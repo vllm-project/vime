@@ -75,6 +75,168 @@ def _exec_vllm_cmd(cmd: list[str], env: dict[str, str]) -> None:
     os.execvpe(cmd[0], cmd, env)
 
 
+# Types we can safely round-trip through ``str(...)`` back to a CLI argument.
+# We branch on the PARSED VALUE, not ``action.type`` — vllm uses helper parsers
+# (e.g. ``optional_type(int)``) that look custom but produce plain primitives;
+# only when the parsed object itself is non-primitive (e.g. a dataclass like
+# ``WeightTransferConfig``) do we need to skip and let vime handle it explicitly.
+_PRIMITIVE_TYPES = (str, int, float, bool)
+
+
+def _forward_vllm_cli_args(args, cmd: list[str]) -> None:
+    """Walk ``args.vllm_*`` and append each non-default value to ``cmd`` as a vllm CLI flag.
+
+    Uses the action table from ``slime.backends.vllm_utils.arguments.get_vllm_cli_action_table``
+    so any new flag in vllm's ``AsyncEngineArgs`` becomes user-controllable through
+    ``--vllm-<flag>`` without changes here.
+
+    Flags whose parsed value is a non-primitive Python object (e.g. a dataclass)
+    are skipped — ``str(value)`` would produce a Python repr instead of the
+    JSON/string the subprocess expects. vime handles those explicitly in
+    ``launch_server_process``.
+    """
+    from argparse import BooleanOptionalAction
+
+    from slime.backends.vllm_utils.arguments import get_vllm_cli_action_table
+
+    fixed = {flag for flag in cmd if isinstance(flag, str) and flag.startswith("--")}
+    raw_values: dict[str, str] = getattr(args, "_vllm_raw_values", {})
+
+    for vime_dest, (vllm_flag, action) in get_vllm_cli_action_table().items():
+        if vllm_flag in fixed:
+            continue  # already set by the orchestrator (e.g., --tensor-parallel-size)
+        if not hasattr(args, vime_dest):
+            continue
+        value = getattr(args, vime_dest)
+        default = action.default
+        if value == default or value is None:
+            continue
+
+        if isinstance(action, BooleanOptionalAction):
+            # vllm registers BooleanOptionalAction so --xxx and --no-xxx both flip the same dest.
+            cmd.append(vllm_flag if value else f"--no-{vllm_flag[2:]}")
+            continue
+        # store_true / store_false (nargs=0): emit bare flag.
+        # NOTE: do not collapse this into a generic ``const is True/False`` check —
+        # that would mis-handle ``nargs='?'`` flags like ``--hf-token <token>``
+        # whose ``const`` is True but whose user-supplied value is the actual token.
+        if action.nargs == 0:
+            cmd.append(vllm_flag)
+            continue
+        # nargs='?' with a const: only emit a bare flag when the user passed the
+        # option WITHOUT a value (parsed value == const). Otherwise fall through
+        # and forward the value.
+        if action.nargs == "?" and action.const is not None and value == action.const:
+            cmd.append(vllm_flag)
+            continue
+        # Value-taking lists (when argparse expects multiple positional values):
+        # forward each item separately as ``--flag v1 v2 ...``.
+        if action.nargs in ("+", "*") or (action.nargs not in (None, "?") and isinstance(value, (list, tuple))):
+            # Normalize scalar values from --custom-config-path YAML (which bypasses
+            # argparse) to a single-element list. Without this, an int like
+            # ``cudagraph_capture_sizes: 1024`` would raise on iteration, and a
+            # string like ``allowed_media_domains: example.com`` would be exploded
+            # into one CLI argument per character.
+            if not isinstance(value, (list, tuple)):
+                value = [value]
+            if not value:
+                continue  # avoid emitting a bare `--flag` with no values
+            if not all(isinstance(v, _PRIMITIVE_TYPES) for v in value):
+                logger.debug("Skipping %s: list contains non-primitive items (%r)", vllm_flag, value)
+                continue
+            cmd.append(vllm_flag)
+            cmd.extend(str(v) for v in value)
+            continue
+        # Single value — forward primitives directly. For non-primitive values
+        # (dict, dataclass, list), prefer the user's original CLI/YAML string when
+        # available (``_vllm_raw_values``): vllm's parsers turn JSON into runtime
+        # objects whose ``asdict()`` snapshot contains normalized/internal fields
+        # the subprocess parser may reject (e.g. ``AttentionConfig.backend`` becomes
+        # a fully-qualified class name). Falling back to ``_serialize_for_cli`` covers
+        # cases where the raw string isn't available (e.g. ``args.<x>`` was set
+        # programmatically without going through ``--custom-config-path`` or argv).
+        if not isinstance(value, _PRIMITIVE_TYPES):
+            raw = raw_values.get(vime_dest)
+            if raw is not None:
+                cmd.extend([vllm_flag, raw])
+                continue
+        serialized = _serialize_for_cli(value)
+        if serialized is None:
+            logger.debug(
+                "Skipping forward of %s: parsed value %r (%s) cannot be serialized; "
+                "needs vime-side handling.",
+                vllm_flag, value, type(value).__name__,
+            )
+            continue
+        cmd.extend([vllm_flag, serialized])
+
+
+class _RobustJsonEncoder:
+    """JSON-encode dataclasses and the non-JSON types vllm's parsed configs may contain.
+
+    vllm's ``CompilationConfig``, ``EPLBConfig``, etc. contain fields of type ``set``,
+    ``frozenset``, ``Enum``, ``Path``, ``bytes``, and nested dataclasses. ``json.dumps``
+    can't serialize those by default; this encoder converts them to JSON-friendly forms.
+    """
+
+    @staticmethod
+    def default(obj):
+        import dataclasses
+        import enum
+        from pathlib import Path
+
+        if dataclasses.is_dataclass(obj):
+            return dataclasses.asdict(obj)
+        if isinstance(obj, (set, frozenset)):
+            return list(obj)
+        if isinstance(obj, enum.Enum):
+            return obj.value
+        if isinstance(obj, Path):
+            return str(obj)
+        if isinstance(obj, bytes):
+            return obj.decode("utf-8", errors="replace")
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def _serialize_for_cli(value) -> str | None:
+    """Serialize a parsed vllm-arg value back to a CLI-safe string.
+
+    Handles the common cases vllm's CLI parsers produce:
+      - primitives (str/int/float/bool) → ``str(value)``
+      - dataclasses (e.g. ``WeightTransferConfig``, ``CompilationConfig`` with sets/enums)
+        → JSON via a robust encoder that handles set/enum/Path/bytes
+      - dicts (e.g. ``--hf-overrides``) → JSON
+      - lists/tuples of JSON-serializable items → JSON
+      - anything else → ``None`` (caller should skip / handle specially)
+    """
+    import dataclasses
+    import json
+
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if dataclasses.is_dataclass(value) or isinstance(value, (dict, list, tuple)):
+        try:
+            return json.dumps(value, default=_RobustJsonEncoder.default)
+        except (TypeError, ValueError) as exc:
+            logger.debug("JSON serialization failed for %r: %s", type(value).__name__, exc)
+            return None
+    return None
+
+
+def _serialize_weight_transfer_config(value) -> str:
+    """Backwards-compat wrapper that always returns a JSON string for the
+    ``--weight-transfer-config`` flag (which the vllm subprocess parses as JSON).
+    """
+    serialized = _serialize_for_cli(value)
+    if serialized is None:
+        # Last resort: assume the value's str() form names the backend.
+        import json
+        return json.dumps({"backend": str(value)})
+    return serialized
+
+
 def launch_server_process(
     *,
     bind_host: str,
@@ -87,6 +249,10 @@ def launch_server_process(
     """Spawn ``vllm serve`` (OpenAI API server) in a subprocess.
 
     Contrasts with SGLang's launcher, which starts the HTTP server in-process from ``ServerArgs``.
+
+    Fixed flags (model identity, distributed topology, port/host, seed) are set by the
+    orchestrator. Every other ``vllm serve`` flag is reachable via ``--vllm-<flag>`` and
+    auto-forwarded by ``_forward_vllm_cli_args`` when the user overrides the vllm default.
     """
     env = os.environ.copy()
     env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
@@ -95,10 +261,11 @@ def launch_server_process(
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")
 
     host_for_subprocess = bind_host.strip("[]")
-    model = getattr(args, "vllm_model", None) or model_path
+    model = model_path
     tp = args.rollout_num_gpus_per_engine
     seed = getattr(args, "seed", 1234) + rank
 
+    # Orchestrator-owned flags (correspond to SKIPPED_DESTS in vllm_utils/arguments.py).
     cmd = [
         "vllm",
         "serve",
@@ -112,27 +279,95 @@ def launch_server_process(
         "--seed",
         str(seed),
         "--trust-remote-code",
-        "--gpu-memory-utilization",
-        str(getattr(args, "vllm_gpu_memory_utilization", 0.4)),
     ]
-    if getattr(args, "vllm_weight_sync_mode", "auto") == "native":
-        cmd += ["--weight-transfer-config", '{"backend":"nccl"}']
-    if getattr(args, "offload_rollout", False) or getattr(args, "vllm_enable_sleep_mode", False):
-        cmd += ["--enable-sleep-mode"]
-    if getattr(args, "vllm_enforce_eager", False):
-        cmd += ["--enforce-eager"]
     if getattr(args, "fp16", False):
         cmd += ["--dtype", "float16"]
-    if getattr(args, "vllm_kv_cache_memory_bytes", None) is not None:
-        cmd += ["--kv-cache-memory-bytes", str(args.vllm_kv_cache_memory_bytes)]
-    if args.rollout_max_context_len is not None:
+    # offload_rollout (vime top-level flag) implies sleep mode.
+    if getattr(args, "offload_rollout", False) and not getattr(args, "vllm_enable_sleep_mode", False):
+        cmd += ["--enable-sleep-mode"]
+    # rollout_max_context_len (vime top-level flag) maps to --max-model-len when set,
+    # unless the user already passed --vllm-max-model-len explicitly.
+    if args.rollout_max_context_len is not None and getattr(args, "vllm_max_model_len", None) is None:
         cmd += ["--max-model-len", str(args.rollout_max_context_len)]
 
-    logger.info("Launching vLLM server: %s", " ".join(cmd))
+    # vime-preferred defaults — must be explicitly forwarded because the vllm-side
+    # default would otherwise apply (the generic forwarder skips values that equal
+    # action.default).
+    #
+    # We treat a value as "user-supplied" if EITHER:
+    #   (a) the user named the flag on argv (tracked in ``args._vllm_user_provided``),
+    #       which lets ``--vllm-gpu-memory-utilization 0.92`` (= vllm-side default)
+    #       still be honored as an explicit override, OR
+    #   (b) the parsed value differs from the vllm-side default — this catches
+    #       overrides loaded later from ``--custom-config-path`` YAML or set
+    #       programmatically on the namespace.
+    from slime.backends.vllm_utils.arguments import get_vllm_cli_action_table
+
+    user_provided: set[str] = getattr(args, "_vllm_user_provided", set())
+    _vllm_action_table = get_vllm_cli_action_table()
+
+    def _user_overrode(dest: str) -> bool:
+        if dest in user_provided:
+            return True
+        entry = _vllm_action_table.get(dest)
+        if entry is None:
+            return False
+        _, action = entry
+        return getattr(args, dest, action.default) != action.default
+
+    # 1) gpu_memory_utilization: vllm default 0.92 OOMs in colocate training; vime ships 0.55.
+    if _user_overrode("vllm_gpu_memory_utilization"):
+        gpu_mem = args.vllm_gpu_memory_utilization
+    else:
+        gpu_mem = 0.55  # vime preferred
+    cmd += ["--gpu-memory-utilization", str(gpu_mem)]
+
+    # 2) weight_transfer_config: vllm default None disables /init_weight_transfer_engine,
+    #    so vime's weight sync would fail. Always default to NCCL — vime's sender
+    #    currently posts sglang-style ``serialized_named_tensors`` payloads, which the
+    #    vllm IPC weight-transfer engine rejects. Switching the default to IPC requires
+    #    porting ``UpdateVLLMWeightFromTensor`` (see PR #12 review). Users who pass
+    #    ``--vllm-weight-transfer-config`` explicitly are honored.
+    if _user_overrode("vllm_weight_transfer_config"):
+        cmd += [
+            "--weight-transfer-config",
+            _serialize_weight_transfer_config(args.vllm_weight_transfer_config),
+        ]
+    else:
+        cmd += ["--weight-transfer-config", '{"backend":"nccl"}']
+
+    # Auto-forward all other args.vllm_* that differ from their vllm-side default.
+    _forward_vllm_cli_args(args, cmd)
+
+    logger.info("Launching vLLM server: %s", _redact_cmd_for_log(cmd))
 
     p = _spawn_ctx.Process(target=_exec_vllm_cmd, args=(cmd, env))
     p.start()
     return p
+
+
+# Flags whose value is a credential and must never appear in logs.
+_REDACTED_FLAGS = frozenset({"--hf-token"})
+
+
+def _redact_cmd_for_log(cmd: list[str]) -> str:
+    """Stringify ``cmd`` for logging, replacing values of sensitive flags with '***'.
+
+    vllm ``--hf-token`` accepts the token as its argument (``nargs='?'``), so we
+    redact the immediately-following token whenever the previous element is in
+    ``_REDACTED_FLAGS``.
+    """
+    parts: list[str] = []
+    redact_next = False
+    for token in cmd:
+        if redact_next:
+            parts.append("***")
+            redact_next = False
+            continue
+        parts.append(token)
+        if isinstance(token, str) and token in _REDACTED_FLAGS:
+            redact_next = True
+    return " ".join(parts)
 
 
 def _wait_server_healthy(base_url: str, process: multiprocessing.Process | None, timeout_s: float = 300.0) -> None:
@@ -176,11 +411,7 @@ class VLLMEngine(RayActor):
         self.num_gpus_per_engine = num_gpus_per_engine
         self.process: multiprocessing.Process | None = None
         self._weight_version: str | None = None
-        self._sync_mode = getattr(args, "vllm_weight_sync_mode", "auto")
-        self._warned_sync_fallback = False
-        self._pending_reload_version: str | None = None
         self._is_local_server = not args.rollout_external
-        self._native_weight_update_ready = False
         # Slime runs one vLLM HTTP process per logical engine; multi-node worker rank is not used.
         self.node_rank = 0
 
@@ -199,8 +430,8 @@ class VLLMEngine(RayActor):
     ):
         del dist_init_addr, nccl_port, disaggregation_bootstrap_port
 
-        self.router_ip = router_ip if router_ip is not None else self.args.sglang_router_ip
-        self.router_port = router_port if router_port is not None else self.args.sglang_router_port
+        self.router_ip = router_ip if router_ip is not None else self.args.vllm_router_ip
+        self.router_port = router_port if router_port is not None else self.args.vllm_router_port
 
         host = host or get_host_info()[1]
         self.server_host = _format_v6_uri(host)
@@ -295,21 +526,6 @@ class VLLMEngine(RayActor):
         )
         _wait_server_healthy(self._http_base(), process=self.process)
 
-    def _restart_local_server(self) -> None:
-        if not self._is_local_server:
-            logger.warning("Skip vLLM reload for external server mode.")
-            return
-        if self.process and self.process.is_alive():
-            self.process.terminate()
-            try:
-                self.process.join(timeout=15)
-            except Exception:
-                pass
-            if self.process.is_alive():
-                self.process.kill()
-                self.process.join(timeout=10)
-        self._init_normal()
-
     def _post_json(self, endpoint: str, payload: dict, timeout: float) -> requests.Response:
         url = f"{self._http_base()}/{endpoint.lstrip('/')}"
         return requests.post(url, json=payload, timeout=timeout)
@@ -353,10 +569,16 @@ class VLLMEngine(RayActor):
         flush_cache: bool = False,
         weight_version: str | None = None,
     ):
-        """
-        Post tensor metadata via ``/update_weights`` when native weight transfer is ready; otherwise record
-        ``weight_version`` and return a reload placeholder (no HTTP update on the fallback path).
+        """Post tensor metadata via ``/update_weights`` (vLLM RLHF native protocol).
+
         Contrasts with SGLang, which posts to ``update_weights_from_tensor`` with a different payload shape.
+
+        If the POST fails this raises — there is intentionally no "fallback to reload"
+        path. The previous fallback restarted vllm from ``self.model_path``, which is
+        the original HF checkpoint (not the just-trained weights), so silently using
+        it would let training continue with stale rollout weights. Failing fast keeps
+        the bug visible until ``UpdateVLLMWeightFromTensor`` (vllm-native IPC) is
+        ported — see PR #12 review.
         """
         del load_format
         if self.node_rank != 0:
@@ -364,7 +586,6 @@ class VLLMEngine(RayActor):
 
         if weight_version is not None:
             self._weight_version = str(weight_version)
-            self._pending_reload_version = self._weight_version
         if flush_cache:
             self.flush_cache()
 
@@ -373,33 +594,13 @@ class VLLMEngine(RayActor):
             "format": "serialized_named_tensors",
             "weight_version": self._weight_version,
         }
-        if self._native_weight_update_ready:
-            try:
-                return self._run_vllm_weight_update(update_info, is_checkpoint_format=False)
-            except Exception as e:
-                if self._sync_mode == "native":
-                    raise RuntimeError(f"Native vLLM tensor weight update failed: {e}") from e
-                logger.warning("Native vLLM tensor weight update failed, fallback: %s", e)
-                self._native_weight_update_ready = False
-
-        self._pending_reload_version = self._weight_version
-        if not self._warned_sync_fallback:
-            logger.warning(
-                "vLLM tensor weight update fallback to reload-on-continue "
-                "(init_weight_transfer_engine not ready or update failed)."
-            )
-            self._warned_sync_fallback = True
-        if self._sync_mode == "native":
-            raise RuntimeError("Native mode requested but weight transfer is not ready.")
-        return {"ok": True, "mode": "reload", "weight_version": self._weight_version}
+        return self._run_vllm_weight_update(update_info, is_checkpoint_format=False)
 
     def flush_cache(self):
         """Clear prefix cache via ``POST /reset_prefix_cache`` (SGLang uses ``GET /flush_cache``)."""
         if self.node_rank != 0:
             return
-        reset_running = bool(getattr(self.args, "vllm_reset_prefix_cache_reset_running", False))
-        reset_external = bool(getattr(self.args, "vllm_reset_prefix_cache_reset_external", False))
-        params = {"reset_running_requests": reset_running, "reset_external": reset_external}
+        params = {"reset_running_requests": False, "reset_external": False}
         for _ in range(60):
             try:
                 response = requests.post(f"{self._http_base()}/reset_prefix_cache", params=params, timeout=60)
@@ -469,18 +670,19 @@ class VLLMEngine(RayActor):
         return None
 
     def release_memory_occupation(self):
-        """
-        ``POST /sleep`` when sleep mode is enabled (SGLang: ``POST /release_memory_occupation``); otherwise a no-op placeholder dict.
+        """``POST /sleep`` when sleep mode is enabled (SGLang: ``POST /release_memory_occupation``).
+
+        Always uses sleep level=1 (release KV cache only). Returns a no-op dict when
+        ``--vllm-enable-sleep-mode`` was not set.
         """
         self.flush_cache()
         if not getattr(self.args, "vllm_enable_sleep_mode", False):
             return {"ok": True, "sleep_mode": False, "note": "vLLM sleep mode disabled; no /sleep call."}
         # vLLM ``POST /sleep`` reads ``level`` from query params, not JSON body
         # (``vllm.entrypoints.serve.sleep.api_router.sleep``).
-        level = int(getattr(self.args, "vllm_sleep_level", 1))
         response = requests.post(
             f"{self._http_base()}/sleep",
-            params={"level": level},
+            params={"level": 1},
             timeout=30,
         )
         response.raise_for_status()
@@ -516,16 +718,12 @@ class VLLMEngine(RayActor):
         return {"ok": True, "supported": False, "note": "vLLM has no weights_checker endpoint."}
 
     def init_weights_update_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
-        """
-        Call ``POST /init_weight_transfer_engine`` with an ``init_info`` block (SGLang: ``/init_weights_update_group``).
+        """Call ``POST /init_weight_transfer_engine`` with an ``init_info`` block.
 
         ``group_name`` / ``backend`` are accepted for a uniform caller signature but are not sent to vLLM.
-        If ``vllm_weight_sync_mode`` is not ``native``, the HTTP call is skipped (SGLang still posts to its endpoint).
+        Always uses the vllm-native weight transfer engine; reload-on-continue fallback is no longer supported.
         """
         del group_name, backend
-        if self._sync_mode != "native":
-            return {"ok": True, "mode": self._sync_mode, "skipped": True}
-
         payload = {
             "init_info": {
                 "master_address": master_address,
@@ -540,21 +738,16 @@ class VLLMEngine(RayActor):
             try:
                 response = self._post_json("init_weight_transfer_engine", payload, timeout=init_timeout_s)
                 response.raise_for_status()
-                self._native_weight_update_ready = True
                 try:
                     return response.json()
                 except Exception:
                     return {"ok": True, "raw": response.text}
             except Exception as e:
                 last_error = e
-                self._native_weight_update_ready = False
                 if attempt < 3:
                     logger.warning("init_weight_transfer_engine attempt %s/3 failed: %s", attempt, e)
                     time.sleep(2 * attempt)
-        if self._sync_mode == "native":
-            raise RuntimeError(f"vLLM init_weight_transfer_engine failed: {last_error}") from last_error
-        logger.warning("vLLM native weight transfer init failed, fallback: %s", last_error)
-        return {"ok": False, "error": str(last_error)}
+        raise RuntimeError(f"vLLM init_weight_transfer_engine failed: {last_error}") from last_error
 
     def destroy_weights_update_group(self, group_name):
         """No vLLM destroy call; return ``None`` (SGLang may ``POST /destroy_weights_update_group`` and swallow errors)."""
@@ -571,36 +764,23 @@ class VLLMEngine(RayActor):
         weight_version: str | None = None,
         packed: bool = True,
     ):
-        """NCCL/native path posts ``/update_weights`` (SGLang: ``POST /update_weights_from_distributed``)."""
+        """NCCL path: POST ``/update_weights`` (SGLang: ``POST /update_weights_from_distributed``).
+
+        Payload matches vLLM NCCL weight transfer (see upstream rlhf_http_nccl example).
+        """
         del group_name
         if weight_version is not None:
             self._weight_version = str(weight_version)
         if flush_cache:
             self.flush_cache()
         dtype_names = [str(d).replace("torch.", "") for d in dtypes]
-        if self._native_weight_update_ready:
-            # Payload matches vLLM NCCL weight transfer (see upstream rlhf_http_nccl example).
-            update_info = {
-                "names": names,
-                "dtype_names": dtype_names,
-                "shapes": [list(s) for s in shapes],
-                "packed": bool(packed),
-            }
-            try:
-                return self._post_vllm_update_weights_http(update_info)
-            except Exception as e:
-                if self._sync_mode == "native":
-                    raise RuntimeError(f"Native vLLM weight update failed: {e}") from e
-                logger.warning("Native vLLM weight update failed, fallback: %s", e)
-                self._native_weight_update_ready = False
-
-        self._pending_reload_version = self._weight_version
-        if self._sync_mode == "native":
-            raise RuntimeError("Native mode requested but weight transfer is not ready.")
-        if not self._warned_sync_fallback and self._sync_mode in ("auto", "reload"):
-            logger.warning("vLLM weight sync mode=%s: reload-on-continue path may apply.", self._sync_mode)
-            self._warned_sync_fallback = True
-        return {"ok": True, "mode": self._sync_mode, "weight_version": self._weight_version}
+        update_info = {
+            "names": names,
+            "dtype_names": dtype_names,
+            "shapes": [list(s) for s in shapes],
+            "packed": bool(packed),
+        }
+        return self._post_vllm_update_weights_http(update_info)
 
     def update_weights_from_disk(self, model_path: str, load_format: str | None = None):
         """``POST /collective_rpc`` with ``reload_weights`` and ``weights_path`` (SGLang uses a dedicated disk API)."""
@@ -622,13 +802,12 @@ class VLLMEngine(RayActor):
             return {"ok": True, "raw": response.text}
 
     def pause_generation(self):
-        """``POST /pause`` with mode query (SGLang: ``POST /pause_generation``); returns the ``requests.Response``."""
+        """``POST /pause`` with mode="keep" (SGLang: ``POST /pause_generation``); returns the ``requests.Response``."""
         if self.node_rank != 0:
             return None
-        mode = getattr(self.args, "vllm_pause_mode", "keep")
         response = requests.post(
             f"{self._http_base()}/pause",
-            params={"mode": mode, "clear_cache": "false"},
+            params={"mode": "keep", "clear_cache": "false"},
             json={},
             timeout=120,
         )
@@ -636,17 +815,11 @@ class VLLMEngine(RayActor):
         return response
 
     def continue_generation(self):
-        """
-        ``POST /resume`` (SGLang: ``POST /continue_generation``); may restart the local child process after a pending reload.
-        """
+        """``POST /resume`` (SGLang: ``POST /continue_generation``)."""
         if self.node_rank != 0:
             return None
         response = requests.post(f"{self._http_base()}/resume", json={}, timeout=120)
         response.raise_for_status()
-        if self._pending_reload_version is not None:
-            logger.info("Reload vLLM server after weight update, version=%s", self._pending_reload_version)
-            self._restart_local_server()
-            self._pending_reload_version = None
         return response
 
     def post_process_weights(

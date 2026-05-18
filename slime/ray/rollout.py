@@ -113,14 +113,9 @@ class ServerGroup:
 
         pg, reordered_bundle_indices, reordered_gpu_ids = self.pg
 
-        if getattr(self.args, "rollout_backend", "sglang") == "vllm":
-            from slime.backends.vllm_utils.vllm_engine import VLLMEngine
+        from slime.backends.vllm_utils.vllm_engine import VLLMEngine
 
-            RolloutRayActor = ray.remote(VLLMEngine)
-        else:
-            from slime.backends.sglang_utils.sglang_engine import SGLangEngine
-
-            RolloutRayActor = ray.remote(SGLangEngine)
+        RolloutRayActor = ray.remote(VLLMEngine)
 
         rollout_engines = []
         for i in range(len(self.all_engines)):
@@ -954,70 +949,56 @@ def _allocate_rollout_engine_addr_and_ports_normal(
 
 
 def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool = False) -> tuple[str, int]:
-    """Start the rollout HTTP gateway: vllm-router when ``rollout_backend=vllm``, else sglang-router."""
-    if not force_new and args.sglang_router_ip is not None:
-        return args.sglang_router_ip, args.sglang_router_port
+    """Start the rollout HTTP gateway (vllm-router)."""
+    if not force_new and args.vllm_router_ip is not None:
+        return args.vllm_router_ip, args.vllm_router_port
 
     router_ip = _wrap_ipv6(get_host_info()[1])
     if force_new:
         router_port = find_available_port(random.randint(3000, 4000))
     else:
-        router_port = args.sglang_router_port
+        router_port = args.vllm_router_port
         if router_port is None:
             router_port = find_available_port(random.randint(3000, 4000))
 
-    use_vllm_router = getattr(args, "rollout_backend", "vllm") == "vllm"
     from slime.utils.http_utils import run_router
 
-    if use_vllm_router:
-        router_args = _vllm_router_args_from_cli(args)
-        impl = "vllm"
-    else:
-        from sglang_router.launch_router import RouterArgs
-
-        router_args = RouterArgs.from_cli_args(args, use_router_prefix=True)
-        impl = "sglang"
+    router_args = _vllm_router_args_from_cli(args)
 
     router_args.host = router_ip
     router_args.port = router_port
     router_args.prometheus_port = find_available_port(random.randint(4000, 5000))
-    router_args.log_level = "warning" if use_vllm_router else "warn"
-    router_args.request_timeout_secs = args.sglang_router_request_timeout_secs
+    router_args.log_level = "warning"
+    router_args.request_timeout_secs = args.vllm_router_request_timeout_secs
 
     if has_pd_disaggregation:
-        if use_vllm_router and hasattr(router_args, "vllm_pd_disaggregation"):
+        if hasattr(router_args, "vllm_pd_disaggregation"):
             router_args.vllm_pd_disaggregation = True
-        elif hasattr(router_args, "pd_disaggregation"):
-            router_args.pd_disaggregation = True
         if hasattr(router_args, "disable_circuit_breaker"):
             router_args.disable_circuit_breaker = True
 
     # MiniLB is PD-only in vllm-router; non-PD rollout needs the Rust Router (omit SLIME_VLLM_ROUTER_USE_RUST).
     if (
-        use_vllm_router
-        and has_pd_disaggregation
+        has_pd_disaggregation
         and os.environ.get("SLIME_VLLM_ROUTER_USE_RUST", "") != "1"
     ):
         router_args.mini_lb = True
 
-    if use_vllm_router:
-        if any(f.name == "disable_health_check" for f in dataclasses.fields(type(router_args))):
-            router_args.disable_health_check = True
-    else:
+    if any(f.name == "disable_health_check" for f in dataclasses.fields(type(router_args))):
         router_args.disable_health_check = True
 
-    logger.info("Launch HTTP router (impl=%s) with args: %s", impl, router_args)
+    logger.info("Launch HTTP router (impl=vllm) with args: %s", router_args)
 
     process = multiprocessing.get_context("spawn").Process(
         target=run_router,
-        args=((impl, router_args),),
+        args=(("vllm", router_args),),
     )
     process.daemon = True
     process.start()
     time.sleep(3)
     if not process.is_alive():
         raise RuntimeError(
-            f"Router subprocess exited (exitcode={process.exitcode}), impl={impl!r}. "
+            f"Router subprocess exited (exitcode={process.exitcode}). "
             "For vllm-router non-PD mode, install the Rust router (pip wheel with Router); "
             "MiniLB is only valid with PD disaggregation. See slime.utils.http_utils run_router logs."
         )
@@ -1072,8 +1053,8 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
 
         # Write back for backward compat (first model only).
         if model_idx == 0:
-            args.sglang_router_ip = router_ip
-            args.sglang_router_port = router_port
+            args.vllm_router_ip = router_ip
+            args.vllm_router_port = router_port
 
         server_groups: list[ServerGroup] = []
         port_cursors: dict[int, int] = {}

@@ -14,7 +14,6 @@ from slime.utils.distributed_utils import get_gloo_group
 from ..sglang import FlattenedTensorBucket, MultiprocessingSerializer
 from .hf_weight_iterator_base import HfWeightIteratorBase
 from .update_weight_from_distributed import (
-    _is_vllm_backend,
     connect_rollout_engines_from_distributed,
     disconnect_rollout_engines_from_distributed,
     post_process_weights,
@@ -200,7 +199,7 @@ class UpdateWeightFromTensor:
                 self.weight_version,
                 self.distributed_rollout_engines,
                 hf_named_tensors,
-                use_vllm=_is_vllm_backend(self.args),
+                use_vllm=True,
                 packed=False,
             )
             if refs_distributed:
