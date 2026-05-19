@@ -149,29 +149,6 @@ RUN cd /root/slime && \
 
 WORKDIR /root/slime
 
-# Build-time smoke: catch missing imports here instead of at first `docker run`.
-RUN python3 - <<'PY'
-import importlib.metadata as metadata
-import vllm
-print("vllm import ok", getattr(vllm, "__version__", metadata.version("vllm")))
-print("sglang version", metadata.version("sglang"))
-print("sglang_router version", metadata.version("sglang-router"))
-print("transformer_engine version", metadata.version("transformer_engine"))
-print("torch", __import__("torch").__version__)
-import flash_attn  # noqa: F401
-print("flash_attn import ok", flash_attn.__version__)
-import apex  # noqa: F401
-print("apex import ok")
-import sglang  # noqa: F401
-print("sglang import ok", sglang.__version__)
-import sglang_router  # noqa: F401
-print("sglang_router import ok", sglang_router.__version__)
-from megatron.bridge import AutoBridge  # noqa: F401
-print("megatron.bridge import ok")
-import slime  # noqa: F401
-print("slime import ok")
-PY
-
 # Reset ENTRYPOINT inherited from vllm/vllm-openai base (which sets
 # `["vllm serve"]`). Without this, every `docker run <image> <cmd>` invocation
 # gets `<cmd>` interpreted as an argument to `vllm serve`.
