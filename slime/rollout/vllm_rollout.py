@@ -348,7 +348,7 @@ class GenerateState(metaclass=SingletonMeta):
             self.group_sampling_seeds = [sampling_seed_base + i for i in range(args.n_samples_per_prompt)]
 
         # dp rank balancing
-        self.dp_counts = [0] * (args.sglang_dp_size or 1)
+        self.dp_counts = [0] * (args.vllm_dp_size or 1)
         self.dp_rank = 0
 
         self.reset()

@@ -155,8 +155,8 @@ class Sample:
         Update the sample with new information from meta_info returned by the rollout engine.
         And extract
         """
-        if args.sglang_speculative_algorithm:
-            # cannot directly use spec info from sglang because of partial rollout.
+        if args.vllm_speculative_config:
+            # cannot directly use spec info from rollout engine because of partial rollout.
             self.spec_info.add(meta_info=meta_info)
 
         # Collect prefix cache statistics

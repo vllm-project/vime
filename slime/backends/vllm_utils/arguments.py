@@ -246,6 +246,17 @@ def add_vllm_arguments(parser):
     # weight_transfer_config based on colocate) are applied explicitly in
     # ``vllm_engine.launch_server_process``.
 
+    # PD disaggregation / multi-group config — mirrors slime sglang_utils/arguments.py.
+    # vllm-side PD plumbing is not yet wired; the CLI surface is reserved so that
+    # rollout.py's `args.prefill_num_servers is not None` check is well-defined and
+    # the eventual vllm PD wiring can light up without further arg-layer changes.
+    parser.add_argument(
+        "--prefill-num-servers",
+        type=int,
+        default=None,
+        help="Number of prefill servers for PD disaggregation.",
+    )
+
     return parser
 
 

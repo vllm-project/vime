@@ -932,13 +932,13 @@ def _allocate_rollout_engine_addr_and_ports_normal(
             num_node_per_engine = _gpus_per_engine // args.num_gpus_per_node
             if local_rank % num_node_per_engine == 0:
                 # this is the first node in the engine, we need to allocate the dist_init_addr port
-                dist_init_addr = f"{get_addr()}:{get_port(30 + args.sglang_dp_size)}"
+                dist_init_addr = f"{get_addr()}:{get_port(30 + args.vllm_dp_size)}"
                 for i in range(num_node_per_engine):
                     addr_and_ports.setdefault(rank + i, {})
                     addr_and_ports[rank + i]["dist_init_addr"] = dist_init_addr
         else:
             for i in range(num_engines_on_this_node):
-                addr_and_ports[rank + i]["dist_init_addr"] = f"{get_addr()}:{get_port(30 + args.sglang_dp_size)}"
+                addr_and_ports[rank + i]["dist_init_addr"] = f"{get_addr()}:{get_port(30 + args.vllm_dp_size)}"
 
     for i, _ in rollout_engines:
         for key in ["port", "nccl_port", "dist_init_addr"]:
@@ -1300,7 +1300,7 @@ def _compute_zero_std_metrics(args, all_samples: list[Sample]):
 
 
 def _compute_spec_metrics(args, all_samples: list[Sample]):
-    if args.sglang_speculative_algorithm is None:
+    if args.vllm_speculative_config is None:
         return {}
     num_samples = len(all_samples)
     metrics = {}
