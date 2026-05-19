@@ -7,7 +7,7 @@ ARG PATCH_VERSION=latest
 ARG MEGATRON_COMMIT=1dcf0dafa884ad52ffb243625717a3471643e087
 ARG SGLANG_VERSION=0.5.10.post1
 
-SHELL ["/bin/bash", "-euxo", "pipefail", "-c"]
+# ======================================== Setup =============================================
 
 WORKDIR /root/
 
@@ -15,14 +15,12 @@ WORKDIR /root/
 
 # vllm/vllm-openai base is an inference image — install cu12 dev headers so
 # TE / apex / flash-attn source builds find cusparse.h etc.
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-      git rsync dnsutils nvtop \
-      cmake ninja-build build-essential \
-      cuda-nvrtc-dev-12-9 cuda-nvml-dev-12-9 cuda-profiler-api-12-9 cuda-nvtx-12-9 \
-      libcusparse-dev-12-9 libcusolver-dev-12-9 libcufft-dev-12-9 libcurand-dev-12-9 \
-      libcudnn9-dev-cuda-12 && \
-    rm -rf /var/lib/apt/lists/*
+RUN apt update
+RUN apt install -y nvtop rsync dnsutils git \
+    cmake ninja-build build-essential \
+    cuda-nvrtc-dev-12-9 cuda-nvml-dev-12-9 cuda-profiler-api-12-9 cuda-nvtx-12-9 \
+    libcusparse-dev-12-9 libcusolver-dev-12-9 libcufft-dev-12-9 libcurand-dev-12-9 \
+    libcudnn9-dev-cuda-12
 
 # vllm/vllm-openai base only ships python3; subsequent source builds invoke `python`.
 RUN ln -sf /usr/bin/python3 /usr/local/bin/python
