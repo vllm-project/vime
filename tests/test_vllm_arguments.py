@@ -1,4 +1,4 @@
-"""Unit tests for changes in PR #10 to slime/backends/vllm_utils/arguments.py.
+"""Unit tests for slime/backends/vllm_utils/arguments.py.
 
 Test philosophy: minimize mocks. Use real `argparse.ArgumentParser`, real
 `SimpleNamespace`, real `vllm_router.RouterArgs.add_cli_args`. Mock only what
@@ -25,7 +25,7 @@ def args_mod():
 
 
 # ============================================================================
-# Fix #6 (issue-level): Python 3.12 argparse compat
+# Python 3.12 argparse compat: strip kwargs argparse <3.13 doesn't accept
 # ============================================================================
 
 
@@ -111,9 +111,9 @@ def test_wrapper_skips_dest_listed_in_SKIPPED_DESTS(args_mod):
 
 
 @pytest.mark.unit
-def test_SKIPPED_DESTS_post_pr10_unskips_pp_and_dp(args_mod):
-    """PR #10 unskips pipeline_parallel_size and data_parallel_size; only
-    tensor_parallel_size remains in SKIPPED_DESTS (vime orchestrator owns it).
+def test_SKIPPED_DESTS_only_tp(args_mod):
+    """Only tensor_parallel_size is in SKIPPED_DESTS (vime orchestrator owns it);
+    pipeline_parallel_size and data_parallel_size auto-forward to the vllm subprocess.
     """
     assert "tensor_parallel_size" in args_mod.SKIPPED_DESTS
     assert "pipeline_parallel_size" not in args_mod.SKIPPED_DESTS

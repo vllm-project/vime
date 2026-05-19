@@ -1,5 +1,4 @@
-"""Unit tests for changes in PR #10 to
-slime/backends/megatron_utils/update_weight/update_weight_from_distributed.py
+"""Unit tests for slime/backends/megatron_utils/update_weight/update_weight_from_distributed.py.
 
 Test philosophy: minimize mocks. Use real torch tensors, real function calls.
 The only test doubles are lightweight recording classes (not MagicMock) that
@@ -89,7 +88,7 @@ def _real_tensors(n: int = 2):
 def test_signature_no_use_vllm(upw):
     sig = inspect.signature(upw.update_weights_from_distributed)
     params = sig.parameters
-    assert "use_vllm" not in params, "PR #10 removed the dead `use_vllm` parameter"
+    assert "use_vllm" not in params, "the dead `use_vllm` parameter must not be reintroduced"
     # All other expected params present
     for p in ("group_name", "group", "weight_version", "rollout_engines",
               "converted_named_tensors", "packed"):
