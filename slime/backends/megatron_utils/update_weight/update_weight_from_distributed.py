@@ -384,7 +384,6 @@ class UpdateWeightFromDistributed:
                 self.weight_version,
                 self.rollout_engines,
                 converted_named_tensors,
-                use_vllm=True,
                 packed=True,
             )
             ray.get(refs)
@@ -501,7 +500,6 @@ class UpdateWeightFromDistributed:
             self.weight_version,
             self.rollout_engines,
             converted_named_tensors,
-            use_vllm=True,
             packed=False,
         )
 
@@ -595,20 +593,17 @@ def disconnect_rollout_engines_from_distributed(
 
 def update_weights_from_distributed(
     group_name: str,
-    group: Any,
+    group: "_NcclBridge",
     weight_version: int,
     rollout_engines: Sequence[ActorHandle],
     converted_named_tensors: Sequence[tuple[str, torch.Tensor]],
     *,
-    use_vllm: bool = False,
     packed: bool = False,
 ) -> list[ObjectRef]:
     """
-    Send metadata (Ray), broadcast tensors (NCCL rank 0 → engines).
-
-    For vLLM the *group* is an ``_NcclBridge`` instance (subprocess) so that
-    raw NCCL never runs inside the Megatron trainer process.
-    For sglang the *group* is a ``torch.distributed.ProcessGroup``.
+    Send metadata (Ray), broadcast tensors (NCCL rank 0 → vLLM engines via
+    the ``_NcclBridge`` subprocess so that raw NCCL never runs inside the
+    Megatron trainer process).
     """
     kwargs: dict[str, Any] = {
         "names": [name for name, _ in converted_named_tensors],
@@ -616,22 +611,15 @@ def update_weights_from_distributed(
         "shapes": [param.shape for _, param in converted_named_tensors],
         "group_name": group_name,
         "weight_version": str(weight_version),
+        "packed": packed,
     }
-    if use_vllm:
-        kwargs["packed"] = packed
 
     refs = [engine.update_weights_from_distributed.remote(**kwargs) for engine in rollout_engines]
 
-    if use_vllm and packed:
+    if packed:
         group.send_weights_packed(list(converted_named_tensors))
-    elif use_vllm:
-        group.broadcast_tensors([param.data for _, param in converted_named_tensors])
     else:
-        handles = []
-        for _, param in converted_named_tensors:
-            handles.append(dist.broadcast(param.data, 0, group=group, async_op=True))
-        for handle in handles:
-            handle.wait()
+        group.broadcast_tensors([param.data for _, param in converted_named_tensors])
 
     return refs
 

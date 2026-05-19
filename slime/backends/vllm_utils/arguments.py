@@ -22,6 +22,18 @@ from slime.utils.http_utils import _wrap_ipv6
 logger = logging.getLogger(__name__)
 
 
+# argparse 3.13+ accepts ``deprecated`` / ``deprecated_aliases`` on add_argument;
+# vLLM may pass them while using BooleanOptionalAction on Python 3.12, which rejects them.
+# Strip these kwargs on older Python so AsyncEngineArgs.add_cli_args() doesn't crash.
+_ARGPARSE_UNSUPPORTED_KWARGS = frozenset({"deprecated", "deprecated_aliases"})
+
+
+def _strip_unsupported_argparse_kwargs(kwargs: dict) -> dict:
+    if sys.version_info >= (3, 13):
+        return kwargs
+    return {k: v for k, v in kwargs.items() if k not in _ARGPARSE_UNSUPPORTED_KWARGS}
+
+
 def _detect_user_provided_dests(parser, argv: list[str]) -> tuple[set[str], dict[str, str]]:
     """Return (user_provided, raw_values) extracted from ``argv``.
 
@@ -82,10 +94,11 @@ SKIPPED_DESTS = [
     "seed",
     # dtype: vime --fp16 / training config owns this
     "dtype",
-    # distributed topology: rollout_num_gpus_per_engine + actor layout own this
+    # tp_size is fully owned by the orchestrator (rollout_num_gpus_per_engine
+    # // pp_size) — see validate_args. pipeline_parallel_size and
+    # data_parallel_size remain user-controllable and auto-forward to the vllm
+    # subprocess when set; mirrors slime sglang_utils which exposes both via CLI.
     "tensor_parallel_size",
-    "pipeline_parallel_size",
-    "data_parallel_size",
     # network: engine launcher decides per-engine port/host
     "port",
     "host",
@@ -95,24 +108,30 @@ SKIPPED_DESTS = [
 
 
 def add_vllm_router_arguments(parser):
-    """vime's vllm-router orchestration flags (not in AsyncEngineArgs)."""
+    """vime's router orchestration flags (where to reach the router; not in vllm-router's CLI).
+
+    Named without a ``--vllm-`` backend prefix so they sit alongside
+    ``vllm_router.RouterArgs`` knobs (``--router-policy``, ``--router-cache-threshold``,
+    …) under a single ``--router-*`` namespace. PR #10 hardcodes a single vllm backend,
+    so backend-disambiguation prefix would only leak implementation.
+    """
     parser.add_argument(
-        "--vllm-router-ip",
+        "--router-ip",
         type=str,
         default=None,
-        help="IP address of the vLLM router.",
+        help="IP address of the router (where vime connects to send rollout requests).",
     )
     parser.add_argument(
-        "--vllm-router-port",
+        "--router-port",
         type=int,
         default=None,
-        help="Port of the vLLM router.",
+        help="Port of the router.",
     )
     parser.add_argument(
-        "--vllm-router-request-timeout-secs",
+        "--router-request-timeout-secs",
         type=int,
         default=14400,
-        help="Timeout for requests to the vLLM router in seconds.",
+        help="Timeout (seconds) for HTTP requests vime makes to the router.",
     )
     return parser
 
@@ -151,6 +170,9 @@ def _make_add_argument_wrapper(target_add_argument):
         if "dest" in new_kwargs and isinstance(new_kwargs["dest"], str):
             if not new_kwargs["dest"].startswith("vllm_"):
                 new_kwargs["dest"] = f"vllm_{new_kwargs['dest']}"
+
+        # Strip argparse kwargs that Python <3.13 rejects (vLLM passes them on newer Python).
+        new_kwargs = _strip_unsupported_argparse_kwargs(new_kwargs)
 
         return target_add_argument(*new_flags, **new_kwargs)
 
@@ -227,72 +249,23 @@ def add_vllm_arguments(parser):
     return parser
 
 
-# vllm-side defaults for legacy migration. Keep in sync with sglang_utils/arguments.py
-# (router_request_timeout_secs=14400, server_concurrency=512) and our own
-# add_vllm_router_arguments / add_vllm_arguments above.
-_VIME_LEGACY_VLLM_DEFAULTS = {
-    "vllm_router_request_timeout_secs": 14400,
-    "vllm_server_concurrency": 512,
-}
-
-
-def _migrate_legacy_sglang_flags(args) -> None:
-    """Migrate ``--sglang-*`` flags to their ``--vllm-*`` equivalents for vllm runs.
-
-    vime previously read ``args.sglang_router_*`` / ``args.sglang_server_concurrency``
-    from the vllm code path; renaming those reads broke existing launch scripts. To
-    preserve backward compatibility, copy each legacy field onto the corresponding
-    ``vllm_*`` attribute whenever (a) the legacy value was actually set by the user,
-    and (b) the new ``vllm_*`` value still equals its default.
-    """
-    legacy_to_vllm = [
-        # (legacy_attr, vllm_attr, vllm_default_when_unset)
-        ("sglang_router_ip", "vllm_router_ip", None),
-        ("sglang_router_port", "vllm_router_port", None),
-        (
-            "sglang_router_request_timeout_secs",
-            "vllm_router_request_timeout_secs",
-            _VIME_LEGACY_VLLM_DEFAULTS["vllm_router_request_timeout_secs"],
-        ),
-        (
-            "sglang_server_concurrency",
-            "vllm_server_concurrency",
-            _VIME_LEGACY_VLLM_DEFAULTS["vllm_server_concurrency"],
-        ),
-    ]
-    user_provided: set[str] = getattr(args, "_vllm_user_provided", set())
-    warned_any = False
-    for legacy_attr, vllm_attr, vllm_default in legacy_to_vllm:
-        legacy_val = getattr(args, legacy_attr, None)
-        vllm_val = getattr(args, vllm_attr, vllm_default)
-        if legacy_val is None or legacy_val == vllm_default:
-            continue  # legacy not set, or already matches default
-        # If the user explicitly passed --vllm-* (even to the same value as the
-        # default), respect their explicit choice and skip migration.
-        if vllm_attr in user_provided:
-            continue
-        if vllm_val != vllm_default:
-            continue  # value differs from default (e.g. YAML override) → keep
-        if not warned_any:
-            logger.warning(
-                "vime: --sglang-* flags are deprecated for the vllm backend. "
-                "Migrating to --vllm-* equivalents; please update your launch scripts."
-            )
-            warned_any = True
-        setattr(args, vllm_attr, legacy_val)
-
-
 def validate_args(args):
     """vllm-specific validation."""
-    # Backwards-compat: if a user still passes legacy ``--sglang-router-ip/port``
-    # (vime previously reused those names for the vllm-router), migrate the
-    # values with a deprecation warning so an external router isn't silently
-    # bypassed.
-    _migrate_legacy_sglang_flags(args)
+    args.vllm_dp_size = args.vllm_data_parallel_size
+    args.vllm_pp_size = args.vllm_pipeline_parallel_size
 
-    if getattr(args, "vllm_router_ip", None):
-        args.vllm_router_ip = _wrap_ipv6(args.vllm_router_ip)
-    return
+    # Compute effective TP size considering PP size
+    if args.vllm_pp_size > 1:
+        assert args.rollout_num_gpus_per_engine % args.vllm_pp_size == 0, (
+            f"rollout_num_gpus_per_engine ({args.rollout_num_gpus_per_engine}) must be divisible by "
+            f"vllm_pipeline_parallel_size ({args.vllm_pp_size})"
+        )
+        args.vllm_tp_size = args.rollout_num_gpus_per_engine // args.vllm_pp_size
+    else:
+        args.vllm_tp_size = args.rollout_num_gpus_per_engine
+
+    if getattr(args, "router_ip", None):
+        args.router_ip = _wrap_ipv6(args.router_ip)
 
 
 def vllm_parse_args():
@@ -308,6 +281,16 @@ def vllm_parse_args():
     """
     parser = argparse.ArgumentParser(add_help=False)
     add_vllm_arguments(parser)
+
+    # Compute default vllm_tensor_parallel_size from CLI args
+    temp_parser = argparse.ArgumentParser(add_help=False)
+    temp_parser.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
+    temp_parser.add_argument("--vllm-pipeline-parallel-size", type=int, default=1)
+    temp_args, _ = temp_parser.parse_known_args()
+    pp_size = temp_args.vllm_pipeline_parallel_size
+    vllm_tp_size = temp_args.rollout_num_gpus_per_engine // pp_size
+    parser.set_defaults(vllm_tensor_parallel_size=vllm_tp_size)
+
     args, _ = parser.parse_known_args()
     user_provided, raw_values = _detect_user_provided_dests(parser, sys.argv[1:])
     args._vllm_user_provided = user_provided
@@ -320,13 +303,16 @@ def vllm_parse_args():
 # try to forward them as command-line flags to the subprocess.
 _VIME_ORCHESTRATION_DESTS = frozenset(
     {
-        "vllm_router_ip",
-        "vllm_router_port",
-        "vllm_router_request_timeout_secs",
+        "router_ip",
+        "router_port",
+        "router_request_timeout_secs",
         "vllm_server_concurrency",
         "vllm_weight_sync_packed",
     }
 )
+
+
+_VLLM_CLI_ACTION_TABLE_CACHE: dict[str, tuple[str, argparse.Action]] | None = None
 
 
 def get_vllm_cli_action_table():
@@ -339,7 +325,15 @@ def get_vllm_cli_action_table():
     Excludes:
       - vime orchestration extras (router endpoint, server concurrency)
       - non-vllm-prefixed actions
+
+    Cached after first build — rebuilding the parser is expensive and the
+    set of vllm CLI flags doesn't change within a process. ``launch_server_process``
+    calls this twice on the hot path.
     """
+    global _VLLM_CLI_ACTION_TABLE_CACHE
+    if _VLLM_CLI_ACTION_TABLE_CACHE is not None:
+        return _VLLM_CLI_ACTION_TABLE_CACHE
+
     parser = argparse.ArgumentParser(add_help=False)
     add_vllm_arguments(parser)
 
@@ -358,4 +352,5 @@ def get_vllm_cli_action_table():
         if primary_flag is None:
             continue
         table[action.dest] = (primary_flag, action)
+    _VLLM_CLI_ACTION_TABLE_CACHE = table
     return table

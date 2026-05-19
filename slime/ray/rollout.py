@@ -950,14 +950,14 @@ def _allocate_rollout_engine_addr_and_ports_normal(
 
 def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool = False) -> tuple[str, int]:
     """Start the rollout HTTP gateway (vllm-router)."""
-    if not force_new and args.vllm_router_ip is not None:
-        return args.vllm_router_ip, args.vllm_router_port
+    if not force_new and args.router_ip is not None:
+        return args.router_ip, args.router_port
 
     router_ip = _wrap_ipv6(get_host_info()[1])
     if force_new:
         router_port = find_available_port(random.randint(3000, 4000))
     else:
-        router_port = args.vllm_router_port
+        router_port = args.router_port
         if router_port is None:
             router_port = find_available_port(random.randint(3000, 4000))
 
@@ -969,7 +969,7 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
     router_args.port = router_port
     router_args.prometheus_port = find_available_port(random.randint(4000, 5000))
     router_args.log_level = "warning"
-    router_args.request_timeout_secs = args.vllm_router_request_timeout_secs
+    router_args.request_timeout_secs = args.router_request_timeout_secs
 
     if has_pd_disaggregation:
         if hasattr(router_args, "vllm_pd_disaggregation"):
@@ -1051,10 +1051,11 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
         has_pd = model_cfg.has_pd_disaggregation
         router_ip, router_port = _start_router(args, has_pd_disaggregation=has_pd, force_new=(model_idx > 0))
 
-        # Write back for backward compat (first model only).
+        # Write back so downstream readers (vllm_rollout, vllm_engine) see the
+        # router we just started (only relevant for first model in multi-model setups).
         if model_idx == 0:
-            args.vllm_router_ip = router_ip
-            args.vllm_router_port = router_port
+            args.router_ip = router_ip
+            args.router_port = router_port
 
         server_groups: list[ServerGroup] = []
         port_cursors: dict[int, int] = {}

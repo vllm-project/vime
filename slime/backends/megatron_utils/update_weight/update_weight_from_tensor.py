@@ -199,7 +199,6 @@ class UpdateWeightFromTensor:
                 self.weight_version,
                 self.distributed_rollout_engines,
                 hf_named_tensors,
-                use_vllm=True,
                 packed=False,
             )
             if refs_distributed:

@@ -1,6 +1,3 @@
-# Third-party RL repos cloned for reference
-reference/
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
