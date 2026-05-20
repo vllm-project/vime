@@ -13,11 +13,10 @@ WORKDIR /root/
 
 # ======================================== Apt dependencies =============================================
 
-# vllm/vllm-openai base is an inference image — install cu12 dev headers so
-# TE / apex / flash-attn source builds find cusparse.h etc.
+# vllm/vllm-openai base is an inference image — add cu12 dev headers + cmake/git
+# so TE / apex / flash-attn source builds find cusparse.h etc.
 RUN apt update
-RUN apt install -y nvtop rsync dnsutils git \
-    cmake ninja-build build-essential \
+RUN apt install -y nvtop rsync dnsutils git cmake \
     cuda-nvrtc-dev-12-9 cuda-nvml-dev-12-9 cuda-profiler-api-12-9 cuda-nvtx-12-9 \
     libcusparse-dev-12-9 libcusolver-dev-12-9 libcufft-dev-12-9 libcurand-dev-12-9 \
     libcudnn9-dev-cuda-12
@@ -56,7 +55,7 @@ RUN git clone https://github.com/NVIDIA/Megatron-LM.git --recursive && \
     cd Megatron-LM && git checkout ${MEGATRON_COMMIT} && \
     pip install -e .
 
-RUN pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@d64a639 --no-cache-dir --force-reinstall
+RUN pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@a193d9dd1b877d33c64a41cfb3db9f867df2d926 --no-cache-dir --force-reinstall
 RUN pip install git+https://github.com/radixark/Megatron-Bridge.git@bridge --no-deps --no-build-isolation
 RUN pip install nvidia-modelopt[torch]>=0.37.0 --no-build-isolation
 
@@ -71,8 +70,7 @@ RUN pip install nvidia-cudnn-cu12==9.16.0.29
 # reinstall numpy 1.x for megatron
 RUN pip install "numpy<2"
 
-# Filter out sglang lines from requirements; we ship the --no-deps stub separately
-# and the full sglang transitive set conflicts with the vllm base environment.
+# Skip sglang lines (we install --no-deps above; the full transitive set conflicts).
 COPY requirements.txt /tmp/slime-requirements.txt
 RUN python3 - <<'PY' && \
     python3 -m pip install -r /tmp/slime-requirements-vllm.txt
@@ -108,11 +106,12 @@ RUN cd Megatron-LM && \
 
 # ====================================== Install main package ============================================
 
-RUN python3 -m pip install pytest
-
 COPY . /root/slime
 RUN cd /root/slime && \
     pip install -e . --no-deps
+
+RUN cd /root/slime/slime/backends/megatron_utils/kernels/int4_qat && \
+    pip install . --no-build-isolation
 
 WORKDIR /root/slime
 
