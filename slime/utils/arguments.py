@@ -1821,10 +1821,6 @@ def slime_validate_args(args):
             args.rollout_function_path = "slime.rollout.vllm_rollout.generate_rollout"
         if args.eval_function_path == "slime.rollout.sglang_rollout.generate_rollout":
             args.eval_function_path = "slime.rollout.vllm_rollout.generate_rollout"
-        if args.use_rollout_routing_replay:
-            raise ValueError(
-                "TODO: add https://github.com/vllm-project/vllm/pull/39568 to support rollout routing replay in /inference/v1/generate. "
-            )
 
     if args.num_steps_per_rollout is not None:
         global_batch_size = args.rollout_batch_size * args.n_samples_per_prompt // args.num_steps_per_rollout

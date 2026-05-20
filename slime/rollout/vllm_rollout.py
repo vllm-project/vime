@@ -1,6 +1,8 @@
 import asyncio
+import base64
 import copy
 import inspect
+import io
 import json
 import logging
 import uuid
@@ -158,6 +160,11 @@ def _vllm_meta_from_generate_choice(args: Namespace, choice: dict, usage: dict |
     return meta
 
 
+def _decode_vllm_routed_experts(value: str) -> np.ndarray:
+    raw = base64.b64decode(value.encode("ascii"), validate=True)
+    return np.load(io.BytesIO(raw), allow_pickle=False)
+
+
 def _apply_vllm_routed_experts(
     args: Namespace,
     sample: Sample,
@@ -166,18 +173,16 @@ def _apply_vllm_routed_experts(
 ) -> None:
     """Populate ``sample.rollout_routed_experts`` from vLLM ``choices[].routed_experts`` when enabled.
 
-    TODO: cherry-pick https://github.com/vllm-project/vllm/pull/39568 for routed experts over
-    ``/inference/v1/generate``. With that support, vLLM exposes MoE routing replay on each
-    response choice. The routing tensor covers generated positions as
-    ``[num_positions, num_layers, topk]``; there is no separate ``prompt_routed_experts`` key in
-    this rollout path.
+    vLLM ``/inference/v1/generate`` returns routed experts as a base64 encoded
+    ``.npy`` payload on each response choice when the server is launched with
+    ``--enable-return-routed-experts``.
     """
     if not getattr(args, "use_rollout_routing_replay", False):
         return
     gen_re = choice.get("routed_experts")
     if gen_re is None:
         return
-    arr = np.asarray(gen_re, dtype=np.int32)
+    arr = _decode_vllm_routed_experts(gen_re)
     n_tok = len(sample.tokens)
     expected_rows = max(0, n_tok - 1)
     if arr.ndim != 3:

@@ -127,6 +127,8 @@ def launch_server_process(
         cmd += ["--kv-cache-memory-bytes", str(args.vllm_kv_cache_memory_bytes)]
     if args.rollout_max_context_len is not None:
         cmd += ["--max-model-len", str(args.rollout_max_context_len)]
+    if getattr(args, "use_rollout_routing_replay", False):
+        cmd += ["--enable-return-routed-experts"]
 
     logger.info("Launching vLLM server: %s", " ".join(cmd))
 
