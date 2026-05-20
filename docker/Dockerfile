@@ -63,7 +63,9 @@ RUN git clone https://github.com/NVIDIA/Megatron-LM.git --recursive && \
     cd Megatron-LM && git checkout ${MEGATRON_COMMIT} && \
     pip install -e .
 
-RUN pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@a193d9dd1b877d33c64a41cfb3db9f867df2d926 --no-cache-dir --force-reinstall
+# Pinned to d64a639 (older than slime upstream's a193d9d); the newer commit
+# requires TMS_CUDA_MAJOR env var to build a multi-CUDA wheel.
+RUN pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@d64a639 --no-cache-dir --force-reinstall
 RUN pip install git+https://github.com/radixark/Megatron-Bridge.git@bridge --no-deps --no-build-isolation
 RUN pip install nvidia-modelopt[torch]>=0.37.0 --no-build-isolation
 
@@ -112,10 +114,10 @@ RUN cd Megatron-LM && \
 
 # ====================================== Install main package ============================================
 
-ARG VIME_COMMIT=main
-RUN git clone https://github.com/vllm-project/vime.git /root/slime && \
-    cd /root/slime && \
-    git checkout ${VIME_COMMIT} && \
+# vime is a private repo, so git clone in build context isn't an option;
+# COPY the local working tree into the image.
+COPY . /root/slime
+RUN cd /root/slime && \
     pip install -e . --no-deps
 
 RUN cd /root/slime/slime/backends/megatron_utils/kernels/int4_qat && \
