@@ -442,8 +442,7 @@ def _mm_render_response_to_generate_body(render_data: Any, model: str) -> dict[s
         return body
 
     raise ValueError(
-        "chat/render: unexpected JSON shape; expected a dict with token_ids or "
-        "[conversation, engine_prompts] list"
+        "chat/render: unexpected JSON shape; expected a dict with token_ids or " "[conversation, engine_prompts] list"
     )
 
 

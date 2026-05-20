@@ -978,10 +978,7 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
             router_args.disable_circuit_breaker = True
 
     # MiniLB is PD-only in vllm-router; non-PD rollout needs the Rust Router (omit SLIME_VLLM_ROUTER_USE_RUST).
-    if (
-        has_pd_disaggregation
-        and os.environ.get("SLIME_VLLM_ROUTER_USE_RUST", "") != "1"
-    ):
+    if has_pd_disaggregation and os.environ.get("SLIME_VLLM_ROUTER_USE_RUST", "") != "1":
         router_args.mini_lb = True
 
     if any(f.name == "disable_health_check" for f in dataclasses.fields(type(router_args))):

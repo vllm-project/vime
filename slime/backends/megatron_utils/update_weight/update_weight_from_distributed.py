@@ -18,7 +18,7 @@ from ray import ObjectRef
 from ray.actor import ActorHandle
 from tqdm import tqdm
 
-from slime.utils.distributed_utils import get_gloo_group, init_process_group
+from slime.utils.distributed_utils import get_gloo_group
 
 from ..megatron_to_hf import convert_to_hf
 from .common import all_gather_param, named_params_and_buffers
@@ -292,9 +292,7 @@ class UpdateWeightFromDistributed:
 
         use_vllm_packed = self._use_vllm_packed()
         if use_vllm_packed and self._is_pp_src_rank:
-            logger.info(
-                "Using vLLM packed weight sync (bucketed; metadata + trainer_send_weights per bucket)"
-            )
+            logger.info("Using vLLM packed weight sync (bucketed; metadata + trainer_send_weights per bucket)")
 
         if use_vllm_packed:
             buffer_size = 0
@@ -339,7 +337,9 @@ class UpdateWeightFromDistributed:
         if not use_vllm_packed:
             buffer_size = 0
             named_tensors = []
-            pbar = tqdm(desc=f"[{self._group_name}] Update weights (experts)", total=0) if self._is_pp_src_rank else None
+            pbar = (
+                tqdm(desc=f"[{self._group_name}] Update weights (experts)", total=0) if self._is_pp_src_rank else None
+            )
             for name, param in named_params_and_buffers(self.args, self.model):
                 if ".experts." not in name:
                     continue
@@ -593,7 +593,7 @@ def disconnect_rollout_engines_from_distributed(
 
 def update_weights_from_distributed(
     group_name: str,
-    group: "_NcclBridge",
+    group: _NcclBridge,
     weight_version: int,
     rollout_engines: Sequence[ActorHandle],
     converted_named_tensors: Sequence[tuple[str, torch.Tensor]],

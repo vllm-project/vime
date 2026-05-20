@@ -5,9 +5,9 @@ import logging
 import multiprocessing
 import os
 import time
+from urllib.parse import quote
 
 import requests
-from urllib.parse import quote
 
 from slime.ray.ray_actor import RayActor
 from slime.utils.http_utils import get_host_info
@@ -163,9 +163,10 @@ def _forward_vllm_cli_args(args, cmd: list[str]) -> None:
         serialized = _serialize_for_cli(value)
         if serialized is None:
             logger.debug(
-                "Skipping forward of %s: parsed value %r (%s) cannot be serialized; "
-                "needs vime-side handling.",
-                vllm_flag, value, type(value).__name__,
+                "Skipping forward of %s: parsed value %r (%s) cannot be serialized; " "needs vime-side handling.",
+                vllm_flag,
+                value,
+                type(value).__name__,
             )
             continue
         cmd.extend([vllm_flag, serialized])
@@ -233,6 +234,7 @@ def _serialize_weight_transfer_config(value) -> str:
     if serialized is None:
         # Last resort: assume the value's str() form names the backend.
         import json
+
         return json.dumps({"backend": str(value)})
     return serialized
 
@@ -466,9 +468,9 @@ class VLLMEngine(RayActor):
             return
         worker_url = self._http_base()
         try:
-            all_workers = requests.get(
-                f"http://{self.router_ip}:{self.router_port}/workers", timeout=30
-            ).json()["workers"]
+            all_workers = requests.get(f"http://{self.router_ip}:{self.router_port}/workers", timeout=30).json()[
+                "workers"
+            ]
             for worker in all_workers:
                 if worker["url"] == worker_url:
                     response = requests.delete(
@@ -698,9 +700,7 @@ class VLLMEngine(RayActor):
         tags = _normalize_vllm_wake_tags(tags)
         # vLLM ``POST /wake_up`` uses ``query_params.getlist("tags")``, not JSON.
         # Omit params when ``tags`` is empty so the server wakes all tags (see api_router.wake_up).
-        wake_params: list[tuple[str, str]] | None = (
-            [("tags", t) for t in tags] if tags else None
-        )
+        wake_params: list[tuple[str, str]] | None = [("tags", t) for t in tags] if tags else None
         response = requests.post(
             f"{self._http_base()}/wake_up",
             params=wake_params,

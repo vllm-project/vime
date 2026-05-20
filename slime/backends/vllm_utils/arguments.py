@@ -358,7 +358,7 @@ def get_vllm_cli_action_table():
         primary_flag = None
         for s in action.option_strings:
             if s.startswith("--vllm-") and not s.startswith("--no-vllm-"):
-                primary_flag = "--" + s[len("--vllm-"):]
+                primary_flag = "--" + s[len("--vllm-") :]
                 break
         if primary_flag is None:
             continue
