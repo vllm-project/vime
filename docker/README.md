@@ -1,4 +1,4 @@
-# Docker
+# Docker release rule
 
 vime ships one image based on the official vllm image, published as
 `aosheninferact/vime-vllm:cu129` (also `latest`).
@@ -9,7 +9,7 @@ Build locally:
 docker build -f docker/Dockerfile -t vime/pr-9-vllm:cu129 .
 ```
 
-## Release rule
+## Release matrix
 
 Before tagging a new stable image, the following matrix must pass. All four
 are currently TODO — none has been wired into CI yet:
