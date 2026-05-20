@@ -17,11 +17,12 @@ WORKDIR /root/
 
 # vllm/vllm-openai base is an inference image — add cu12 dev headers + cmake/git
 # so TE / apex / flash-attn source builds find cusparse.h etc.
-RUN apt update
-RUN apt install -y nvtop rsync dnsutils git cmake \
+RUN apt-get update && apt-get install -y \
+    nvtop rsync dnsutils git cmake \
     cuda-nvrtc-dev-12-9 cuda-nvml-dev-12-9 cuda-profiler-api-12-9 cuda-nvtx-12-9 \
     libcusparse-dev-12-9 libcusolver-dev-12-9 libcufft-dev-12-9 libcurand-dev-12-9 \
-    libcudnn9-dev-cuda-12
+    libcudnn9-dev-cuda-12 && \
+    rm -rf /var/lib/apt/lists/*
 
 # vllm/vllm-openai base only ships python3; subsequent source builds invoke `python`.
 RUN ln -sf /usr/bin/python3 /usr/local/bin/python
@@ -60,8 +61,7 @@ RUN NVCC_APPEND_FLAGS="--threads 4" \
   --config-settings "--build-option=--cpp_ext --cuda_ext --parallel 8" git+https://github.com/NVIDIA/apex.git@10417aceddd7d5d05d7cbf7b0fc2daad1105f8b4
 
 RUN git clone https://github.com/NVIDIA/Megatron-LM.git --recursive && \
-    cd Megatron-LM && git checkout ${MEGATRON_COMMIT} && \
-    pip install -e .
+    cd Megatron-LM && git checkout ${MEGATRON_COMMIT}
 
 # Pinned to d64a639 (older than slime upstream's a193d9d); the newer commit
 # requires TMS_CUDA_MAJOR env var to build a multi-CUDA wheel.
@@ -102,6 +102,8 @@ RUN rm -rf /root/.cache/pip
 
 # ====================================== Patches ============================================
 
+# Patch megatron BEFORE pip install -e . so any patch hunks that touch setup.py
+# or C++/CUDA extensions are picked up by the build.
 COPY docker/patch/${PATCH_VERSION}/megatron.patch /root/Megatron-LM/
 RUN cd Megatron-LM && \
     git update-index --refresh && \
@@ -110,12 +112,11 @@ RUN cd Megatron-LM && \
       echo "Patch failed to apply cleanly. Please resolve conflicts." && \
       exit 1; \
     fi && \
-    rm megatron.patch
+    rm megatron.patch && \
+    pip install -e .
 
 # ====================================== Install main package ============================================
 
-# vime is a private repo, so git clone in build context isn't an option;
-# COPY the local working tree into the image.
 COPY . /root/slime
 RUN cd /root/slime && \
     pip install -e . --no-deps
