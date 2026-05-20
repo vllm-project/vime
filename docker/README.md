@@ -1,11 +1,10 @@
 # Docker release rule
 
-vime now ships a single image variant, based on the official vllm release
-(`vllm/vllm-openai:v0.21.0-cu129-ubuntu2404`).  The image bundles the slime
-training stack (Megatron-LM, mbridge / Megatron-Bridge, modelopt, apex,
-flash-attn 2 + flash-attn 3 hopper, TE 2.10, flash-linear-attention,
-tilelang, torch_memory_saver) plus an `--no-deps` sglang stub for
-top-level imports.
+vime ships a single image variant, based on the official vllm release
+(`vllm/vllm-openai:v0.21.0-cu129-ubuntu2404`), bundling the slime training
+stack (Megatron-LM, mbridge / Megatron-Bridge, modelopt, apex, flash-attn 2 +
+flash-attn 3 hopper, TE 2.10, flash-linear-attention, tilelang,
+torch_memory_saver).
 
 current stable version:
 - vllm 0.21.0 (cu129) + megatron `1dcf0dafa884ad52ffb243625717a3471643e087` + slime patch `docker/patch/latest/megatron.patch`
@@ -18,11 +17,6 @@ Build locally:
 ```bash
 docker build -f docker/Dockerfile -t vime/pr-9-vllm:cu129 .
 ```
-
-Before each update, the validated path is a single-step Qwen3-0.6B vllm
-rollout train on 4× H200; broader coverage (multi-step, MoE, PD
-disaggregation, multi-node, spec decode, checkpoint save/load) is not
-yet wired into CI and should be exercised before tagging stable.
 
 History (sglang-based images, predates the vllm switch):
 - sglang v0.5.9 (bbe9c7eeb520b0a67e92d133dfc137a3688dc7f2), megatron dev 3714d81d418c9f1bca4594fc35f9e8289f652862
