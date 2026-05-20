@@ -1,14 +1,4 @@
-"""Unit tests for slime/backends/megatron_utils/update_weight/update_weight_from_distributed.py.
-
-Test philosophy: minimize mocks. Use real torch tensors, real function calls.
-The only test doubles are lightweight recording classes (not MagicMock) that
-stand in for the ray ActorHandle / _NcclBridge surfaces — these can't be
-instantiated standalone (Ray requires a cluster; _NcclBridge spawns a
-subprocess with NCCL), so we substitute named classes that record calls.
-
-Real megatron + ray + torch are already installed in the docker image, so the
-module loads without any sys.modules stubbing.
-"""
+"""Unit tests for slime/backends/megatron_utils/update_weight/update_weight_from_distributed.py."""
 
 from __future__ import annotations
 
@@ -23,15 +13,7 @@ import torch
 
 @pytest.fixture(scope="module")
 def upw():
-    return importlib.import_module(
-        "slime.backends.megatron_utils.update_weight.update_weight_from_distributed"
-    )
-
-
-# ============================================================================
-# Test doubles: lightweight recording classes (NOT MagicMock).
-# Each method records its call args so tests can assert on dispatch + payload.
-# ============================================================================
+    return importlib.import_module("slime.backends.megatron_utils.update_weight.update_weight_from_distributed")
 
 
 @dataclass
@@ -41,8 +23,6 @@ class _RemoteCall:
 
 
 class RecordingRemoteMethod:
-    """Mimics ``handle.method.remote(...)`` — records each call, returns a stub ref."""
-
     def __init__(self, return_value: str = "ref"):
         self._return_value = return_value
         self.calls: list[_RemoteCall] = []
@@ -54,8 +34,6 @@ class RecordingRemoteMethod:
 
 @dataclass
 class RecordingEngine:
-    """Stands in for a ray ActorHandle of a rollout engine."""
-
     update_weights_from_distributed: RecordingRemoteMethod = field(
         default_factory=lambda: RecordingRemoteMethod("ref")
     )
@@ -63,8 +41,6 @@ class RecordingEngine:
 
 @dataclass
 class RecordingNcclBridge:
-    """Stands in for ``_NcclBridge`` — records broadcast / send_packed calls."""
-
     broadcast_calls: list[list[torch.Tensor]] = field(default_factory=list)
     packed_calls: list[list[tuple[str, torch.Tensor]]] = field(default_factory=list)
 
@@ -79,37 +55,27 @@ def _real_tensors(n: int = 2):
     return [(f"layer.{i}.weight", torch.zeros(2, 2)) for i in range(n)]
 
 
-# ============================================================================
-# Signature changes: `use_vllm` parameter removed; only `packed` remains.
-# ============================================================================
-
-
 @pytest.mark.unit
 def test_signature_no_use_vllm(upw):
     sig = inspect.signature(upw.update_weights_from_distributed)
     params = sig.parameters
-    assert "use_vllm" not in params, "the dead `use_vllm` parameter must not be reintroduced"
-    # All other expected params present
-    for p in ("group_name", "group", "weight_version", "rollout_engines",
-              "converted_named_tensors", "packed"):
-        assert p in params, f"missing expected param: {p}"
+    assert "use_vllm" not in params
+    for p in ("group_name", "group", "weight_version", "rollout_engines", "converted_named_tensors", "packed"):
+        assert p in params
 
 
 @pytest.mark.unit
 def test_signature_rejects_legacy_use_vllm_call(upw):
-    """Old callsite ``update_weights_from_distributed(..., use_vllm=True, ...)``
-    must now raise TypeError."""
     with pytest.raises(TypeError, match="use_vllm"):
         upw.update_weights_from_distributed(
-            "g", RecordingNcclBridge(), 1, [RecordingEngine()],
-            _real_tensors(), use_vllm=True, packed=False,
+            "g",
+            RecordingNcclBridge(),
+            1,
+            [RecordingEngine()],
+            _real_tensors(),
+            use_vllm=True,
+            packed=False,
         )
-
-
-# ============================================================================
-# Behavior: packed=True → group.send_weights_packed; packed=False →
-# group.broadcast_tensors. No sglang `dist.broadcast` fallback.
-# ============================================================================
 
 
 @pytest.mark.unit
@@ -118,9 +84,7 @@ def test_packed_true_dispatches_send_weights_packed(upw):
     engine = RecordingEngine()
     tensors = _real_tensors()
 
-    refs = upw.update_weights_from_distributed(
-        "groupA", group, 7, [engine], tensors, packed=True
-    )
+    refs = upw.update_weights_from_distributed("groupA", group, 7, [engine], tensors, packed=True)
 
     assert len(group.packed_calls) == 1
     assert len(group.broadcast_calls) == 0
@@ -135,9 +99,7 @@ def test_packed_false_dispatches_broadcast_tensors(upw):
     engine = RecordingEngine()
     tensors = _real_tensors()
 
-    refs = upw.update_weights_from_distributed(
-        "groupB", group, 7, [engine], tensors, packed=False
-    )
+    refs = upw.update_weights_from_distributed("groupB", group, 7, [engine], tensors, packed=False)
 
     assert len(group.broadcast_calls) == 1
     assert len(group.packed_calls) == 0
@@ -147,13 +109,10 @@ def test_packed_false_dispatches_broadcast_tensors(upw):
 
 @pytest.mark.unit
 def test_default_packed_is_false(upw):
-    """Default is unpacked (broadcast_tensors), matching the function default."""
     group = RecordingNcclBridge()
     engine = RecordingEngine()
 
-    upw.update_weights_from_distributed(
-        "g", group, 1, [engine], _real_tensors()
-    )
+    upw.update_weights_from_distributed("g", group, 1, [engine], _real_tensors())
 
     assert len(group.broadcast_calls) == 1
     assert len(group.packed_calls) == 0
@@ -161,8 +120,6 @@ def test_default_packed_is_false(upw):
 
 @pytest.mark.unit
 def test_no_dist_broadcast_fallback(upw, monkeypatch):
-    """The old sglang `else: dist.broadcast(...)` branch is removed. Patch
-    `dist.broadcast` and confirm it's never invoked, even on packed=False."""
     import torch.distributed as dist
 
     seen_broadcast = []
@@ -174,17 +131,10 @@ def test_no_dist_broadcast_fallback(upw, monkeypatch):
 
     group = RecordingNcclBridge()
     engine = RecordingEngine()
-    upw.update_weights_from_distributed(
-        "g", group, 1, [engine], _real_tensors(), packed=False
-    )
+    upw.update_weights_from_distributed("g", group, 1, [engine], _real_tensors(), packed=False)
 
-    assert seen_broadcast == [], "dist.broadcast must not be called (sglang path removed)"
-    assert group.broadcast_calls, "broadcast went via _NcclBridge.broadcast_tensors"
-
-
-# ============================================================================
-# Remote engine RPC payload: kwargs forwarded to each rollout engine.
-# ============================================================================
+    assert seen_broadcast == []
+    assert group.broadcast_calls
 
 
 @pytest.mark.unit
@@ -193,9 +143,7 @@ def test_remote_kwargs_include_packed_true(upw):
     engine = RecordingEngine()
     tensors = _real_tensors(n=1)
 
-    upw.update_weights_from_distributed(
-        "myg", group, 42, [engine], tensors, packed=True
-    )
+    upw.update_weights_from_distributed("myg", group, 42, [engine], tensors, packed=True)
 
     assert len(engine.update_weights_from_distributed.calls) == 1
     kw = engine.update_weights_from_distributed.calls[0].kwargs
@@ -213,9 +161,7 @@ def test_remote_kwargs_include_packed_false(upw):
     engine = RecordingEngine()
     tensors = _real_tensors(n=2)
 
-    upw.update_weights_from_distributed(
-        "g", group, 99, [engine], tensors, packed=False
-    )
+    upw.update_weights_from_distributed("g", group, 99, [engine], tensors, packed=False)
 
     kw = engine.update_weights_from_distributed.calls[0].kwargs
     assert kw["packed"] is False
@@ -225,14 +171,10 @@ def test_remote_kwargs_include_packed_false(upw):
 
 @pytest.mark.unit
 def test_remote_kwargs_no_use_vllm(upw):
-    """`use_vllm` is removed from the forwarded RPC kwargs (slime sglang
-    never sent it; vime's legacy `use_vllm=True` is dead)."""
     group = RecordingNcclBridge()
     engine = RecordingEngine()
 
-    upw.update_weights_from_distributed(
-        "g", group, 1, [engine], _real_tensors(), packed=False
-    )
+    upw.update_weights_from_distributed("g", group, 1, [engine], _real_tensors(), packed=False)
 
     kw = engine.update_weights_from_distributed.calls[0].kwargs
     assert "use_vllm" not in kw
@@ -240,26 +182,19 @@ def test_remote_kwargs_no_use_vllm(upw):
 
 @pytest.mark.unit
 def test_multiple_engines_each_get_call(upw):
-    """RPC fanout to every engine in `rollout_engines`."""
     group = RecordingNcclBridge()
     engines = [RecordingEngine() for _ in range(3)]
-    upw.update_weights_from_distributed(
-        "g", group, 1, engines, _real_tensors(), packed=True
-    )
+    upw.update_weights_from_distributed("g", group, 1, engines, _real_tensors(), packed=True)
     for e in engines:
         assert len(e.update_weights_from_distributed.calls) == 1
 
 
 @pytest.mark.unit
 def test_empty_tensor_list_still_dispatches(upw):
-    """Edge case: zero tensors. Function should still RPC fanout and call
-    group method (even if with empty list — caller decides whether to skip)."""
     group = RecordingNcclBridge()
     engine = RecordingEngine()
 
-    refs = upw.update_weights_from_distributed(
-        "g", group, 1, [engine], [], packed=False
-    )
+    refs = upw.update_weights_from_distributed("g", group, 1, [engine], [], packed=False)
 
     assert refs == ["ref"]
     kw = engine.update_weights_from_distributed.calls[0].kwargs
@@ -269,28 +204,14 @@ def test_empty_tensor_list_still_dispatches(upw):
     assert group.broadcast_calls[0] == []
 
 
-# ============================================================================
-# Source-level invariants — confirm dead code is gone.
-# ============================================================================
-
-
 @pytest.mark.unit
 def test_source_no_standalone_use_vllm_param(upw):
-    """Grep the source for `use_vllm=` assignments — should be 0 outside of
-    the unrelated `use_vllm_packed` name (which is packed-vs-bucket mode)."""
     src = inspect.getsource(upw)
-    lines = [
-        line.strip()
-        for line in src.splitlines()
-        if "use_vllm=" in line and "use_vllm_packed" not in line
-    ]
-    assert lines == [], f"unexpected use_vllm= leftovers: {lines}"
+    lines = [line.strip() for line in src.splitlines() if "use_vllm=" in line and "use_vllm_packed" not in line]
+    assert lines == []
 
 
 @pytest.mark.unit
 def test_source_no_sglang_dist_broadcast_fallback(upw):
-    """The old `else: dist.broadcast(...)` sglang fallback in
-    `update_weights_from_distributed` is gone — confirm the function body
-    has no direct `dist.broadcast` call."""
     fn_src = inspect.getsource(upw.update_weights_from_distributed)
     assert "dist.broadcast(" not in fn_src
