@@ -24,7 +24,7 @@ import sys
 import types
 from argparse import Namespace
 from dataclasses import dataclass, field
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -33,6 +33,7 @@ import torch
 # ─────────────────────────────────────────────────────────────────────────────
 # Stub modules injected before importing the module under test
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _install_stubs():
     """
@@ -71,6 +72,7 @@ def _install_stubs():
 
     # Patch torch.distributed at the attribute level (don't replace the module)
     import torch.distributed as _dist
+
     for attr in ("get_rank", "barrier"):
         setattr(_dist, attr, getattr(dist_stub, attr))
 
@@ -91,14 +93,10 @@ def _install_stubs():
     hf_base_cls = MagicMock()
     hf_base_cls.create.return_value = hf_iter_stub
 
-    hf_iter_base_mod = types.ModuleType(
-        "slime.backends.megatron_utils.update_weight.hf_weight_iterator_base"
-    )
+    hf_iter_base_mod = types.ModuleType("slime.backends.megatron_utils.update_weight.hf_weight_iterator_base")
     hf_iter_base_mod.HfWeightIteratorBase = hf_base_cls
 
-    upw_dist_mod = types.ModuleType(
-        "slime.backends.megatron_utils.update_weight.update_weight_from_distributed"
-    )
+    upw_dist_mod = types.ModuleType("slime.backends.megatron_utils.update_weight.update_weight_from_distributed")
     upw_dist_mod.connect_rollout_engines_from_distributed = MagicMock(return_value="groups")
     upw_dist_mod.disconnect_rollout_engines_from_distributed = MagicMock()
     upw_dist_mod.post_process_weights = MagicMock()
@@ -159,6 +157,7 @@ def upw_vllm():
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers / recording stubs
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @dataclass
 class _RemoteCall:
@@ -243,6 +242,7 @@ def _make_instance(upw_vllm, args=None):
 # Signature / structural tests
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 def test_class_exists(upw_vllm):
     assert hasattr(upw_vllm, "UpdateVLLMWeightFromTensor")
@@ -274,6 +274,7 @@ def test_connect_rollout_engines_signature(upw_vllm):
 # ─────────────────────────────────────────────────────────────────────────────
 # connect_rollout_engines: colocated / distributed split
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _connect(obj, engines, *, counts, offsets):
     """Helper: call connect_rollout_engines with explicit counts/offsets."""
@@ -356,9 +357,9 @@ def test_nccl_groups_created_for_distributed(upw_vllm):
     dist_engine = RecordingVLLMEngine()
     _UPW_DIST_MOD.connect_rollout_engines_from_distributed.reset_mock()
 
-    with patch.object(sys.modules["megatron.core"].mpu, "get_data_parallel_rank", return_value=0), \
-         patch.object(sys.modules["megatron.core"].mpu, "get_tensor_model_parallel_rank", return_value=0), \
-         patch.object(sys.modules["megatron.core"].mpu, "get_pipeline_model_parallel_rank", return_value=0):
+    with patch.object(sys.modules["megatron.core"].mpu, "get_data_parallel_rank", return_value=0), patch.object(
+        sys.modules["megatron.core"].mpu, "get_tensor_model_parallel_rank", return_value=0
+    ), patch.object(sys.modules["megatron.core"].mpu, "get_pipeline_model_parallel_rank", return_value=0):
         _connect(obj, [dist_engine], counts=[2], offsets=[4])
 
     _UPW_DIST_MOD.connect_rollout_engines_from_distributed.assert_called_once()
@@ -378,6 +379,7 @@ def test_no_nccl_for_colocated_only(upw_vllm):
 # ─────────────────────────────────────────────────────────────────────────────
 # update_weights: lifecycle tests
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def _run_update_weights(obj, hf_chunks=None):
     """
@@ -400,12 +402,14 @@ def _run_update_weights(obj, hf_chunks=None):
         "IPCTrainerSendWeightsArgs": ipc_trainer_args_cls,
     }
 
-    with patch.dict("sys.modules", {
-        "vllm.distributed.weight_transfer.ipc_engine": types.SimpleNamespace(**ipc_mod_patch),
-    }):
+    with patch.dict(
+        "sys.modules",
+        {
+            "vllm.distributed.weight_transfer.ipc_engine": types.SimpleNamespace(**ipc_mod_patch),
+        },
+    ):
         # Stub dist.get_rank to return 0 (rank-0 path exercises rank-0 branches)
-        with patch("torch.distributed.get_rank", return_value=0), \
-             patch("torch.distributed.barrier"):
+        with patch("torch.distributed.get_rank", return_value=0), patch("torch.distributed.barrier"):
             obj.update_weights()
 
     return ipc_engine_cls
@@ -561,14 +565,16 @@ def test_trainer_send_weights_uses_ray_mode(upw_vllm):
         send_modes.append(kw.get("send_mode"))
         return kw
 
-    with patch.dict("sys.modules", {
-        "vllm.distributed.weight_transfer.ipc_engine": types.SimpleNamespace(
-            IPCWeightTransferEngine=ipc_engine_cls,
-            IPCTrainerSendWeightsArgs=fake_args_cls,
-        ),
-    }):
-        with patch("torch.distributed.get_rank", return_value=0), \
-             patch("torch.distributed.barrier"):
+    with patch.dict(
+        "sys.modules",
+        {
+            "vllm.distributed.weight_transfer.ipc_engine": types.SimpleNamespace(
+                IPCWeightTransferEngine=ipc_engine_cls,
+                IPCTrainerSendWeightsArgs=fake_args_cls,
+            ),
+        },
+    ):
+        with patch("torch.distributed.get_rank", return_value=0), patch("torch.distributed.barrier"):
             obj._hf_weight_iterator = MagicMock()
             obj._hf_weight_iterator.get_hf_weight_chunks.return_value = iter([_real_tensors(1)])
             obj.update_weights()
@@ -591,14 +597,16 @@ def test_trainer_send_weights_passes_engine_list(upw_vllm):
         return kw
 
     ipc_engine_cls = MagicMock()
-    with patch.dict("sys.modules", {
-        "vllm.distributed.weight_transfer.ipc_engine": types.SimpleNamespace(
-            IPCWeightTransferEngine=ipc_engine_cls,
-            IPCTrainerSendWeightsArgs=fake_args_cls,
-        ),
-    }):
-        with patch("torch.distributed.get_rank", return_value=0), \
-             patch("torch.distributed.barrier"):
+    with patch.dict(
+        "sys.modules",
+        {
+            "vllm.distributed.weight_transfer.ipc_engine": types.SimpleNamespace(
+                IPCWeightTransferEngine=ipc_engine_cls,
+                IPCTrainerSendWeightsArgs=fake_args_cls,
+            ),
+        },
+    ):
+        with patch("torch.distributed.get_rank", return_value=0), patch("torch.distributed.barrier"):
             obj._hf_weight_iterator = MagicMock()
             obj._hf_weight_iterator.get_hf_weight_chunks.return_value = iter([_real_tensors(1)])
             obj.update_weights()

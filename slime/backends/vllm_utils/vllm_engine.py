@@ -594,9 +594,9 @@ class VLLMEngine(RayActor):
             # ipc_handles contain local closures from monkey_patch_torch_reductions
             # (_rebuild_cuda_tensor_modified) that standard pickle cannot serialize.
             # cloudpickle handles local functions and closures correctly.
-            inner["ipc_handles_pickled"] = base64.b64encode(
-                cloudpickle.dumps(inner.pop("ipc_handles"))
-            ).decode("utf-8")
+            inner["ipc_handles_pickled"] = base64.b64encode(cloudpickle.dumps(inner.pop("ipc_handles"))).decode(
+                "utf-8"
+            )
         return self._post_vllm_update_weights_http(inner)
 
     def health_generate(self, timeout: float = 5.0) -> bool:

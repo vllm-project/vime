@@ -49,6 +49,3 @@ class vLLMColocateWorkerExtension:
         # CUDA IPC handle deserialisation correctly.
         _VLLMHijack.hijack()
         return super().__new__(cls)
-    
-    def funny():
-        pass

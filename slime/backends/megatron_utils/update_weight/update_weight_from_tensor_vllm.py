@@ -280,7 +280,9 @@ class UpdateVLLMWeightFromTensor:
                     rollout_engines=all_engines,
                 )
             if self._colocated_engines:
-                ray.get([engine.resume_memory_occupation.remote(tags=["scheduling"]) for engine in self._colocated_engines])
+                ray.get(
+                    [engine.resume_memory_occupation.remote(tags=["scheduling"]) for engine in self._colocated_engines]
+                )
             if self._distributed_engines:
                 ray.get([engine.continue_generation.remote() for engine in self._distributed_engines])
         dist.barrier(group=get_gloo_group())
