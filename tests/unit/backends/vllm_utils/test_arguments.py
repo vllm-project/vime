@@ -1,4 +1,4 @@
-"""Unit tests for slime/backends/vllm_utils/arguments.py."""
+"""Unit tests for ``slime.backends.vllm_utils.arguments``."""
 
 from __future__ import annotations
 

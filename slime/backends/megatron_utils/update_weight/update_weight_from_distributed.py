@@ -24,6 +24,20 @@ from .common import all_gather_param, named_params_and_buffers
 logger = logging.getLogger(__name__)
 
 
+def _begin_vllm_weight_update_session(rollout_engines: Sequence[ActorHandle]) -> None:
+    if dist.get_rank() == 0:
+        logger.info("vLLM weight update: start_weight_update")
+        ray.get([engine.start_weight_update.remote(is_checkpoint_format=True) for engine in rollout_engines])
+    dist.barrier(group=get_gloo_group())
+
+
+def _end_vllm_weight_update_session(rollout_engines: Sequence[ActorHandle]) -> None:
+    if dist.get_rank() == 0:
+        logger.info("vLLM weight update: finish_weight_update")
+        ray.get([engine.finish_weight_update.remote() for engine in rollout_engines])
+    dist.barrier(group=get_gloo_group())
+
+
 class UpdateWeightFromDistributed:
     """
     Update distributed engines via NCCL. Each PP rank: group "slime-pp_{pp_rank}",
@@ -113,6 +127,25 @@ class UpdateWeightFromDistributed:
                 )
         dist.barrier(group=get_gloo_group())
 
+        _begin_vllm_weight_update_session(self.rollout_engines)
+        try:
+            self._sync_weights_to_rollout_engines()
+        finally:
+            _end_vllm_weight_update_session(self.rollout_engines)
+
+        dist.barrier(group=get_gloo_group())
+        if dist.get_rank() == 0:
+            # int4/fp4 post_process
+            if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
+                post_process_weights(
+                    restore_weights_before_load=False,
+                    post_process_quantization=True,
+                    rollout_engines=self.rollout_engines,
+                )
+            ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
+        dist.barrier(group=get_gloo_group())
+
+    def _sync_weights_to_rollout_engines(self) -> None:
         use_vllm_packed = self._use_vllm_packed()
         if use_vllm_packed and self._is_pp_src_rank:
             logger.info("Using vLLM packed weight sync (bucketed; metadata + trainer_send_weights per bucket)")
@@ -172,18 +205,6 @@ class UpdateWeightFromDistributed:
 
             if named_tensors:
                 self._update_expert_bucket_weights_from_distributed(named_tensors, pbar=pbar)
-
-        dist.barrier(group=get_gloo_group())
-        if dist.get_rank() == 0:
-            # int4/fp4 post_process
-            if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
-                post_process_weights(
-                    restore_weights_before_load=False,
-                    post_process_quantization=True,
-                    rollout_engines=self.rollout_engines,
-                )
-            ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
-        dist.barrier(group=get_gloo_group())
 
     def _use_vllm_packed(self) -> bool:
         """Use vLLM packed weight transfer (one-shot metadata + trainer_send_weights)."""
@@ -439,16 +460,15 @@ def update_weights_from_distributed(
 
     refs = [engine.update_weights_from_distributed.remote(**kwargs) for engine in rollout_engines]
 
-    from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine
+    from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerSendWeightsArgs, NCCLWeightTransferEngine
 
     named_gpu_iter = (
         (name, (param.data if hasattr(param, "data") else param).contiguous())
         for name, param in converted_named_tensors
     )
     NCCLWeightTransferEngine.trainer_send_weights(
-        iterator=named_gpu_iter,
-        group=group,
-        packed=packed,
+        named_gpu_iter,
+        NCCLTrainerSendWeightsArgs(group=group, packed=packed),
     )
     torch.cuda.synchronize()
 

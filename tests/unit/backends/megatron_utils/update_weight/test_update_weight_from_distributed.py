@@ -40,6 +40,8 @@ class RecordingEngine:
     destroy_weights_update_group: RecordingRemoteMethod = field(
         default_factory=lambda: RecordingRemoteMethod("destroy_ref")
     )
+    start_weight_update: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod("start_ref"))
+    finish_weight_update: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod("finish_ref"))
 
 
 @dataclass
@@ -49,6 +51,38 @@ class DummyGroup:
 
 def _real_tensors(n: int = 2):
     return [(f"layer.{i}.weight", torch.zeros(2, 2)) for i in range(n)]
+
+
+def _patch_trainer_send(monkeypatch, upw, seen: list[dict]) -> None:
+    class DummyNCCLTrainerSendWeightsArgs:
+        def __init__(self, *, group, packed):
+            self.group = group
+            self.packed = packed
+
+    class DummyNCCLWeightTransferEngine:
+        @staticmethod
+        def trainer_send_weights(iterator, trainer_args):
+            seen.append(
+                {
+                    "items": list(iterator),
+                    "group": trainer_args.group,
+                    "packed": trainer_args.packed,
+                }
+            )
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "vllm.distributed.weight_transfer.nccl_engine",
+        type(
+            "M",
+            (),
+            {
+                "NCCLWeightTransferEngine": DummyNCCLWeightTransferEngine,
+                "NCCLTrainerSendWeightsArgs": DummyNCCLTrainerSendWeightsArgs,
+            },
+        ),
+    )
+    monkeypatch.setattr(upw.torch.cuda, "synchronize", lambda: None)
 
 
 @pytest.mark.unit
@@ -80,24 +114,7 @@ def test_packed_true_uses_vllm_trainer_send_weights(upw, monkeypatch):
     engine = RecordingEngine()
     tensors = _real_tensors()
     seen = []
-
-    class DummyNCCLWeightTransferEngine:
-        @staticmethod
-        def trainer_send_weights(*, iterator, group, packed):
-            seen.append({"items": list(iterator), "group": group, "packed": packed})
-
-    monkeypatch.setattr(
-        upw,
-        "NCCLWeightTransferEngine",
-        DummyNCCLWeightTransferEngine,
-        raising=False,
-    )
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "vllm.distributed.weight_transfer.nccl_engine",
-        type("M", (), {"NCCLWeightTransferEngine": DummyNCCLWeightTransferEngine}),
-    )
-    monkeypatch.setattr(upw.torch.cuda, "synchronize", lambda: None)
+    _patch_trainer_send(monkeypatch, upw, seen)
 
     refs = upw.update_weights_from_distributed("groupA", group, 7, [engine], tensors, packed=True)
 
@@ -115,18 +132,7 @@ def test_packed_false_still_uses_vllm_trainer_send_weights(upw, monkeypatch):
     engine = RecordingEngine()
     tensors = _real_tensors()
     seen = []
-
-    class DummyNCCLWeightTransferEngine:
-        @staticmethod
-        def trainer_send_weights(*, iterator, group, packed):
-            seen.append({"items": list(iterator), "group": group, "packed": packed})
-
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "vllm.distributed.weight_transfer.nccl_engine",
-        type("M", (), {"NCCLWeightTransferEngine": DummyNCCLWeightTransferEngine}),
-    )
-    monkeypatch.setattr(upw.torch.cuda, "synchronize", lambda: None)
+    _patch_trainer_send(monkeypatch, upw, seen)
 
     refs = upw.update_weights_from_distributed("groupB", group, 7, [engine], tensors, packed=False)
 
@@ -141,18 +147,7 @@ def test_default_packed_is_false(upw, monkeypatch):
     group = DummyGroup()
     engine = RecordingEngine()
     seen = []
-
-    class DummyNCCLWeightTransferEngine:
-        @staticmethod
-        def trainer_send_weights(*, iterator, group, packed):
-            seen.append({"items": list(iterator), "group": group, "packed": packed})
-
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "vllm.distributed.weight_transfer.nccl_engine",
-        type("M", (), {"NCCLWeightTransferEngine": DummyNCCLWeightTransferEngine}),
-    )
-    monkeypatch.setattr(upw.torch.cuda, "synchronize", lambda: None)
+    _patch_trainer_send(monkeypatch, upw, seen)
 
     upw.update_weights_from_distributed("g", group, 1, [engine], _real_tensors())
 
@@ -170,18 +165,8 @@ def test_no_dist_broadcast_fallback(upw, monkeypatch):
     def fake_broadcast(*a, **k):
         seen_broadcast.append((a, k))
 
-    class DummyNCCLWeightTransferEngine:
-        @staticmethod
-        def trainer_send_weights(*, iterator, group, packed):
-            seen_send.append({"items": list(iterator), "group": group, "packed": packed})
-
     monkeypatch.setattr(dist, "broadcast", fake_broadcast)
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "vllm.distributed.weight_transfer.nccl_engine",
-        type("M", (), {"NCCLWeightTransferEngine": DummyNCCLWeightTransferEngine}),
-    )
-    monkeypatch.setattr(upw.torch.cuda, "synchronize", lambda: None)
+    _patch_trainer_send(monkeypatch, upw, seen_send)
 
     group = DummyGroup()
     engine = RecordingEngine()
@@ -197,18 +182,7 @@ def test_remote_kwargs_include_packed_true(upw, monkeypatch):
     engine = RecordingEngine()
     tensors = _real_tensors(n=1)
     seen_send = []
-
-    class DummyNCCLWeightTransferEngine:
-        @staticmethod
-        def trainer_send_weights(*, iterator, group, packed):
-            seen_send.append({"items": list(iterator), "group": group, "packed": packed})
-
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "vllm.distributed.weight_transfer.nccl_engine",
-        type("M", (), {"NCCLWeightTransferEngine": DummyNCCLWeightTransferEngine}),
-    )
-    monkeypatch.setattr(upw.torch.cuda, "synchronize", lambda: None)
+    _patch_trainer_send(monkeypatch, upw, seen_send)
 
     upw.update_weights_from_distributed("myg", group, 42, [engine], tensors, packed=True)
 
@@ -230,18 +204,7 @@ def test_remote_kwargs_include_packed_false(upw, monkeypatch):
     engine = RecordingEngine()
     tensors = _real_tensors(n=2)
     seen_send = []
-
-    class DummyNCCLWeightTransferEngine:
-        @staticmethod
-        def trainer_send_weights(*, iterator, group, packed):
-            seen_send.append({"items": list(iterator), "group": group, "packed": packed})
-
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "vllm.distributed.weight_transfer.nccl_engine",
-        type("M", (), {"NCCLWeightTransferEngine": DummyNCCLWeightTransferEngine}),
-    )
-    monkeypatch.setattr(upw.torch.cuda, "synchronize", lambda: None)
+    _patch_trainer_send(monkeypatch, upw, seen_send)
 
     upw.update_weights_from_distributed("g", group, 99, [engine], tensors, packed=False)
 
@@ -258,18 +221,7 @@ def test_remote_kwargs_no_use_vllm(upw, monkeypatch):
     group = DummyGroup()
     engine = RecordingEngine()
     seen_send = []
-
-    class DummyNCCLWeightTransferEngine:
-        @staticmethod
-        def trainer_send_weights(*, iterator, group, packed):
-            seen_send.append({"items": list(iterator), "group": group, "packed": packed})
-
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "vllm.distributed.weight_transfer.nccl_engine",
-        type("M", (), {"NCCLWeightTransferEngine": DummyNCCLWeightTransferEngine}),
-    )
-    monkeypatch.setattr(upw.torch.cuda, "synchronize", lambda: None)
+    _patch_trainer_send(monkeypatch, upw, seen_send)
 
     upw.update_weights_from_distributed("g", group, 1, [engine], _real_tensors(), packed=False)
 
@@ -283,18 +235,7 @@ def test_multiple_engines_each_get_call(upw, monkeypatch):
     group = DummyGroup()
     engines = [RecordingEngine() for _ in range(3)]
     seen_send = []
-
-    class DummyNCCLWeightTransferEngine:
-        @staticmethod
-        def trainer_send_weights(*, iterator, group, packed):
-            seen_send.append({"items": list(iterator), "group": group, "packed": packed})
-
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "vllm.distributed.weight_transfer.nccl_engine",
-        type("M", (), {"NCCLWeightTransferEngine": DummyNCCLWeightTransferEngine}),
-    )
-    monkeypatch.setattr(upw.torch.cuda, "synchronize", lambda: None)
+    _patch_trainer_send(monkeypatch, upw, seen_send)
 
     upw.update_weights_from_distributed("g", group, 1, engines, _real_tensors(), packed=True)
     assert len(seen_send) == 1
@@ -308,18 +249,7 @@ def test_empty_tensor_list_still_dispatches(upw, monkeypatch):
     group = DummyGroup()
     engine = RecordingEngine()
     seen_send = []
-
-    class DummyNCCLWeightTransferEngine:
-        @staticmethod
-        def trainer_send_weights(*, iterator, group, packed):
-            seen_send.append({"items": list(iterator), "group": group, "packed": packed})
-
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "vllm.distributed.weight_transfer.nccl_engine",
-        type("M", (), {"NCCLWeightTransferEngine": DummyNCCLWeightTransferEngine}),
-    )
-    monkeypatch.setattr(upw.torch.cuda, "synchronize", lambda: None)
+    _patch_trainer_send(monkeypatch, upw, seen_send)
 
     refs = upw.update_weights_from_distributed("g", group, 1, [engine], [], packed=False)
 
@@ -381,3 +311,45 @@ def test_connect_rollout_engines_always_uses_vllm_trainer_init(upw, monkeypatch)
     assert seen[0]["world_size"] == 4  # 1 + (1 + 2)
     assert len(engines[0].init_weights_update_group.calls) == 1
     assert len(engines[1].init_weights_update_group.calls) == 1
+
+
+@pytest.mark.unit
+def test_weight_update_session_calls_start_and_finish(upw, monkeypatch):
+    import torch.distributed as dist
+
+    engines = [RecordingEngine(), RecordingEngine()]
+    ray_refs = []
+    barrier_calls: list[object] = []
+
+    def fake_barrier(*, group=None, **kwargs):
+        barrier_calls.append(group)
+
+    monkeypatch.setattr(dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(dist, "barrier", fake_barrier)
+    monkeypatch.setattr(upw, "get_gloo_group", lambda: "dummy-gloo-group")
+    monkeypatch.setattr(upw.ray, "get", lambda refs: ray_refs.extend(refs) or refs)
+
+    upw._begin_vllm_weight_update_session(engines)
+    upw._end_vllm_weight_update_session(engines)
+
+    assert len(engines[0].start_weight_update.calls) == 1
+    assert engines[0].start_weight_update.calls[0].kwargs["is_checkpoint_format"] is True
+    assert len(engines[1].start_weight_update.calls) == 1
+    assert len(engines[0].finish_weight_update.calls) == 1
+    assert len(engines[1].finish_weight_update.calls) == 1
+    assert barrier_calls == ["dummy-gloo-group", "dummy-gloo-group"]
+
+
+@pytest.mark.unit
+def test_source_wraps_sync_with_weight_update_session(upw):
+    src = inspect.getsource(upw.UpdateWeightFromDistributed.update_weights)
+    assert "_begin_vllm_weight_update_session" in src
+    assert "_end_vllm_weight_update_session" in src
+    assert "_sync_weights_to_rollout_engines" in src
+
+
+@pytest.mark.unit
+def test_source_uses_nccl_trainer_send_weights_args(upw):
+    src = inspect.getsource(upw.update_weights_from_distributed)
+    assert "NCCLTrainerSendWeightsArgs" in src
+    assert "weight_transfer_compat" not in src
