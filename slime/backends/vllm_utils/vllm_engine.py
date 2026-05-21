@@ -348,6 +348,14 @@ def launch_server_process(
     else:
         cmd += ["--weight-transfer-config", '{"backend":"nccl"}']
 
+    # Colocated (IPC) mode: inject the worker extension so the IPC engine patch
+    # is applied inside every vLLM worker process automatically.
+    if getattr(args, "colocate", False) and "--worker-extension-cls" not in cmd:
+        cmd += [
+            "--worker-extension-cls",
+            "slime.backends.vllm_utils.vllm_worker_extension.vLLMColocateWorkerExtension",
+        ]
+
     # Auto-forward all other args.vllm_* that differ from their vllm-side default.
     _forward_vllm_cli_args(args, cmd)
 
