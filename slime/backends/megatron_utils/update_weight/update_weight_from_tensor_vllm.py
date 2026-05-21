@@ -65,16 +65,16 @@ class UpdateVLLMWeightFromTensor:
 
     Engine lifecycle per ``update_weights`` call::
 
-        colocated:   sleep(level=0)             (rank 0)
-        distributed: pause_generation / flush_cache (rank 0)
-        init_weight_transfer_engine              (rank 0, colocated, first call only)
-        start_weight_update                      (rank 0, colocated)
+        colocated:   release_memory_occupation(level=0) (rank 0)
+        distributed: pause_generation / flush_cache      (rank 0)
+        init_weight_transfer_engine                      (rank 0, colocated, first call only)
+        start_weight_update                              (rank 0, colocated)
         [for each HF chunk]
-          trainer_send_weights                   (all ranks, colocated)
-          update_weights_from_distributed        (src rank, distributed)
-        finish_weight_update                     (rank 0, colocated)
-        colocated:   wake_up(tags=["scheduling"]) (rank 0)
-        distributed: continue_generation          (rank 0)
+          trainer_send_weights                           (all ranks, colocated)
+          update_weights_from_distributed                (src rank, distributed)
+        finish_weight_update                             (rank 0, colocated)
+        colocated:   resume_memory_occupation(tags=["scheduling"]) (rank 0)
+        distributed: continue_generation                           (rank 0)
     """
 
     def __init__(
@@ -194,12 +194,12 @@ class UpdateVLLMWeightFromTensor:
         all_engines = self._colocated_engines + self._distributed_engines
 
         # ── 1. Pause generation and flush KV cache (rank 0 only) ────────────
-        # vLLM colocated engines: sleep(level=0) suspends generation and frees
-        # KV cache in one call, matching the rlhf_ipc.py reference pattern.
+        # vLLM colocated engines: release_memory_occupation(level=0) suspends generation
+        # and frees both KV cache and model weights (required for IPC tensor injection).
         # Distributed (non-vLLM) engines keep the sglang-style pause+flush API.
         if rank == 0:
             if self._colocated_engines:
-                ray.get([engine.sleep.remote(level=0) for engine in self._colocated_engines])
+                ray.get([engine.release_memory_occupation.remote(level=0) for engine in self._colocated_engines])
             if self._distributed_engines:
                 ray.get([engine.pause_generation.remote() for engine in self._distributed_engines])
                 ray.get([engine.flush_cache.remote() for engine in self._distributed_engines])
@@ -269,8 +269,8 @@ class UpdateVLLMWeightFromTensor:
         dist.barrier(group=get_gloo_group())
 
         # ── 6. Post-process quantization (if needed) and resume ───────────────
-        # vLLM colocated engines: wake_up(tags=["scheduling"]) matches the
-        # rlhf_ipc.py reference pattern.
+        # vLLM colocated engines: resume_memory_occupation(tags=["scheduling"]) restores
+        # scheduling only (weights were just injected via IPC).
         # Distributed engines use the sglang-style continue_generation.
         if rank == 0:
             if self.quantization_config and self.quantization_config.get("quant_method") in ["compressed-tensors"]:
@@ -280,7 +280,7 @@ class UpdateVLLMWeightFromTensor:
                     rollout_engines=all_engines,
                 )
             if self._colocated_engines:
-                ray.get([engine.wake_up.remote(tags=["scheduling"]) for engine in self._colocated_engines])
+                ray.get([engine.resume_memory_occupation.remote(tags=["scheduling"]) for engine in self._colocated_engines])
             if self._distributed_engines:
                 ray.get([engine.continue_generation.remote() for engine in self._distributed_engines])
         dist.barrier(group=get_gloo_group())

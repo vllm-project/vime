@@ -671,11 +671,12 @@ class VLLMEngine(RayActor):
             logger.info("get_weight_version: /v1/models failed (%s)", e)
         return None
 
-    def release_memory_occupation(self):
-        """``POST /sleep`` when sleep mode is enabled (SGLang: ``POST /release_memory_occupation``).
+    def release_memory_occupation(self, level: int = 1):
+        """``POST /sleep?level={level}`` when sleep mode is enabled (SGLang: ``POST /release_memory_occupation``).
 
-        Always uses sleep level=1 (release KV cache only). Returns a no-op dict when
-        ``--vllm-enable-sleep-mode`` was not set.
+        level=1 (default) releases KV cache only.
+        level=0 releases both KV cache and model weights (required before IPC tensor injection).
+        Returns a no-op dict when ``--vllm-enable-sleep-mode`` was not set.
         """
         self.flush_cache()
         if not getattr(self.args, "vllm_enable_sleep_mode", False):
@@ -684,7 +685,7 @@ class VLLMEngine(RayActor):
         # (``vllm.entrypoints.serve.sleep.api_router.sleep``).
         response = requests.post(
             f"{self._http_base()}/sleep",
-            params={"level": 1},
+            params={"level": level},
             timeout=30,
         )
         response.raise_for_status()
@@ -706,6 +707,53 @@ class VLLMEngine(RayActor):
             params=wake_params,
             timeout=30,
         )
+        response.raise_for_status()
+        try:
+            return response.json()
+        except Exception:
+            return {"ok": True, "raw": response.text}
+
+    def init_weight_transfer_engine(self, payload: dict) -> dict:
+        """``POST /init_weight_transfer_engine`` with a caller-supplied payload (IPC path).
+
+        For IPC mode the payload is ``{"init_info": {}}``; for NCCL use
+        ``init_weights_update_group`` which constructs the payload from typed args.
+        """
+        init_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                response = self._post_json("init_weight_transfer_engine", payload, timeout=init_timeout_s)
+                response.raise_for_status()
+                try:
+                    return response.json()
+                except Exception:
+                    return {"ok": True, "raw": response.text}
+            except Exception as e:
+                last_error = e
+                if attempt < 3:
+                    logger.warning("init_weight_transfer_engine attempt %s/3 failed: %s", attempt, e)
+                    time.sleep(2 * attempt)
+        raise RuntimeError(f"vLLM init_weight_transfer_engine failed: {last_error}") from last_error
+
+    def start_weight_update(self, is_checkpoint_format: bool = False) -> dict:
+        """``POST /start_weight_update`` — signals vLLM to enter IPC weight-update mode."""
+        update_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
+        response = self._post_json(
+            "start_weight_update",
+            {"is_checkpoint_format": is_checkpoint_format},
+            timeout=update_timeout_s,
+        )
+        response.raise_for_status()
+        try:
+            return response.json()
+        except Exception:
+            return {"ok": True, "raw": response.text}
+
+    def finish_weight_update(self) -> dict:
+        """``POST /finish_weight_update`` — signals vLLM to exit IPC weight-update mode."""
+        update_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
+        response = self._post_json("finish_weight_update", {}, timeout=update_timeout_s)
         response.raise_for_status()
         try:
             return response.json()
