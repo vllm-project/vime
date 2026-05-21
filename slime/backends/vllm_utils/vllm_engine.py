@@ -325,16 +325,22 @@ def launch_server_process(
     cmd += ["--gpu-memory-utilization", str(gpu_mem)]
 
     # 2) weight_transfer_config: vllm default None disables /init_weight_transfer_engine,
-    #    so vime's weight sync would fail. Always default to NCCL — vime's sender
-    #    currently posts sglang-style ``serialized_named_tensors`` payloads, which the
-    #    vllm IPC weight-transfer engine rejects. Switching the default to IPC requires
-    #    porting ``UpdateVLLMWeightFromTensor`` (see PR #12 review). Users who pass
-    #    ``--vllm-weight-transfer-config`` explicitly are honored.
+    #    so vime's weight sync would fail.
+    #    - Colocated mode: use IPC backend. UpdateVLLMWeightFromTensor calls
+    #      IPCWeightTransferEngine.trainer_send_weights and passes an empty init_info
+    #      dict, which is the correct signature for the IPC backend.
+    #    - Non-colocated mode: use NCCL backend. Weight sync goes through
+    #      update_weights_from_distributed; the vLLM engine still needs
+    #      init_weight_transfer_engine to succeed (with NCCL the caller must supply
+    #      master_address, master_port, rank_offset, and world_size separately).
+    #    Users who pass ``--vllm-weight-transfer-config`` explicitly are honored.
     if _user_overrode("vllm_weight_transfer_config"):
         cmd += [
             "--weight-transfer-config",
             _serialize_weight_transfer_config(args.vllm_weight_transfer_config),
         ]
+    elif getattr(args, "colocate", False):
+        cmd += ["--weight-transfer-config", '{"backend":"ipc"}']
     else:
         cmd += ["--weight-transfer-config", '{"backend":"nccl"}']
 
