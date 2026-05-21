@@ -240,15 +240,15 @@ class UpdateVLLMWeightFromTensor:
             # _all_gather_and_merge_handles can collect every GPU's IPC handle.
             # Rank 0 then delivers the merged dict to all colocated engine actors.
             if self._colocated_engines:
-                trainer_args = IPCTrainerSendWeightsArgs(
-                    send_mode="ray",
-                    llm_handle=self._colocated_engines,
-                    packed=False,
-                )
-                IPCWeightTransferEngine.trainer_send_weights(
-                    iterator=iter(hf_named_tensors),
-                    trainer_args=trainer_args,
-                )
+                for engine in self._colocated_engines:
+                    trainer_args = IPCTrainerSendWeightsArgs(
+                        mode="ray",
+                        llm_handle=engine,
+                    )
+                    IPCWeightTransferEngine.trainer_send_weights(
+                        iterator=iter(hf_named_tensors),
+                        trainer_args=trainer_args,
+                    )
 
             # Distributed overflow path (only the designated src rank).
             if self._distributed_engines and self._is_distributed_src_rank:
