@@ -261,6 +261,10 @@ def launch_server_process(
     env.setdefault("NCCL_CUMEM_ENABLE", "0")
     env["CUDA_VISIBLE_DEVICES"] = visible_devices
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")
+    # Colocated (IPC) mode: the server must be able to deserialize pickled IPC handles
+    # sent by VLLMEngine.update_weights via the /update_weights HTTP endpoint.
+    if getattr(args, "colocate", False):
+        env.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     host_for_subprocess = bind_host.strip("[]")
     model = model_path
@@ -561,6 +565,27 @@ class VLLMEngine(RayActor):
         """Backward-compatible alias for non-NCCL ``update_info`` shapes (e.g. tensor/IPC path)."""
         del is_checkpoint_format
         return self._post_vllm_update_weights_http(update_info)
+
+    def update_weights(self, update_info: dict) -> dict:
+        """Public Ray-callable entry point used by IPCWeightTransferEngine (Ray mode).
+
+        ``IPCWeightTransferEngine.trainer_send_weights`` calls
+        ``llm_handle.update_weights.remote(dict(update_info=update_info))``,
+        with ``update_info`` containing raw ``ipc_handles`` (Python callables from
+        ``reduce_tensor``).  Since vime communicates with vLLM over HTTP those
+        callables cannot be JSON-serialised; convert them to ``ipc_handles_pickled``
+        (base64-encoded pickle) which the vLLM server's ``IPCWeightTransferUpdateInfo``
+        accepts when ``VLLM_ALLOW_INSECURE_SERIALIZATION=1`` is set.
+        """
+        import base64
+        import pickle
+
+        inner = dict(update_info["update_info"])  # shallow copy — do not mutate caller
+        if inner.get("ipc_handles") is not None:
+            inner["ipc_handles_pickled"] = base64.b64encode(
+                pickle.dumps(inner.pop("ipc_handles"))
+            ).decode("utf-8")
+        return self._post_vllm_update_weights_http(inner)
 
     def health_generate(self, timeout: float = 5.0) -> bool:
         """Return True if ``GET /health`` succeeds (SGLang uses ``GET /health_generate`` for the same role)."""
