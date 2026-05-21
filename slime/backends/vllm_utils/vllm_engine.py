@@ -578,12 +578,16 @@ class VLLMEngine(RayActor):
         accepts when ``VLLM_ALLOW_INSECURE_SERIALIZATION=1`` is set.
         """
         import base64
-        import pickle
+
+        import cloudpickle
 
         inner = dict(update_info["update_info"])  # shallow copy — do not mutate caller
         if inner.get("ipc_handles") is not None:
+            # ipc_handles contain local closures from monkey_patch_torch_reductions
+            # (_rebuild_cuda_tensor_modified) that standard pickle cannot serialize.
+            # cloudpickle handles local functions and closures correctly.
             inner["ipc_handles_pickled"] = base64.b64encode(
-                pickle.dumps(inner.pop("ipc_handles"))
+                cloudpickle.dumps(inner.pop("ipc_handles"))
             ).decode("utf-8")
         return self._post_vllm_update_weights_http(inner)
 
