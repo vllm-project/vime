@@ -23,7 +23,6 @@ from .update_weight_from_distributed import (
 
 logger = logging.getLogger(__name__)
 
-
 class UpdateWeightFromTensor:
     """
     Update colocated vLLM engines from tensors via CUDA IPC (Ray send mode).
@@ -78,6 +77,8 @@ class UpdateWeightFromTensor:
 
         # Populated by connect_rollout_engines
         self._colocated_engines: list[ActorHandle] = []
+        self._colocated_engine_gpu_offsets: list[int] = []
+        self._colocated_engine_gpu_counts: list[int] = []
         self._distributed_engines: list[ActorHandle] = []
         self._model_update_groups = None
         self._is_distributed_src_rank: bool = False
@@ -104,6 +105,9 @@ class UpdateWeightFromTensor:
         trainer actor GPU range.  The remainder are treated as distributed and
         receive weights via NCCL broadcast.
 
+        The NCCL bridge for distributed engines is (re-)created whenever the
+        engine set changes, matching the behaviour of
+        ``UpdateWeightFromTensor.connect_rollout_engines``.
         """
         self.rollout_engine_lock = rollout_engine_lock
 
@@ -124,6 +128,8 @@ class UpdateWeightFromTensor:
             colocate_engine_nums += 1
 
         self._colocated_engines = list(rollout_engines[:colocate_engine_nums])
+        self._colocated_engine_gpu_offsets = list(engine_gpu_offsets[:colocate_engine_nums])
+        self._colocated_engine_gpu_counts = list(engine_gpu_counts[:colocate_engine_nums])
         self._distributed_engines = list(rollout_engines[colocate_engine_nums:])
 
         # Set up NCCL bridge for any overflow (non-colocated) engines.
@@ -209,19 +215,29 @@ class UpdateWeightFromTensor:
         # ── 4. Iterate HF weight chunks and send ─────────────────────────────
         megatron_local_weights = self.weights_getter()
         for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(megatron_local_weights):
-            # Colocated path: all ranks must call trainer_send_weights so that
-            # _all_gather_and_merge_handles can collect every GPU's IPC handle.
-            # Rank 0 then delivers the merged dict to all colocated engine actors.
+            # Colocated path: each trainer rank sends weights only to the engine
+            # that is colocated on the SAME physical GPU.  vLLM's
+            # trainer_send_weights (Ray mode) creates an IPC handle for the
+            # *current* GPU only — sending it to a different-GPU engine causes
+            # a UUID mismatch.  The matching engine is found by comparing
+            # torch.cuda.current_device() against the stored GPU offsets.
             if self._colocated_engines:
-                for engine in self._colocated_engines:
-                    trainer_args = IPCTrainerSendWeightsArgs(
-                        mode="ray",
-                        llm_handle=engine,
-                    )
-                    IPCWeightTransferEngine.trainer_send_weights(
-                        iterator=iter(hf_named_tensors),
-                        trainer_args=trainer_args,
-                    )
+                current_device = torch.cuda.current_device()
+                for engine, offset, count in zip(
+                    self._colocated_engines,
+                    self._colocated_engine_gpu_offsets,
+                    self._colocated_engine_gpu_counts,
+                ):
+                    if offset <= current_device < offset + count:
+                        trainer_args = IPCTrainerSendWeightsArgs(
+                            mode="ray",
+                            llm_handle=engine,
+                        )
+                        IPCWeightTransferEngine.trainer_send_weights(
+                            iterator=iter(hf_named_tensors),
+                            trainer_args=trainer_args,
+                        )
+                        break
 
             # Distributed overflow path (only the designated src rank).
             if self._distributed_engines and self._is_distributed_src_rank:
@@ -253,9 +269,7 @@ class UpdateWeightFromTensor:
                     rollout_engines=all_engines,
                 )
             if self._colocated_engines:
-                ray.get(
-                    [engine.resume_memory_occupation.remote(tags=["scheduling"]) for engine in self._colocated_engines]
-                )
+                ray.get([engine.resume_memory_occupation.remote(tags=["scheduling"]) for engine in self._colocated_engines])
             if self._distributed_engines:
                 ray.get([engine.continue_generation.remote() for engine in self._distributed_engines])
         dist.barrier(group=get_gloo_group())
