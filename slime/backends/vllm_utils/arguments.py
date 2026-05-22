@@ -217,7 +217,7 @@ def add_vllm_arguments(parser):
         "--no-vllm-weight-sync-packed",
         dest="vllm_weight_sync_packed",
         action="store_false",
-        help="Disable packed sync; use per-bucket NCCL via NcclBridge instead.",
+        help="Disable packed sync; send weights per bucket via in-process NCCL (non-packed mode).",
     )
     parser.set_defaults(vllm_weight_sync_packed=True)
 

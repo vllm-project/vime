@@ -15,6 +15,7 @@ from megatron.core import mpu
 from ray import ObjectRef
 from ray.actor import ActorHandle
 from tqdm import tqdm
+from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerSendWeightsArgs, NCCLWeightTransferEngine
 
 from slime.utils.distributed_utils import get_gloo_group
 
@@ -205,6 +206,9 @@ class UpdateWeightFromDistributed:
 
             if named_tensors:
                 self._update_expert_bucket_weights_from_distributed(named_tensors, pbar=pbar)
+
+        if self._is_pp_src_rank:
+            torch.cuda.synchronize()
 
     def _use_vllm_packed(self) -> bool:
         """Use vLLM packed weight transfer (one-shot metadata + trainer_send_weights)."""
@@ -398,8 +402,6 @@ def connect_rollout_engines_from_distributed(
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
 
-    from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine
-
     device = torch.cuda.current_device()
     logger.info(
         "vLLM in-process weight transfer: addr=%s port=%d world_size=%d device=%d CVD=%s",
@@ -460,8 +462,6 @@ def update_weights_from_distributed(
 
     refs = [engine.update_weights_from_distributed.remote(**kwargs) for engine in rollout_engines]
 
-    from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerSendWeightsArgs, NCCLWeightTransferEngine
-
     named_gpu_iter = (
         (name, (param.data if hasattr(param, "data") else param).contiguous())
         for name, param in converted_named_tensors
@@ -470,7 +470,6 @@ def update_weights_from_distributed(
         named_gpu_iter,
         NCCLTrainerSendWeightsArgs(group=group, packed=packed),
     )
-    torch.cuda.synchronize()
 
     return refs
 

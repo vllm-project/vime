@@ -53,7 +53,9 @@ def _real_tensors(n: int = 2):
     return [(f"layer.{i}.weight", torch.zeros(2, 2)) for i in range(n)]
 
 
-def _patch_trainer_send(monkeypatch, upw, seen: list[dict]) -> None:
+def _make_dummy_nccl_engine(*, send_seen: list[dict] | None = None, init_seen: list[dict] | None = None):
+    """Build dummy NCCL types; patch on *upw* module (top-level import, not sys.modules)."""
+
     class DummyNCCLTrainerSendWeightsArgs:
         def __init__(self, *, group, packed):
             self.group = group
@@ -62,26 +64,34 @@ def _patch_trainer_send(monkeypatch, upw, seen: list[dict]) -> None:
     class DummyNCCLWeightTransferEngine:
         @staticmethod
         def trainer_send_weights(iterator, trainer_args):
-            seen.append(
-                {
-                    "items": list(iterator),
-                    "group": trainer_args.group,
-                    "packed": trainer_args.packed,
-                }
-            )
+            if send_seen is not None:
+                send_seen.append(
+                    {
+                        "items": list(iterator),
+                        "group": trainer_args.group,
+                        "packed": trainer_args.packed,
+                    }
+                )
 
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "vllm.distributed.weight_transfer.nccl_engine",
-        type(
-            "M",
-            (),
-            {
-                "NCCLWeightTransferEngine": DummyNCCLWeightTransferEngine,
-                "NCCLTrainerSendWeightsArgs": DummyNCCLTrainerSendWeightsArgs,
-            },
-        ),
-    )
+        @staticmethod
+        def trainer_init(cfg):
+            if init_seen is not None:
+                init_seen.append(cfg)
+            return DummyGroup("group-from-trainer-init")
+
+    return DummyNCCLWeightTransferEngine, DummyNCCLTrainerSendWeightsArgs
+
+
+def _patch_nccl_on_module(
+    monkeypatch, upw, *, send_seen: list[dict] | None = None, init_seen: list[dict] | None = None
+):
+    dummy_engine, dummy_args = _make_dummy_nccl_engine(send_seen=send_seen, init_seen=init_seen)
+    monkeypatch.setattr(upw, "NCCLWeightTransferEngine", dummy_engine)
+    monkeypatch.setattr(upw, "NCCLTrainerSendWeightsArgs", dummy_args)
+
+
+def _patch_trainer_send(monkeypatch, upw, seen: list[dict]) -> None:
+    _patch_nccl_on_module(monkeypatch, upw, send_seen=seen)
     monkeypatch.setattr(upw.torch.cuda, "synchronize", lambda: None)
 
 
@@ -285,19 +295,9 @@ def test_source_no_materialized_named_gpu_list(upw):
 def test_connect_rollout_engines_always_uses_vllm_trainer_init(upw, monkeypatch):
     args = type("Args", (), {"rollout_num_gpus_per_engine": 1})()
     engines = [RecordingEngine(), RecordingEngine()]
-    seen = []
+    seen: list[dict] = []
 
-    class DummyNCCLWeightTransferEngine:
-        @staticmethod
-        def trainer_init(cfg):
-            seen.append(cfg)
-            return DummyGroup("group-from-trainer-init")
-
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "vllm.distributed.weight_transfer.nccl_engine",
-        type("M", (), {"NCCLWeightTransferEngine": DummyNCCLWeightTransferEngine}),
-    )
+    _patch_nccl_on_module(monkeypatch, upw, init_seen=seen)
     monkeypatch.setattr(upw.torch.cuda, "synchronize", lambda: None)
     monkeypatch.setattr(upw.torch.cuda, "empty_cache", lambda: None)
     monkeypatch.setattr(upw.ray, "get", lambda refs: refs)
@@ -353,3 +353,11 @@ def test_source_uses_nccl_trainer_send_weights_args(upw):
     src = inspect.getsource(upw.update_weights_from_distributed)
     assert "NCCLTrainerSendWeightsArgs" in src
     assert "weight_transfer_compat" not in src
+
+
+@pytest.mark.unit
+def test_cuda_sync_once_after_all_buckets_not_per_bucket(upw):
+    send_src = inspect.getsource(upw.update_weights_from_distributed)
+    sync_src = inspect.getsource(upw.UpdateWeightFromDistributed._sync_weights_to_rollout_engines)
+    assert "torch.cuda.synchronize" not in send_src
+    assert "torch.cuda.synchronize" in sync_src

@@ -187,14 +187,22 @@ def test_response_json_or_fallback_parses_dict():
 def test_response_json_or_fallback_non_dict_wrapped():
     response = _MockResponse()
     response.json = lambda: ["a", "b"]  # type: ignore[method-assign]
-    assert mod._response_json_or_fallback(response) == {"ok": True, "data": ["a", "b"]}
+    assert mod._response_json_or_fallback(response) == {
+        "ok": False,
+        "error": "Response is not a dictionary",
+        "data": ["a", "b"],
+    }
 
 
 @pytest.mark.unit
 def test_response_json_or_fallback_invalid_json():
     response = _MockResponse(text="not-json")
     response.json = lambda: (_ for _ in ()).throw(ValueError("no json"))  # type: ignore[method-assign]
-    assert mod._response_json_or_fallback(response) == {"ok": True, "raw": "not-json"}
+    assert mod._response_json_or_fallback(response) == {
+        "ok": False,
+        "error": "Invalid JSON response",
+        "raw": "not-json",
+    }
 
 
 @pytest.mark.unit

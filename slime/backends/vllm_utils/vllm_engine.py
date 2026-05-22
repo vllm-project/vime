@@ -62,14 +62,14 @@ def _to_local_gpu_id(physical_gpu_id: int) -> int:
 
 
 def _response_json_or_fallback(response: requests.Response) -> dict:
-    """Parse JSON body; on decode failure return a minimal dict with raw text."""
+    """Parse JSON body; on decode failure return an error-shaped dict (HTTP status already checked)."""
     try:
         body = response.json()
         if isinstance(body, dict):
             return body
-        return {"ok": True, "data": body}
+        return {"ok": False, "error": "Response is not a dictionary", "data": body}
     except ValueError:
-        return {"ok": True, "raw": response.text}
+        return {"ok": False, "error": "Invalid JSON response", "raw": response.text}
 
 
 def _format_v6_uri(addr: str | None) -> str | None:
@@ -430,6 +430,7 @@ class VLLMEngine(RayActor):
         self.node_rank = 0
         self.server_host: str | None = None
         self.server_port: int | None = None
+        self._weight_transfer_http_timeout_s: float | None = None
 
     def _http_base(self) -> str:
         if self.server_host is None or self.server_port is None:
@@ -554,12 +555,14 @@ class VLLMEngine(RayActor):
         return requests.post(url, json=payload, timeout=timeout)
 
     def _weight_transfer_http_timeout(self) -> float:
-        return float(
-            os.environ.get(
-                "SLIME_VLLM_WEIGHT_TRANSFER_UPDATE_TIMEOUT_SEC",
-                os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"),
+        if self._weight_transfer_http_timeout_s is None:
+            self._weight_transfer_http_timeout_s = float(
+                os.environ.get(
+                    "SLIME_VLLM_WEIGHT_TRANSFER_UPDATE_TIMEOUT_SEC",
+                    os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"),
+                )
             )
-        )
+        return self._weight_transfer_http_timeout_s
 
     def start_weight_update(self, is_checkpoint_format: bool = True) -> dict:
         """``POST /start_weight_update`` (vLLM 0.21+ weight transfer)."""
