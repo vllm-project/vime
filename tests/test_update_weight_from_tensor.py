@@ -1,5 +1,5 @@
 """
-Unit tests for UpdateVLLMWeightFromTensor.
+Unit tests for UpdateWeightFromTensor.
 
 Design notes
 ------------
@@ -24,7 +24,7 @@ import sys
 import types
 from argparse import Namespace
 from dataclasses import dataclass, field
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import torch
@@ -33,7 +33,6 @@ import torch
 # ─────────────────────────────────────────────────────────────────────────────
 # Stub modules injected before importing the module under test
 # ─────────────────────────────────────────────────────────────────────────────
-
 
 def _install_stubs():
     """
@@ -72,7 +71,6 @@ def _install_stubs():
 
     # Patch torch.distributed at the attribute level (don't replace the module)
     import torch.distributed as _dist
-
     for attr in ("get_rank", "barrier"):
         setattr(_dist, attr, getattr(dist_stub, attr))
 
@@ -93,18 +91,31 @@ def _install_stubs():
     hf_base_cls = MagicMock()
     hf_base_cls.create.return_value = hf_iter_stub
 
-    hf_iter_base_mod = types.ModuleType("slime.backends.megatron_utils.update_weight.hf_weight_iterator_base")
+    hf_iter_base_mod = types.ModuleType(
+        "slime.backends.megatron_utils.update_weight.hf_weight_iterator_base"
+    )
     hf_iter_base_mod.HfWeightIteratorBase = hf_base_cls
 
-    upw_dist_mod = types.ModuleType("slime.backends.megatron_utils.update_weight.update_weight_from_distributed")
+    upw_dist_mod = types.ModuleType(
+        "slime.backends.megatron_utils.update_weight.update_weight_from_distributed"
+    )
     upw_dist_mod.connect_rollout_engines_from_distributed = MagicMock(return_value="groups")
     upw_dist_mod.disconnect_rollout_engines_from_distributed = MagicMock()
     upw_dist_mod.post_process_weights = MagicMock()
     upw_dist_mod.update_weights_from_distributed = MagicMock(return_value=[])
 
+    import pathlib as _pathlib
+    _tests_dir = _pathlib.Path(__file__).resolve().parent
+    _slime_dir = _tests_dir.parent / "slime"
+
     backends = types.ModuleType("slime.backends")
+    backends.__path__ = [str(_slime_dir / "backends")]
+
     backends_mega = types.ModuleType("slime.backends.megatron_utils")
+    backends_mega.__path__ = [str(_slime_dir / "backends" / "megatron_utils")]
+
     backends_mega_upw = types.ModuleType("slime.backends.megatron_utils.update_weight")
+    backends_mega_upw.__path__ = [str(_slime_dir / "backends" / "megatron_utils" / "update_weight")]
 
     for key, mod in [
         ("slime.backends", backends),
@@ -143,7 +154,7 @@ _HF_ITER_STUB, _HF_BASE_CLS, _UPW_DIST_MOD, _IPC_MOD = _install_stubs()
 # Fixtures
 # ─────────────────────────────────────────────────────────────────────────────
 
-MODULE_PATH = "slime.backends.megatron_utils.update_weight.update_weight_from_tensor_vllm"
+MODULE_PATH = "slime.backends.megatron_utils.update_weight.update_weight_from_tensor"
 
 
 @pytest.fixture(scope="module")
@@ -157,7 +168,6 @@ def upw_vllm():
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers / recording stubs
 # ─────────────────────────────────────────────────────────────────────────────
-
 
 @dataclass
 class _RemoteCall:
@@ -181,12 +191,11 @@ class RecordingRemoteMethod:
 class RecordingVLLMEngine:
     """Mimics a colocated vLLM rollout engine actor."""
 
-    pause_generation: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod())
-    flush_cache: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod())
+    release_memory_occupation: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod())
     init_weight_transfer_engine: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod())
     start_weight_update: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod())
     finish_weight_update: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod())
-    continue_generation: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod())
+    resume_memory_occupation: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod())
 
 
 @dataclass
@@ -215,13 +224,13 @@ def _default_args(
 
 def _make_instance(upw_vllm, args=None):
     """
-    Create an ``UpdateVLLMWeightFromTensor`` without touching any GPU/megatron
+    Create an ``UpdateWeightFromTensor`` without touching any GPU/megatron
     code by bypassing ``__init__`` and setting attributes manually.
     """
     if args is None:
         args = _default_args()
 
-    obj = object.__new__(upw_vllm.UpdateVLLMWeightFromTensor)
+    obj = object.__new__(upw_vllm.UpdateWeightFromTensor)
     obj.args = args
     obj.model = []
     obj.weights_getter = lambda: {}
@@ -230,6 +239,8 @@ def _make_instance(upw_vllm, args=None):
     obj.weight_version = 0
     obj._hf_weight_iterator = _HF_ITER_STUB
     obj._colocated_engines = []
+    obj._colocated_engine_gpu_offsets = []
+    obj._colocated_engine_gpu_counts = []
     obj._distributed_engines = []
     obj._model_update_groups = None
     obj._is_distributed_src_rank = False
@@ -242,15 +253,14 @@ def _make_instance(upw_vllm, args=None):
 # Signature / structural tests
 # ─────────────────────────────────────────────────────────────────────────────
 
-
 @pytest.mark.unit
 def test_class_exists(upw_vllm):
-    assert hasattr(upw_vllm, "UpdateVLLMWeightFromTensor")
+    assert hasattr(upw_vllm, "UpdateWeightFromTensor")
 
 
 @pytest.mark.unit
 def test_init_signature(upw_vllm):
-    sig = inspect.signature(upw_vllm.UpdateVLLMWeightFromTensor.__init__)
+    sig = inspect.signature(upw_vllm.UpdateWeightFromTensor.__init__)
     params = sig.parameters
     for expected in ("args", "model", "weights_getter", "model_name", "quantization_config"):
         assert expected in params, f"Expected __init__ param '{expected}' not found"
@@ -258,7 +268,7 @@ def test_init_signature(upw_vllm):
 
 @pytest.mark.unit
 def test_update_weights_signature(upw_vllm):
-    sig = inspect.signature(upw_vllm.UpdateVLLMWeightFromTensor.update_weights)
+    sig = inspect.signature(upw_vllm.UpdateWeightFromTensor.update_weights)
     # Only 'self' — no extra required params
     params = [p for p in sig.parameters if p != "self"]
     assert params == []
@@ -266,7 +276,7 @@ def test_update_weights_signature(upw_vllm):
 
 @pytest.mark.unit
 def test_connect_rollout_engines_signature(upw_vllm):
-    sig = inspect.signature(upw_vllm.UpdateVLLMWeightFromTensor.connect_rollout_engines)
+    sig = inspect.signature(upw_vllm.UpdateWeightFromTensor.connect_rollout_engines)
     for expected in ("rollout_engines", "rollout_engine_lock", "engine_gpu_counts", "engine_gpu_offsets"):
         assert expected in sig.parameters
 
@@ -274,7 +284,6 @@ def test_connect_rollout_engines_signature(upw_vllm):
 # ─────────────────────────────────────────────────────────────────────────────
 # connect_rollout_engines: colocated / distributed split
 # ─────────────────────────────────────────────────────────────────────────────
-
 
 def _connect(obj, engines, *, counts, offsets):
     """Helper: call connect_rollout_engines with explicit counts/offsets."""
@@ -357,9 +366,9 @@ def test_nccl_groups_created_for_distributed(upw_vllm):
     dist_engine = RecordingVLLMEngine()
     _UPW_DIST_MOD.connect_rollout_engines_from_distributed.reset_mock()
 
-    with patch.object(sys.modules["megatron.core"].mpu, "get_data_parallel_rank", return_value=0), patch.object(
-        sys.modules["megatron.core"].mpu, "get_tensor_model_parallel_rank", return_value=0
-    ), patch.object(sys.modules["megatron.core"].mpu, "get_pipeline_model_parallel_rank", return_value=0):
+    with patch.object(sys.modules["megatron.core"].mpu, "get_data_parallel_rank", return_value=0), \
+         patch.object(sys.modules["megatron.core"].mpu, "get_tensor_model_parallel_rank", return_value=0), \
+         patch.object(sys.modules["megatron.core"].mpu, "get_pipeline_model_parallel_rank", return_value=0):
         _connect(obj, [dist_engine], counts=[2], offsets=[4])
 
     _UPW_DIST_MOD.connect_rollout_engines_from_distributed.assert_called_once()
@@ -380,7 +389,6 @@ def test_no_nccl_for_colocated_only(upw_vllm):
 # update_weights: lifecycle tests
 # ─────────────────────────────────────────────────────────────────────────────
 
-
 def _run_update_weights(obj, hf_chunks=None):
     """
     Drive ``update_weights`` with stubs for every external call.
@@ -397,19 +405,28 @@ def _run_update_weights(obj, hf_chunks=None):
     obj._hf_weight_iterator = MagicMock()
     obj._hf_weight_iterator.get_hf_weight_chunks.return_value = iter(hf_chunks)
 
+    # Auto-populate GPU offsets/counts for engines set directly on the object
+    # (bypassing connect_rollout_engines).  Use rollout_num_gpus_per_engine from
+    # args so each engine maps to a contiguous, non-overlapping GPU range.
+    if obj._colocated_engines and not obj._colocated_engine_gpu_offsets:
+        gpus = obj.args.rollout_num_gpus_per_engine
+        n = len(obj._colocated_engines)
+        obj._colocated_engine_gpu_offsets = [i * gpus for i in range(n)]
+        obj._colocated_engine_gpu_counts = [gpus] * n
+
     ipc_mod_patch = {
         "IPCWeightTransferEngine": ipc_engine_cls,
         "IPCTrainerSendWeightsArgs": ipc_trainer_args_cls,
     }
 
-    with patch.dict(
-        "sys.modules",
-        {
-            "vllm.distributed.weight_transfer.ipc_engine": types.SimpleNamespace(**ipc_mod_patch),
-        },
-    ):
-        # Stub dist.get_rank to return 0 (rank-0 path exercises rank-0 branches)
-        with patch("torch.distributed.get_rank", return_value=0), patch("torch.distributed.barrier"):
+    with patch.dict("sys.modules", {
+        "vllm.distributed.weight_transfer.ipc_engine": types.SimpleNamespace(**ipc_mod_patch),
+    }):
+        # Stub dist.get_rank to return 0 (rank-0 path exercises rank-0 branches).
+        # current_device=0 so the first colocated engine (offset 0) always matches.
+        with patch("torch.distributed.get_rank", return_value=0), \
+             patch("torch.distributed.barrier"), \
+             patch("torch.cuda.current_device", return_value=0):
             obj.update_weights()
 
     return ipc_engine_cls
@@ -427,8 +444,7 @@ def test_update_weights_calls_pause_and_flush(upw_vllm):
 
     _run_update_weights(obj)
 
-    assert len(engine.pause_generation.calls) == 1
-    assert len(engine.flush_cache.calls) == 1
+    assert len(engine.release_memory_occupation.calls) == 1
 
 
 @pytest.mark.unit
@@ -439,7 +455,7 @@ def test_update_weights_calls_continue_generation(upw_vllm):
 
     _run_update_weights(obj)
 
-    assert len(engine.continue_generation.calls) == 1
+    assert len(engine.resume_memory_occupation.calls) == 1
 
 
 @pytest.mark.unit
@@ -496,14 +512,9 @@ def test_start_before_finish_order(upw_vllm):
     order: list[str] = []
 
     class OrderedEngine:
-        class pause_generation:
+        class release_memory_occupation:
             @staticmethod
-            def remote():
-                return "ref"
-
-        class flush_cache:
-            @staticmethod
-            def remote():
+            def remote(**kw):
                 return "ref"
 
         class init_weight_transfer_engine:
@@ -523,9 +534,9 @@ def test_start_before_finish_order(upw_vllm):
                 order.append("finish")
                 return "ref"
 
-        class continue_generation:
+        class resume_memory_occupation:
             @staticmethod
-            def remote():
+            def remote(**kw):
                 return "ref"
 
     obj._colocated_engines = [OrderedEngine()]
@@ -562,19 +573,21 @@ def test_trainer_send_weights_uses_ray_mode(upw_vllm):
     send_modes: list[str] = []
 
     def fake_args_cls(**kw):
-        send_modes.append(kw.get("send_mode"))
+        send_modes.append(kw.get("mode"))
         return kw
 
-    with patch.dict(
-        "sys.modules",
-        {
-            "vllm.distributed.weight_transfer.ipc_engine": types.SimpleNamespace(
-                IPCWeightTransferEngine=ipc_engine_cls,
-                IPCTrainerSendWeightsArgs=fake_args_cls,
-            ),
-        },
-    ):
-        with patch("torch.distributed.get_rank", return_value=0), patch("torch.distributed.barrier"):
+    obj._colocated_engine_gpu_offsets = [0]
+    obj._colocated_engine_gpu_counts = [2]
+
+    with patch.dict("sys.modules", {
+        "vllm.distributed.weight_transfer.ipc_engine": types.SimpleNamespace(
+            IPCWeightTransferEngine=ipc_engine_cls,
+            IPCTrainerSendWeightsArgs=fake_args_cls,
+        ),
+    }):
+        with patch("torch.distributed.get_rank", return_value=0), \
+             patch("torch.distributed.barrier"), \
+             patch("torch.cuda.current_device", return_value=0):
             obj._hf_weight_iterator = MagicMock()
             obj._hf_weight_iterator.get_hf_weight_chunks.return_value = iter([_real_tensors(1)])
             obj.update_weights()
@@ -584,11 +597,14 @@ def test_trainer_send_weights_uses_ray_mode(upw_vllm):
 
 @pytest.mark.unit
 def test_trainer_send_weights_passes_engine_list(upw_vllm):
-    """The llm_handle passed to IPCTrainerSendWeightsArgs must be the engine list."""
+    """The llm_handle passed to IPCTrainerSendWeightsArgs is the device-local engine handle."""
     obj = _make_instance(upw_vllm)
     engine_a = RecordingVLLMEngine()
     engine_b = RecordingVLLMEngine()
     obj._colocated_engines = [engine_a, engine_b]
+    # device 0 belongs to engine_a (offset=0, count=2); engine_b starts at offset=2.
+    obj._colocated_engine_gpu_offsets = [0, 2]
+    obj._colocated_engine_gpu_counts = [2, 2]
 
     captured_llm_handles: list = []
 
@@ -597,21 +613,21 @@ def test_trainer_send_weights_passes_engine_list(upw_vllm):
         return kw
 
     ipc_engine_cls = MagicMock()
-    with patch.dict(
-        "sys.modules",
-        {
-            "vllm.distributed.weight_transfer.ipc_engine": types.SimpleNamespace(
-                IPCWeightTransferEngine=ipc_engine_cls,
-                IPCTrainerSendWeightsArgs=fake_args_cls,
-            ),
-        },
-    ):
-        with patch("torch.distributed.get_rank", return_value=0), patch("torch.distributed.barrier"):
+    with patch.dict("sys.modules", {
+        "vllm.distributed.weight_transfer.ipc_engine": types.SimpleNamespace(
+            IPCWeightTransferEngine=ipc_engine_cls,
+            IPCTrainerSendWeightsArgs=fake_args_cls,
+        ),
+    }):
+        with patch("torch.distributed.get_rank", return_value=0), \
+             patch("torch.distributed.barrier"), \
+             patch("torch.cuda.current_device", return_value=0):
             obj._hf_weight_iterator = MagicMock()
             obj._hf_weight_iterator.get_hf_weight_chunks.return_value = iter([_real_tensors(1)])
             obj.update_weights()
 
-    assert captured_llm_handles == [[engine_a, engine_b]]
+    # current_device=0 is in engine_a's range [0, 2), so engine_a's handle is used.
+    assert captured_llm_handles == [engine_a]
 
 
 @pytest.mark.unit
@@ -619,7 +635,7 @@ def test_no_ipc_calls_when_no_colocated_engines(upw_vllm):
     """With only distributed engines, IPC path must not be triggered."""
     obj = _make_instance(upw_vllm)
     obj._colocated_engines = []
-    obj._distributed_engines = [RecordingVLLMEngine()]
+    obj._distributed_engines = [RecordingDistributedEngine()]
 
     ipc_engine = _run_update_weights(obj)
 
@@ -634,7 +650,7 @@ def test_distributed_engines_receive_nccl_update(upw_vllm):
     """
     obj = _make_instance(upw_vllm)
     obj._colocated_engines = []
-    obj._distributed_engines = [RecordingVLLMEngine()]
+    obj._distributed_engines = [RecordingDistributedEngine()]
     obj._is_distributed_src_rank = True
     obj._model_update_groups = "some_groups"
     obj.weight_version = 5
@@ -672,8 +688,8 @@ def test_multiple_colocated_engines_all_get_lifecycle_calls(upw_vllm):
     for e in engines:
         assert len(e.start_weight_update.calls) == 1
         assert len(e.finish_weight_update.calls) == 1
-        assert len(e.pause_generation.calls) == 1
-        assert len(e.continue_generation.calls) == 1
+        assert len(e.release_memory_occupation.calls) == 1
+        assert len(e.resume_memory_occupation.calls) == 1
 
 
 @pytest.mark.unit
@@ -686,7 +702,7 @@ def test_mixed_colocated_and_distributed_engines(upw_vllm):
     """
     obj = _make_instance(upw_vllm)
     col_engine = RecordingVLLMEngine()
-    dist_engine = RecordingVLLMEngine()
+    dist_engine = RecordingDistributedEngine()
     obj._colocated_engines = [col_engine]
     obj._distributed_engines = [dist_engine]
     obj._is_distributed_src_rank = True
@@ -705,10 +721,11 @@ def test_mixed_colocated_and_distributed_engines(upw_vllm):
     # Distributed: NCCL
     _UPW_DIST_MOD.update_weights_from_distributed.assert_called_once()
 
-    # Both: pause and continue
-    assert len(col_engine.pause_generation.calls) == 1
+    # Colocated: release/resume memory occupation
+    assert len(col_engine.release_memory_occupation.calls) == 1
+    assert len(col_engine.resume_memory_occupation.calls) == 1
+    # Distributed: pause and continue generation
     assert len(dist_engine.pause_generation.calls) == 1
-    assert len(col_engine.continue_generation.calls) == 1
     assert len(dist_engine.continue_generation.calls) == 1
 
 
@@ -736,7 +753,7 @@ def test_source_uses_ipc_not_gloo_gather(upw_vllm):
     The vLLM IPC implementation must NOT contain sglang-style Gloo gather code
     (no FlattenedTensorBucket / MultiprocessingSerializer / gather_object pattern).
     """
-    src = inspect.getsource(upw_vllm.UpdateVLLMWeightFromTensor)
+    src = inspect.getsource(upw_vllm.UpdateWeightFromTensor)
     assert "FlattenedTensorBucket" not in src
     assert "MultiprocessingSerializer" not in src
     assert "ipc_gather_group" not in src
@@ -745,7 +762,7 @@ def test_source_uses_ipc_not_gloo_gather(upw_vllm):
 @pytest.mark.unit
 def test_source_uses_vllm_ipc_engine(upw_vllm):
     """The implementation must import and use IPCWeightTransferEngine."""
-    src = inspect.getsource(upw_vllm.UpdateVLLMWeightFromTensor)
+    src = inspect.getsource(upw_vllm.UpdateWeightFromTensor)
     assert "IPCWeightTransferEngine" in src
     assert "trainer_send_weights" in src
 
@@ -753,5 +770,5 @@ def test_source_uses_vllm_ipc_engine(upw_vllm):
 @pytest.mark.unit
 def test_source_uses_ray_send_mode(upw_vllm):
     """send_mode='ray' must be used (not 'http') for colocated actor communication."""
-    src = inspect.getsource(upw_vllm.UpdateVLLMWeightFromTensor.update_weights)
+    src = inspect.getsource(upw_vllm.UpdateWeightFromTensor.update_weights)
     assert '"ray"' in src or "'ray'" in src
