@@ -344,15 +344,6 @@ def _build_inference_sampling_params(sampling_params: dict[str, Any]) -> dict[st
     return sp
 
 
-def build_inference_payload(args: Namespace, sampling_params: dict[str, Any], token_ids: list[int]) -> dict[str, Any]:
-    """Build a vLLM ``/inference/v1/generate`` request body for token-only rollout."""
-    return {
-        "model": args.hf_checkpoint,
-        "token_ids": token_ids,
-        "sampling_params": _build_inference_sampling_params(sampling_params),
-    }
-
-
 def _mm_render_response_to_generate_body(render_data: Any, model: str) -> dict[str, Any]:
     """Turn ``/v1/chat/completions/render`` JSON into a ``/inference/v1/generate`` request body (minus ``sampling_params``).
 
@@ -418,6 +409,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     if params["max_new_tokens"] == 0:
         sample.status = Sample.Status.TRUNCATED
         return sample
+    inference_sampling_params = _build_inference_sampling_params(params)
 
     images = sample.multimodal_inputs.get("images") if sample.multimodal_inputs else None
 
@@ -446,7 +438,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         with trace_span(sample, "vllm_mm_render", attrs={"model": args.hf_checkpoint}):
             render_data = await post(render_url, render_payload, headers=headers)
         generate_body = _mm_render_response_to_generate_body(render_data, args.hf_checkpoint)
-        generate_body["sampling_params"] = _build_inference_sampling_params(params)
+        generate_body["sampling_params"] = inference_sampling_params
         gen_url = f"{base}/inference/v1/generate"
         with trace_span(sample, "vllm_mm_generate", attrs={"max_tokens": params["max_new_tokens"]}):
             output = await post(gen_url, generate_body, headers=headers)
@@ -458,7 +450,11 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
             token_ids = _coerce_flat_int_token_ids(sample.tokens)
         else:
             token_ids = prompt_ids
-        payload = build_inference_payload(args, params, token_ids)
+        payload = {
+            "model": args.hf_checkpoint,
+            "token_ids": token_ids,
+            "sampling_params": inference_sampling_params,
+        }
         with trace_span(sample, "vllm_inference_generate", attrs={"max_new_tokens": params["max_new_tokens"]}):
             output = await post(url, payload, headers=headers)
 
