@@ -1,17 +1,18 @@
+from __future__ import annotations
+
+import logging
+import os
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
 
 import ray
 import torch
 import torch.distributed as dist
 from megatron.core import mpu
-from ray import ObjectRef
 from ray.actor import ActorHandle
 
 from slime.utils.distributed_utils import get_gloo_group
 
-from ..sglang import FlattenedTensorBucket, MultiprocessingSerializer
 from .hf_weight_iterator_base import HfWeightIteratorBase
 from .update_weight_from_distributed import (
     connect_rollout_engines_from_distributed,
@@ -20,13 +21,36 @@ from .update_weight_from_distributed import (
     update_weights_from_distributed,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class UpdateWeightFromTensor:
     """
-    Update rollout engines from tensor dict:
-    load(dict→GPU) → broadcast PP/EP(GPU NCCL) → gather TP(GPU NCCL) → convert HF(GPU) → send.
-    Colocated: GPU→CPU serialize → gather_object(Gloo CPU, collects from rollout_num_gpus_per_engine ranks) → Ray IPC to engine.
-    Distributed: GPU NCCL broadcast to remote engines.
+    Update colocated vLLM engines from tensors via CUDA IPC (Ray send mode).
+
+    Colocated path:
+        Megatron weights → HF conversion → CUDA IPC to vLLM engine actors via
+        ``IPCWeightTransferEngine.trainer_send_weights(send_mode="ray")``.
+        All trainer ranks participate in the IPC handle all-gather; only rank 0
+        actually delivers the merged payload to the vLLM actors.
+
+    Distributed overflow path (optional):
+        Falls back to NCCL distributed broadcast via
+        ``update_weights_from_distributed`` for engines whose GPUs lie outside
+        the actor GPU range.
+
+    Engine lifecycle per ``update_weights`` call::
+
+        colocated:   release_memory_occupation(level=0) (rank 0)
+        distributed: pause_generation / flush_cache      (rank 0)
+        init_weight_transfer_engine                      (rank 0, colocated, first call only)
+        start_weight_update                              (rank 0, colocated)
+        [for each HF chunk]
+          trainer_send_weights                           (all ranks, colocated)
+          update_weights_from_distributed                (src rank, distributed)
+        finish_weight_update                             (rank 0, colocated)
+        colocated:   resume_memory_occupation(tags=["scheduling"]) (rank 0)
+        distributed: continue_generation                           (rank 0)
     """
 
     def __init__(
@@ -38,10 +62,6 @@ class UpdateWeightFromTensor:
         model_name: str,
         quantization_config: dict[str, int | str | list[str]] | None,
     ) -> None:
-        """
-        Compute param buckets.  IPC Gloo groups are created later in
-        ``connect_rollout_engines`` once ``engine_gpu_counts`` is known.
-        """
         self.args = args
         self.model = model
         self.weights_getter = weights_getter
@@ -50,13 +70,25 @@ class UpdateWeightFromTensor:
         self.weight_version = 0
 
         self._hf_weight_iterator = HfWeightIteratorBase.create(
-            args=args, model=model, model_name=model_name, quantization_config=quantization_config
+            args=args,
+            model=model,
+            model_name=model_name,
+            quantization_config=quantization_config,
         )
 
-        self._ipc_gather_group = None
-        self._ipc_gather_src = None
-        self._ipc_engine = None
+        # Populated by connect_rollout_engines
+        self._colocated_engines: list[ActorHandle] = []
+        self._distributed_engines: list[ActorHandle] = []
         self._model_update_groups = None
+        self._is_distributed_src_rank: bool = False
+        self._group_name = "slime"
+        # IPC weight transfer engine is initialized once per set of colocated
+        # engines (not per update call).
+        self._ipc_initialized: bool = False
+
+    # ------------------------------------------------------------------
+    # connect / disconnect
+    # ------------------------------------------------------------------
 
     def connect_rollout_engines(
         self,
@@ -66,22 +98,24 @@ class UpdateWeightFromTensor:
         engine_gpu_offsets: Sequence[int] | None = None,
     ) -> None:
         """
-        Split colocated/distributed engines. Global source rank (DP=TP=PP=0) creates NCCL
-        for distributed. Map ranks to colocated IPC engines.
+        Split engines into colocated (IPC) vs distributed (NCCL) buckets.
+
+        Colocated engines are those whose GPU range fits entirely within the
+        trainer actor GPU range.  The remainder are treated as distributed and
+        receive weights via NCCL broadcast.
+
         """
-        self.rollout_engines = rollout_engines
+        self.rollout_engine_lock = rollout_engine_lock
 
         if engine_gpu_counts is None:
             engine_gpu_counts = [self.args.rollout_num_gpus_per_engine] * len(rollout_engines)
         if engine_gpu_offsets is None:
-            # Fallback: assume engines are densely packed (no placeholder gaps).
             engine_gpu_offsets = []
             offset = 0
             for c in engine_gpu_counts:
                 engine_gpu_offsets.append(offset)
                 offset += c
 
-        # Compute colocated engine count: engines whose GPUs fall within actor GPU range.
         total_actor_gpus = self.args.actor_num_nodes * self.args.actor_num_gpus_per_node
         colocate_engine_nums = 0
         for gpu_offset, gpu_count in zip(engine_gpu_offsets, engine_gpu_counts, strict=True):
@@ -89,180 +123,139 @@ class UpdateWeightFromTensor:
                 break
             colocate_engine_nums += 1
 
-        self.use_distribute = len(rollout_engines) > colocate_engine_nums
+        self._colocated_engines = list(rollout_engines[:colocate_engine_nums])
+        self._distributed_engines = list(rollout_engines[colocate_engine_nums:])
 
-        if self.use_distribute:
-            self.rollout_engines = rollout_engines[:colocate_engine_nums]
-            self.distributed_rollout_engines = rollout_engines[colocate_engine_nums:]
+        # Set up NCCL bridge for any overflow (non-colocated) engines.
+        if self._distributed_engines:
             distributed_gpu_counts = engine_gpu_counts[colocate_engine_nums:]
             self._is_distributed_src_rank = (
                 mpu.get_data_parallel_rank(with_context_parallel=True) == 0
                 and mpu.get_tensor_model_parallel_rank() == 0
                 and mpu.get_pipeline_model_parallel_rank() == 0
             )
-            self._group_name = "slime"
             if self._is_distributed_src_rank:
                 if self._model_update_groups is not None:
                     disconnect_rollout_engines_from_distributed(
-                        self.args, self._group_name, self._model_update_groups, self.distributed_rollout_engines
+                        self.args,
+                        self._group_name,
+                        self._model_update_groups,
+                        self._distributed_engines,
                     )
-
                 self._model_update_groups = connect_rollout_engines_from_distributed(
                     self.args,
                     self._group_name,
-                    self.distributed_rollout_engines,
+                    self._distributed_engines,
                     engine_gpu_counts=distributed_gpu_counts,
                 )
 
-        colocate_gpu_offsets = engine_gpu_offsets[:colocate_engine_nums]
-        colocate_gpu_counts = engine_gpu_counts[:colocate_engine_nums]
-
-        # Create IPC Gloo gather groups (only on first call; partitioning is
-        # fixed across reconnects).
-        if self._ipc_gather_group is None:
-            for i in range(colocate_engine_nums):
-                group_ranks = list(range(colocate_gpu_offsets[i], colocate_gpu_offsets[i] + colocate_gpu_counts[i]))
-                new_group = dist.new_group(ranks=group_ranks, backend="gloo")
-                if dist.get_rank() in group_ranks:
-                    self._ipc_gather_group = new_group
-                    self._ipc_gather_src = colocate_gpu_offsets[i]
-
-        # Map training ranks to colocated engine actors.
-        for i, engine in enumerate(self.rollout_engines):
-            start = colocate_gpu_offsets[i]
-            end = start + colocate_gpu_counts[i]
-            if start <= dist.get_rank() < end:
-                self._ipc_engine = engine
+    # ------------------------------------------------------------------
+    # weight update
+    # ------------------------------------------------------------------
 
     @torch.no_grad()
     def update_weights(self) -> None:
         """
-        version++, flush caches, process buckets. Progress on rank 0.
+        Transfer updated Megatron weights to all rollout engines.
+
+        Colocated engines receive weights via CUDA IPC (all trainer ranks
+        participate).  Distributed overflow engines receive weights via NCCL
+        broadcast (source rank only).
         """
         self.weight_version += 1
-
         rank = dist.get_rank()
+        all_engines = self._colocated_engines + self._distributed_engines
+
+        # ── 1. Pause generation and flush KV cache (rank 0 only) ────────────
+        # vLLM colocated engines: release_memory_occupation(level=0) suspends generation
+        # and frees both KV cache and model weights (required for IPC tensor injection).
+        # Distributed (non-vLLM) engines keep the sglang-style pause+flush API.
         if rank == 0:
-            ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
-            ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
-            if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
+            if self._colocated_engines:
+                ray.get([engine.release_memory_occupation.remote(level=0) for engine in self._colocated_engines])
+            if self._distributed_engines:
+                ray.get([engine.pause_generation.remote() for engine in self._distributed_engines])
+                ray.get([engine.flush_cache.remote() for engine in self._distributed_engines])
+            if self.quantization_config and self.quantization_config.get("quant_method") in ["compressed-tensors"]:
                 post_process_weights(
                     restore_weights_before_load=True,
                     post_process_quantization=False,
-                    rollout_engines=self.rollout_engines,
+                    rollout_engines=all_engines,
                 )
         dist.barrier(group=get_gloo_group())
 
-        megatron_local_weights = self.weights_getter()
-
-        for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(megatron_local_weights):
-            refs, long_lived_tensors = self._send_hf_params(hf_named_tensors)
-            ray.get(refs)
-            # Free GPU tensors so the caching allocator can reuse the blocks,
-            # then release CUDA IPC cache entries whose consumers (sglang engines)
-            # have already closed their IPC handles.
-            del long_lived_tensors, hf_named_tensors
-            torch.cuda.ipc_collect()
-
+        # ── 2. One-time IPC weight transfer engine init (rank 0 only) ───────
+        if rank == 0 and self._colocated_engines and not self._ipc_initialized:
+            for engine in self._colocated_engines:
+                ray.get(engine.init_weight_transfer_engine.remote(dict(init_info=dict())))
+            self._ipc_initialized = True
         dist.barrier(group=get_gloo_group())
-        # After the barrier all engines have returned, so every rank's last-chunk
-        # IPC handles are now released by the consumers.  Clean them up.
-        torch.cuda.ipc_collect()
 
-        # int4/fp4 post_process
+        # ── 3. Signal colocated vLLM engines to enter weight-update mode ─────
+        if rank == 0 and self._colocated_engines:
+            ray.get(
+                [engine.start_weight_update.remote(is_checkpoint_format=True) for engine in self._colocated_engines]
+            )
+        dist.barrier(group=get_gloo_group())
+
+        # Required so vLLM can deserialize CUDA IPC handle payloads.
+        os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+
+        from vllm.distributed.weight_transfer.ipc_engine import (  # noqa: PLC0415
+            IPCTrainerSendWeightsArgs,
+            IPCWeightTransferEngine,
+        )
+
+        # ── 4. Iterate HF weight chunks and send ─────────────────────────────
+        megatron_local_weights = self.weights_getter()
+        for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(megatron_local_weights):
+            # Colocated path: all ranks must call trainer_send_weights so that
+            # _all_gather_and_merge_handles can collect every GPU's IPC handle.
+            # Rank 0 then delivers the merged dict to all colocated engine actors.
+            if self._colocated_engines:
+                for engine in self._colocated_engines:
+                    trainer_args = IPCTrainerSendWeightsArgs(
+                        mode="ray",
+                        llm_handle=engine,
+                    )
+                    IPCWeightTransferEngine.trainer_send_weights(
+                        iterator=iter(hf_named_tensors),
+                        trainer_args=trainer_args,
+                    )
+
+            # Distributed overflow path (only the designated src rank).
+            if self._distributed_engines and self._is_distributed_src_rank:
+                refs = update_weights_from_distributed(
+                    self._group_name,
+                    self._model_update_groups,
+                    self.weight_version,
+                    self._distributed_engines,
+                    hf_named_tensors,
+                    packed=False,
+                )
+                if refs:
+                    ray.get(refs)
+
+        # ── 5. Signal colocated engines to exit weight-update mode ───────────
+        if rank == 0 and self._colocated_engines:
+            ray.get([engine.finish_weight_update.remote() for engine in self._colocated_engines])
+        dist.barrier(group=get_gloo_group())
+
+        # ── 6. Post-process quantization (if needed) and resume ───────────────
+        # vLLM colocated engines: resume_memory_occupation(tags=["scheduling"]) restores
+        # scheduling only (weights were just injected via IPC).
+        # Distributed engines use the sglang-style continue_generation.
         if rank == 0:
-            if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
+            if self.quantization_config and self.quantization_config.get("quant_method") in ["compressed-tensors"]:
                 post_process_weights(
                     restore_weights_before_load=False,
                     post_process_quantization=True,
-                    rollout_engines=self.rollout_engines,
+                    rollout_engines=all_engines,
                 )
-            ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
+            if self._colocated_engines:
+                ray.get(
+                    [engine.resume_memory_occupation.remote(tags=["scheduling"]) for engine in self._colocated_engines]
+                )
+            if self._distributed_engines:
+                ray.get([engine.continue_generation.remote() for engine in self._distributed_engines])
         dist.barrier(group=get_gloo_group())
-
-    def _send_hf_params(self, hf_named_tensors) -> tuple[list[ObjectRef], Any]:
-        all_refs = []
-
-        refs_colocated, long_lived_tensors = _send_to_colocated_engine(
-            hf_named_tensors,
-            ipc_engine=self._ipc_engine,
-            ipc_gather_src=self._ipc_gather_src,
-            ipc_gather_group=self._ipc_gather_group,
-            weight_version=self.weight_version,
-        )
-        all_refs.extend(refs_colocated)
-
-        if self.use_distribute and self._is_distributed_src_rank:
-            refs_distributed = update_weights_from_distributed(
-                self._group_name,
-                self._model_update_groups,
-                self.weight_version,
-                self.distributed_rollout_engines,
-                hf_named_tensors,
-                packed=False,
-            )
-            if refs_distributed:
-                all_refs.extend(refs_distributed)
-
-        return all_refs, long_lived_tensors
-
-
-def _send_to_colocated_engine(
-    hf_named_tensors: list[tuple[str, torch.Tensor]],
-    *,
-    ipc_engine,
-    ipc_gather_src,
-    ipc_gather_group,
-    weight_version,
-) -> tuple[list[ObjectRef], Any]:
-    # Placeholder ranks (GPU slots reserved but no engine) have no gather group.
-    # gather_object is only collective among group members, so we skip entirely.
-    if ipc_gather_group is None:
-        return [], None
-
-    long_live_tensors = []
-
-    if getattr(FlattenedTensorBucket, "supports_multi_dtypes", False):
-        converted_named_tensors_by_dtypes = {"dtype": hf_named_tensors}
-    else:
-        converted_named_tensors_by_dtypes = {}
-        for name, tensor in hf_named_tensors:
-            dtype = tensor.dtype
-            if dtype not in converted_named_tensors_by_dtypes:
-                converted_named_tensors_by_dtypes[dtype] = []
-            converted_named_tensors_by_dtypes[dtype].append((name, tensor))
-
-    serialized_tensors = []
-    for _dtype, named_tensors in converted_named_tensors_by_dtypes.items():
-        flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=named_tensors)
-        metadata = flattened_tensor_bucket.get_metadata()
-        flattened_tensor_data = {
-            "flattened_tensor": flattened_tensor_bucket.get_flattened_tensor(),
-            "metadata": metadata,
-        }
-        long_live_tensors.append(flattened_tensor_data)
-        serialized_tensors.append(MultiprocessingSerializer.serialize(flattened_tensor_data, output_str=True))
-
-    serialized_named_tensors = (
-        [None] * dist.get_world_size(ipc_gather_group) if ipc_gather_src == dist.get_rank() else None
-    )
-    dist.gather_object(
-        serialized_tensors,
-        object_gather_list=serialized_named_tensors,
-        dst=ipc_gather_src,
-        group=ipc_gather_group,
-    )
-
-    refs = []
-    if dist.get_rank() == ipc_gather_src:
-        # TODO: here we assume all ranks have the same number of dtypes, not sure if that is correct.
-        num_dtypes = len(serialized_named_tensors[0])
-        for i in range(num_dtypes):
-            kwargs = {
-                "serialized_named_tensors": [tensors[i] for tensors in serialized_named_tensors],
-                "load_format": "flattened_bucket",
-                "weight_version": str(weight_version),
-            }
-            refs.append(ipc_engine.update_weights_from_tensor.remote(**kwargs))
-
-    return refs, long_live_tensors
