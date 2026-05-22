@@ -117,6 +117,7 @@ def _execute_case(case: VLLMGenerateCase):
         rollout_num_gpus_per_engine=case.num_gpus,
         seed=1234,
         vllm_gpu_memory_utilization=0.9,
+        vllm_async_scheduling=False,
         vllm_enforce_eager=False,
         rollout_max_context_len=case.max_model_len,
         use_rollout_routing_replay=case.use_rollout_routing_replay,
@@ -137,9 +138,9 @@ def _execute_case(case: VLLMGenerateCase):
         rollout_args = Namespace(
             ci_test=False,
             hf_checkpoint=case.model_path,
-            sglang_router_ip="127.0.0.1",
-            sglang_router_port=server_port,
-            sglang_server_concurrency=512,
+            router_ip="127.0.0.1",
+            router_port=server_port,
+            vllm_server_concurrency=512,
             rollout_num_gpus=case.num_gpus,
             rollout_num_gpus_per_engine=case.num_gpus,
             rollout_temperature=0.0,
@@ -149,9 +150,9 @@ def _execute_case(case: VLLMGenerateCase):
             rollout_stop=None,
             rollout_stop_token_ids=None,
             rollout_skip_special_tokens=True,
-            sglang_dp_size=1,
+            vllm_dp_size=1,
             use_rollout_routing_replay=case.use_rollout_routing_replay,
-            sglang_speculative_algorithm=None,
+            vllm_speculative_config=None,
             use_distributed_post=False,
         )
         sampling_params = {
