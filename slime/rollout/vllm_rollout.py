@@ -1,6 +1,8 @@
 import asyncio
+import base64
 import copy
 import inspect
+import io
 import json
 import logging
 import uuid
@@ -39,10 +41,10 @@ _PROCESSOR_PROMPT_KEYS = {"input_ids", "attention_mask"}
 
 
 def _coerce_flat_int_token_ids(ids: Any) -> list[int]:
-    """Turn tokenizer / processor output into a flat ``list[int]`` for vLLM ``/v1/completions`` JSON.
+    """Turn tokenizer / processor output into a flat ``list[int]`` for vLLM token-only JSON.
 
-    vLLM deserializes ``prompt`` as ``StringOrArray`` (Rust): a JSON string or a JSON array of integers.
-    Nested lists, numpy/torch scalars, or non-int elements cause ``422`` deserialization errors.
+    ``/inference/v1/generate`` requires ``token_ids: list[int]``. Nested lists, numpy/torch scalars,
+    or non-int elements cause ``422`` validation errors.
     """
     if ids is None:
         return []
@@ -96,13 +98,13 @@ def _base_dataset_prompt_ids(sample: Sample, tokenizer, processor: Any) -> list[
     return _coerce_flat_int_token_ids(tokenizer.encode(sample.prompt, add_special_tokens=False))
 
 
-def get_model_url(args: Namespace, model_name: str, endpoint: str = "/v1/completions") -> str:
+def get_model_url(args: Namespace, model_name: str, endpoint: str = "/inference/v1/generate") -> str:
     """Return the router URL for a named model.
 
     Use this in custom rollout functions to route requests to a specific
     model when multiple models are deployed via ``--sglang-config``::
 
-        url = get_model_url(args, "ref", "/v1/completions")
+        url = get_model_url(args, "ref", "/inference/v1/generate")
         resp = await post(url, json=payload)
 
     Falls back to the default router if *model_name* is not found or
@@ -138,7 +140,7 @@ async def _resume_vllm_workers(urls: list[str]) -> None:
             logger.warning("Failed to resume vLLM worker at %s: %s", url, result)
 
 
-def _openai_meta_from_completion_choice(args: Namespace, choice: dict, usage: dict | None) -> dict[str, Any]:
+def _vllm_meta_from_generate_choice(args: Namespace, choice: dict, usage: dict | None) -> dict[str, Any]:
     """Build a minimal ``meta_info``-like dict for :meth:`Sample.update_from_meta_info`."""
     fr = choice.get("finish_reason") or "stop"
     if isinstance(fr, dict):
@@ -158,6 +160,11 @@ def _openai_meta_from_completion_choice(args: Namespace, choice: dict, usage: di
     return meta
 
 
+def _decode_vllm_routed_experts(value: str) -> np.ndarray:
+    raw = base64.b64decode(value.encode("ascii"), validate=True)
+    return np.load(io.BytesIO(raw), allow_pickle=False)
+
+
 def _apply_vllm_routed_experts(
     args: Namespace,
     sample: Sample,
@@ -166,21 +173,16 @@ def _apply_vllm_routed_experts(
 ) -> None:
     """Populate ``sample.rollout_routed_experts`` from vLLM ``choices[].routed_experts`` when enabled.
 
-    vLLM exposes MoE routing replay on the **per-completion** ``CompletionOutput`` as a single
-    ``routed_experts`` ndarray (shape ``[num_positions, num_layers, topk]``); the V1 scheduler
-    builds it once per finished request from KV slot indices for ``request.num_tokens - 1``
-    positions — there is **no** separate ``prompt_routed_experts`` key on the HTTP completion
-    payload (confirmed absent in upstream ``vllm``; see ``CompletionOutput`` in
-    ``vllm/outputs.py`` and ``_get_routed_experts`` in ``vllm/v1/core/sched/scheduler.py``).
-    When the OpenAI layer forwards it, it appears as an extra field on the choice object
-    (Pydantic ``extra="allow"`` on ``CompletionResponseChoice``).
+    vLLM ``/inference/v1/generate`` returns routed experts as a base64 encoded
+    ``.npy`` payload on each response choice when the server is launched with
+    ``--enable-return-routed-experts``.
     """
     if not getattr(args, "use_rollout_routing_replay", False):
         return
     gen_re = choice.get("routed_experts")
     if gen_re is None:
         return
-    arr = np.asarray(gen_re, dtype=np.int32)
+    arr = _decode_vllm_routed_experts(gen_re)
     n_tok = len(sample.tokens)
     expected_rows = max(0, n_tok - 1)
     if arr.ndim != 3:
@@ -204,44 +206,8 @@ def _apply_vllm_routed_experts(
     sample.rollout_routed_experts = arr
 
 
-def _fallback_tokens_from_text_and_completion_logprobs(
-    tokenizer, choice: dict, completion_text: str
-) -> tuple[list[int], list[float]]:
-    """Fallback when vLLM did not return ``token_ids``: approximate from string logprobs or re-tokenize."""
-    lp = choice.get("logprobs")
-    if not lp or not isinstance(lp, dict):
-        toks = tokenizer.encode(completion_text, add_special_tokens=False)
-        return toks, [0.0] * len(toks)
-
-    token_logprobs = lp.get("token_logprobs")
-    tokens_field = lp.get("tokens")
-    if token_logprobs and tokens_field and len(token_logprobs) == len(tokens_field):
-        new_toks: list[int] = []
-        new_lps: list[float] = []
-        for piece, logp in zip(tokens_field, token_logprobs, strict=False):
-            if logp is None:
-                continue
-            ids = tokenizer.encode(piece, add_special_tokens=False)
-            if not ids:
-                continue
-            per = float(logp) / max(len(ids), 1)
-            new_toks.extend(ids)
-            new_lps.extend([per] * len(ids))
-        if new_toks:
-            return new_toks, new_lps
-
-    toks = tokenizer.encode(completion_text, add_special_tokens=False)
-    return toks, [0.0] * len(toks)
-
-
-def _vllm_engine_tokens_and_logprobs(
-    tokenizer,
-    choice: dict[str, Any],
-    completion_text: str,
-    *,
-    is_chat: bool,
-) -> tuple[list[int], list[float]]:
-    """Parse engine ``token_ids`` and per-token logprobs from an OpenAI choice (requires ``return_token_ids``)."""
+def _inference_generate_tokens_and_logprobs(choice: dict[str, Any]) -> tuple[list[int], list[float]]:
+    """Parse ``token_ids`` and ``logprobs.content`` from a vLLM ``/inference/v1/generate`` choice."""
     tids_raw = choice.get("token_ids")
     if isinstance(tids_raw, list) and tids_raw and all(isinstance(x, int) for x in tids_raw):
         tids = [int(x) for x in tids_raw]
@@ -250,56 +216,26 @@ def _vllm_engine_tokens_and_logprobs(
         if not isinstance(lp, dict):
             return tids, [0.0] * len(tids)
 
-        if is_chat:
-            content = lp.get("content")
-            if isinstance(content, list) and len(content) == len(tids):
-                for item in content:
-                    if isinstance(item, dict):
-                        lps.append(float(item.get("logprob", 0.0)))
-                    else:
-                        lps.append(0.0)
-                return tids, lps
-            if isinstance(content, list) and content:
-                # Partial content: pad / truncate to token_ids length if possible
-                for i in range(len(tids)):
-                    if i < len(content) and isinstance(content[i], dict):
-                        lps.append(float(content[i].get("logprob", 0.0)))
-                    else:
-                        lps.append(0.0)
-                return tids, lps
-            return tids, [0.0] * len(tids)
-
-        token_logprobs = lp.get("token_logprobs")
-        if isinstance(token_logprobs, list) and len(token_logprobs) == len(tids):
-            for p in token_logprobs:
-                lps.append(0.0 if p is None else float(p))
+        content = lp.get("content")
+        if isinstance(content, list) and len(content) == len(tids):
+            for item in content:
+                if isinstance(item, dict):
+                    lps.append(float(item.get("logprob", 0.0)))
+                else:
+                    lps.append(0.0)
+            return tids, lps
+        if isinstance(content, list) and content:
+            # Partial content: pad / truncate to token_ids length if possible.
+            for i in range(len(tids)):
+                if i < len(content) and isinstance(content[i], dict):
+                    lps.append(float(content[i].get("logprob", 0.0)))
+                else:
+                    lps.append(0.0)
             return tids, lps
 
         return tids, [0.0] * len(tids)
 
-    if is_chat:
-        lp = choice.get("logprobs")
-        content = lp.get("content") if isinstance(lp, dict) else None
-        if isinstance(content, list) and content:
-            tids_ch: list[int] = []
-            lps_ch: list[float] = []
-            for item in content:
-                if not isinstance(item, dict):
-                    continue
-                tok = item.get("token")
-                if not isinstance(tok, str):
-                    continue
-                ids = tokenizer.encode(tok, add_special_tokens=False)
-                if not ids:
-                    continue
-                lv = float(item.get("logprob", 0.0))
-                per = lv / max(len(ids), 1)
-                tids_ch.extend(ids)
-                lps_ch.extend([per] * len(ids))
-            if tids_ch:
-                return tids_ch, lps_ch
-
-    return _fallback_tokens_from_text_and_completion_logprobs(tokenizer, choice, completion_text)
+    return [], []
 
 
 def _align_engine_tokens_and_logprobs(
@@ -446,35 +382,8 @@ def _mm_render_response_to_generate_body(render_data: Any, model: str) -> dict[s
     )
 
 
-def _build_completion_payload(
-    args: Namespace, sampling_params: dict[str, Any], prompt_field: str | list[int]
-) -> dict[str, Any]:
-    """Map shared ``sampling_params`` to vLLM OpenAI ``/v1/completions`` body."""
-    body: dict[str, Any] = {
-        "model": args.hf_checkpoint,
-        "prompt": prompt_field,
-        "max_tokens": sampling_params["max_new_tokens"],
-        "temperature": sampling_params["temperature"],
-        "top_p": sampling_params["top_p"],
-        "logprobs": 1,
-        "return_token_ids": True,
-    }
-    tk = sampling_params.get("top_k")
-    if tk is not None and tk > 0:
-        body["top_k"] = tk
-    if sampling_params.get("stop"):
-        body["stop"] = sampling_params["stop"]
-    if sampling_params.get("stop_token_ids"):
-        body["stop_token_ids"] = sampling_params["stop_token_ids"]
-    if sampling_params.get("skip_special_tokens"):
-        body["skip_special_tokens"] = True
-    if sampling_params.get("seed") is not None:
-        body["seed"] = sampling_params["seed"]
-    return body
-
-
 async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, Any]) -> Sample:
-    """Generate using vLLM OpenAI-compatible HTTP API on the router host/port."""
+    """Generate using vLLM ``/inference/v1/generate`` on the router host/port."""
     if args.ci_test:
         assert isinstance(sample.prompt, str)
 
@@ -499,6 +408,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     if params["max_new_tokens"] == 0:
         sample.status = Sample.Status.TRUNCATED
         return sample
+    inference_sampling_params = _build_inference_sampling_params(params)
 
     images = sample.multimodal_inputs.get("images") if sample.multimodal_inputs else None
 
@@ -527,50 +437,40 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         with trace_span(sample, "vllm_mm_render", attrs={"model": args.hf_checkpoint}):
             render_data = await post(render_url, render_payload, headers=headers)
         generate_body = _mm_render_response_to_generate_body(render_data, args.hf_checkpoint)
-        generate_body["sampling_params"] = _build_inference_sampling_params(params)
+        generate_body["sampling_params"] = inference_sampling_params
         gen_url = f"{base}/inference/v1/generate"
         with trace_span(sample, "vllm_mm_generate", attrs={"max_tokens": params["max_new_tokens"]}):
             output = await post(gen_url, generate_body, headers=headers)
-        choice = output["choices"][0]
-        skip_sp = params.get("skip_special_tokens")
-        skip_decode = True if skip_sp is None else bool(skip_sp)
-        out_ids = choice.get("token_ids") or []
-        text = (
-            state.tokenizer.decode(out_ids, skip_special_tokens=skip_decode)
-            if isinstance(out_ids, list) and out_ids
-            else ""
-        )
-        usage = output.get("usage")
-        meta = _openai_meta_from_completion_choice(args, choice, usage)
-        new_response_tokens, new_response_log_probs = _vllm_engine_tokens_and_logprobs(
-            state.tokenizer, choice, text, is_chat=True
-        )
-        new_response_tokens, new_response_log_probs = _align_engine_tokens_and_logprobs(
-            new_response_tokens, new_response_log_probs
-        )
     else:
-        url = f"{base}/v1/completions"
-        # vLLM OpenAI ``prompt``: JSON string or flat array of integers. On partial continuation, send full
-        # ``sample.tokens`` as integer ids (aligned with dev_vllm ``sglang_rollout`` + vLLM backend).
+        url = f"{base}/inference/v1/generate"
+        # vLLM disaggregated ``/inference/v1/generate`` is token-only. On partial continuation, send the
+        # full prompt+response prefix so vLLM continues from the current sample state.
         if len(sample.response) > 0:
-            prompt_field = _coerce_flat_int_token_ids(sample.tokens)
-        elif isinstance(sample.prompt, str):
-            prompt_field = sample.prompt
+            token_ids = _coerce_flat_int_token_ids(sample.tokens)
         else:
-            prompt_field = prompt_ids
-        payload = _build_completion_payload(args, params, prompt_field)
-        with trace_span(sample, "vllm_completions", attrs={"max_new_tokens": params["max_new_tokens"]}):
+            token_ids = prompt_ids
+        payload = {
+            "model": args.hf_checkpoint,
+            "token_ids": token_ids,
+            "sampling_params": inference_sampling_params,
+        }
+        with trace_span(sample, "vllm_inference_generate", attrs={"max_new_tokens": params["max_new_tokens"]}):
             output = await post(url, payload, headers=headers)
-        choice = output["choices"][0]
-        text = choice.get("text") or ""
-        usage = output.get("usage")
-        meta = _openai_meta_from_completion_choice(args, choice, usage)
-        new_response_tokens, new_response_log_probs = _vllm_engine_tokens_and_logprobs(
-            state.tokenizer, choice, text, is_chat=False
-        )
-        new_response_tokens, new_response_log_probs = _align_engine_tokens_and_logprobs(
-            new_response_tokens, new_response_log_probs
-        )
+
+    choice = output["choices"][0]
+    skip_sp = params.get("skip_special_tokens")
+    skip_decode = True if skip_sp is None else bool(skip_sp)
+    out_ids = choice.get("token_ids") or []
+    text = (
+        state.tokenizer.decode(out_ids, skip_special_tokens=skip_decode)
+        if isinstance(out_ids, list) and out_ids
+        else ""
+    )
+    meta = _vllm_meta_from_generate_choice(args, choice, output.get("usage"))
+    new_response_tokens, new_response_log_probs = _inference_generate_tokens_and_logprobs(choice)
+    new_response_tokens, new_response_log_probs = _align_engine_tokens_and_logprobs(
+        new_response_tokens, new_response_log_probs
+    )
 
     if new_response_tokens:
         meta["output_token_logprobs"] = [

@@ -304,6 +304,8 @@ def launch_server_process(
     # unless the user already passed --vllm-max-model-len explicitly.
     if args.rollout_max_context_len is not None and getattr(args, "vllm_max_model_len", None) is None:
         cmd += ["--max-model-len", str(args.rollout_max_context_len)]
+    if getattr(args, "use_rollout_routing_replay", False):
+        cmd += ["--enable-return-routed-experts"]
 
     # vime-preferred defaults — must be explicitly forwarded because the vllm-side
     # default would otherwise apply (the generic forwarder skips values that equal
