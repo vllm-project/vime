@@ -114,12 +114,12 @@ def get_model_url(args: Namespace, model_name: str, endpoint: str = "/inference/
     if routers and model_name in routers:
         ip, port = routers[model_name]
         return f"http://{ip}:{port}{endpoint}"
-    return f"http://{args.sglang_router_ip}:{args.sglang_router_port}{endpoint}"
+    return f"http://{args.router_ip}:{args.router_port}{endpoint}"
 
 
 async def _router_worker_urls(args: Namespace) -> list[str]:
     """Resolve worker base URLs from the vLLM router (same HTTP shape as SGLang router)."""
-    base = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+    base = f"http://{args.router_ip}:{args.router_port}"
     try:
         response = await get(f"{base}/workers")
         return [worker["url"] for worker in response["workers"]]
@@ -265,7 +265,7 @@ class GenerateState(metaclass=SingletonMeta):
         self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
 
         self.semaphore = asyncio.Semaphore(
-            args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
+            args.vllm_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
         )
         self.sampling_params: dict[str, Any] = dict(
             temperature=args.rollout_temperature,
@@ -284,7 +284,7 @@ class GenerateState(metaclass=SingletonMeta):
             self.group_sampling_seeds = [sampling_seed_base + i for i in range(args.n_samples_per_prompt)]
 
         # dp rank balancing
-        self.dp_counts = [0] * (args.sglang_dp_size or 1)
+        self.dp_counts = [0] * (args.vllm_dp_size or 1)
         self.dp_rank = 0
 
         self.reset()
@@ -378,8 +378,7 @@ def _mm_render_response_to_generate_body(render_data: Any, model: str) -> dict[s
         return body
 
     raise ValueError(
-        "chat/render: unexpected JSON shape; expected a dict with token_ids or "
-        "[conversation, engine_prompts] list"
+        "chat/render: unexpected JSON shape; expected a dict with token_ids or " "[conversation, engine_prompts] list"
     )
 
 
@@ -389,7 +388,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         assert isinstance(sample.prompt, str)
 
     state = GenerateState(args)
-    base = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+    base = f"http://{args.router_ip}:{args.router_port}"
 
     assert (
         sample.status == Sample.Status.PENDING or sample.status == Sample.Status.ABORTED

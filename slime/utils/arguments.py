@@ -6,10 +6,10 @@ import os
 from typing import Any
 
 import yaml
-from sglang_router.launch_router import RouterArgs
+from vllm_router.launch_router import RouterArgs
 
-from slime.backends.sglang_utils.arguments import sglang_parse_args
-from slime.backends.sglang_utils.arguments import validate_args as sglang_validate_args
+from slime.backends.vllm_utils.arguments import validate_args as vllm_validate_args
+from slime.backends.vllm_utils.arguments import vllm_parse_args
 from slime.utils.eval_config import EvalDatasetConfig, build_eval_dataset_configs, ensure_dataset_list
 from slime.utils.logging_utils import configure_logger
 
@@ -206,37 +206,6 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
         # rollout
         def add_rollout_arguments(parser):
             parser.add_argument(
-                "--rollout-backend",
-                type=str,
-                choices=["sglang", "vllm"],
-                default="vllm",
-                help="Backend for rollout inference service.",
-            )
-            parser.add_argument(
-                "--vllm-gpu-memory-utilization",
-                type=float,
-                default=0.55,
-                help="GPU memory utilization target for vLLM server.",
-            )
-            parser.add_argument(
-                "--vllm-enforce-eager",
-                action="store_true",
-                default=False,
-                help="Enable --enforce-eager when launching vLLM server.",
-            )
-            parser.add_argument(
-                "--vllm-weight-sync-mode",
-                type=str,
-                choices=["auto", "native", "reload"],
-                default="native",
-                help=(
-                    "vLLM weight sync policy: 'native' launches vLLM with --weight-transfer-config and "
-                    "init_weight_transfer_engine (Megatron NCCL / NcclBridge sync). "
-                    "'reload' / 'auto' skip native init here (reload-on-continue or other fallbacks may apply)."
-                ),
-            )
-
-            parser.add_argument(
                 "--hf-checkpoint",
                 type=str,
                 default=None,
@@ -261,7 +230,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--rollout-function-path",
                 type=str,
-                default="slime.rollout.sglang_rollout.generate_rollout",
+                default="slime.rollout.vllm_rollout.generate_rollout",
                 help=(
                     "Path to the rollout generation function."
                     "You should use this model to create your own custom rollout function, "
@@ -460,23 +429,6 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=1,
                 help="Interval for updating the weights",
             )
-            _vllm_packed = parser.add_mutually_exclusive_group()
-            _vllm_packed.add_argument(
-                "--vllm-weight-sync-packed",
-                dest="vllm_weight_sync_packed",
-                action="store_true",
-                help=(
-                    "When rollout-backend is vllm: use one-shot packed weight transfer for dense models (no MoE experts). "
-                    "Automatically disabled for MoE or compressed-tensors quantization."
-                ),
-            )
-            _vllm_packed.add_argument(
-                "--no-vllm-weight-sync-packed",
-                dest="vllm_weight_sync_packed",
-                action="store_false",
-                help="Disable vLLM packed weight sync; use per-bucket NCCL via NcclBridge instead.",
-            )
-            parser.set_defaults(vllm_weight_sync_packed=True)
             parser.add_argument(
                 "--keep-old-actor",
                 action="store_true",
@@ -1062,12 +1014,10 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             return parser
 
         def add_router_arguments(parser):
-            parser.add_argument(
-                "--use-slime-router",
-                action="store_true",
-                default=False,
-                help="Whether to use SlimeRouter for text-based routing instead of SGLang token-based routing",
-            )
+            # vllm-router's full CLI surface (~30 knobs: policy, cache_threshold,
+            # retries, health-check, …) under `--router-*` prefix (collision-safe).
+            # exclude_host_port=True because vime owns `--router-ip / --router-port`
+            # (defined in slime/backends/vllm_utils/arguments.py:add_vllm_router_arguments).
             RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
             return parser
 
@@ -1473,17 +1423,16 @@ def parse_args(add_custom_arguments=None):
     add_slime_arguments = get_slime_extra_args_provider(add_custom_arguments)
 
     pre = _pre_parse_mode()
-    skip_sglang = pre.debug_train_only or pre.load_debug_rollout_data is not None
+    skip_vllm = pre.debug_train_only or pre.load_debug_rollout_data is not None
 
-    # Phase 1: Parse sglang args independently (separate parser, parse_known_args).
-    # Skipped when sglang servers are not needed.
-    sglang_ns = None
-    if not skip_sglang:
-        sglang_ns = sglang_parse_args()
+    # Phase 1: Parse vllm args independently (separate parser, parse_known_args).
+    vllm_ns = None
+    if not skip_vllm:
+        vllm_ns = vllm_parse_args()
 
     # Phase 2: Parse megatron + slime args.
-    # Uses ignore_unknown_args=True so that --sglang-* and pre-parsed CLI flags
-    # are silently ignored by the megatron parser.
+    # Uses ignore_unknown_args=True so that --vllm-* and pre-parsed CLI flags are
+    # silently ignored by the megatron parser.
     from slime.backends.megatron_utils.arguments import megatron_parse_args
     from slime.backends.megatron_utils.arguments import validate_args as megatron_validate_args
 
@@ -1496,9 +1445,9 @@ def parse_args(add_custom_arguments=None):
     for key, value in vars(pre).items():
         setattr(args, key, value)
 
-    # Merge sglang args into the main namespace
-    if sglang_ns is not None:
-        for key, value in vars(sglang_ns).items():
+    # Merge vllm args into the main namespace
+    if vllm_ns is not None:
+        for key, value in vars(vllm_ns).items():
             setattr(args, key, value)
 
     slime_validate_args(args)
@@ -1507,7 +1456,7 @@ def parse_args(add_custom_arguments=None):
         megatron_validate_args(args)
 
     if not args.debug_train_only:
-        sglang_validate_args(args)
+        vllm_validate_args(args)
 
     return args
 
@@ -1638,13 +1587,6 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
 
 def slime_validate_args(args):
     args.eval_datasets = _resolve_eval_datasets(args)
-
-    if args.use_slime_router:
-        logger.warning(
-            "--use-slime-router is deprecated and ignored. slime now always uses sglang_router "
-            "built from https://github.com/zhuzilin/sgl-router."
-        )
-        args.use_slime_router = False
 
     if args.kl_coef != 0 or args.use_kl_loss:
         if not os.path.exists(args.ref_load):
@@ -1815,12 +1757,6 @@ def slime_validate_args(args):
 
     if args.eval_function_path is None:
         args.eval_function_path = args.rollout_function_path
-    
-    if args.rollout_backend == "vllm":
-        if args.rollout_function_path == "slime.rollout.sglang_rollout.generate_rollout":
-            args.rollout_function_path = "slime.rollout.vllm_rollout.generate_rollout"
-        if args.eval_function_path == "slime.rollout.sglang_rollout.generate_rollout":
-            args.eval_function_path = "slime.rollout.vllm_rollout.generate_rollout"
 
     if args.num_steps_per_rollout is not None:
         global_batch_size = args.rollout_batch_size * args.n_samples_per_prompt // args.num_steps_per_rollout
@@ -1871,6 +1807,16 @@ def slime_validate_args(args):
             if hasattr(args, k):
                 logger.info(f"Warning: Argument {k} is already set to {getattr(args, k)}, will override with {v}.")
             setattr(args, k, v)
+            # vllm launch_server_process distinguishes "user-supplied value" from
+            # "argparse default" via ``args._vllm_user_provided``. YAML overrides
+            # bypass argparse, so we register them explicitly here — without this,
+            # YAML values that happen to equal the vllm-side default (e.g.
+            # ``vllm_gpu_memory_utilization: 0.92``) would be treated as "default"
+            # and silently replaced by vime's preferred value.
+            if isinstance(k, str) and k.startswith("vllm_"):
+                if not hasattr(args, "_vllm_user_provided"):
+                    args._vllm_user_provided = set()
+                args._vllm_user_provided.add(k)
 
     if args.eval_max_context_len is None:
         logger.info(

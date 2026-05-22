@@ -13,7 +13,7 @@ qwen_vl_utils # for VLM
 ray[default]
 ring_flash_attn
 sglang-router>=0.2.3
-vllm-router>=0.1.14
 tensorboard
 transformers
+vllm-router>=0.1.14
 wandb
