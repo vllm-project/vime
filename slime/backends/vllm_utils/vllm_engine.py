@@ -288,9 +288,13 @@ def launch_server_process(
     ]
     if getattr(args, "fp16", False):
         cmd += ["--dtype", "float16"]
-    # offload_rollout (vime top-level flag) implies sleep mode.
-    if getattr(args, "offload_rollout", False) and not getattr(args, "vllm_enable_sleep_mode", False):
+    # Colocated IPC weight sync releases model weights via POST /sleep?level=0.
+    # offload_rollout also needs sleep/wake for memory handoff.
+    if (getattr(args, "offload_rollout", False) or getattr(args, "colocate", False)) and not getattr(
+        args, "vllm_enable_sleep_mode", False
+    ):
         cmd += ["--enable-sleep-mode"]
+        args.vllm_enable_sleep_mode = True
     # rollout_max_context_len (vime top-level flag) maps to --max-model-len when set,
     # unless the user already passed --vllm-max-model-len explicitly.
     if args.rollout_max_context_len is not None and getattr(args, "vllm_max_model_len", None) is None:
@@ -330,7 +334,7 @@ def launch_server_process(
 
     # 2) weight_transfer_config: vllm default None disables /init_weight_transfer_engine,
     #    so vime's weight sync would fail.
-    #    - Colocated mode: use IPC backend. UpdateVLLMWeightFromTensor calls
+    #    - Colocated mode: use IPC backend. UpdateWeightFromTensor calls
     #      IPCWeightTransferEngine.trainer_send_weights and passes an empty init_info
     #      dict, which is the correct signature for the IPC backend.
     #    - Non-colocated mode: use NCCL backend. Weight sync goes through
@@ -353,7 +357,7 @@ def launch_server_process(
     if getattr(args, "colocate", False) and "--worker-extension-cls" not in cmd:
         cmd += [
             "--worker-extension-cls",
-            "slime.backends.vllm_utils.vllm_worker_extension.vLLMColocateWorkerExtension",
+            "slime.backends.megatron_utils.update_weight.update_weight_from_tensor.vLLMColocateWorkerExtension",
         ]
 
     # Auto-forward all other args.vllm_* that differ from their vllm-side default.
@@ -622,7 +626,7 @@ class VLLMEngine(RayActor):
         path. The previous fallback restarted vllm from ``self.model_path``, which is
         the original HF checkpoint (not the just-trained weights), so silently using
         it would let training continue with stale rollout weights. Failing fast keeps
-        the bug visible until ``UpdateVLLMWeightFromTensor`` (vllm-native IPC) is
+        the bug visible until ``UpdateWeightFromTensor`` (vllm-native IPC) is
         ported — see PR #12 review.
         """
         del load_format
