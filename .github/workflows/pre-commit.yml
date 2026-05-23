@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
   run-pre-commit:
@@ -23,19 +24,45 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.10'
-          cache: 'pip'
 
-      - name: Install pre-commit
-        run: pip install --upgrade pip pre-commit
-
-      - name: Cache pre-commit environments
-        uses: actions/cache@v5
+      - name: Run pre-commit
+        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
         with:
-          path: ~/.cache/pre-commit
-          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
-          restore-keys: |
-            pre-commit-${{ runner.os }}-
+          extra_args: --all-files --show-diff-on-failure --color=always
 
-      - name: Run pre-commit on all files
-        run: pre-commit run --all-files --show-diff-on-failure --color=always
-
+      - name: Comment fix instructions on failure
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            // Marker so this comment is idempotent across re-runs on the same PR.
+            const marker = '<!-- pre-commit-failure-comment -->';
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+            if (comments.some(c => c.body && c.body.includes(marker))) {
+              core.info('pre-commit failure comment already exists on this PR; skipping.');
+              return;
+            }
+            const body = [
+              marker,
+              `Hi @${context.payload.pull_request.user.login}, the pre-commit checks have failed. Please run:`,
+              '',
+              '```bash',
+              'uv pip install pre-commit',
+              'pre-commit install',
+              'pre-commit run --all-files',
+              '```',
+              '',
+              'Then commit the changes and push to your branch. After installing the hook with `pre-commit install`,',
+              '`pre-commit` will run automatically on changed files before each commit.',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body,
+            });
