@@ -98,6 +98,10 @@ RUN pip install "numpy<2"
 RUN pip install --no-deps "sglang==${SGLANG_VERSION}" sglang-router==0.3.2 && \
     pip install IPython
 
+# Pin vllm-router explicitly so the vllm rollout routing layer is a visible build step
+# (also in requirements.txt; pulling it here makes the layer cache-able and fail-fast).
+RUN pip install "vllm-router>=0.1.14"
+
 RUN rm -rf /root/.cache/pip
 
 # ====================================== Patches ============================================
@@ -125,6 +129,22 @@ RUN git clone https://github.com/vllm-project/vime.git /root/slime && \
 
 RUN cd /root/slime/slime/backends/megatron_utils/kernels/int4_qat && \
     pip install . --no-build-isolation
+
+# ====================================== Build-time smoke ============================================
+
+# Fail-fast import smoke + flashinfer version pin check. Catches ABI / version
+# regressions at build time instead of first GPU run.
+RUN python3 -c "\
+import vllm, sglang, slime, flashinfer; \
+from slime.backends.vllm_utils.vllm_engine import VLLMEngine; \
+print('vllm', vllm.__version__); \
+print('sglang', sglang.__version__); \
+print('flashinfer', flashinfer.__version__); \
+print('VLLMEngine import ok')"
+
+# Megatron stream serialization. vllm rollout + megatron actor co-located on
+# the same GPU need this; default value causes stream-level contention.
+ENV CUDA_DEVICE_MAX_CONNECTIONS=1
 
 # Reset ENTRYPOINT inherited from vllm/vllm-openai base (`vllm serve`).
 ENTRYPOINT []
