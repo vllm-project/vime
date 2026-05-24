@@ -202,6 +202,8 @@ VLLM_ARGS=(
 )
 ```
 
+rollout 并发较高时，还可以通过 `--vllm-` 前缀调节 vLLM scheduler，例如 `--vllm-max-num-seqs`、`--vllm-max-num-batched-tokens`；调试或规避 CUDA graph 相关限制时可加 `--vllm-enforce-eager`。
+
 ⚠️  slime 会用 vLLM router 来调度多个 vLLM server。训推一体（`--colocate`）时，训练与推理权重经 CUDA IPC 同步；训推分离时，训练侧经 NCCL 与 vLLM engine 同步权重。
 
 ### dynamic sampling
@@ -284,8 +286,12 @@ ray job submit ... \
 VLLM_ARGS=(
    --rollout-num-gpus-per-engine 2
    --vllm-gpu-memory-utilization 0.9
+   --vllm-max-num-seqs 256
+   --vllm-max-num-batched-tokens 8192
 )
 ```
+
+如需调试或规避 CUDA graph 相关限制，可额外加上 `--vllm-enforce-eager`。
 
 ⚠️  在训推一体的训练时，megatron 始终会占据一些显存，需要通过 `--vllm-gpu-memory-utilization` 来降低 vLLM 占据的显存比例，并配合 `--train-memory-margin-bytes` 为训练侧预留空间。
 

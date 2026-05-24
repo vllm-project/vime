@@ -202,6 +202,8 @@ VLLM_ARGS=(
 )
 ```
 
+When rollout concurrency is high, tune the vLLM scheduler via the `--vllm-` prefix—for example, `--vllm-max-num-seqs` and `--vllm-max-num-batched-tokens`. Add `--vllm-enforce-eager` for debugging or to work around CUDA graph limits.
+
 ⚠️  slime uses the vLLM router to schedule multiple vLLM servers. With co-located training and inference (`--colocate`), weights are synchronized via CUDA IPC; with decoupled training and inference, the trainer synchronizes weights with vLLM engines over NCCL.
 
 ### Dynamic Sampling
@@ -284,8 +286,12 @@ For decoupled training and inference, `VLLM_ARGS` only needs inference-backend s
 VLLM_ARGS=(
    --rollout-num-gpus-per-engine 2
    --vllm-gpu-memory-utilization 0.9
+   --vllm-max-num-seqs 256
+   --vllm-max-num-batched-tokens 8192
 )
 ```
+
+Add `--vllm-enforce-eager` when debugging or to work around CUDA graph limits.
 
 ⚠️  When using co-located training and inference, Megatron will always occupy some GPU memory. Reduce vLLM's memory footprint with `--vllm-gpu-memory-utilization`, and reserve headroom for training with `--train-memory-margin-bytes`.
 
