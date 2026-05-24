@@ -72,7 +72,7 @@ MODEL_ARGS += ( --rotary-base 10000 )
 
 ```bash
 CKPT_ARGS=(
-   # HF checkpoint required by sglang; we also read the tokenizer from here
+   # HF checkpoint required by vLLM; we also read the tokenizer from here
    --hf-checkpoint /root/Qwen3-4B
    # Checkpoint for the reference model
    --ref-load /root/Qwen3-4B_torch_dist
@@ -191,18 +191,20 @@ OPTIMIZER_ARGS=(
 )
 ```
 
-#### SGLANG\_ARGS
+#### VLLM\_ARGS
 
-These are the parameters required by sglang. Here, `--rollout-num-gpus-per-engine` basically corresponds to sglang's `tp_size`. Other sglang parameters are passed to slime by adding the `--sglang-` prefix.
+Parameters for vLLM inference. vime uses vLLM as the rollout backend by default (`rollout.py` launches `VLLMEngine`; the default rollout function is `slime.rollout.vllm_rollout.generate_rollout`), so no extra backend flag is needed. `--rollout-num-gpus-per-engine` corresponds to each vLLM engine's `tensor_parallel_size`. Other vLLM parameters are passed to slime with a `--vllm-` prefix (for example, `--vllm-max-model-len`).
 
 ```bash
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 2
-   --sglang-mem-fraction-static 0.7
+   --vllm-gpu-memory-utilization 0.7
 )
 ```
 
-⚠️ slime uses `sgl-router` to schedule multiple sglang servers. `dp_size` is not supported when DP attention is disabled.
+When rollout concurrency is high, tune the vLLM scheduler via the `--vllm-` prefix—for example, `--vllm-max-num-seqs` and `--vllm-max-num-batched-tokens`. Add `--vllm-enforce-eager` for debugging or to work around CUDA graph limits.
+
+⚠️  slime uses the vLLM router to schedule multiple vLLM servers. With co-located training and inference (`--colocate`), weights are synchronized via CUDA IPC; with decoupled training and inference, the trainer synchronizes weights with vLLM engines over NCCL.
 
 ### Dynamic Sampling
 
@@ -276,21 +278,22 @@ ray job submit ... \
    ...
 ```
 
-In this case, 2 GPUs will be allocated for training, and 6 GPUs will be allocated for inference.
+In this case, 2 GPUs will be allocated for training, and 6 GPUs will be allocated for inference. Like `--actor-num-gpus-per-node`, `--rollout-num-gpus` is a **Ray resource argument** passed to `train.py`: the framework uses it to build the placement group and assign the first bundles to training actors and the remaining bundles to rollout engines (see `slime/ray/placement_group.py`). **Under co-located mode (`--colocate`), this argument is ignored** and is set automatically to `actor_num_gpus_per_node * actor_num_nodes`. Do not put `--rollout-num-gpus` in `VLLM_ARGS`.
 
-⚠️  If the concurrency on each sglang server is too high, it may exceed sglang's default CUDA graph concurrency limit (the default maximum is 160), which will affect inference speed. You can adjust this in the following two ways:
+For decoupled training and inference, `VLLM_ARGS` only needs inference-backend settings, for example:
 
-1.  Use `--sglang-server-concurrency` to limit the maximum number of concurrent requests sent to a single sglang server. For example:
+```bash
+VLLM_ARGS=(
+   --rollout-num-gpus-per-engine 2
+   --vllm-gpu-memory-utilization 0.9
+   --vllm-max-num-seqs 256
+   --vllm-max-num-batched-tokens 8192
+)
+```
 
-    ```bash
-    --sglang-server-concurrency 160
-    ```
+Add `--vllm-enforce-eager` when debugging or to work around CUDA graph limits.
 
-2.  Use `--sglang-cuda-graph-bs` (which corresponds to sglang's native `--cuda-graph-bs` argument) to increase the number of CUDA graphs initialized by sglang. For example:
-
-    ```bash
-    --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 256)
-    ```
+⚠️  When using co-located training and inference, Megatron will always occupy some GPU memory. Reduce vLLM's memory footprint with `--vllm-gpu-memory-utilization`, and reserve headroom for training with `--train-memory-margin-bytes`.
 
 ### Asynchronous Training
 

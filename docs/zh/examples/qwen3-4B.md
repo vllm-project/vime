@@ -72,7 +72,7 @@ MODEL_ARGS += ( --rotary-base 10000 )
 
 ```bash
 CKPT_ARGS=(
-   # sglang 需要的 hf ckpt，我们也会从这里读 tokenizer
+   # vLLM 需要的 hf ckpt，我们也会从这里读 tokenizer
    --hf-checkpoint /root/Qwen3-4B
    # reference model 的 ckp
    --ref-load /root/Qwen3-4B_torch_dist
@@ -191,18 +191,20 @@ OPTIMIZER_ARGS=(
 )
 ```
 
-#### SGLANG_ARGS
+#### VLLM_ARGS
 
-sglang 所需的参数，这里 `--rollout-num-gpus-per-engine` 基本对应 sglang 的 `tp_size`，除此之外的 sglang 参数均通过添加 `--sglang-` 的前缀来传给 slime。
+vLLM 推理所需的参数。vime 默认使用 vLLM 作为 rollout 后端（`rollout.py` 启动 `VLLMEngine`，默认 rollout 函数为 `slime.rollout.vllm_rollout.generate_rollout`），无需额外指定 backend。`--rollout-num-gpus-per-engine` 对应每个 vLLM engine 的 `tensor_parallel_size`；除此之外的 vLLM 参数均通过添加 `--vllm-` 前缀传给 slime（例如 `--vllm-max-model-len`）。
 
 ```bash
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 2
-   --sglang-mem-fraction-static 0.7
+   --vllm-gpu-memory-utilization 0.7
 )
 ```
 
-⚠️  slime 会用 sgl-router 来调度多个 sglang server，在不开启 dp attention 的情况下不支持 `dp_size`。
+rollout 并发较高时，还可以通过 `--vllm-` 前缀调节 vLLM scheduler，例如 `--vllm-max-num-seqs`、`--vllm-max-num-batched-tokens`；调试或规避 CUDA graph 相关限制时可加 `--vllm-enforce-eager`。
+
+⚠️  slime 会用 vLLM router 来调度多个 vLLM server。训推一体（`--colocate`）时，训练与推理权重经 CUDA IPC 同步；训推分离时，训练侧经 NCCL 与 vLLM engine 同步权重。
 
 ### dynamic sampling
 
@@ -276,26 +278,25 @@ ray job submit ... \
    ...
 ```
 
-此时，就会分配 2 张卡给训练，6 张卡给推理。
+此时，就会分配 2 张卡给训练，6 张卡给推理。`--rollout-num-gpus` 与 `--actor-num-gpus-per-node` 一样，是传给 `train.py` 的 **Ray 资源参数**：框架据此创建 placement group，并把前若干 bundle 分给训练 actor、后续 bundle 分给 rollout engine（见 `slime/ray/placement_group.py`）。**共卡模式（`--colocate`）下该参数会被忽略**，并自动设为 `actor_num_gpus_per_node * actor_num_nodes`。请勿把 `--rollout-num-gpus` 写在 `VLLM_ARGS` 中。
 
-⚠️  在进行训推分离的时候，每个 sglang server 上的并发度太大，超过了 sglang 默认的 cuda graph 的并发度（默认最大 160），影响推理速度。可以用以下 2 种方式进行调整：
+训推分离时，`VLLM_ARGS` 仅需配置推理后端相关参数，例如：
 
-1. 通过 `--sglang-server-concurrency` 限制发给一个 sglang server 的最大并发量，例如：
+```bash
+VLLM_ARGS=(
+   --rollout-num-gpus-per-engine 2
+   --vllm-gpu-memory-utilization 0.9
+   --vllm-max-num-seqs 256
+   --vllm-max-num-batched-tokens 8192
+)
+```
 
-   ```bash
-   --sglang-server-concurrency 160
-    ```
+如需调试或规避 CUDA graph 相关限制，可额外加上 `--vllm-enforce-eager`。
 
-2. 使用 `--sglang-cuda-graph-bs`，即 sglang 原生的 `--cuda-graph-bs`, 增大 sglang 初始化的 cuda graph 数量，例如：
-
-   ```bash
-   --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 256)
-   ```
+⚠️  在训推一体的训练时，megatron 始终会占据一些显存，需要通过 `--vllm-gpu-memory-utilization` 来降低 vLLM 占据的显存比例，并配合 `--train-memory-margin-bytes` 为训练侧预留空间。
 
 ### 异步训练
 
 当进行训推分离时，你会发现训练和推理的 GPU 总是相互等待着，为了避免这种资源空闲，我们可以开启异步训练。开启的方式即为将启动脚本中的 `train.py` 改变为 `train_async.py`。这样 slime 就会在进行当前 rollout 的训练时进行下一个 rollout 的数据生成了。
 
 `train.py` 和 `train_async.py` 的差别只在于 train loop 的同步逻辑，我们通过 ray 的异步（`.remote`, `ray.get`）实现了这点。
-
-⚠️  在异步训练时，sglang 的性能检测日志与训练日志可能会混到一起，不易区分，可以通过 `--sglang-log-level` 来减少 sglang 的日志。
