@@ -5,6 +5,10 @@ import logging
 import multiprocessing
 import os
 import time
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import numpy as np
 from urllib.parse import quote
 
 import requests
@@ -308,9 +312,6 @@ def launch_server_process(
     # unless the user already passed --vllm-max-model-len explicitly.
     if args.rollout_max_context_len is not None and getattr(args, "vllm_max_model_len", None) is None:
         cmd += ["--max-model-len", str(args.rollout_max_context_len)]
-    if getattr(args, "use_rollout_routing_replay", False):
-        cmd += ["--enable-return-routed-experts"]
-
     # vime-preferred defaults — must be explicitly forwarded because the vllm-side
     # default would otherwise apply (the generic forwarder skips values that equal
     # action.default).
@@ -335,6 +336,22 @@ def launch_server_process(
             return False
         _, action = entry
         return getattr(args, dest, action.default) != action.default
+
+    # MoE routing replay: routed-experts return + sync scheduling (incompatible with
+    # async scheduling on vLLM 0.21.x). Expert parallel is opt-in via
+    # ``--vllm-enable-expert-parallel``.
+    if getattr(args, "use_rollout_routing_replay", False):
+        cmd += ["--enable-return-routed-experts"]
+        if not _user_overrode("vllm_async_scheduling"):
+            cmd += ["--no-async-scheduling"]
+        # Prefix cache hits skip prefill MoE forwards; routed-experts capture then
+        # only covers decode (~gen_len-1 rows) and prompt_routed_experts is missing.
+        if not _user_overrode("vllm_enable_prefix_caching"):
+            cmd += ["--no-enable-prefix-caching"]
+        if getattr(args, "vllm_enable_expert_parallel", False):
+            cmd += ["--enable-expert-parallel"]
+            if not _user_overrode("vllm_expert_placement_strategy"):
+                cmd += ["--expert-placement-strategy", "linear"]
 
     # 1) gpu_memory_utilization: vllm default 0.92 OOMs in colocate training; vime ships 0.55.
     if _user_overrode("vllm_gpu_memory_utilization"):
@@ -403,6 +420,76 @@ def _redact_cmd_for_log(cmd: list[str]) -> str:
         if isinstance(token, str) and token in _REDACTED_FLAGS:
             redact_next = True
     return " ".join(parts)
+
+
+def _routing_rows_from_http_payload(value: Any) -> np.ndarray | None:
+    """Decode vLLM routed-experts HTTP field (base64 npy or nested list)."""
+    import base64
+    import io
+
+    import numpy as np
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return np.load(io.BytesIO(base64.b64decode(value)), allow_pickle=False)
+    if isinstance(value, list):
+        return np.asarray(value, dtype=np.int32)
+    return None
+
+
+def _verify_generate_routed_experts(base_url: str, model: str, timeout_s: float = 120.0) -> None:
+    """Smoke-check MoE routing via ``/v1/completions`` (matches R3 rollout on vLLM 0.21.x)."""
+    import numpy as np
+
+    base = base_url.rstrip("/")
+    payload = {
+        "model": model,
+        "prompt": "Routing replay smoke test.",
+        "max_tokens": 8,
+        "temperature": 0.0,
+        "logprobs": 1,
+        "return_token_ids": True,
+        "stream": False,
+    }
+    response = requests.post(f"{base}/v1/completions", json=payload, timeout=timeout_s)
+    response.raise_for_status()
+    body = response.json()
+    choice = (body.get("choices") or [{}])[0]
+    pre = _routing_rows_from_http_payload(body.get("prompt_routed_experts"))
+    gen = _routing_rows_from_http_payload(choice.get("routed_experts"))
+    if pre is None and gen is None:
+        raise RuntimeError(
+            "vLLM /v1/completions returned no routed-experts fields. "
+            "Ensure the server was started with --enable-return-routed-experts "
+            "(use_rollout_routing_replay)."
+        )
+    if pre is None or gen is None:
+        raise RuntimeError(
+            "vLLM /v1/completions must return both prompt_routed_experts and "
+            "choices[].routed_experts for routing replay. "
+            "Ensure --enable-return-routed-experts and --no-async-scheduling on the vLLM cmdline."
+        )
+
+    out_ids = choice.get("token_ids") or []
+    usage = body.get("usage") or {}
+    num_prompt = int(usage.get("prompt_tokens") or 0)
+    num_gen = int(usage.get("completion_tokens") or len(out_ids))
+    expected_rows = num_prompt + num_gen - 1 if num_prompt > 0 and num_gen > 0 else 0
+
+    merged = np.concatenate([pre, gen], axis=0)
+    n_rows = int(merged.shape[0])
+    if expected_rows > 0 and n_rows not in (expected_rows, expected_rows + 1):
+        raise RuntimeError(
+            f"vLLM routing replay smoke check: merged routing rows {n_rows} != "
+            f"expected {expected_rows} (prompt+gen len(tokens)-1). "
+            "Ensure --enable-return-routed-experts and --no-async-scheduling."
+        )
+    logger.info(
+        "vLLM routing replay smoke check OK (/v1/completions): prompt+gen routing rows=%s " "(expected %s)",
+        n_rows,
+        expected_rows,
+    )
 
 
 def _wait_server_healthy(base_url: str, process: multiprocessing.Process | None, timeout_s: float = 300.0) -> None:
@@ -559,7 +646,10 @@ class VLLMEngine(RayActor):
             visible_devices=visible_devices,
             model_path=self.model_path,
         )
-        _wait_server_healthy(self._http_base(), process=self.process)
+        base = self._http_base()
+        _wait_server_healthy(base, process=self.process)
+        if getattr(self.args, "use_rollout_routing_replay", False):
+            _verify_generate_routed_experts(base, self.model_path)
 
     def _post_json(self, endpoint: str, payload: dict, timeout: float) -> requests.Response:
         url = f"{self._http_base()}/{endpoint.lstrip('/')}"

@@ -161,40 +161,101 @@ def _vllm_meta_from_generate_choice(args: Namespace, choice: dict, usage: dict |
 
 
 def _decode_vllm_routed_experts(value: str) -> np.ndarray:
+    """Decode vLLM routed-experts field when returned as base64 ``.npy`` (optional)."""
     raw = base64.b64decode(value.encode("ascii"), validate=True)
     return np.load(io.BytesIO(raw), allow_pickle=False)
 
 
-def _apply_vllm_routed_experts(
-    args: Namespace,
-    sample: Sample,
-    _output: dict,
-    choice: dict,
-) -> None:
-    """Populate ``sample.rollout_routed_experts`` from vLLM ``choices[].routed_experts`` when enabled.
+def _routing_array_from_payload(value: Any) -> np.ndarray | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return _decode_vllm_routed_experts(value)
+    if isinstance(value, list):
+        return np.asarray(value, dtype=np.int32)
+    logger.warning("routed_experts payload must be nested list or base64 npy from vLLM HTTP API")
+    return None
 
-    vLLM ``/inference/v1/generate`` returns routed experts as a base64 encoded
-    ``.npy`` payload on each response choice when the server is launched with
-    ``--enable-return-routed-experts``.
+
+def _merge_generate_routed_experts(
+    output: dict,
+    choice: dict,
+    gen_token_count: int | None,
+    prompt_token_count: int | None = None,
+) -> np.ndarray | None:
+    """Merge vLLM generate routing (same semantics as ``/v1/completions``).
+
+    SGLang returns one buffer reshaped to ``(len(tokens) - 1, num_layers, top_k)``.
     """
-    if not getattr(args, "use_rollout_routing_replay", False):
-        return
+    parts: list[np.ndarray] = []
+    prompt_re = output.get("prompt_routed_experts")
+    if prompt_re is not None:
+        prompt_arr = _routing_array_from_payload(prompt_re)
+        if prompt_arr is not None and prompt_arr.ndim == 3:
+            parts.append(prompt_arr)
+        elif prompt_arr is not None:
+            logger.warning(f"Unexpected prompt_routed_experts ndim={prompt_arr.ndim}")
+
     gen_re = choice.get("routed_experts")
-    if gen_re is None:
-        return
-    arr = _decode_vllm_routed_experts(gen_re)
-    n_tok = len(sample.tokens)
-    expected_rows = max(0, n_tok - 1)
+    if gen_re is not None:
+        gen_arr = _routing_array_from_payload(gen_re)
+        if gen_arr is not None and gen_arr.ndim == 3:
+            if (
+                prompt_re is None
+                and prompt_token_count is not None
+                and prompt_token_count > 0
+                and gen_token_count is not None
+                and gen_token_count > 0
+                and (
+                    gen_arr.shape[0] > gen_token_count or gen_arr.shape[0] >= prompt_token_count + gen_token_count - 1
+                )
+            ):
+                prompt_arr = gen_arr[:prompt_token_count]
+                gen_arr = gen_arr[prompt_token_count:]
+                if prompt_arr.size > 0:
+                    parts.append(prompt_arr)
+            if gen_token_count is not None and gen_token_count > 0 and gen_arr.shape[0] > gen_token_count:
+                gen_arr = gen_arr[:gen_token_count]
+            if gen_arr.size > 0:
+                parts.append(gen_arr)
+        elif gen_arr is not None:
+            logger.warning(f"Unexpected routed_experts ndim={gen_arr.ndim}")
+
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    return np.concatenate(parts, axis=0)
+
+
+def _align_routed_experts_rows(arr: np.ndarray, expected_rows: int) -> np.ndarray | None:
+    """Resize merged routing to ``len(tokens) - 1`` rows (SGLang / Megatron layout)."""
     if arr.ndim != 3:
         logger.warning(f"Unexpected routed_experts ndim={arr.ndim} shape={arr.shape}")
-        return
-    if arr.shape[0] == n_tok:
-        arr = arr[:-1]
-    elif arr.shape[0] != expected_rows:
+        return None
+    n_rows = arr.shape[0]
+    if n_rows == expected_rows:
+        return arr
+    if n_rows == expected_rows + 1:
+        return arr[:-1]
+    if n_rows > expected_rows + 1:
         logger.warning(
-            f"routed_experts row count {arr.shape[0]} not in {{{expected_rows}, {n_tok}}}; "
-            "skipping rollout_routed_experts assign",
+            f"routed_experts row count {n_rows} > expected {expected_rows}; trimming to {expected_rows}",
         )
+        return arr[:expected_rows]
+    logger.warning(
+        f"routed_experts row count {n_rows} < expected {expected_rows}; "
+        "missing prompt_routed_experts on generate response?",
+    )
+    return None
+
+
+def _assign_rollout_routed_experts(args: Namespace, sample: Sample, arr: np.ndarray | None) -> None:
+    if arr is None:
+        return
+    expected_rows = max(0, len(sample.tokens) - 1)
+    arr = _align_routed_experts_rows(arr, expected_rows)
+    if arr is None:
         return
     nl = getattr(args, "num_layers", None)
     mtk = getattr(args, "moe_router_topk", None)
@@ -203,7 +264,37 @@ def _apply_vllm_routed_experts(
             f"routed_experts shape {arr.shape} does not match args (num_layers={nl}, moe_router_topk={mtk})",
         )
         return
-    sample.rollout_routed_experts = arr
+    sample.rollout_routed_experts = np.ascontiguousarray(arr.astype(np.int32, copy=True))
+
+
+def _apply_vllm_routed_experts(
+    args: Namespace,
+    sample: Sample,
+    output: dict,
+    choice: dict,
+    gen_token_count: int | None = None,
+    prompt_token_count: int | None = None,
+) -> None:
+    """Populate ``sample.rollout_routed_experts`` from ``/inference/v1/generate`` when R3 is enabled."""
+    if not getattr(args, "use_rollout_routing_replay", False):
+        return
+    arr = _merge_generate_routed_experts(output, choice, gen_token_count, prompt_token_count=prompt_token_count)
+    _assign_rollout_routed_experts(args, sample, arr)
+    if sample.rollout_routed_experts is not None:
+        return
+    if sample.status == Sample.Status.ABORTED and sample.response_length == 0:
+        return
+    pre = output.get("prompt_routed_experts")
+    gen = choice.get("routed_experts")
+    raise RuntimeError(
+        "vLLM routing replay: failed to set sample.rollout_routed_experts. "
+        f"prompt_routed_experts in response={pre is not None}, "
+        f"choices[0].routed_experts={gen is not None}, "
+        f"tokens={len(sample.tokens)}, gen_tokens={gen_token_count}. "
+        "Check vLLM was launched with --enable-return-routed-experts, "
+        "--no-enable-prefix-caching, and --enforce-eager. "
+        "Rollout uses /v1/completions for R3 (not /inference/v1/generate)."
+    )
 
 
 def _inference_generate_tokens_and_logprobs(choice: dict[str, Any]) -> tuple[list[int], list[float]]:
@@ -322,6 +413,65 @@ class GenerateState(metaclass=SingletonMeta):
         self.remaining_batch_size += len(samples)
 
 
+def _use_vllm_completions_for_r3(args: Namespace, sample: Sample, *, has_images: bool) -> bool:
+    """Use ``/v1/completions`` for MoE routing replay (v0.21.x returns prompt+gen routing there).
+
+    ``/inference/v1/generate`` often exposes only decode rows on ``choices[].routed_experts``.
+    Partial continuation must keep the token-id generate API.
+    """
+    if not getattr(args, "use_rollout_routing_replay", False):
+        return False
+    if has_images:
+        return False
+    if len(sample.response) > 0:
+        return False
+    return True
+
+
+def _build_completion_request_body(
+    model: str,
+    prompt: str,
+    sampling_params: dict[str, Any],
+) -> dict[str, Any]:
+    """Map rollout ``sampling_params`` to vLLM ``/v1/completions`` request body."""
+    body: dict[str, Any] = {
+        "model": model,
+        "prompt": prompt,
+        "max_tokens": sampling_params["max_new_tokens"],
+        "temperature": sampling_params["temperature"],
+        "top_p": sampling_params["top_p"],
+        "logprobs": 1,
+        "return_token_ids": True,
+        "stream": False,
+    }
+    tk = sampling_params.get("top_k")
+    if tk is not None and tk > 0:
+        body["top_k"] = tk
+    if sampling_params.get("stop"):
+        body["stop"] = sampling_params["stop"]
+    if sampling_params.get("stop_token_ids"):
+        body["stop_token_ids"] = sampling_params["stop_token_ids"]
+    if sampling_params.get("seed") is not None:
+        body["seed"] = sampling_params["seed"]
+    return body
+
+
+def _completion_tokens_and_logprobs(choice: dict[str, Any]) -> tuple[list[int], list[float]]:
+    """Parse ``token_ids`` and ``logprobs`` from a vLLM ``/v1/completions`` choice."""
+    tids_raw = choice.get("token_ids")
+    if not isinstance(tids_raw, list) or not tids_raw:
+        return [], []
+    tids = [int(x) for x in tids_raw]
+    lp = choice.get("logprobs")
+    if not isinstance(lp, dict):
+        return tids, [0.0] * len(tids)
+    token_logprobs = lp.get("token_logprobs")
+    if isinstance(token_logprobs, list) and len(token_logprobs) >= len(tids):
+        lps = [float(x) if x is not None else 0.0 for x in token_logprobs[-len(tids) :]]
+        return tids, lps
+    return tids, [0.0] * len(tids)
+
+
 def _build_inference_sampling_params(sampling_params: dict[str, Any]) -> dict[str, Any]:
     """Map rollout ``sampling_params`` to vLLM ``/inference/v1/generate`` ``sampling_params`` body."""
     sp: dict[str, Any] = {
@@ -421,6 +571,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         if getattr(args, "router_policy", None) == "consistent_hashing":
             headers = {"X-SMG-Routing-Key": sample.session_id}
 
+    used_completions_r3 = False
     if images:
         # Disaggregated MM flow: render (preprocess) then tokens-only generate — see vLLM docs
         # ``examples/online_serving/disaggregated_serving`` (``/v1/chat/completions/render`` +
@@ -441,6 +592,18 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         gen_url = f"{base}/inference/v1/generate"
         with trace_span(sample, "vllm_mm_generate", attrs={"max_tokens": params["max_new_tokens"]}):
             output = await post(gen_url, generate_body, headers=headers)
+        request_prompt_len = len(generate_body.get("token_ids") or [])
+    elif _use_vllm_completions_for_r3(args, sample, has_images=False):
+        used_completions_r3 = True
+        completion_url = f"{base}/v1/completions"
+        completion_body = _build_completion_request_body(
+            args.hf_checkpoint,
+            sample.prompt,
+            params,
+        )
+        with trace_span(sample, "vllm_completion", attrs={"max_tokens": params["max_new_tokens"]}):
+            output = await post(completion_url, completion_body, headers=headers)
+        request_prompt_len = len(prompt_ids)
     else:
         url = f"{base}/inference/v1/generate"
         # vLLM disaggregated ``/inference/v1/generate`` is token-only. On partial continuation, send the
@@ -454,6 +617,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
             "token_ids": token_ids,
             "sampling_params": inference_sampling_params,
         }
+        request_prompt_len = len(token_ids)
         with trace_span(sample, "vllm_inference_generate", attrs={"max_new_tokens": params["max_new_tokens"]}):
             output = await post(url, payload, headers=headers)
 
@@ -461,13 +625,19 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     skip_sp = params.get("skip_special_tokens")
     skip_decode = True if skip_sp is None else bool(skip_sp)
     out_ids = choice.get("token_ids") or []
-    text = (
-        state.tokenizer.decode(out_ids, skip_special_tokens=skip_decode)
-        if isinstance(out_ids, list) and out_ids
-        else ""
-    )
+    if used_completions_r3 and choice.get("text") is not None:
+        text = str(choice.get("text") or "")
+    else:
+        text = (
+            state.tokenizer.decode(out_ids, skip_special_tokens=skip_decode)
+            if isinstance(out_ids, list) and out_ids
+            else ""
+        )
     meta = _vllm_meta_from_generate_choice(args, choice, output.get("usage"))
-    new_response_tokens, new_response_log_probs = _inference_generate_tokens_and_logprobs(choice)
+    if used_completions_r3:
+        new_response_tokens, new_response_log_probs = _completion_tokens_and_logprobs(choice)
+    else:
+        new_response_tokens, new_response_log_probs = _inference_generate_tokens_and_logprobs(choice)
     new_response_tokens, new_response_log_probs = _align_engine_tokens_and_logprobs(
         new_response_tokens, new_response_log_probs
     )
@@ -491,7 +661,14 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         sample.rollout_log_probs = []
     sample.rollout_log_probs += new_response_log_probs
 
-    _apply_vllm_routed_experts(args, sample, output, choice)
+    _apply_vllm_routed_experts(
+        args,
+        sample,
+        output,
+        choice,
+        gen_token_count=len(new_response_tokens) if new_response_tokens else None,
+        prompt_token_count=request_prompt_len,
+    )
 
     sample.update_from_meta_info(args, meta)
     return sample

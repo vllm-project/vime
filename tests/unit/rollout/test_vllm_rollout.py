@@ -226,30 +226,56 @@ def test_decode_vllm_routed_experts_roundtrip():
     np.testing.assert_array_equal(decoded, arr)
 
 
-@pytest.mark.unit
-def test_apply_vllm_routed_experts_assigns_when_shape_matches():
-    arr = np.zeros((3, 2, 1), dtype=np.int32)
+def _encode_routed_npy(arr: np.ndarray) -> str:
     buf = io.BytesIO()
     np.save(buf, arr)
-    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
-
-    sample = Sample(tokens=[1, 2, 3, 4])
-    args = Namespace(use_rollout_routing_replay=True, num_layers=2, moe_router_topk=1)
-    mod._apply_vllm_routed_experts(args, sample, {}, {"routed_experts": encoded})
-    np.testing.assert_array_equal(sample.rollout_routed_experts, arr)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 @pytest.mark.unit
-def test_apply_vllm_routed_experts_strips_prompt_row_when_n_tok_rows():
-    arr = np.zeros((4, 2, 1), dtype=np.int32)
-    buf = io.BytesIO()
-    np.save(buf, arr)
-    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+def test_merge_generate_routed_experts_trims_extra_gen_rows():
+    prompt = np.ones((2, 2, 1), dtype=np.int32)
+    gen = np.full((4, 2, 1), 2, dtype=np.int32)
+    merged = mod._merge_generate_routed_experts(
+        {"prompt_routed_experts": _encode_routed_npy(prompt)},
+        {"routed_experts": _encode_routed_npy(gen)},
+        gen_token_count=2,
+    )
+    np.testing.assert_array_equal(merged, np.concatenate([prompt, gen[:2]], axis=0))
 
-    sample = Sample(tokens=[1, 2, 3, 4])
+
+@pytest.mark.unit
+def test_apply_vllm_routed_experts_merged_matches_sglang_layout():
+    prompt = np.zeros((2, 2, 1), dtype=np.int32)
+    gen = np.zeros((2, 2, 1), dtype=np.int32)
+    sample = Sample(tokens=[1, 2, 50, 51])
     args = Namespace(use_rollout_routing_replay=True, num_layers=2, moe_router_topk=1)
-    mod._apply_vllm_routed_experts(args, sample, {}, {"routed_experts": encoded})
-    np.testing.assert_array_equal(sample.rollout_routed_experts, arr[:-1])
+    mod._apply_vllm_routed_experts(
+        args,
+        sample,
+        {"prompt_routed_experts": _encode_routed_npy(prompt)},
+        {"routed_experts": _encode_routed_npy(gen)},
+        gen_token_count=2,
+    )
+    np.testing.assert_array_equal(sample.rollout_routed_experts, np.zeros((3, 2, 1), dtype=np.int32))
+
+
+@pytest.mark.unit
+def test_apply_vllm_routed_experts_merges_prompt_and_gen_nested_lists():
+    prompt_part = np.ones((2, 2, 1), dtype=np.int32)
+    gen_part = np.full((2, 2, 1), 2, dtype=np.int32)
+    expected = np.concatenate([prompt_part, gen_part], axis=0)
+
+    sample = Sample(tokens=[10, 20, 30, 40, 50])
+    args = Namespace(use_rollout_routing_replay=True, num_layers=2, moe_router_topk=1)
+    mod._apply_vllm_routed_experts(
+        args,
+        sample,
+        {"prompt_routed_experts": prompt_part.tolist()},
+        {"routed_experts": gen_part.tolist()},
+        gen_token_count=2,
+    )
+    np.testing.assert_array_equal(sample.rollout_routed_experts, expected)
 
 
 @pytest.mark.unit
@@ -431,8 +457,8 @@ def test_apply_vllm_routed_experts_disabled_or_missing():
     sample = Sample(tokens=[1, 2, 3])
     mod._apply_vllm_routed_experts(Namespace(use_rollout_routing_replay=False), sample, {}, {})
     assert sample.rollout_routed_experts is None
-    mod._apply_vllm_routed_experts(Namespace(use_rollout_routing_replay=True), sample, {}, {})
-    assert sample.rollout_routed_experts is None
+    with pytest.raises(RuntimeError, match="routing replay"):
+        mod._apply_vllm_routed_experts(Namespace(use_rollout_routing_replay=True), sample, {}, {})
 
 
 @pytest.mark.unit
@@ -440,17 +466,27 @@ def test_apply_vllm_routed_experts_skips_bad_shape():
     arr = np.zeros((2, 2), dtype=np.int32)
     sample = Sample(tokens=[1, 2, 3])
     args = Namespace(use_rollout_routing_replay=True)
-    mod._apply_vllm_routed_experts(args, sample, {}, {"routed_experts": _encode_routed(arr)})
-    assert sample.rollout_routed_experts is None
+    with pytest.raises(RuntimeError, match="routing replay"):
+        mod._apply_vllm_routed_experts(args, sample, {}, {"routed_experts": _encode_routed(arr)})
 
 
 @pytest.mark.unit
-def test_apply_vllm_routed_experts_skips_row_mismatch():
+def test_apply_vllm_routed_experts_trims_when_too_many_rows():
     arr = np.zeros((9, 2, 1), dtype=np.int32)
     sample = Sample(tokens=[1, 2, 3])
     args = Namespace(use_rollout_routing_replay=True, num_layers=2, moe_router_topk=1)
     mod._apply_vllm_routed_experts(args, sample, {}, {"routed_experts": _encode_routed(arr)})
-    assert sample.rollout_routed_experts is None
+    assert sample.rollout_routed_experts is not None
+    assert sample.rollout_routed_experts.shape == (2, 2, 1)
+
+
+@pytest.mark.unit
+def test_apply_vllm_routed_experts_raises_when_too_few_rows():
+    arr = np.zeros((1, 2, 1), dtype=np.int32)
+    sample = Sample(tokens=[1, 2, 3])
+    args = Namespace(use_rollout_routing_replay=True, num_layers=2, moe_router_topk=1)
+    with pytest.raises(RuntimeError, match="routing replay"):
+        mod._apply_vllm_routed_experts(args, sample, {}, {"routed_experts": _encode_routed(arr)})
 
 
 @pytest.mark.unit
@@ -458,8 +494,8 @@ def test_apply_vllm_routed_experts_skips_layer_topk_mismatch():
     arr = np.zeros((2, 3, 4), dtype=np.int32)
     sample = Sample(tokens=[1, 2, 3])
     args = Namespace(use_rollout_routing_replay=True, num_layers=2, moe_router_topk=1)
-    mod._apply_vllm_routed_experts(args, sample, {}, {"routed_experts": _encode_routed(arr)})
-    assert sample.rollout_routed_experts is None
+    with pytest.raises(RuntimeError, match="routing replay"):
+        mod._apply_vllm_routed_experts(args, sample, {}, {"routed_experts": _encode_routed(arr)})
 
 
 @pytest.mark.unit
@@ -588,15 +624,19 @@ def test_generate_multimodal_render_then_generate(patch_generate_state, monkeypa
 
 @pytest.mark.unit
 def test_generate_applies_routed_experts(patch_generate_state, monkeypatch):
-    # After generate: 2 prompt + 2 response tokens => expected_rows = 3
-    arr = np.zeros((3, 2, 1), dtype=np.int32)
+    # Fake tokenizer yields 3 prompt ids; +2 response => 5 tokens, 4 routing rows.
+    prompt_rows = np.ones((2, 2, 1), dtype=np.int32)
+    gen_rows = np.full((2, 2, 1), 2, dtype=np.int32)
+    expected = np.concatenate([prompt_rows, gen_rows], axis=0)
+
     post_mock = AsyncMock(
         return_value={
+            "prompt_routed_experts": _encode_routed_npy(prompt_rows),
             "choices": [
                 {
                     "token_ids": [50, 51],
                     "finish_reason": "stop",
-                    "routed_experts": _encode_routed(arr),
+                    "routed_experts": _encode_routed_npy(gen_rows),
                     "logprobs": {"content": [{}, {}]},
                 }
             ],
@@ -605,7 +645,8 @@ def test_generate_applies_routed_experts(patch_generate_state, monkeypatch):
     )
     monkeypatch.setattr(mod, "post", post_mock)
 
-    sample = Sample(index=0, prompt="ab")
+    # _FakeTokenizer encodes up to 3 chars => 3 prompt ids + 2 response = 5 tokens.
+    sample = Sample(index=0, prompt="abc")
     asyncio.run(
         mod.generate(
             _rollout_args(use_rollout_routing_replay=True, num_layers=2, moe_router_topk=1),
@@ -613,7 +654,9 @@ def test_generate_applies_routed_experts(patch_generate_state, monkeypatch):
             _default_sampling_params(max_new_tokens=4),
         )
     )
-    np.testing.assert_array_equal(sample.rollout_routed_experts, arr)
+    np.testing.assert_array_equal(sample.rollout_routed_experts, expected)
+    assert len(sample.tokens) == 5
+    assert sample.rollout_routed_experts.shape[0] == len(sample.tokens) - 1
 
 
 @pytest.mark.unit

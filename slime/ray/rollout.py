@@ -774,7 +774,17 @@ class RolloutManager:
         if samples[0].rollout_log_probs is not None:
             train_data["rollout_log_probs"] = [sample.rollout_log_probs for sample in samples]
 
-        if samples[0].rollout_routed_experts is not None:
+        if getattr(self.args, "use_rollout_routing_replay", False):
+            routed = [sample.rollout_routed_experts for sample in samples]
+            missing = [i for i, r in enumerate(routed) if r is None]
+            if missing:
+                raise ValueError(
+                    f"use_rollout_routing_replay: {len(missing)}/{len(samples)} samples missing "
+                    "rollout_routed_experts (see rollout logs for vLLM routing replay errors). "
+                    "Ensure vLLM serves with --enable-return-routed-experts and --no-async-scheduling."
+                )
+            train_data["rollout_routed_experts"] = routed
+        elif samples[0].rollout_routed_experts is not None:
             train_data["rollout_routed_experts"] = [sample.rollout_routed_experts for sample in samples]
 
         if samples[0].train_metadata is not None:
