@@ -49,7 +49,7 @@ body:
         - slime version:
         - Python version:
         - PyTorch version:
-        - CUDA/ROCm version:
+        - CUDA version:
         - GPU type and count:
         - OS:
 

@@ -19,8 +19,7 @@
 - B 卡基本功能稳定，可作为开发和测试参考，但暂无 CI 保护
 - 两种硬件平台使用完全相同的安装和启动流程
 
-- 对于不方便使用 docker 的场景，请参考 [build_conda.sh](https://github.com/THUDM/slime/blob/main/build_conda.sh)；
-- 对于 AMD 支持，请参考 [AMD 使用教程](../../en/platform_support/amd_tutorial.md)。
+- 对于不方便使用 docker 的场景，请参考 [build_conda.sh](https://github.com/THUDM/slime/blob/main/build_conda.sh)。
 
 ### 拉取并启动 Docker 容器
 
