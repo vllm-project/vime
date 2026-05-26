@@ -23,7 +23,6 @@ For non-colocated overflow engines the existing NCCL distributed broadcast
 
 from __future__ import annotations
 
-import logging
 import os
 from argparse import Namespace
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -43,8 +42,6 @@ from .update_weight_from_distributed import (
     post_process_weights,
     update_weights_from_distributed,
 )
-
-logger = logging.getLogger(__name__)
 
 
 def _apply_monkey_patch_torch_reductions() -> None:
