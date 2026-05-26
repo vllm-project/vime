@@ -113,6 +113,7 @@ WANDB_ARGS=(
 VLLM_ARGS=(
    --rollout-num-gpus-per-engine 8
    --vllm-gpu-memory-utilization 0.7
+   --vllm-cudagraph-capture-sizes 1 2 4 8 $(seq 16 8 256)
 )
 
 MISC_ARGS=(

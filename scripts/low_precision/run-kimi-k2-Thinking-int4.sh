@@ -120,12 +120,11 @@ VLLM_ARGS=(
    --rollout-num-gpus-per-engine 8
    --vllm-gpu-memory-utilization 0.7
 
-   # dp attention
-   #   # --vllm-data-parallel-size 8
-   #   #   #
+   # uncomment to enable DP-attention (non-MLA models only):
+   # --vllm-data-parallel-size 8
 
-
-   # deepep MoE A2A — add --vllm-all2all-backend deepep_high_throughput to enable
+   # uncomment to enable DeepEP all-to-all backend for MoE:
+   # --vllm-all2all-backend deepep_high_throughput
 
    # make every dp rank has 128 concurrency
    --vllm-server-concurrency 1024

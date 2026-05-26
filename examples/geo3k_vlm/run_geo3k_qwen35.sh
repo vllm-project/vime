@@ -118,8 +118,11 @@ OPTIMIZER_ARGS=(
 VLLM_ARGS=(
    --rollout-num-gpus-per-engine 8
    --vllm-gpu-memory-utilization 0.7
+   --vllm-enable-expert-parallel
+   --vllm-cudagraph-capture-sizes 1 2 4 8 $(seq 16 8 256)
 
    # MTP speculative decoding
+   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3}'
 
    --vllm-max-num-seqs 512
 )
