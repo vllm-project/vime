@@ -5,7 +5,7 @@ from typing import Any
 
 from tau_bench.agents.tool_calling_agent import RESPOND_ACTION_NAME
 from tau_bench.types import Action
-from tool_parser import parse_tools
+from vllm_tool_parser import parse_tools
 
 # Set up logger for this module
 logger = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ class OpenAICompatibleToolCallAdapter:
 
     This class encapsulates tool call parsing and action conversion logic, and
     provides an OpenAI format output interface. Parses Hermes/Qwen-2.5 tool-call
-    markers via the local `tool_parser` module (which mirrors vLLM's
+    markers via the local `vllm_tool_parser` module (which mirrors vLLM's
     Hermes2ProToolParser).
     """
 

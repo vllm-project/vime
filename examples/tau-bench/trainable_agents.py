@@ -39,7 +39,7 @@ def call_to_action(calls: list[Any], text_response: str) -> Action:
     """
     Convert parsed tool calls into an Action, mirroring tau-bench's
     original message_to_action contract but adapted for the dict shape
-    returned by ``tool_parser.parse_tools``.
+    returned by ``vllm_tool_parser.parse_tools``.
     """
     # Default action if no action was found.
     action = Action(name=RESPOND_ACTION_NAME, kwargs={"content": text_response})
