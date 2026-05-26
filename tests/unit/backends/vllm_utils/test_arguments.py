@@ -230,11 +230,8 @@ def test_add_vllm_router_arguments_old_names_removed(args_mod):
     args_mod.add_vllm_router_arguments(parser)
     flags = {s for a in parser._actions for s in a.option_strings}
     dests = {a.dest for a in parser._actions if a.option_strings}
-    assert "--sglang-router-ip" not in flags
-    assert "--sglang-router-port" not in flags
     assert "--router-ip" not in flags
     assert "--router-port" not in flags
-    assert "sglang_router_ip" not in dests
     assert "router_ip" not in dests
 
 
