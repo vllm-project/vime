@@ -19,8 +19,6 @@ _spawn_ctx = multiprocessing.get_context("spawn")
 # vLLM sleep/wake only supports these tags (SGLang also uses ``cuda_graph``, which must be dropped).
 _VLLM_WAKE_TAGS = frozenset({"weights", "kv_cache"})
 
-_SKIP_NON_LEADER = {"ok": True, "skipped": True}
-
 
 def _normalize_vllm_wake_tags(tags: list[str] | None) -> list[str] | None:
     if not tags:
@@ -59,17 +57,6 @@ def _to_local_gpu_id(physical_gpu_id: int) -> int:
         f"GPU id {physical_gpu_id} is not valid under CUDA_VISIBLE_DEVICES={cvd}. "
         f"Expected one of {visible} (physical) or 0..{len(visible)-1} (local)."
     )
-
-
-def _response_json_or_fallback(response: requests.Response) -> dict:
-    """Parse JSON body; on decode failure return an error-shaped dict (HTTP status already checked)."""
-    try:
-        body = response.json()
-        if isinstance(body, dict):
-            return body
-        return {"ok": False, "error": "Response is not a dictionary", "data": body}
-    except ValueError:
-        return {"ok": False, "error": "Invalid JSON response", "raw": response.text}
 
 
 def _format_v6_uri(addr: str | None) -> str | None:
@@ -176,7 +163,7 @@ def _forward_vllm_cli_args(args, cmd: list[str]) -> None:
         serialized = _serialize_for_cli(value)
         if serialized is None:
             logger.debug(
-                "Skipping forward of %s: parsed value %r (%s) cannot be serialized; needs vime-side handling.",
+                "Skipping forward of %s: parsed value %r (%s) cannot be serialized; " "needs vime-side handling.",
                 vllm_flag,
                 value,
                 type(value).__name__,
@@ -274,6 +261,19 @@ def launch_server_process(
     env.setdefault("NCCL_CUMEM_ENABLE", "0")
     env["CUDA_VISIBLE_DEVICES"] = visible_devices
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")
+    # Colocate loads --worker-extension-cls from slime; vLLM subprocess must see the
+    # same tree as the trainer (editable vime), not an older site-packages slime.
+    if getattr(args, "colocate", False):
+        import slime
+
+        vime_root = os.path.dirname(os.path.dirname(os.path.abspath(slime.__file__)))
+        existing_pp = env.get("PYTHONPATH", "")
+        if vime_root not in {p for p in existing_pp.split(os.pathsep) if p}:
+            env["PYTHONPATH"] = os.pathsep.join(filter(None, [vime_root, existing_pp]))
+    # Colocated (IPC) mode: the server must be able to deserialize pickled IPC handles
+    # sent by VLLMEngine.update_weights via the /update_weights HTTP endpoint.
+    if getattr(args, "colocate", False):
+        env.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     host_for_subprocess = bind_host.strip("[]")
     model = model_path
@@ -297,9 +297,13 @@ def launch_server_process(
     ]
     if getattr(args, "fp16", False):
         cmd += ["--dtype", "float16"]
-    # offload_rollout (vime top-level flag) implies sleep mode.
-    if getattr(args, "offload_rollout", False) and not getattr(args, "vllm_enable_sleep_mode", False):
+    # Colocated IPC weight sync releases model weights via POST /sleep?level=0.
+    # offload_rollout also needs sleep/wake for memory handoff.
+    if (getattr(args, "offload_rollout", False) or getattr(args, "colocate", False)) and not getattr(
+        args, "vllm_enable_sleep_mode", False
+    ):
         cmd += ["--enable-sleep-mode"]
+        args.vllm_enable_sleep_mode = True
     # rollout_max_context_len (vime top-level flag) maps to --max-model-len when set,
     # unless the user already passed --vllm-max-model-len explicitly.
     if args.rollout_max_context_len is not None and getattr(args, "vllm_max_model_len", None) is None:
@@ -340,18 +344,32 @@ def launch_server_process(
     cmd += ["--gpu-memory-utilization", str(gpu_mem)]
 
     # 2) weight_transfer_config: vllm default None disables /init_weight_transfer_engine,
-    #    so vime's weight sync would fail. Always default to NCCL — vime's sender
-    #    currently posts sglang-style ``serialized_named_tensors`` payloads, which the
-    #    vllm IPC weight-transfer engine rejects. Switching the default to IPC requires
-    #    porting ``UpdateVLLMWeightFromTensor`` (see PR #12 review). Users who pass
-    #    ``--vllm-weight-transfer-config`` explicitly are honored.
+    #    so vime's weight sync would fail.
+    #    - Colocated mode: use IPC backend. UpdateWeightFromTensor calls
+    #      IPCWeightTransferEngine.trainer_send_weights and passes an empty init_info
+    #      dict, which is the correct signature for the IPC backend.
+    #    - Non-colocated mode: use NCCL backend. Weight sync goes through
+    #      update_weights_from_distributed; the vLLM engine still needs
+    #      init_weight_transfer_engine to succeed (with NCCL the caller must supply
+    #      master_address, master_port, rank_offset, and world_size separately).
+    #    Users who pass ``--vllm-weight-transfer-config`` explicitly are honored.
     if _user_overrode("vllm_weight_transfer_config"):
         cmd += [
             "--weight-transfer-config",
             _serialize_weight_transfer_config(args.vllm_weight_transfer_config),
         ]
+    elif getattr(args, "colocate", False):
+        cmd += ["--weight-transfer-config", '{"backend":"ipc"}']
     else:
         cmd += ["--weight-transfer-config", '{"backend":"nccl"}']
+
+    # Colocated (IPC) mode: inject the worker extension so the IPC engine patch
+    # is applied inside every vLLM worker process automatically.
+    if getattr(args, "colocate", False) and "--worker-extension-cls" not in cmd:
+        cmd += [
+            "--worker-extension-cls",
+            "slime.backends.megatron_utils.update_weight.update_weight_from_tensor.vLLMColocateWorkerExtension",
+        ]
 
     # Auto-forward all other args.vllm_* that differ from their vllm-side default.
     _forward_vllm_cli_args(args, cmd)
@@ -428,21 +446,12 @@ class VLLMEngine(RayActor):
         self.num_gpus_per_engine = num_gpus_per_engine
         self.process: multiprocessing.Process | None = None
         self._weight_version: str | None = None
+        self._is_local_server = not args.rollout_external
         # Slime runs one vLLM HTTP process per logical engine; multi-node worker rank is not used.
         self.node_rank = 0
-        self.server_host: str | None = None
-        self.server_port: int | None = None
-        self._weight_transfer_http_timeout_s: float | None = None
 
     def _http_base(self) -> str:
-        if self.server_host is None or self.server_port is None:
-            raise RuntimeError("VLLMEngine.init() must be called before HTTP requests")
         return f"http://{self.server_host}:{self.server_port}"
-
-    def _skipped_if_not_leader(self) -> dict | None:
-        if self.node_rank != 0:
-            return dict(_SKIP_NON_LEADER)
-        return None
 
     def init(
         self,
@@ -556,45 +565,54 @@ class VLLMEngine(RayActor):
         url = f"{self._http_base()}/{endpoint.lstrip('/')}"
         return requests.post(url, json=payload, timeout=timeout)
 
-    def _weight_transfer_http_timeout(self) -> float:
-        if self._weight_transfer_http_timeout_s is None:
-            self._weight_transfer_http_timeout_s = float(
-                os.environ.get(
-                    "SLIME_VLLM_WEIGHT_TRANSFER_UPDATE_TIMEOUT_SEC",
-                    os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"),
-                )
-            )
-        return self._weight_transfer_http_timeout_s
-
-    def start_weight_update(self, is_checkpoint_format: bool = True) -> dict:
-        """``POST /start_weight_update`` (vLLM 0.21+ weight transfer)."""
-        if skipped := self._skipped_if_not_leader():
-            return skipped
-        response = self._post_json(
-            "start_weight_update",
-            {"is_checkpoint_format": is_checkpoint_format},
-            timeout=self._weight_transfer_http_timeout(),
-        )
-        response.raise_for_status()
-        return _response_json_or_fallback(response)
-
-    def finish_weight_update(self) -> dict:
-        """``POST /finish_weight_update`` (vLLM 0.21+ weight transfer)."""
-        if skipped := self._skipped_if_not_leader():
-            return skipped
-        response = self._post_json("finish_weight_update", {}, timeout=self._weight_transfer_http_timeout())
-        response.raise_for_status()
-        return _response_json_or_fallback(response)
-
     def _post_vllm_update_weights_http(self, update_info: dict) -> dict:
-        """POST ``/update_weights`` with ``{"update_info": ...}`` (vLLM RLHF control plane)."""
-        response = self._post_json(
-            "update_weights",
-            {"update_info": update_info},
-            timeout=self._weight_transfer_http_timeout(),
+        """POST ``/update_weights`` with ``{"update_info": ...}`` (vLLM RLHF control plane).
+
+        Caller must invoke ``start_weight_update`` / ``finish_weight_update`` around a batch of
+        ``/update_weights`` calls (see ``UpdateWeightFromTensor`` / ``UpdateWeightFromDistributed``).
+        """
+        timeout_s = float(
+            os.environ.get(
+                "SLIME_VLLM_WEIGHT_TRANSFER_UPDATE_TIMEOUT_SEC",
+                os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"),
+            )
         )
+        response = self._post_json("update_weights", {"update_info": update_info}, timeout=timeout_s)
         response.raise_for_status()
-        return _response_json_or_fallback(response)
+        try:
+            return response.json()
+        except Exception:
+            return {"ok": True, "raw": response.text}
+
+    def _run_vllm_weight_update(self, update_info: dict, *, is_checkpoint_format: bool = False):
+        """Backward-compatible alias for non-NCCL ``update_info`` shapes (e.g. tensor/IPC path)."""
+        del is_checkpoint_format
+        return self._post_vllm_update_weights_http(update_info)
+
+    def update_weights(self, update_info: dict) -> dict:
+        """Public Ray-callable entry point used by IPCWeightTransferEngine (Ray mode).
+
+        ``IPCWeightTransferEngine.trainer_send_weights`` calls
+        ``llm_handle.update_weights.remote(dict(update_info=update_info))``,
+        with ``update_info`` containing raw ``ipc_handles`` (Python callables from
+        ``reduce_tensor``).  Since vime communicates with vLLM over HTTP those
+        callables cannot be JSON-serialised; convert them to ``ipc_handles_pickled``
+        (base64-encoded pickle) which the vLLM server's ``IPCWeightTransferUpdateInfo``
+        accepts when ``VLLM_ALLOW_INSECURE_SERIALIZATION=1`` is set.
+        """
+        import base64
+
+        import cloudpickle
+
+        inner = dict(update_info["update_info"])  # shallow copy — do not mutate caller
+        if inner.get("ipc_handles") is not None:
+            # ipc_handles contain local closures from monkey_patch_torch_reductions
+            # (_rebuild_cuda_tensor_modified) that standard pickle cannot serialize.
+            # cloudpickle handles local functions and closures correctly.
+            inner["ipc_handles_pickled"] = base64.b64encode(cloudpickle.dumps(inner.pop("ipc_handles"))).decode(
+                "utf-8"
+            )
+        return self._post_vllm_update_weights_http(inner)
 
     def health_generate(self, timeout: float = 5.0) -> bool:
         """Return True if ``GET /health`` succeeds (SGLang uses ``GET /health_generate`` for the same role)."""
@@ -619,7 +637,7 @@ class VLLMEngine(RayActor):
         path. The previous fallback restarted vllm from ``self.model_path``, which is
         the original HF checkpoint (not the just-trained weights), so silently using
         it would let training continue with stale rollout weights. Failing fast keeps
-        the bug visible until ``UpdateVLLMWeightFromTensor`` (vllm-native IPC) is
+        the bug visible until ``UpdateWeightFromTensor`` (vllm-native IPC) is
         ported — see PR #12 review.
         """
         del load_format
@@ -636,7 +654,7 @@ class VLLMEngine(RayActor):
             "format": "serialized_named_tensors",
             "weight_version": self._weight_version,
         }
-        return self._post_vllm_update_weights_http(update_info)
+        return self._run_vllm_weight_update(update_info, is_checkpoint_format=False)
 
     def flush_cache(self):
         """Clear prefix cache via ``POST /reset_prefix_cache`` (SGLang uses ``GET /flush_cache``)."""
@@ -711,11 +729,12 @@ class VLLMEngine(RayActor):
             logger.info("get_weight_version: /v1/models failed (%s)", e)
         return None
 
-    def release_memory_occupation(self):
-        """``POST /sleep`` when sleep mode is enabled (SGLang: ``POST /release_memory_occupation``).
+    def release_memory_occupation(self, level: int = 1):
+        """``POST /sleep?level={level}`` when sleep mode is enabled (SGLang: ``POST /release_memory_occupation``).
 
-        Always uses sleep level=1 (release KV cache only). Returns a no-op dict when
-        ``--vllm-enable-sleep-mode`` was not set.
+        level=1 (default) releases KV cache only.
+        level=0 releases both KV cache and model weights (required before IPC tensor injection).
+        Returns a no-op dict when ``--vllm-enable-sleep-mode`` was not set.
         """
         self.flush_cache()
         if not getattr(self.args, "vllm_enable_sleep_mode", False):
@@ -724,11 +743,14 @@ class VLLMEngine(RayActor):
         # (``vllm.entrypoints.serve.sleep.api_router.sleep``).
         response = requests.post(
             f"{self._http_base()}/sleep",
-            params={"level": 1},
+            params={"level": level},
             timeout=30,
         )
         response.raise_for_status()
-        return _response_json_or_fallback(response)
+        try:
+            return response.json()
+        except Exception:
+            return {"ok": True, "raw": response.text}
 
     def resume_memory_occupation(self, tags: list[str] | None = None):
         """``POST /wake_up`` when sleep mode is on (SGLang: ``POST /resume_memory_occupation``); else a small placeholder dict."""
@@ -744,7 +766,57 @@ class VLLMEngine(RayActor):
             timeout=30,
         )
         response.raise_for_status()
-        return _response_json_or_fallback(response)
+        try:
+            return response.json()
+        except Exception:
+            return {"ok": True, "raw": response.text}
+
+    def init_weight_transfer_engine(self, payload: dict) -> dict:
+        """``POST /init_weight_transfer_engine`` with a caller-supplied payload (IPC path).
+
+        For IPC mode the payload is ``{"init_info": {}}``; for NCCL use
+        ``init_weights_update_group`` which constructs the payload from typed args.
+        """
+        init_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                response = self._post_json("init_weight_transfer_engine", payload, timeout=init_timeout_s)
+                response.raise_for_status()
+                try:
+                    return response.json()
+                except Exception:
+                    return {"ok": True, "raw": response.text}
+            except Exception as e:
+                last_error = e
+                if attempt < 3:
+                    logger.warning("init_weight_transfer_engine attempt %s/3 failed: %s", attempt, e)
+                    time.sleep(2 * attempt)
+        raise RuntimeError(f"vLLM init_weight_transfer_engine failed: {last_error}") from last_error
+
+    def start_weight_update(self, is_checkpoint_format: bool = False) -> dict:
+        """``POST /start_weight_update`` — signals vLLM to enter IPC weight-update mode."""
+        update_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
+        response = self._post_json(
+            "start_weight_update",
+            {"is_checkpoint_format": is_checkpoint_format},
+            timeout=update_timeout_s,
+        )
+        response.raise_for_status()
+        try:
+            return response.json()
+        except Exception:
+            return {"ok": True, "raw": response.text}
+
+    def finish_weight_update(self) -> dict:
+        """``POST /finish_weight_update`` — signals vLLM to exit IPC weight-update mode."""
+        update_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
+        response = self._post_json("finish_weight_update", {}, timeout=update_timeout_s)
+        response.raise_for_status()
+        try:
+            return response.json()
+        except Exception:
+            return {"ok": True, "raw": response.text}
 
     def check_weights(self, action: str):
         """No vLLM ``weights_checker`` route; return a placeholder (SGLang posts to ``/weights_checker``)."""
@@ -766,13 +838,16 @@ class VLLMEngine(RayActor):
                 "world_size": world_size,
             }
         }
-        timeout_s = self._weight_transfer_http_timeout()
+        init_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
         last_error = None
         for attempt in range(1, 4):
             try:
-                response = self._post_json("init_weight_transfer_engine", payload, timeout=timeout_s)
+                response = self._post_json("init_weight_transfer_engine", payload, timeout=init_timeout_s)
                 response.raise_for_status()
-                return _response_json_or_fallback(response)
+                try:
+                    return response.json()
+                except Exception:
+                    return {"ok": True, "raw": response.text}
             except Exception as e:
                 last_error = e
                 if attempt < 3:
@@ -827,7 +902,10 @@ class VLLMEngine(RayActor):
             timeout=600,
         )
         response.raise_for_status()
-        return _response_json_or_fallback(response)
+        try:
+            return response.json()
+        except Exception:
+            return {"ok": True, "raw": response.text}
 
     def pause_generation(self):
         """``POST /pause`` with mode="keep" (SGLang: ``POST /pause_generation``); returns the ``requests.Response``."""

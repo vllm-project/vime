@@ -1,5 +1,6 @@
 accelerate
 blobfile
+cloudpickle
 datasets
 httpx[http2]
 mcp[cli]
