@@ -63,11 +63,8 @@ def execute():
         "--adam-beta2 0.98 "
     )
 
-    sglang_args = (
-        "--rollout-num-gpus-per-engine 1 "
-        f"--sglang-mem-fraction-static {0.55 if TIGHT_DEVICE_MEMORY else 0.65} "
-        "--sglang-cuda-graph-max-bs 32 "
-        "--sglang-enable-metrics "
+    vllm_args = (
+        "--rollout-num-gpus-per-engine 1 " f"--vllm-gpu-memory-utilization {0.55 if TIGHT_DEVICE_MEMORY else 0.65} "
     )
 
     ci_args = "--ci-test "
@@ -98,7 +95,7 @@ def execute():
         f"{grpo_args} "
         f"{U.get_default_wandb_args(__file__)} "
         f"{perf_args} "
-        f"{sglang_args} "
+        f"{vllm_args} "
         f"{ci_args} "
         f"{fault_tolerance_args} "
         f"{misc_args} "
@@ -114,8 +111,8 @@ def execute():
 
 if __name__ == "__main__":
     prepare()
-    os.environ.pop("http_proxy")
-    os.environ.pop("https_proxy")
-    os.environ.pop("HTTP_PROXY")
-    os.environ.pop("HTTPS_PROXY")
+    os.environ.pop("http_proxy", None)
+    os.environ.pop("https_proxy", None)
+    os.environ.pop("HTTP_PROXY", None)
+    os.environ.pop("HTTPS_PROXY", None)
     execute()

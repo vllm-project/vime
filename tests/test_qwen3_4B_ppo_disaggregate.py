@@ -97,13 +97,11 @@ megatron:
         "--adam-beta2 0.98 "
     )
 
-    sglang_args = (
+    vllm_args = (
         "--rollout-num-gpus-per-engine 2 "
         "--rollout-num-gpus 4 "
-        "--sglang-mem-fraction-static 0.8 "
-        "--sglang-cuda-graph-max-bs 32 "
-        "--sglang-max-running-requests 512 "
-        "--sglang-enable-metrics "
+        "--vllm-gpu-memory-utilization 0.8 "
+        "--vllm-max-num-seqs 512 "
     )
 
     ci_args = "--ci-test "
@@ -130,7 +128,7 @@ megatron:
         f"{U.get_default_wandb_args(__file__)} "
         f"{perf_args} "
         f"{eval_args} "
-        f"{sglang_args} "
+        f"{vllm_args} "
         f"{ci_args} "
         f"{misc_args} "
     )

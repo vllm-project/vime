@@ -279,7 +279,7 @@ def test_source_no_standalone_use_vllm_param(upw):
 
 
 @pytest.mark.unit
-def test_source_no_sglang_dist_broadcast_fallback(upw):
+def test_source_no_dist_broadcast_fallback(upw):
     src = inspect.getsource(upw)
     assert "dist.broadcast(" not in src
 

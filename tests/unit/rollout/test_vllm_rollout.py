@@ -56,7 +56,8 @@ class _PatchedGenerateState:
         self.pendings: set = set()
         self.dp_counts = [0]
         self.dp_rank = 0
-        if getattr(args, "sglang_enable_deterministic_inference", False):
+        self.group_sampling_seeds = None
+        if getattr(args, "vllm_enable_deterministic_inference", False):
             self.group_sampling_seeds = [args.rollout_seed + i for i in range(args.n_samples_per_prompt)]
 
     @classmethod
@@ -77,8 +78,8 @@ def _rollout_args(**overrides) -> Namespace:
     base = dict(
         ci_test=False,
         hf_checkpoint="/tmp/model",
-        router_ip="127.0.0.1",
-        router_port=8000,
+        vllm_router_ip="127.0.0.1",
+        vllm_router_port=8000,
         partial_rollout=False,
         mask_offpolicy_in_partial_rollout=False,
         group_rm=False,
@@ -175,9 +176,9 @@ def test_base_dataset_prompt_ids_ignores_sample_tokens():
 @pytest.mark.unit
 def test_get_model_url_named_router_and_fallback():
     args = Namespace(
-        router_ip="127.0.0.1",
-        router_port=8000,
-        sglang_model_routers={"ref": ("10.0.0.2", 9001)},
+        vllm_router_ip="127.0.0.1",
+        vllm_router_port=8000,
+        vllm_model_routers={"ref": ("10.0.0.2", 9001)},
     )
     assert mod.get_model_url(args, "ref") == "http://10.0.0.2:9001/inference/v1/generate"
     assert mod.get_model_url(args, "missing") == "http://127.0.0.1:8000/inference/v1/generate"
@@ -364,7 +365,7 @@ def test_mm_render_response_to_generate_body_invalid_shape():
 @pytest.mark.unit
 def test_router_worker_urls_workers_endpoint(monkeypatch):
     monkeypatch.setattr(mod, "get", AsyncMock(return_value={"workers": [{"url": "http://w1"}, {"url": "http://w2"}]}))
-    args = Namespace(router_ip="127.0.0.1", router_port=7000)
+    args = Namespace(vllm_router_ip="127.0.0.1", vllm_router_port=7000)
     urls = asyncio.run(mod._router_worker_urls(args))
     assert urls == ["http://w1", "http://w2"]
 
@@ -377,7 +378,7 @@ def test_router_worker_urls_falls_back_to_list_workers(monkeypatch):
         return {"urls": ["http://w3"]}
 
     monkeypatch.setattr(mod, "get", fake_get)
-    args = Namespace(router_ip="127.0.0.1", router_port=7000)
+    args = Namespace(vllm_router_ip="127.0.0.1", vllm_router_port=7000)
     urls = asyncio.run(mod._router_worker_urls(args))
     assert urls == ["http://w3"]
 
@@ -416,7 +417,7 @@ def test_base_dataset_prompt_ids_multimodal_via_processor():
 
 @pytest.mark.unit
 def test_get_model_url_without_named_routers():
-    args = Namespace(router_ip="10.0.0.3", router_port=9000)
+    args = Namespace(vllm_router_ip="10.0.0.3", vllm_router_port=9000)
     assert mod.get_model_url(args, "any") == "http://10.0.0.3:9000/inference/v1/generate"
 
 
@@ -549,21 +550,21 @@ def test_generate_truncated_when_continuation_budget_zero(patch_generate_state, 
 
 
 @pytest.mark.unit
-def test_generate_consistent_hashing_header(patch_generate_state, monkeypatch):
+def test_generate_consistent_hash_header(patch_generate_state, monkeypatch):
     post_mock = AsyncMock(return_value=_generate_response())
     monkeypatch.setattr(mod, "post", post_mock)
 
     sample = Sample(index=0, prompt="abc", session_id="sess-42")
     asyncio.run(
         mod.generate(
-            _rollout_args(router_policy="consistent_hashing"),
+            _rollout_args(router_policy="consistent_hash"),
             sample,
             _default_sampling_params(),
         )
     )
 
     headers = post_mock.await_args_list[0].kwargs.get("headers")
-    assert headers == {"X-SMG-Routing-Key": "sess-42"}
+    assert headers == {"x-session-id": "sess-42"}
 
 
 @pytest.mark.unit

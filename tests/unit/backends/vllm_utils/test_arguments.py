@@ -145,7 +145,7 @@ def _ns(**overrides):
         vllm_data_parallel_size=1,
         vllm_pipeline_parallel_size=1,
         rollout_num_gpus_per_engine=4,
-        router_ip=None,
+        vllm_router_ip=None,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -178,30 +178,30 @@ def test_validate_args_pp_indivisible_asserts(args_mod):
 
 @pytest.mark.unit
 def test_validate_args_router_ipv6_wrapped(args_mod):
-    ns = _ns(router_ip="::1")
+    ns = _ns(vllm_router_ip="::1")
     args_mod.validate_args(ns)
-    assert ns.router_ip == "[::1]"
+    assert ns.vllm_router_ip == "[::1]"
 
 
 @pytest.mark.unit
 def test_validate_args_router_ipv6_already_wrapped_unchanged(args_mod):
-    ns = _ns(router_ip="[::1]")
+    ns = _ns(vllm_router_ip="[::1]")
     args_mod.validate_args(ns)
-    assert ns.router_ip == "[::1]"
+    assert ns.vllm_router_ip == "[::1]"
 
 
 @pytest.mark.unit
 def test_validate_args_router_ipv4_unchanged(args_mod):
-    ns = _ns(router_ip="127.0.0.1")
+    ns = _ns(vllm_router_ip="127.0.0.1")
     args_mod.validate_args(ns)
-    assert ns.router_ip == "127.0.0.1"
+    assert ns.vllm_router_ip == "127.0.0.1"
 
 
 @pytest.mark.unit
 def test_validate_args_router_none_noop(args_mod):
-    ns = _ns(router_ip=None)
+    ns = _ns(vllm_router_ip=None)
     args_mod.validate_args(ns)
-    assert ns.router_ip is None
+    assert ns.vllm_router_ip is None
 
 
 @pytest.mark.unit
@@ -209,9 +209,9 @@ def test_add_vllm_router_arguments_registers_router_prefix(args_mod):
     parser = argparse.ArgumentParser(add_help=False)
     args_mod.add_vllm_router_arguments(parser)
     flags = {s for a in parser._actions for s in a.option_strings}
-    assert "--router-ip" in flags
-    assert "--router-port" in flags
-    assert "--router-request-timeout-secs" in flags
+    assert "--vllm-router-ip" in flags
+    assert "--vllm-router-port" in flags
+    assert "--vllm-router-request-timeout-secs" in flags
 
 
 @pytest.mark.unit
@@ -219,9 +219,9 @@ def test_add_vllm_router_arguments_dests(args_mod):
     parser = argparse.ArgumentParser(add_help=False)
     args_mod.add_vllm_router_arguments(parser)
     dests = {a.dest for a in parser._actions if a.option_strings}
-    assert "router_ip" in dests
-    assert "router_port" in dests
-    assert "router_request_timeout_secs" in dests
+    assert "vllm_router_ip" in dests
+    assert "vllm_router_port" in dests
+    assert "vllm_router_request_timeout_secs" in dests
 
 
 @pytest.mark.unit
@@ -230,10 +230,12 @@ def test_add_vllm_router_arguments_old_names_removed(args_mod):
     args_mod.add_vllm_router_arguments(parser)
     flags = {s for a in parser._actions for s in a.option_strings}
     dests = {a.dest for a in parser._actions if a.option_strings}
-    assert "--vllm-router-ip" not in flags
-    assert "--vllm-router-port" not in flags
-    assert "vllm_router_ip" not in dests
-    assert "vllm_router_port" not in dests
+    assert "--sglang-router-ip" not in flags
+    assert "--sglang-router-port" not in flags
+    assert "--router-ip" not in flags
+    assert "--router-port" not in flags
+    assert "sglang_router_ip" not in dests
+    assert "router_ip" not in dests
 
 
 @pytest.mark.unit
@@ -241,27 +243,34 @@ def test_add_vllm_router_arguments_parses_real_values(args_mod):
     parser = argparse.ArgumentParser(add_help=False)
     args_mod.add_vllm_router_arguments(parser)
     parsed, _ = parser.parse_known_args(
-        ["--router-ip", "10.0.0.1", "--router-port", "8000", "--router-request-timeout-secs", "30"]
+        [
+            "--vllm-router-ip",
+            "10.0.0.1",
+            "--vllm-router-port",
+            "8000",
+            "--vllm-router-request-timeout-secs",
+            "30",
+        ]
     )
-    assert parsed.router_ip == "10.0.0.1"
-    assert parsed.router_port == 8000
-    assert parsed.router_request_timeout_secs == 30
+    assert parsed.vllm_router_ip == "10.0.0.1"
+    assert parsed.vllm_router_port == 8000
+    assert parsed.vllm_router_request_timeout_secs == 30
 
 
 @pytest.mark.unit
 def test_orchestration_dests_use_new_names(args_mod):
-    assert "router_ip" in args_mod._VIME_ORCHESTRATION_DESTS
-    assert "router_port" in args_mod._VIME_ORCHESTRATION_DESTS
-    assert "router_request_timeout_secs" in args_mod._VIME_ORCHESTRATION_DESTS
-    assert "vllm_router_ip" not in args_mod._VIME_ORCHESTRATION_DESTS
-    assert "vllm_router_port" not in args_mod._VIME_ORCHESTRATION_DESTS
+    assert "vllm_router_ip" in args_mod._VIME_ORCHESTRATION_DESTS
+    assert "vllm_router_port" in args_mod._VIME_ORCHESTRATION_DESTS
+    assert "vllm_router_request_timeout_secs" in args_mod._VIME_ORCHESTRATION_DESTS
+    assert "router_ip" not in args_mod._VIME_ORCHESTRATION_DESTS
+    assert "router_port" not in args_mod._VIME_ORCHESTRATION_DESTS
 
 
 def _realistic_add_vllm_arguments(parser):
     parser.add_argument("--vllm-gpu-memory-utilization", dest="vllm_gpu_memory_utilization", type=float, default=0.92)
     parser.add_argument("--vllm-enforce-eager", dest="vllm_enforce_eager", action="store_true", default=False)
-    parser.add_argument("--router-ip", dest="router_ip", type=str, default=None)
-    parser.add_argument("--router-port", dest="router_port", type=int, default=None)
+    parser.add_argument("--vllm-router-ip", dest="vllm_router_ip", type=str, default=None)
+    parser.add_argument("--vllm-router-port", dest="vllm_router_port", type=int, default=None)
     parser.add_argument("--vllm-server-concurrency", dest="vllm_server_concurrency", type=int, default=512)
     return parser
 

@@ -9,13 +9,13 @@ MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
 NUM_GPUS = 8
 
-# Inline sglang config: same model, 3 engine groups with different parallelism.
+# Inline vLLM config: same model, 3 engine groups with different parallelism.
 # Non-colocated (decoupled training and rollout): actor uses 4 GPUs, rollout uses 4 GPUs.
 # Group 1: 2 GPUs, 2 GPUs/engine (tp=2) → 1 engine
 # Group 2: 1 GPU,  1 GPU/engine  (tp=1) → 1 engine
 # Group 3: 1 GPU,  placeholder   → reserves 1 GPU slot, no engine created
-SGLANG_CONFIG_YAML = """\
-sglang:
+VLLM_CONFIG_YAML = """\
+vllm:
   - name: default
     server_groups:
       - worker_type: regular
@@ -36,9 +36,9 @@ def prepare():
 
 
 def execute():
-    # Write inline sglang config to a temp file
-    config_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", prefix="sglang_config_", delete=False)
-    config_file.write(SGLANG_CONFIG_YAML)
+    # Write inline vLLM config to a temp file
+    config_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", prefix="vllm_config_", delete=False)
+    config_file.write(VLLM_CONFIG_YAML)
     config_file.flush()
     config_path = config_file.name
 
@@ -99,12 +99,11 @@ def execute():
         "--adam-beta2 0.98 "
     )
 
-    sglang_args = (
+    vllm_args = (
         "--rollout-num-gpus-per-engine 1 "
-        f"--sglang-mem-fraction-static {0.6 if TIGHT_DEVICE_MEMORY else 0.7} "
-        "--sglang-enable-metrics "
-        "--sglang-cuda-graph-max-bs 32 "
-        f"--sglang-config {config_path} "
+        f"--vllm-gpu-memory-utilization {0.6 if TIGHT_DEVICE_MEMORY else 0.7} "
+        "--vllm-max-num-seqs 32 "
+        f"--vllm-config {config_path} "
     )
 
     ci_args = "--ci-test "
@@ -130,7 +129,7 @@ def execute():
         f"{U.get_default_wandb_args(__file__)} "
         f"{perf_args} "
         f"{eval_args} "
-        f"{sglang_args} "
+        f"{vllm_args} "
         f"{ci_args} "
         f"{misc_args} "
     )

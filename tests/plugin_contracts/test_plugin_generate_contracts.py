@@ -21,7 +21,7 @@ except ImportError:
         from _shared import get_contract_path, install_paths, install_stubs, run_contract_test_for_file
 
 install_paths()
-install_stubs(with_sglang_router=True, with_transformers=True)
+install_stubs(with_transformers=True)
 
 NUM_GPUS = 0
 REFERENCE_CUSTOM_GENERATE_PATH = "plugin_contracts.test_plugin_generate_contracts.custom_generate"
@@ -29,7 +29,7 @@ REFERENCE_CUSTOM_GENERATE_WITH_EVAL_PATH = (
     "plugin_contracts.test_plugin_generate_contracts.custom_generate_with_evaluation"
 )
 
-from slime.rollout.sglang_rollout import generate_and_rm
+from slime.rollout.vllm_rollout import generate_and_rm
 from slime.utils.misc import load_function
 from slime.utils.types import Sample
 
@@ -44,9 +44,6 @@ def make_args(**overrides):
         mask_offpolicy_in_partial_rollout = False
         group_rm = False
         custom_generate_function_path = None
-        sglang_enable_deterministic_inference = False
-        rollout_seed = 7
-        n_samples_per_prompt = 2
 
     args = Args()
     for key, value in overrides.items():
@@ -61,7 +58,6 @@ class FakeGenerateState:
         self.pendings = set()
         self.remaining_batch_size = 0
         self.aborted = False
-        self.group_sampling_seeds = [args.rollout_seed + i for i in range(args.n_samples_per_prompt)]
 
     @contextmanager
     def dp_rank_context(self):
@@ -116,15 +112,15 @@ class _PatchedGenerateState(FakeGenerateState):
 
 @pytest.fixture
 def patch_generate_state(monkeypatch):
-    """Patch GenerateState with a test-safe variant; returns the sglang_rollout module."""
-    from slime.rollout import sglang_rollout
+    """Patch GenerateState with a test-safe variant; returns the vllm_rollout module."""
+    from slime.rollout import vllm_rollout
 
-    monkeypatch.setattr(sglang_rollout, "GenerateState", _PatchedGenerateState)
-    return sglang_rollout
+    monkeypatch.setattr(vllm_rollout, "GenerateState", _PatchedGenerateState)
+    return vllm_rollout
 
 
 def test_generate_and_rm_default_generate_branch_is_stable(patch_generate_state, monkeypatch):
-    sglang_rollout = patch_generate_state
+    vllm_rollout = patch_generate_state
 
     async def official_default_generate(args, sample: Sample, sampling_params: dict):
         sample.tokens = [31, 32]
@@ -134,7 +130,7 @@ def test_generate_and_rm_default_generate_branch_is_stable(patch_generate_state,
         sample.status = Sample.Status.COMPLETED
         return sample
 
-    monkeypatch.setattr(sglang_rollout, "generate", official_default_generate)
+    monkeypatch.setattr(vllm_rollout, "generate", official_default_generate)
 
     result = asyncio.run(
         generate_and_rm(
@@ -174,14 +170,14 @@ def test_custom_generate_function_path_supports_user_override(patch_generate_sta
 
 
 def test_generate_and_rm_group_rm_accepts_list_result_from_custom_generate(patch_generate_state, monkeypatch):
-    sglang_rollout = patch_generate_state
+    vllm_rollout = patch_generate_state
 
     async def custom_generate_list(args, sample: Sample, sampling_params: dict):
         sample.status = Sample.Status.COMPLETED
         sibling = Sample(index=1, prompt="prompt-1", status=Sample.Status.COMPLETED)
         return [sample, sibling]
 
-    monkeypatch.setattr(sglang_rollout, "load_function", lambda _path: custom_generate_list)
+    monkeypatch.setattr(vllm_rollout, "load_function", lambda _path: custom_generate_list)
 
     result = asyncio.run(
         generate_and_rm(

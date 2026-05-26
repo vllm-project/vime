@@ -138,8 +138,8 @@ def _execute_case(case: VLLMGenerateCase):
         rollout_args = Namespace(
             ci_test=False,
             hf_checkpoint=case.model_path,
-            router_ip="127.0.0.1",
-            router_port=server_port,
+            vllm_router_ip="127.0.0.1",
+            vllm_router_port=server_port,
             vllm_server_concurrency=512,
             rollout_num_gpus=case.num_gpus,
             rollout_num_gpus_per_engine=case.num_gpus,

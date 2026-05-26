@@ -68,7 +68,8 @@ body:
         - CUDA version:
         - GPU type and count:
         - OS:
-        - SGLang version (if relevant):
+        - vLLM version:
+        - vllm-router version:
         - Megatron-LM version (if relevant):
     validations:
       required: true

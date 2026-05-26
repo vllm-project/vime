@@ -27,9 +27,9 @@ def prepare():
     )
 
 
-def write_sglang_config() -> str:
+def write_vllm_config() -> str:
     config = {
-        "sglang": [
+        "vllm": [
             {
                 "name": "default",
                 "server_groups": [
@@ -37,26 +37,24 @@ def write_sglang_config() -> str:
                         "worker_type": "prefill",
                         "num_gpus": 4,
                         "num_gpus_per_engine": 4,
-                        "overrides": {"disaggregation_transfer_backend": "mooncake"},
                     },
                     {
                         "worker_type": "decode",
                         "num_gpus": 4,
                         "num_gpus_per_engine": 4,
-                        "overrides": {"disaggregation_transfer_backend": "mooncake"},
                     },
                 ],
             }
         ]
     }
-    f = tempfile.NamedTemporaryFile("w", suffix=".yaml", prefix="sglang_pd_mooncake_", delete=False)
+    f = tempfile.NamedTemporaryFile("w", suffix=".yaml", prefix="rollout_pd_mooncake_", delete=False)
     with f:
         yaml.safe_dump(config, f, sort_keys=False)
     return f.name
 
 
 def execute():
-    sglang_config = write_sglang_config()
+    vllm_config = write_vllm_config()
 
     ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME} " f"--ref-load /root/models/{MODEL_NAME}_torch_dist "
     rollout_args = (
@@ -107,26 +105,14 @@ def execute():
         "--use-dynamic-batch-size "
         "--max-tokens-per-gpu 2048 "
     )
-    sglang_args = (
+    vllm_args = (
         "--rollout-num-gpus 8 "
         "--rollout-num-gpus-per-engine 4 "
-        "--sglang-enable-dp-attention "
-        "--sglang-dp-size 4 "
-        "--sglang-enable-dp-lm-head "
-        "--sglang-ep-size 4 "
-        "--sglang-moe-dense-tp-size 1 "
-        "--sglang-mem-fraction-static 0.45 "
-        "--sglang-cuda-graph-max-bs 8 "
-        "--sglang-max-running-requests 16 "
-        "--sglang-disaggregation-transfer-backend mooncake "
-        "--sglang-speculative-algorithm EAGLE "
-        "--sglang-speculative-num-steps 3 "
-        "--sglang-speculative-eagle-topk 1 "
-        "--sglang-speculative-num-draft-tokens 4 "
-        "--sglang-watchdog-timeout 1200 "
-        "--sglang-router-request-timeout-secs 1200 "
-        "--sglang-enable-metrics "
-        f"--sglang-config {sglang_config} "
+        "--vllm-data-parallel-size 4 "
+        "--vllm-gpu-memory-utilization 0.45 "
+        "--vllm-max-num-seqs 8 "
+        "--vllm-router-request-timeout-secs 1200 "
+        f"--vllm-config {vllm_config} "
     )
     misc_args = (
         "--ci-test "
@@ -147,7 +133,7 @@ def execute():
         f"{grpo_args} "
         f"{U.get_default_wandb_args(__file__)} "
         f"{perf_args} "
-        f"{sglang_args} "
+        f"{vllm_args} "
         f"{misc_args} "
     )
     U.execute_train(train_args=train_args, num_gpus_per_node=NUM_GPUS, megatron_model_type=MODEL_TYPE)

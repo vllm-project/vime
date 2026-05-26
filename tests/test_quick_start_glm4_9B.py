@@ -80,7 +80,7 @@ def execute():
         "--adam-beta2 0.98 "
     )
 
-    sglang_args = "--rollout-num-gpus-per-engine 2 " "--sglang-cuda-graph-max-bs 32 "
+    vllm_args = "--rollout-num-gpus-per-engine 2 "
 
     ci_args = "--ci-test "
 
@@ -106,7 +106,7 @@ def execute():
         f"{U.get_default_wandb_args(__file__)} "
         f"{perf_args} "
         f"{eval_args} "
-        f"{sglang_args} "
+        f"{vllm_args} "
         f"{ci_args} "
         f"{misc_args} "
     )

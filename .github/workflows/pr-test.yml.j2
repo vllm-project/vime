@@ -7,13 +7,13 @@
         {'test_file': 'test_qwen2.5_0.5B_ppo_critic_only_short.py', 'num_gpus': 4},
       ],
     },
-    'e2e-test-sglang-config': {
-      'label': 'run-ci-sglang-config',
+    'e2e-test-vllm-config': {
+      'label': 'run-ci-vllm-config',
       'tests': [
-        {'test_file': 'test_qwen2.5_0.5B_sglang_config.py', 'num_gpus': 8},
-        {'test_file': 'test_qwen2.5_0.5B_sglang_config_distributed.py', 'num_gpus': 8},
-        {'test_file': 'test_sglang_config_mixed_offload.py', 'num_gpus': 8},
-        {'test_file': 'test_sglang_config_mixed_offload_ft.py', 'num_gpus': 8},
+        {'test_file': 'test_qwen2.5_0.5B_vllm_config.py', 'num_gpus': 8},
+        {'test_file': 'test_qwen2.5_0.5B_vllm_config_distributed.py', 'num_gpus': 8},
+        {'test_file': 'test_vllm_config_mixed_offload.py', 'num_gpus': 8},
+        {'test_file': 'test_vllm_config_mixed_offload_ft.py', 'num_gpus': 8},
       ],
     },
     'e2e-test-megatron': {
@@ -32,7 +32,7 @@
         {'test_file': 'test_moonlight_16B_A3B_r3.py', 'num_gpus': 8, 'enable_eval': '0'},
         {'test_file': 'test_mimo_7B_mtp_only_grad.py', 'num_gpus': 8},
         {'test_file': 'test_qwen2.5_0.5B_debug_rollout_then_train.py', 'num_gpus': 8},
-        {'test_file': 'test_qwen2.5_0.5B_opd_sglang.py', 'num_gpus': 8},
+        {'test_file': 'test_qwen2.5_0.5B_opd_vllm.py', 'num_gpus': 8},
       ],
     },
     'e2e-test-precision': {
@@ -64,7 +64,7 @@
 
     'e2e-test-image': {
       'label': 'run-ci-image',
-      'image': 'slimerl/slime-test:latest',
+      'image': 'inferactinc/public:vime-vllm-cu129-latest',
       'tests': [
         {'test_file': 'test_qwen3.5_0.8B_gsm8k_async_short.py', 'num_gpus': 4},
         {'test_file': 'test_qwen3.5_0.8B_gsm8k_short.py', 'num_gpus': 4},
@@ -79,7 +79,7 @@
         {'test_file': 'test_qwen3_4B_ckpt.py', 'num_gpus': 8},
         {'test_file': 'test_qwen3_4B_ckpt.py', 'test_args': '--async-save', 'num_gpus': 8},
         {'test_file': 'test_qwen2.5_0.5B_debug_rollout_then_train.py', 'num_gpus': 8},
-        {'test_file': 'test_qwen2.5_0.5B_opd_sglang.py', 'num_gpus': 8},
+        {'test_file': 'test_qwen2.5_0.5B_opd_vllm.py', 'num_gpus': 8},
       ],
     },
 } %>
@@ -205,7 +205,7 @@ jobs:
             -v /mnt/nvme0n1/slime_ci/models:/root/models \
             -v /mnt/nvme0n1/slime_ci/datasets:/root/datasets \
             -w "$GITHUB_WORKSPACE" \
-            << config.image if config.image else 'slimerl/slime:latest' >> \
+            << config.image if config.image else 'inferactinc/public:vime-vllm-cu129-latest' >> \
             bash -lc '
               set -euo pipefail
               pip install -e . --no-deps --break-system-packages
@@ -321,7 +321,7 @@ jobs:
             -v /mnt/nvme0n1/slime_ci/models:/root/models \
             -v /mnt/nvme0n1/slime_ci/datasets:/root/datasets \
             -w "$GITHUB_WORKSPACE" \
-            slimerl/slime:latest \
+            inferactinc/public:vime-vllm-cu129-latest \
             bash -lc '
               set -euo pipefail
               pip install -e . --no-deps --break-system-packages

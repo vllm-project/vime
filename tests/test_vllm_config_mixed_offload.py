@@ -1,6 +1,6 @@
 """E2E test: mixed offload with updatable + frozen models.
 
-Deploys two models via --sglang-config in colocate mode:
+Deploys two models via --vllm-config in colocate mode:
   - "actor": update_weights=true, 4 GPUs → overlaps with megatron, gets offloaded
     and weights updated from training.
   - "ref":   update_weights=false, 4 GPUs → overlaps with megatron, gets offloaded
@@ -25,8 +25,8 @@ MODEL_TYPE = "qwen2.5-0.5B"
 NUM_GPUS = 8
 
 # Two models on 8 GPUs (colocate): actor gets weight updates, ref is frozen.
-SGLANG_CONFIG_YAML = """\
-sglang:
+VLLM_CONFIG_YAML = """\
+vllm:
   - name: actor
     update_weights: true
     server_groups:
@@ -49,8 +49,8 @@ def prepare():
 
 
 def execute():
-    config_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", prefix="sglang_mixed_offload_", delete=False)
-    config_file.write(SGLANG_CONFIG_YAML)
+    config_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", prefix="rollout_mixed_offload_", delete=False)
+    config_file.write(VLLM_CONFIG_YAML)
     config_file.flush()
     config_path = config_file.name
 
@@ -108,11 +108,11 @@ def execute():
         "--adam-beta2 0.98 "
     )
 
-    sglang_args = (
+    vllm_args = (
         "--rollout-num-gpus-per-engine 1 "
-        f"--sglang-mem-fraction-static {0.6 if TIGHT_DEVICE_MEMORY else 0.7} "
-        "--sglang-cuda-graph-max-bs 32 "
-        f"--sglang-config {config_path} "
+        f"--vllm-gpu-memory-utilization {0.6 if TIGHT_DEVICE_MEMORY else 0.7} "
+        "--vllm-max-num-seqs 32 "
+        f"--vllm-config {config_path} "
     )
 
     ci_args = "--ci-test "
@@ -137,7 +137,7 @@ def execute():
         f"{U.get_default_wandb_args(__file__)} "
         f"{perf_args} "
         f"{eval_args} "
-        f"{sglang_args} "
+        f"{vllm_args} "
         f"{ci_args} "
         f"{misc_args} "
     )

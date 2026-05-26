@@ -32,43 +32,44 @@ def _get_gpu_split():
 
 
 def _launch_teacher_server(teacher_gpu: str):
-    """Launch an sglang teacher server on the specified GPU."""
+    """Launch a vLLM teacher server on the specified GPU."""
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = teacher_gpu
 
-    log_path = "/tmp/sglang_teacher.log"
+    log_path = "/tmp/vllm_teacher.log"
     log_file = open(log_path, "w")
     process = subprocess.Popen(
         [
             "python3",
             "-m",
-            "sglang.launch_server",
-            "--model-path",
+            "vllm.entrypoints.openai.api_server",
+            "--model",
             f"/root/models/{MODEL_NAME}",
             "--host",
             "0.0.0.0",
             "--port",
             str(TEACHER_PORT),
-            "--tp",
+            "--tensor-parallel-size",
             "1",
-            "--mem-fraction-static",
+            "--gpu-memory-utilization",
             "0.6",
+            "--trust-remote-code",
         ],
         env=env,
         stdout=log_file,
         stderr=subprocess.STDOUT,
     )
 
-    print(f"Starting teacher sglang server on GPU {teacher_gpu} (pid={process.pid}), log: {log_path}")
+    print(f"Starting teacher vLLM server on GPU {teacher_gpu} (pid={process.pid}), log: {log_path}")
 
     # Wait for server to be ready (up to 10 minutes)
     for _ in range(120):
         if process.poll() is not None:
             raise RuntimeError(f"Teacher server process exited with code {process.returncode}. Check {log_path}")
         try:
-            req = urllib.request.urlopen(f"http://{TEACHER_HOST}:{TEACHER_PORT}/health_generate", timeout=2)
+            req = urllib.request.urlopen(f"http://{TEACHER_HOST}:{TEACHER_PORT}/health", timeout=2)
             if req.status == 200:
-                print(f"Teacher sglang server is ready on GPU {teacher_gpu}")
+                print(f"Teacher vLLM server is ready on GPU {teacher_gpu}")
                 return process
         except Exception:
             pass
@@ -128,14 +129,14 @@ def execute():
         rm_args = (
             "--custom-rm-path slime.rollout.on_policy_distillation.reward_func "
             "--custom-reward-post-process-path slime.rollout.on_policy_distillation.post_process_rewards "
-            f"--rm-url http://{TEACHER_HOST}:{TEACHER_PORT}/generate "
+            f"--rm-url http://{TEACHER_HOST}:{TEACHER_PORT}/v1/completions "
         )
 
         grpo_args = (
             "--advantage-estimator grpo "
-            # OPD with sglang teacher (self-distillation for CI test)
+            # OPD with vLLM teacher (self-distillation for CI test)
             "--use-opd "
-            "--opd-type sglang "
+            "--opd-type vllm "
             "--opd-kl-coef 1.0 "
             "--use-kl-loss "
             "--kl-loss-coef 0.00 "
@@ -154,11 +155,10 @@ def execute():
             "--adam-beta2 0.98 "
         )
 
-        sglang_args = (
+        vllm_args = (
             "--rollout-num-gpus-per-engine 1 "
-            f"--sglang-mem-fraction-static {0.6 if TIGHT_DEVICE_MEMORY else 0.7} "
-            "--sglang-cuda-graph-max-bs 32 "
-            "--sglang-enable-metrics "
+            f"--vllm-gpu-memory-utilization {0.6 if TIGHT_DEVICE_MEMORY else 0.7} "
+            "--vllm-max-num-seqs 32 "
         )
 
         ci_args = "--ci-test "
@@ -183,7 +183,7 @@ def execute():
             f"{U.get_default_wandb_args(__file__)} "
             f"{perf_args} "
             f"{eval_args} "
-            f"{sglang_args} "
+            f"{vllm_args} "
             f"{ci_args} "
             f"{misc_args} "
             f"{rm_args} "
@@ -199,7 +199,6 @@ def execute():
         if teacher_process:
             teacher_process.kill()
             teacher_process.wait()
-        U.exec_command("pkill -9 sglang; true")
 
 
 if __name__ == "__main__":

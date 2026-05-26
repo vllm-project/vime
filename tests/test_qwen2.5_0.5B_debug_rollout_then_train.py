@@ -1,8 +1,8 @@
 """
 Two-phase debug test:
-  Phase 1 – debug_rollout_only: launch sglang, generate rollout data for 2 steps,
+  Phase 1 – debug_rollout_only: launch vLLM, generate rollout data for 2 steps,
             and save them to a temp directory.
-  Phase 2 – load_debug_rollout_data (train only): skip sglang entirely, load the
+  Phase 2 – load_debug_rollout_data (train only): skip vLLM entirely, load the
             saved rollout data, and run 2 training steps.
 
 Uses Qwen2.5-0.5B-Instruct (smallest supported model) with 2 GPUs.
@@ -87,15 +87,13 @@ def _common_args(debug_data_dir: str):
 def execute_rollout_only(debug_data_dir: str):
     """Phase 1: rollout-only, save data."""
 
-    sglang_args = (
-        "--rollout-num-gpus-per-engine 1 "
-        f"--sglang-mem-fraction-static {0.6 if TIGHT_DEVICE_MEMORY else 0.7} "
-        "--sglang-cuda-graph-max-bs 32 "
+    vllm_args = (
+        "--rollout-num-gpus-per-engine 1 " f"--vllm-gpu-memory-utilization {0.6 if TIGHT_DEVICE_MEMORY else 0.7} "
     )
 
     phase1_args = (
         f"{_common_args(debug_data_dir)} "
-        f"{sglang_args} "
+        f"{vllm_args} "
         "--debug-rollout-only "
         f"--save-debug-rollout-data {debug_data_dir}/rollout_{{rollout_id}}.pt "
     )

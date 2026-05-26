@@ -91,16 +91,10 @@ def execute():
         "--use-precision-aware-optimizer "
     )
 
-    sglang_args = (
-        "--rollout-num-gpus-per-engine 8 "
-        "--sglang-mem-fraction-static 0.8 "
-        "--sglang-cuda-graph-max-bs 32 "
-        "--sglang-max-running-requests 512 "
-        "--sglang-enable-metrics "
-    )
+    vllm_args = "--rollout-num-gpus-per-engine 8 " "--vllm-gpu-memory-utilization 0.8 " "--vllm-max-num-seqs 512 "
 
     if USE_DEEPEP:
-        sglang_args += "--sglang-moe-a2a-backend deepep --sglang-deepep-mode auto "
+        vllm_args += "--vllm-all2all-backend deepep_high_throughput "
 
     ci_args = "--ci-test "
 
@@ -131,7 +125,7 @@ def execute():
         f"{U.get_default_wandb_args(__file__)} "
         f"{perf_args} "
         f"{eval_args} "
-        f"{sglang_args} "
+        f"{vllm_args} "
         f"{ci_args} "
         f"{misc_args} "
     )

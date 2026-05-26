@@ -92,23 +92,12 @@ def execute():
         "--use-precision-aware-optimizer "
     )
 
-    sglang_args = (
+    vllm_args = (
         "--rollout-num-gpus-per-engine 4 "
-        "--sglang-mem-fraction-static 0.75 "
-        "--sglang-enable-dp-attention "
-        "--sglang-dp-size 4 "
-        "--sglang-ep-size 4 "
-        "--sglang-enable-dp-lm-head "
-        "--sglang-cuda-graph-bs 1 2 4 8 16 24 32 "
-        "--sglang-max-running-requests 512 "
+        "--vllm-gpu-memory-utilization 0.75 "
+        "--vllm-data-parallel-size 4 "
+        "--vllm-max-num-seqs 512 "
         "--prefill-num-servers 1 "
-        "--sglang-disaggregation-transfer-backend mooncake "
-        "--sglang-speculative-algorithm EAGLE "
-        "--sglang-speculative-num-steps 3 "
-        "--sglang-speculative-eagle-topk 1 "
-        "--sglang-speculative-num-draft-tokens 4 "
-        "--sglang-mamba-scheduler-strategy extra_buffer "
-        "--sglang-enable-metrics "
     )
 
     misc_args = (
@@ -135,7 +124,7 @@ def execute():
         f"{U.get_default_wandb_args(__file__)} "
         f"{perf_args} "
         f"{eval_args} "
-        f"{sglang_args} "
+        f"{vllm_args} "
         f"{misc_args} "
     )
 
