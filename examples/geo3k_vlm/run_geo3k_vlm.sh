@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# Qwen3 VL RL training on geo3k dataset
+# Qwen3 VL RL training on geo3k dataset with non-colocated vLLM rollout.
+# Uses 4 GPUs for Megatron training and 4 GPUs for vLLM rollout.
 # Usage: 
 #   SLIME_SCRIPT_MODEL_NAME=Qwen3-VL-2B-Instruct ./run_geo3k_vlm.sh
 
@@ -8,7 +9,9 @@
 TRAIN_BACKEND="megatron"
 MODEL_NAME=${SLIME_SCRIPT_MODEL_NAME:-"Qwen3-VL-8B-Instruct"}
 DATASET_NAME=${SLIME_SCRIPT_DATASET_NAME:-"chenhegu/geo3k_imgurl"}
-NUM_GPUS=${SLIME_SCRIPT_NUM_GPUS:-8}
+TOTAL_GPUS=8
+TRAIN_GPUS=4
+ROLLOUT_GPUS=4
 DATASET_LOCAL_NAME=$(basename "$DATASET_NAME")
 
 # Validate MODEL_NAME
@@ -130,10 +133,12 @@ OPTIMIZER_ARGS=(
    --adam-beta2 0.98
 )
 
-SGLANG_ARGS=(
+VLLM_ARGS=(
+   --rollout-num-gpus ${ROLLOUT_GPUS}
    --rollout-num-gpus-per-engine 1
-   --sglang-mem-fraction-static 0.6
-   --sglang-cuda-graph-bs 1 2 4 8 16 24 32 40 48 56 64 72 80 88 96 104 112 120 128 136 144 152 160 168 176 184 192 200 208 216 224 232 240 248 256
+   --vllm-server-concurrency 64
+   --vllm-gpu-memory-utilization ${VLLM_GPU_MEMORY_UTILIZATION:-0.9}
+   --router-policy round_robin
 )
 
 # Wandb args (only if WANDB_API_KEY is set)
@@ -141,7 +146,7 @@ if [ -n "$WANDB_API_KEY" ]; then
    WANDB_ARGS=(
       --use-wandb
       --wandb-project slime-geo3k-vlm
-      --wandb-group ${MODEL_NAME_LOWER}-${TRAIN_BACKEND}
+      --wandb-group ${MODEL_NAME_LOWER}-${TRAIN_BACKEND}-vllm-8gpu-noncolocate
       --wandb-key ${WANDB_API_KEY}
       --disable-wandb-random-suffix
    )
@@ -149,16 +154,15 @@ else
    WANDB_ARGS=()
 fi
 
-MISC_ARGS=(
-   --colocate
-)
+MISC_ARGS=()
 
 # Backend-specific args
 # megatron backend
 BACKEND_ARGS=(
    --train-backend megatron
    --load /root/models/${MODEL_NAME}
-   --tensor-model-parallel-size 4
+   --num-gpus-per-node ${TOTAL_GPUS}
+   --tensor-model-parallel-size 1
    --sequence-parallel
    --pipeline-model-parallel-size 1
    --context-parallel-size 1
@@ -187,7 +191,7 @@ MODEL_ARGS_ROTARY_BASE=5000000 source "${SLIME_DIR}/scripts/models/${MODEL_ARGS_
 if [ "$USE_EXTERNAL_RAY" = "0" ]; then
    export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
    export no_proxy="127.0.0.1,${MASTER_ADDR}"
-   ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus ${NUM_GPUS} --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+   ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus ${TOTAL_GPUS} --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 fi
 
 # Build runtime env
@@ -203,7 +207,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
    -- python3 train.py \
    --actor-num-nodes 1 \
-   --actor-num-gpus-per-node ${NUM_GPUS} \
+   --actor-num-gpus-per-node ${TRAIN_GPUS} \
    --multimodal-keys "${MULTIMODAL_KEYS}" \
    ${MODEL_ARGS[@]} \
    ${CKPT_ARGS[@]} \
@@ -211,7 +215,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    ${EVAL_ARGS[@]} \
    ${GRPO_ARGS[@]} \
    ${OPTIMIZER_ARGS[@]} \
-   ${SGLANG_ARGS[@]} \
+   ${VLLM_ARGS[@]} \
    ${WANDB_ARGS[@]} \
    ${BACKEND_ARGS[@]} \
    ${MISC_ARGS[@]}
