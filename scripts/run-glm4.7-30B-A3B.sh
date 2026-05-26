@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # for rerun the task
-pkill -9 sglang
+pkill -9 -f "vllm serve"
 sleep 3
 ray stop --force
 pkill -9 ray
@@ -112,23 +112,17 @@ WANDB_ARGS=(
    # --wandb-group glm4.7-flash
 )
 
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 8
-   --sglang-mem-fraction-static 0.8
-   --sglang-enable-dp-attention
-   --sglang-dp-size 8
-   --sglang-enable-dp-lm-head
-   --sglang-moe-dense-tp-size 1
+   --vllm-gpu-memory-utilization 0.8
+   --vllm-data-parallel-size 8
 
    # mtp
-   --sglang-speculative-algorithm EAGLE
-   --sglang-speculative-num-steps 3
-   --sglang-speculative-eagle-topk 1
-   --sglang-speculative-num-draft-tokens 4
 
-   --sglang-cuda-graph-max-bs 64
 
-   --sglang-max-running-requests 512
+   --vllm-max-num-seqs 512
+   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3}'
+   --vllm-max-cudagraph-capture-size 64
 )
 
 MISC_ARGS=(
@@ -172,6 +166,6 @@ ray job submit --address="http://127.0.0.1:8265" \
    ${WANDB_ARGS[@]} \
    ${PERF_ARGS[@]} \
    ${EVAL_ARGS[@]} \
-   ${SGLANG_ARGS[@]} \
+   ${VLLM_ARGS[@]} \
    ${MISC_ARGS[@]} \
    ${MTP_ARGS[@]}

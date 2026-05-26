@@ -36,7 +36,7 @@ else
 fi
 
 # Cleanup
-pkill -9 sglang
+pkill -9 -f "vllm serve"
 sleep 3
 if [ "$USE_EXTERNAL_RAY" = "0" ]; then
    ray stop --force

@@ -4,7 +4,7 @@ This is a minimal reproduction of [Search-R1](https://github.com/PeterGriffinJin
 
 ## Environment Setup
 
-Use the `slimerl/slime:latest` image and initialize the environment required for Search-R1:
+Use the `inferactinc/public:vime-vllm-cu129-latest` image and initialize the environment required for Search-R1:
 
 ```bash
 cd /root/

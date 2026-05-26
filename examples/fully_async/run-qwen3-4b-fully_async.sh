@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # for rerun the task
-pkill -9 sglang
+pkill -9 -f "vllm serve"
 sleep 3
 ray stop --force
 pkill -9 ray
@@ -96,7 +96,7 @@ OPTIMIZER_ARGS=(
    --adam-beta2 0.98
 )
 
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 1
 )
 
@@ -135,5 +135,5 @@ ray job submit --address="http://127.0.0.1:8265" \
    ${OPTIMIZER_ARGS[@]} \
    ${GRPO_ARGS[@]} \
    ${PERF_ARGS[@]} \
-   ${SGLANG_ARGS[@]} \
+   ${VLLM_ARGS[@]} \
    ${MISC_ARGS[@]}

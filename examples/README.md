@@ -14,6 +14,4 @@ These examples provide concrete examples to leverage slime in your own RL workfl
 - **[reproducibility](./reproducibility)**: Guides on achieving bitwise experiment reproduction using deterministic modes.
 - **[retool](./retool)**: Demonstrates the retool functionality for tool-enabled language model generation.
 - **[search-r1](./search-r1)**: A minimal reproduction of Search-R1, featuring multi-turn conversation and tool-calling.
-- **[strands_sglang](./strands_sglang)**: Integration example with the Strands-Agents scaffolding framework.
-- **[tau-bench](./tau-bench)**: Training in an agentic multi-turn tool use environment (Tau-bench).
 - **[train_infer_mismatch_helper](./train_infer_mismatch_helper)**: Algorithmic methods for rollout correction (e.g., TIS, MIS).

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # for rerun the task
-pkill -9 sglang
+pkill -9 -f "vllm serve"
 sleep 3
 ray stop --force
 pkill -9 ray
@@ -87,12 +87,11 @@ WANDB_ARGS=(
    --wandb-group qwen2.5-0.5B-gsm8k-deterministic
 )
 
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 1
-   --sglang-mem-fraction-static 0.7
+   --vllm-gpu-memory-utilization 0.7
 
-   --sglang-enable-deterministic-inference
-   --sglang-attention-backend flashinfer
+   --vllm-attention-backend FLASHINFER
 
    --deterministic-mode
 )
@@ -118,7 +117,8 @@ ray job submit --address="http://127.0.0.1:8265" \
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         "NCCL_ALGO": "Ring",
         "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0",
-        "CUBLAS_WORKSPACE_CONFIG": ":4096:8"
+        "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+        "VLLM_BATCH_INVARIANT": "1"
      }
    }' \
    -- python3 train.py \
@@ -134,5 +134,5 @@ ray job submit --address="http://127.0.0.1:8265" \
    ${WANDB_ARGS[@]} \
    ${PERF_ARGS[@]} \
    ${EVAL_ARGS[@]} \
-   ${SGLANG_ARGS[@]} \
+   ${VLLM_ARGS[@]} \
    ${MISC_ARGS[@]}

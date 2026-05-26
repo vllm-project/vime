@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # for rerun the task
-pkill -9 sglang
+pkill -9 -f "vllm serve"
 sleep 3
 ray stop --force
 pkill -9 ray
@@ -117,24 +117,19 @@ WANDB_ARGS=(
    # --wandb-key ${WANDB_KEY}
 )
 
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 16
-   --sglang-mem-fraction-static 0.7
+   --vllm-gpu-memory-utilization 0.7
 
    # dp attention
-   --sglang-enable-dp-attention
-   --sglang-dp-size 8
-   --sglang-moe-dense-tp-size 1
-   --sglang-enable-dp-lm-head
+   --vllm-data-parallel-size 8
 
-   --sglang-ep-size 16
 
-   # enable deepep for sglang
-   # --sglang-moe-a2a-backend deepep
-   # --sglang-deepep-mode auto
+   # deepep MoE A2A — add --vllm-all2all-backend deepep_high_throughput to enable
 
    # make every dp rank has 128 concurrency
-   --sglang-server-concurrency 1024
+   --vllm-server-concurrency 1024
+   --vllm-enable-expert-parallel
 )
 
 
@@ -179,5 +174,5 @@ ray job submit --address="http://127.0.0.1:8265" \
    ${WANDB_ARGS[@]} \
    ${PERF_ARGS[@]} \
    ${EVAL_ARGS[@]} \
-   ${SGLANG_ARGS[@]} \
+   ${VLLM_ARGS[@]} \
    ${MISC_ARGS[@]}

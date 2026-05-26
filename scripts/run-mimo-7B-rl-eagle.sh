@@ -2,7 +2,7 @@
 #!/bin/bash
 
 # for rerun the task
-pkill -9 sglang
+pkill -9 -f "vllm serve"
 sleep 3
 ray stop --force
 pkill -9 ray
@@ -104,18 +104,15 @@ WANDB_ARGS=(
    # --wandb-key ${WANDB_API_KEY}
 )
 
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 1
-   --sglang-mem-fraction-static 0.7
+   --vllm-gpu-memory-utilization 0.7
 
    # for speculative decoding
-   --sglang-speculative-algorithm EAGLE
-   --sglang-speculative-num-steps 3
-   --sglang-speculative-eagle-topk 1
-   --sglang-speculative-num-draft-tokens 4
 
    # sometimes flashinfer has IMA bugs. Use fa3 as instead
-   --sglang-attention-backend fa3
+   --vllm-attention-backend FLASH_ATTN
+   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3}'
 )
 
 MISC_ARGS=(
@@ -161,6 +158,6 @@ ray job submit --address="http://127.0.0.1:8265" \
    ${WANDB_ARGS[@]} \
    ${PERF_ARGS[@]} \
    ${EVAL_ARGS[@]} \
-   ${SGLANG_ARGS[@]} \
+   ${VLLM_ARGS[@]} \
    ${MISC_ARGS[@]} \
    ${SPEC_ARGS[@]}

@@ -58,7 +58,7 @@ class Geo3kEnv(BaseInteractionEnv):
         """
         Parse the latest tool call payload from the assistant response.
         Supports the <tool_call>{...}</tool_call> convention used in the
-        SGLang multi-turn templates. Tool tags are mandatory.
+        vLLM multi-turn templates. Tool tags are mandatory.
         """
         matches = list(TOOL_CALL_RE.finditer(text))
         raw_json = None

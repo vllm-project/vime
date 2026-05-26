@@ -1,7 +1,7 @@
 export SLIME_SCRIPT_MODEL_NAME=Qwen3-VL-8B-Instruct
 export SLIME_SCRIPT_TRAIN_BACKEND=megatron
 export PYTORCH_ALLOC_CONF=expandable_segments:True
-export PYTHONPATH="/root/Megatron-Bridge/src:/root/Megatron-LM/:/root/sglang/python:$PYTHONPATH"
+export PYTHONPATH="/root/Megatron-Bridge/src:/root/Megatron-LM/:$PYTHONPATH"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # for rerun the task
-# pkill -9 sglang
+# pkill -9 -f "vllm serve"
 # sleep 3
 # ray stop --force
 # pkill -9 ray
@@ -122,11 +122,11 @@ WANDB_ARGS=(
    # --wandb-key ${WANDB_KEY}
 )
 
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 8
-   --sglang-mem-fraction-static 0.6
-   --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 256)
-   --sglang-expert-parallel-size 8
+   --vllm-gpu-memory-utilization 0.6
+   --vllm-enable-expert-parallel
+   --vllm-cudagraph-capture-sizes 1 2 4 8 $(seq 16 8 256)
    # --use-rollout-routing-replay
 )
 
@@ -175,5 +175,5 @@ ray job submit --address="${RAY_ADDRESS}" \
    ${WANDB_ARGS[@]} \
    ${PERF_ARGS[@]} \
    ${EVAL_ARGS[@]} \
-   ${SGLANG_ARGS[@]} \
+   ${VLLM_ARGS[@]} \
    ${MISC_ARGS[@]}

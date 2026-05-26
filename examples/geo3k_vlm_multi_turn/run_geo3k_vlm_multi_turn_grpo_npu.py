@@ -82,16 +82,7 @@ def execute():
         "--use-precision-aware-optimizer "
     )
 
-    sglang_args = (
-        "--rollout-num-gpus-per-engine 1 "
-        "--sglang-mem-fraction-static 0.6 "
-        f"--sglang-cuda-graph-bs {' '.join(map(str, [4, 8] + list(range(16, 257, 8))))} "
-        "--sglang-device npu "
-        "--sglang-disable-radix-cache "
-        "--sglang-chunked-prefill-size 32768 "
-        "--sglang-max-prefill-tokens 4000 "
-        "--sglang-max-total-tokens 327680 "
-    )
+    vllm_args = "--rollout-num-gpus-per-engine 1 " "--vllm-gpu-memory-utilization 0.6 "
 
     megatron_args = (
         "--train-backend megatron "
@@ -137,7 +128,7 @@ def execute():
         f"{rollout_args} "
         f"{optimizer_args} "
         f"{grpo_args} "
-        f"{sglang_args} "
+        f"{vllm_args} "
         f"{backend_args} "
         f"{misc_args} "
         f"{wandb_args} "

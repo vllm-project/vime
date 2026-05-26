@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # for rerun the task
-pkill -9 sglang
+pkill -9 -f "vllm serve"
 sleep 3
 ray stop --force
 pkill -9 ray
@@ -112,13 +112,12 @@ WANDB_ARGS=(
 )
 
 
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 8
-   --sglang-mem-fraction-static 0.7
-  #  --sglang-enable-dp-attention
-  #  --sglang-dp-size 4
-   --sglang-ep-size 8
-   --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 256)
+   --vllm-gpu-memory-utilization 0.7
+  #  #  --vllm-data-parallel-size 4
+   --vllm-enable-expert-parallel
+   --vllm-cudagraph-capture-sizes 1 2 4 8 $(seq 16 8 256)
 )
 
 
@@ -166,5 +165,5 @@ ray job submit --address="http://127.0.0.1:8265" \
    ${WANDB_ARGS[@]} \
    ${PERF_ARGS[@]} \
    ${EVAL_ARGS[@]} \
-   ${SGLANG_ARGS[@]} \
+   ${VLLM_ARGS[@]} \
    ${MISC_ARGS[@]}

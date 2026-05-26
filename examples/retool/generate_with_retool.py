@@ -7,7 +7,11 @@ try:
 except ImportError as e:
     raise ImportError("Jinja2 is required. Please install it with: pip install jinja2") from e
 
-from slime.rollout.sglang_rollout import GenerateState
+from slime.rollout.vllm_rollout import (
+    GenerateState,
+    _build_inference_sampling_params,
+    _inference_generate_tokens_and_logprobs,
+)
 from slime.utils.http_utils import post
 from slime.utils.types import Sample
 
@@ -144,42 +148,6 @@ def postprocess_predictions(prediction: str):
     return None, ""
 
 
-def postprocess_responses(resp: str) -> str:
-    """Post-process response to ensure tag completeness"""
-    # Handle <tool_call> tags (new format from Jinja2 template)
-    if "<tool_call>" in resp:
-        # Find the last occurrence of <tool_call>...</tool_call>
-        tool_call_pattern = r"<tool_call>\s*\{.*?\}\s*</tool_call>"
-        matches = list(re.finditer(tool_call_pattern, resp, re.DOTALL))
-        if matches:
-            last_match = matches[-1]
-            return resp[: last_match.end()]
-
-    # Handle <code> tags
-    if "</code>" in resp:
-        return resp.split("</code>")[0] + "</code>"
-
-    # Handle ```python code blocks
-    if "```python" in resp:
-        # Find the last occurrence of ```python...```
-        python_pattern = r"```python\s*.*?```"
-        matches = list(re.finditer(python_pattern, resp, re.DOTALL))
-        if matches:
-            last_match = matches[-1]
-            return resp[: last_match.end()]
-
-    # Handle Answer: \boxed{...} format (only format we need for math_dapo)
-    if "Answer:" in resp and "\\boxed{" in resp:
-        # Find the last occurrence of Answer: \boxed{...} with nested braces support
-        answer_pattern = r"Answer:\s*\\boxed\{((?:[^{}]|\{[^{}]*\})*)\}"
-        matches = list(re.finditer(answer_pattern, resp, re.DOTALL))
-        if matches:
-            last_match = matches[-1]
-            return resp[: last_match.end()]
-
-    return resp
-
-
 async def execute_predictions(prediction: str) -> str:
     """Execute predictions and return results"""
     action, content = postprocess_predictions(prediction)
@@ -217,7 +185,7 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
     assert not args.partial_rollout, "Partial rollout is not supported for " "this function at the moment."
 
     state = GenerateState(args)
-    url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+    url = f"http://{args.vllm_router_ip}:{args.vllm_router_port}/inference/v1/generate"
 
     # Set up the initial prompt with system prompt and tools (outside the loop)
     tool_specs = tool_registry.get_tool_specs()
@@ -228,6 +196,7 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
     response_token_ids = []
     loss_masks = []
     tool_call_count = 0  # Track actual tool call rounds
+    inference_sampling_params = _build_inference_sampling_params(sampling_params)
 
     for turn in range(TOOL_CONFIGS["max_turns"]):
         # Check if total length exceeds max context length
@@ -243,9 +212,9 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
         # Use token IDs instead of text
         current_token_ids = prompt_tokens_ids + response_token_ids
         payload = {
-            "input_ids": current_token_ids,
-            "sampling_params": sampling_params,
-            "return_logprob": True,  # Request log probabilities for training
+            "model": args.hf_checkpoint,
+            "token_ids": current_token_ids,
+            "sampling_params": inference_sampling_params,
         }
 
         # Log payload to wandb for debugging
@@ -271,30 +240,26 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
 
         output = await post(url, payload)
 
+        choice = output["choices"][0]
+        finish_reason = choice.get("finish_reason") or "stop"
+
         # Handle abort
-        if output["meta_info"]["finish_reason"]["type"] == "abort":
+        if finish_reason in ("abort", "cancelled"):
             sample.status = Sample.Status.ABORTED
             return sample
 
-        if "output_token_logprobs" in output["meta_info"]:
-            cur_response_token_ids = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
-            cur_response = state.tokenizer.decode(cur_response_token_ids)
-            cur_log_probs = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
-            if sample.rollout_log_probs is None:
-                sample.rollout_log_probs = []
-            sample.rollout_log_probs += cur_log_probs
-
-        else:
-            cur_response = output["text"]
-            cur_response = postprocess_responses(cur_response)
-            cur_response_token_ids = state.tokenizer(cur_response, add_special_tokens=False)["input_ids"]
+        cur_response_token_ids, cur_log_probs = _inference_generate_tokens_and_logprobs(choice)
+        cur_response = state.tokenizer.decode(cur_response_token_ids) if cur_response_token_ids else ""
+        if sample.rollout_log_probs is None:
+            sample.rollout_log_probs = []
+        sample.rollout_log_probs += cur_log_probs
 
         response += cur_response
         response_token_ids += cur_response_token_ids
         loss_masks += [1] * len(cur_response_token_ids)
 
         # Check length limit
-        if output["meta_info"]["finish_reason"]["type"] == "length":
+        if finish_reason == "length":
             break
 
         next_obs, done = await execute_predictions(cur_response)
@@ -338,14 +303,15 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
     # Store tool call count for reward calculation
     sample.tool_call_count = tool_call_count
 
-    # Set status
-    match output["meta_info"]["finish_reason"]["type"]:
-        case "length":
-            sample.status = Sample.Status.TRUNCATED
-        case "abort":
-            sample.status = Sample.Status.ABORTED
-        case "stop":
-            sample.status = Sample.Status.COMPLETED
+    # Set status (only when not already set above by truncation / break)
+    if sample.status not in (Sample.Status.TRUNCATED, Sample.Status.ABORTED):
+        match finish_reason:
+            case "length":
+                sample.status = Sample.Status.TRUNCATED
+            case "abort" | "cancelled":
+                sample.status = Sample.Status.ABORTED
+            case _:
+                sample.status = Sample.Status.COMPLETED
 
     return sample
 
