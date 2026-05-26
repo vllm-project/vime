@@ -11,6 +11,7 @@ import requests
 
 from slime.ray.ray_actor import RayActor
 from slime.utils.http_utils import get_host_info
+from slime.utils.common import is_npu
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,10 @@ def get_base_gpu_id(args, rank):
 
 
 def _to_local_gpu_id(physical_gpu_id: int) -> int:
-    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if is_npu():
+        cvd = os.environ.get("ASCEND_RT_VISIBLE_DEVICES")
+    else:
+        cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
     if not cvd:
         return physical_gpu_id
     visible = [int(x) for x in cvd.split(",") if x.strip() != ""]
@@ -272,7 +276,10 @@ def launch_server_process(
     env = os.environ.copy()
     env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
     env.setdefault("NCCL_CUMEM_ENABLE", "0")
-    env["CUDA_VISIBLE_DEVICES"] = visible_devices
+    if is_npu():
+        env["ASCEND_RT_VISIBLE_DEVICES"] = visible_devices
+    else:
+        env["CUDA_VISIBLE_DEVICES"] = visible_devices
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")
 
     host_for_subprocess = bind_host.strip("[]")
@@ -356,6 +363,7 @@ def launch_server_process(
     # Auto-forward all other args.vllm_* that differ from their vllm-side default.
     _forward_vllm_cli_args(args, cmd)
 
+    print(f"Launching vLLM server: {' '.join(cmd)}")
     logger.info("Launching vLLM server: %s", _redact_cmd_for_log(cmd))
 
     p = _spawn_ctx.Process(target=_exec_vllm_cmd, args=(cmd, env))

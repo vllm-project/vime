@@ -15,6 +15,7 @@ from urllib3.exceptions import NewConnectionError
 
 from slime.ray.ray_actor import RayActor
 from slime.utils.http_utils import get_host_info
+from slime.utils.common import is_npu
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,10 @@ def get_base_gpu_id(args, rank):
 
 
 def _to_local_gpu_id(physical_gpu_id: int) -> int:
-    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if is_npu():
+        cvd = os.environ.get("ASCEND_RT_VISIBLE_DEVICES")
+    else:
+        cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
     if not cvd:
         return physical_gpu_id  # no remapping
     # CUDA_VISIBLE_DEVICES can be like "4,5,6,7"

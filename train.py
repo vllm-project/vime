@@ -1,9 +1,12 @@
 import ray
 
-from slime.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
+from slime.ray.placement_group import create_placement_groups, create_rollout_ma
 from slime.utils.arguments import parse_args
 from slime.utils.logging_utils import configure_logger, finish_tracking, init_tracking, update_tracking_open_metrics
 from slime.utils.misc import should_run_periodic_action
+from slime.utils.common import is_npu
+if is_npu():
+    import mindspeed.megatron_adaptor
 
 
 def train(args):

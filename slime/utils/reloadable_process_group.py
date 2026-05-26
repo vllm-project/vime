@@ -167,7 +167,7 @@ class ReloadableProcessGroup(torch.distributed.ProcessGroup):
         for reloadable_group in reloadable_groups:
             if reloadable_group.group is not None:
                 continue
-            group = old_new_group(ranks=reloadable_group.group_info["ranks"], backend="nccl")
+            group = old_new_group(ranks=reloadable_group.group_info["ranks"], backend="hccl")
             reloadable_group.group = group
 
     def rank(self) -> int:

@@ -99,7 +99,7 @@ def main():
     os.environ.setdefault("MASTER_ADDR", "localhost")
     os.environ.setdefault("MASTER_PORT", "12355")
     dist.init_process_group(
-        backend="nccl",
+        backend="hccl",
         world_size=world_size,
         rank=global_rank,
         device_id=torch.device(f"cuda:{local_rank}"),

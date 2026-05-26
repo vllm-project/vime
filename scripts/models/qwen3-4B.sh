@@ -10,7 +10,8 @@ MODEL_ARGS=(
    --disable-bias-linear
    --normalization "RMSNorm"
    --norm-epsilon 1e-6
-   --rotary-base "${MODEL_ARGS_ROTARY_BASE:-1000000}"
+   # --rotary-base "${MODEL_ARGS_ROTARY_BASE:-1000000}"
+   --rotary-base 5000000
    --vocab-size 151936
    --kv-channels 128
    --qk-layernorm

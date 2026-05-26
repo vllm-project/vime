@@ -8,6 +8,10 @@ import numpy as np
 import ray
 import torch
 import torch.distributed as dist
+from slime.utils.common import is_npu
+if is_npu():
+    import mindspeed.megatron_adaptor
+    from mindspeed.megatron_adaptor import repatch
 from megatron.core import mpu
 from torch_memory_saver import torch_memory_saver
 from transformers import AutoConfig, AutoTokenizer
@@ -59,6 +63,8 @@ class MegatronTrainRayActor(TrainRayActor):
 
         init(args)
 
+        if is_npu():
+            repatch(args)
         if is_megatron_main_rank():
             init_tracking(args, primary=False)
 
@@ -194,11 +200,12 @@ class MegatronTrainRayActor(TrainRayActor):
         )
         # TODO: this is ugly, move to somewhere else?
         # move tokens to GPU in advance
+        device = torch.npu.current_device() if is_npu() else torch.cuda.current_device()
         rollout_data["tokens"] = [
-            torch.tensor(t, dtype=torch.long, device=torch.cuda.current_device()) for t in rollout_data["tokens"]
+            torch.tensor(t, dtype=torch.long, device=device) for t in rollout_data["tokens"]
         ]
         rollout_data["loss_masks"] = [
-            torch.tensor(t, dtype=torch.int, device=torch.cuda.current_device()) for t in rollout_data["loss_masks"]
+            torch.tensor(t, dtype=torch.int, device=device) for t in rollout_data["loss_masks"]
         ]
         if "multimodal_train_inputs" in rollout_data:
             # Move multimodal training tensors to GPU in advance
@@ -206,9 +213,9 @@ class MegatronTrainRayActor(TrainRayActor):
                 (
                     {
                         key: (
-                            torch.from_numpy(v.copy()).to(device=torch.cuda.current_device())
+                            torch.from_numpy(v.copy()).to(device=device)
                             if isinstance(v, np.ndarray)
-                            else v.to(device=torch.cuda.current_device())
+                            else v.to(device=device)
                         )
                         for key, v in mm_dict.items()
                     }
