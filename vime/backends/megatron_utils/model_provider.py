@@ -103,6 +103,15 @@ def _get_model_provider_func(
             provider.num_layers_in_first_pipeline_stage = args.decoder_first_pipeline_num_layers
         if getattr(args, "decoder_last_pipeline_num_layers", None) is not None:
             provider.num_layers_in_last_pipeline_stage = args.decoder_last_pipeline_num_layers
+        # provider.gradient_accumulation_fusion = args.gradient_accumulation_fusion
+        provider.gradient_accumulation_fusion = False
+        provider.recompute_granularity = args.recompute_granularity
+        provider.recompute_method = args.recompute_method
+        provider.recompute_num_layers = args.recompute_num_layers
+        for key, value in vars(args).items():
+            if hasattr(provider, key):
+                continue
+            setattr(provider, key, value)
         provider.finalize()
 
         if role == "critic":

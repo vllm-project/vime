@@ -180,6 +180,110 @@ def execute_train(
         )
 
 
+def execute_train_npu(
+    train_args: str,
+    megatron_model_type: str | None,
+    train_script: str = "train.py",
+    before_ray_job_submit=None,
+    extra_env_vars=None,
+    config: ExecuteTrainConfig | None = None,
+):
+    if extra_env_vars is None:
+        extra_env_vars = {}
+    if config is None:
+        config = ExecuteTrainConfig()
+    external_ray = get_bool_env_var("SLIME_SCRIPT_EXTERNAL_RAY")
+    master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
+
+    train_backend_fsdp = "--train-backend fsdp" in train_args
+    assert train_backend_fsdp == (megatron_model_type is None)
+
+    exec_command(
+        "pkill -9 sglang; "
+        "sleep 3; "
+        f"{'' if external_ray else 'ray stop --force; '}"
+        f"{'' if external_ray else 'pkill -9 ray; '}"
+        # cannot be run in CI, o/w kill the parent script
+        # TODO: do we really need this kill? (or can we instead kill slime)
+        # "pkill -9 python; "
+        "pkill -9 slime; "
+        "sleep 3; "
+        f"{'' if external_ray else 'pkill -9 ray; '}"
+        # "pkill -9 python; "
+        "pkill -9 slime; "
+        "pkill -9 redis; "
+        "true; "
+    )
+
+    if not external_ray:
+        exec_command(
+            # will prevent ray from buffering stdout/stderr
+            f"export PYTHONBUFFERED=16 && "
+            f"ray start --head --node-ip-address {master_addr} --disable-usage-stats"
+        )
+
+    if (f := before_ray_job_submit) is not None:
+        f()
+
+    runtime_env_json = json.dumps(
+        {
+            "env_vars": {
+                # "PYTHONPATH": "/root/Megatron-LM/",
+                "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+                "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+                "ASCEND_TOOLKIT_HOME": "/usr/local/CANN9.0.0/ascend-toolkit/latest/",
+                "ASCEND_OPP_PATH": "/usr/local/CANN9.0.0/ascend-toolkit/latest/opp/",
+                "ASCEND_AICPU_PATH": "/usr/local/CANN9.0.0/ascend-toolkit/latest/",
+                "ASCEND_HOME_PATH": "/usr/local/CANN9.0.0/ascend-toolkit/latest/",
+                "set_env_path": "/usr/local/CANN9.0.0/nnal/atb/set_env.sh",
+                "HYDRA_FULL_ERROR": "1",
+                "HCCL_HOST_SOCKET_PORT_RANGE": "60000-60050",
+                "HCCL_NPU_SOCKET_PORT_RANGE": "61000-61050",
+                # If setting this in FSDP, the computation communication overlapping may have issues
+                **(
+                    {}
+                    if train_backend_fsdp
+                    else {
+                        "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+                    }
+                ),
+                "NCCL_NVLS_ENABLE": str(int(check_has_nvlink())),
+                "no_proxy": f"127.0.0.1,{master_addr}",
+                # This is needed by megatron / torch distributed in multi-node setup
+                "MASTER_ADDR": master_addr,
+                **(
+                    {
+                        "CUDA_ENABLE_COREDUMP_ON_EXCEPTION": "1",
+                        "CUDA_COREDUMP_SHOW_PROGRESS": "1",
+                        "CUDA_COREDUMP_GENERATION_FLAGS": "skip_nonrelocated_elf_images,skip_global_memory,skip_shared_memory,skip_local_memory,skip_constbank_memory",
+                        "CUDA_COREDUMP_FILE": "/root/shared_data/cuda_coredump_%h.%p.%t",
+                    }
+                    if config.cuda_core_dump
+                    else {}
+                ),
+                **extra_env_vars,
+                **_parse_extra_env_vars(config.extra_env_vars),
+            }
+        }
+    )
+
+    if get_bool_env_var("SLIME_SCRIPT_ENABLE_RAY_SUBMIT", "1"):
+        cmd_megatron_model_source = (
+            f'source "{repo_base_dir}/scripts/models/{megatron_model_type}.sh" && '
+            if megatron_model_type is not None
+            else ""
+        )
+        exec_command(
+            f"export no_proxy=127.0.0.1 && export PYTHONBUFFERED=16 && "
+            f"{cmd_megatron_model_source}"
+            f'ray job submit --address="http://127.0.0.1:8265" '
+            f"--runtime-env-json='{runtime_env_json}' "
+            f"-- python3 {train_script} "
+            f"{'${MODEL_ARGS[@]}' if megatron_model_type is not None else ''} "
+            f"{train_args}"
+        )
+
+
 def _parse_extra_env_vars(text: str):
     try:
         return json.loads(text)
