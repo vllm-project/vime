@@ -1,15 +1,10 @@
 from __future__ import annotations
 
 import ipaddress
-import json
 import logging
 import multiprocessing
 import os
 import time
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    import numpy as np
 from urllib.parse import quote
 
 import requests
@@ -313,6 +308,9 @@ def launch_server_process(
     # unless the user already passed --vllm-max-model-len explicitly.
     if args.rollout_max_context_len is not None and getattr(args, "vllm_max_model_len", None) is None:
         cmd += ["--max-model-len", str(args.rollout_max_context_len)]
+    if getattr(args, "use_rollout_routing_replay", False):
+        cmd += ["--enable-return-routed-experts"]
+
     # vime-preferred defaults — must be explicitly forwarded because the vllm-side
     # default would otherwise apply (the generic forwarder skips values that equal
     # action.default).
@@ -337,10 +335,6 @@ def launch_server_process(
             return False
         _, action = entry
         return getattr(args, dest, action.default) != action.default
-
-    # MoE routing replay (vLLM 0.22+, PR #39568): routed experts on ``/inference/v1/generate``.
-    if getattr(args, "use_rollout_routing_replay", False):
-        cmd += ["--enable-return-routed-experts"]
 
     # 1) gpu_memory_utilization: vllm default 0.92 OOMs in colocate training; vime ships 0.55.
     if _user_overrode("vllm_gpu_memory_utilization"):
@@ -411,36 +405,9 @@ def _redact_cmd_for_log(cmd: list[str]) -> str:
     return " ".join(parts)
 
 
-def _response_json_or_fallback(response) -> dict:
-    """Parse JSON from an HTTP response, returning a structured error dict on failure."""
-    try:
-        data = response.json()
-    except (ValueError, json.JSONDecodeError):
-        return {"ok": False, "error": "Invalid JSON response", "raw": getattr(response, "text", "")}
-    if not isinstance(data, dict):
-        return {"ok": False, "error": "Response is not a dictionary", "data": data}
-    return data
-
-
-def _routing_rows_from_http_payload(value: Any) -> np.ndarray | None:
-    """Decode vLLM routed-experts HTTP field (base64 npy or nested list)."""
-    import base64
-    import io
-
-    import numpy as np
-
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return np.load(io.BytesIO(base64.b64decode(value)), allow_pickle=False)
-    if isinstance(value, list):
-        return np.asarray(value, dtype=np.int32)
-    return None
-
-
 def _verify_generate_routed_experts(base_url: str, model: str, timeout_s: float = 120.0) -> None:
     """Smoke-check MoE routing via ``/inference/v1/generate`` (same path as R3 rollout; vLLM 0.22+)."""
-    from slime.rollout.vllm_rollout import _merge_generate_routed_experts
+    from slime.rollout.vllm_rollout import _decode_generate_routed_experts
 
     base = base_url.rstrip("/")
     token_ids = [1, 2, 3, 4, 5]
@@ -461,21 +428,16 @@ def _verify_generate_routed_experts(base_url: str, model: str, timeout_s: float 
     num_gen = len(out_ids)
     num_prompt = len(token_ids)
 
-    merged = _merge_generate_routed_experts(
-        body,
-        choice,
-        gen_token_count=num_gen,
-        prompt_token_count=num_prompt,
-    )
-    if merged is None:
+    arr = _decode_generate_routed_experts(choice)
+    if arr is None:
         raise RuntimeError(
             "vLLM /inference/v1/generate returned no routed-experts fields. "
             "Requires vLLM 0.22+ with --enable-return-routed-experts (use_rollout_routing_replay)."
         )
 
     expected_rows = num_prompt + num_gen - 1 if num_prompt > 0 and num_gen > 0 else 0
-    n_rows = int(merged.shape[0])
-    if expected_rows > 0 and n_rows not in (expected_rows, expected_rows + 1):
+    n_rows = int(arr.shape[0])
+    if expected_rows > 0 and n_rows != expected_rows:
         raise RuntimeError(
             f"vLLM routing replay smoke check: routing rows {n_rows} != "
             f"expected {expected_rows} (prompt+gen len(tokens)-1). "
