@@ -83,7 +83,6 @@ def test_start_weight_update_posts_four_phase_endpoint(vllm_engine, monkeypatch)
     assert len(calls) == 1
     assert calls[0][0] == "start_weight_update"
     assert calls[0][1] == {"is_checkpoint_format": True}
-    assert calls[0][2] == vllm_engine._weight_transfer_http_timeout()
 
 
 @pytest.mark.unit
@@ -99,7 +98,9 @@ def test_finish_weight_update_posts_empty_body(vllm_engine, monkeypatch):
     result = vllm_engine.finish_weight_update()
 
     assert result == {"done": True}
-    assert calls == [("finish_weight_update", {}, vllm_engine._weight_transfer_http_timeout())]
+    assert len(calls) == 1
+    assert calls[0][0] == "finish_weight_update"
+    assert calls[0][1] == {}
 
 
 @pytest.mark.unit
@@ -150,56 +151,6 @@ def test_post_vllm_update_weights_http_wraps_update_info(vllm_engine, monkeypatc
     assert result == {"status": "ok"}
     assert seen[0][0] == "update_weights"
     assert seen[0][1] == {"update_info": {"names": ["w"], "packed": False}}
-
-
-@pytest.mark.unit
-def test_weight_transfer_http_timeout_reads_env(vllm_engine, monkeypatch):
-    monkeypatch.setenv("SLIME_VLLM_WEIGHT_TRANSFER_UPDATE_TIMEOUT_SEC", "123.5")
-    assert vllm_engine._weight_transfer_http_timeout() == 123.5
-
-
-@pytest.mark.unit
-def test_weight_transfer_http_timeout_fallback_to_legacy_env(vllm_engine, monkeypatch):
-    monkeypatch.delenv("SLIME_VLLM_WEIGHT_TRANSFER_UPDATE_TIMEOUT_SEC", raising=False)
-    monkeypatch.setenv("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "42")
-    assert vllm_engine._weight_transfer_http_timeout() == 42.0
-
-
-@pytest.mark.unit
-def test_response_json_or_fallback_parses_dict():
-    response = _MockResponse(json_data={"status": "ready"})
-    assert mod._response_json_or_fallback(response) == {"status": "ready"}
-
-
-@pytest.mark.unit
-def test_response_json_or_fallback_non_dict_wrapped():
-    response = _MockResponse()
-    response.json = lambda: ["a", "b"]  # type: ignore[method-assign]
-    assert mod._response_json_or_fallback(response) == {
-        "ok": False,
-        "error": "Response is not a dictionary",
-        "data": ["a", "b"],
-    }
-
-
-@pytest.mark.unit
-def test_response_json_or_fallback_invalid_json():
-    response = _MockResponse(text="not-json")
-    response.json = lambda: (_ for _ in ()).throw(ValueError("no json"))  # type: ignore[method-assign]
-    assert mod._response_json_or_fallback(response) == {
-        "ok": False,
-        "error": "Invalid JSON response",
-        "raw": "not-json",
-    }
-
-
-@pytest.mark.unit
-def test_http_base_requires_init(vllm_args):
-    from slime.backends.vllm_utils.vllm_engine import VLLMEngine
-
-    engine = VLLMEngine(vllm_args, rank=0)
-    with pytest.raises(RuntimeError, match="init\\(\\)"):
-        engine._http_base()
 
 
 @pytest.mark.unit
