@@ -11,11 +11,23 @@ https://docs.vllm.ai/en/stable/examples/rl/rlhf_ipc/
 
 The flow for colocated engines:
 1. Megatron params → HF conversion (via HfWeightIteratorBase)
-2. All trainer ranks call ``IPCWeightTransferEngine.trainer_send_weights()``
-   with ``send_mode="ray"`` pointing at the colocated vLLM engine actor on the
-   same GPU slot.  Each rank creates a CUDA IPC handle for its GPU; the engine
-   collects all handles via ``_all_gather_and_merge_handles`` so every vLLM
-   worker can pick the handle belonging to its physical GPU UUID.
+2. Each trainer rank builds vLLM-protocol IPC handles for its GPU
+   (``reduce_tensor`` from ``torch.multiprocessing.reductions``) and dispatches
+   them via ``engine.update_weights_from_tensor.remote(update_info=..., weight_version=...)``.
+   When ``rollout_num_gpus_per_engine > 1`` (vLLM TP within the engine), the
+   coordinator rank gathers and merges per-rank handles into one RPC so every
+   vLLM worker can pick the handle for its physical GPU UUID. The RPC name
+   ``update_weights_from_tensor`` and the ``weight_version`` kwarg match slime's
+   IPC entry point (``sglang_engine.update_weights_from_tensor``); only the
+   on-the-wire payload differs (vLLM IPCWeightTransferUpdateInfo dict vs
+   SGLang serialized_named_tensors).
+
+We deliberately do not use ``IPCWeightTransferEngine.trainer_send_weights``:
+its hard-coded ``llm_handle.update_weights.remote(...)`` call would force the
+RPC contract to be the vLLM one and would drop ``weight_version`` on the floor
+(ci_test's engine-vs-updater check requires the engine to track the version).
+Reusing only ``reduce_tensor`` for handle creation lets vime keep the RPC
+contract aligned with slime.
 
 For non-colocated overflow engines the existing NCCL distributed broadcast
 (``update_weights_from_distributed``) is used unchanged.
@@ -122,18 +134,10 @@ def _merge_ipc_update_infos(infos: Sequence[dict[str, list]]) -> dict[str, list]
 
 
 class UpdateWeightFromTensor:
-    """
-    Update colocated vLLM engines from tensors via CUDA IPC (Ray send mode).
-
-    Colocated path:
-        Megatron weights → HF conversion → CUDA IPC to vLLM engine actors via
-        ``IPCWeightTransferEngine.trainer_send_weights(send_mode="ray")``.
-        Each trainer rank sends to the colocated engine on its GPU slot.
-
-    Distributed overflow path (optional):
-        Falls back to NCCL distributed broadcast via
-        ``update_weights_from_distributed`` for engines whose GPUs lie outside
-        the actor GPU range.
+    """Update colocated vLLM engines via CUDA IPC, with NCCL fallback for
+    non-colocated overflow engines. See the module docstring for the
+    high-level design (why we dispatch via ``update_weights_from_tensor``
+    directly instead of vLLM's ``trainer_send_weights``).
 
     Engine lifecycle per ``update_weights`` call::
 
@@ -142,7 +146,7 @@ class UpdateWeightFromTensor:
         init_weight_transfer_engine                      (rank 0, colocated, first call only)
         start_weight_update                              (coordinator rank per engine only)
         [for each HF chunk]
-          trainer_send_weights                           (each rank mapped to _ipc_engine)
+          update_weights_from_tensor                     (per-rank or coordinator-merged)
           update_weights_from_distributed                (src rank, distributed)
           barrier                                        (all ranks)
         finish_weight_update                             (coordinator rank per engine only)
@@ -342,14 +346,11 @@ class UpdateWeightFromTensor:
             dist.barrier(group=get_gloo_group())
 
         # ── 5. Signal colocated engines to exit weight-update mode ───────────
-        # Thread the just-incremented weight_version through finish_weight_update
-        # so each colocated engine records it on ``self._weight_version``. The IPC
-        # path otherwise bypasses ``update_weights_from_tensor`` (the normal hook
-        # for setting it) and ci_test's engine-vs-updater check at
-        # slime/backends/megatron_utils/actor.py would mismatch (engine reports
-        # the model path from /v1/models; updater reports the integer version).
+        # State-machine bookend only; ``_weight_version`` is recorded inside
+        # ``update_weights_from_tensor`` (step 4) when the data RPC succeeds —
+        # matches slime's single-RPC version-with-data semantics.
         if self._ipc_engine_coordinator:
-            ray.get(self._ipc_engine.finish_weight_update.remote(weight_version=str(self.weight_version)))
+            ray.get(self._ipc_engine.finish_weight_update.remote())
         dist.barrier(group=get_gloo_group())
 
         # ── 6. Post-process quantization (if needed) and resume ───────────────
@@ -374,10 +375,11 @@ class UpdateWeightFromTensor:
     def _send_hf_chunk_via_ipc(self, hf_named_tensors: Sequence[tuple[str, torch.Tensor]]) -> None:
         """Send one HF chunk to the colocated vLLM engine via CUDA IPC (Ray → HTTP).
 
-        When ``rollout_num_gpus_per_engine > 1``, every trainer rank in the engine's GPU
-        slot builds an IPC handle on its GPU; the coordinator merges UUIDs and issues
-        a single ``update_weights`` RPC.  vLLM 0.21 ``trainer_send_weights`` alone only
-        ships the calling rank's UUID, which breaks vLLM TP workers on sibling GPUs.
+        ``slot_size == 1``: this rank ships its IPC payload directly.
+        ``slot_size > 1`` (vLLM TP): every rank in the slot builds its handle;
+        the coordinator gathers them, merges UUIDs, and issues one RPC for the
+        slot. Both paths dispatch the same RPC — ``update_weights_from_tensor`` —
+        with ``weight_version`` alongside the data (see module docstring).
         """
         assert self._ipc_engine is not None
         assert self._ipc_engine_slot_start is not None
@@ -385,18 +387,12 @@ class UpdateWeightFromTensor:
 
         slot_size = self._ipc_engine_slot_end - self._ipc_engine_slot_start
         if slot_size <= 1:
-            from vllm.distributed.weight_transfer.ipc_engine import (  # noqa: PLC0415
-                IPCTrainerSendWeightsArgs,
-                IPCWeightTransferEngine,
-            )
-
-            trainer_args = IPCTrainerSendWeightsArgs(
-                mode="ray",
-                llm_handle=self._ipc_engine,
-            )
-            IPCWeightTransferEngine.trainer_send_weights(
-                iterator=iter(hf_named_tensors),
-                trainer_args=trainer_args,
+            local_info = _build_ipc_update_info_from_named_tensors(hf_named_tensors)
+            ray.get(
+                self._ipc_engine.update_weights_from_tensor.remote(
+                    **local_info,
+                    weight_version=str(self.weight_version),
+                )
             )
             return
 
@@ -420,7 +416,12 @@ class UpdateWeightFromTensor:
                 )
             slot_infos = [_deserialize_ipc_update_info(p) for p in gathered_payloads]
             merged = _merge_ipc_update_infos(slot_infos)
-            ray.get(self._ipc_engine.update_weights.remote(dict(update_info=merged)))
+            ray.get(
+                self._ipc_engine.update_weights_from_tensor.remote(
+                    **merged,
+                    weight_version=str(self.weight_version),
+                )
+            )
 
         dist.barrier(group=tp_group)
 

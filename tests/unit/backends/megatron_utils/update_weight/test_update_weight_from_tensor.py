@@ -110,6 +110,7 @@ class RecordingVLLMEngine:
     init_weight_transfer_engine: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     start_weight_update: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     finish_weight_update: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
+    update_weights_from_tensor: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     pause_generation: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     flush_cache: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     continue_generation: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
@@ -205,7 +206,11 @@ def test_colocated_lifecycle_uses_vllm_sleep_and_weight_transfer_apis(upw_vllm):
 
 
 @pytest.mark.unit
-def test_trainer_send_weights_uses_single_llm_handle_per_rank(upw_vllm):
+def test_send_via_ipc_dispatches_update_weights_from_tensor_with_version(upw_vllm):
+    """slot_size=1: every HF chunk fires
+    ``engine.update_weights_from_tensor.remote(**fields, weight_version=...)``.
+    Mirrors slime's IPC RPC contract — same name, parameterized fields,
+    version travels with data (no piggyback onto ``finish_weight_update``)."""
     obj = _make_instance(upw_vllm)
     engine = RecordingVLLMEngine()
     obj._colocated_engines = [engine]
@@ -214,18 +219,23 @@ def test_trainer_send_weights_uses_single_llm_handle_per_rank(upw_vllm):
     obj._ipc_engine_slot_start = 0
     obj._ipc_engine_slot_end = 1
 
-    captured: list[dict] = []
+    dummy_info = {"names": ["w"], "dtype_names": ["bfloat16"], "shapes": [[2, 2]], "ipc_handles": [{"u": ("f", ())}]}
+    with patch(f"{MODULE_PATH}._build_ipc_update_info_from_named_tensors", return_value=dummy_info):
+        _run_update(obj, chunks=_chunks(2))
 
-    def fake_args(**kw):
-        captured.append(kw)
-        return kw
-
-    ipc_engine = MagicMock()
-    _run_update(obj, chunks=_chunks(2), ipc_engine_cls=ipc_engine, ipc_args_cls=fake_args)
-
-    assert ipc_engine.trainer_send_weights.call_count == 2
-    assert captured[0]["mode"] == "ray"
-    assert captured[0]["llm_handle"] is engine
+    # 2 HF chunks → 2 IPC RPCs
+    assert len(engine.update_weights_from_tensor.calls) == 2
+    kwargs = engine.update_weights_from_tensor.calls[0].kwargs
+    # fields are passed as explicit kwargs (** expanded from local_info)
+    assert kwargs["names"] == dummy_info["names"]
+    assert kwargs["dtype_names"] == dummy_info["dtype_names"]
+    assert kwargs["shapes"] == dummy_info["shapes"]
+    assert kwargs["ipc_handles"] is dummy_info["ipc_handles"]
+    # weight_version is the trainer's post-increment version (0 + 1 = 1) as a str
+    assert kwargs["weight_version"] == "1"
+    # finish_weight_update is a stateless bookend now — no kwargs
+    assert len(engine.finish_weight_update.calls) == 1
+    assert engine.finish_weight_update.calls[0].kwargs == {}
 
 
 @pytest.mark.unit

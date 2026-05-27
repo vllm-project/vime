@@ -103,16 +103,71 @@ def test_finish_weight_update_posts_empty_body(vllm_engine, monkeypatch):
 
 
 @pytest.mark.unit
-def test_finish_weight_update_records_weight_version_after_success(vllm_engine, monkeypatch):
-    def fake_post(endpoint: str, payload: dict, timeout: float):
-        assert endpoint == "finish_weight_update"
-        return _MockResponse(json_data={"done": True})
+def test_update_weights_from_tensor_posts_ipc_payload_and_records_version(vllm_engine, monkeypatch):
+    posted: list[dict] = []
+    monkeypatch.setattr(
+        vllm_engine,
+        "_post_vllm_update_weights_http",
+        lambda payload: (posted.append(payload), {"ok": True})[1],
+    )
+    assert vllm_engine._weight_version is None
 
-    monkeypatch.setattr(vllm_engine, "_post_json", fake_post)
+    vllm_engine.update_weights_from_tensor(
+        names=["layer.0.weight"],
+        dtype_names=["float32"],
+        shapes=[[2, 2]],
+        ipc_handles=[{"uuid-gpu0": ("rebuild_fn", (1, 2, 3))}],
+        weight_version="42",
+    )
 
-    vllm_engine.finish_weight_update(weight_version="3")
+    assert len(posted) == 1
+    sent = posted[0]
+    # ipc_handles got cloudpickle'd into ipc_handles_pickled
+    assert "ipc_handles" not in sent
+    assert isinstance(sent["ipc_handles_pickled"], str)
+    assert sent["names"] == ["layer.0.weight"]
+    assert sent["shapes"] == [[2, 2]]
+    # version recorded after POST success
+    assert vllm_engine._weight_version == "42"
 
-    assert vllm_engine.get_weight_version() == "3"
+
+@pytest.mark.unit
+def test_update_weights_from_tensor_does_not_advance_version_on_failure(vllm_engine, monkeypatch):
+    """POST failure must not advance _weight_version (else a retry would skip the resync)."""
+
+    def fake_post_vllm_fail(payload: dict) -> dict:
+        raise RuntimeError("simulated POST failure")
+
+    monkeypatch.setattr(vllm_engine, "_post_vllm_update_weights_http", fake_post_vllm_fail)
+
+    vllm_engine._weight_version = "old"
+    with pytest.raises(RuntimeError, match="simulated POST failure"):
+        vllm_engine.update_weights_from_tensor(
+            names=[], dtype_names=[], shapes=[], ipc_handles=[], weight_version="new"
+        )
+    assert vllm_engine._weight_version == "old"
+
+
+@pytest.mark.unit
+def test_get_weight_version_returns_recorded_version(vllm_engine):
+    vllm_engine._weight_version = "7"
+    assert vllm_engine.get_weight_version() == "7"
+
+
+@pytest.mark.unit
+def test_get_weight_version_raises_when_unset(vllm_engine):
+    """Unrecorded version is a hard error — no silent /v1/models fallback."""
+    assert vllm_engine._weight_version is None
+    with pytest.raises(RuntimeError, match="before any successful weight transfer"):
+        vllm_engine.get_weight_version()
+
+
+@pytest.mark.unit
+def test_get_weight_version_worker_rank_returns_none_without_raise(vllm_engine):
+    """Worker ranks short-circuit (matches the class-wide idiom)."""
+    vllm_engine.node_rank = 1
+    vllm_engine._weight_version = None
+    assert vllm_engine.get_weight_version() is None
 
 
 @pytest.mark.unit

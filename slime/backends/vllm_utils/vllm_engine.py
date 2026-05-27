@@ -584,36 +584,6 @@ class VLLMEngine(RayActor):
         except Exception:
             return {"ok": True, "raw": response.text}
 
-    def _run_vllm_weight_update(self, update_info: dict, *, is_checkpoint_format: bool = False):
-        """Backward-compatible alias for non-NCCL ``update_info`` shapes (e.g. tensor/IPC path)."""
-        del is_checkpoint_format
-        return self._post_vllm_update_weights_http(update_info)
-
-    def update_weights(self, update_info: dict) -> dict:
-        """Public Ray-callable entry point used by IPCWeightTransferEngine (Ray mode).
-
-        ``IPCWeightTransferEngine.trainer_send_weights`` calls
-        ``llm_handle.update_weights.remote(dict(update_info=update_info))``,
-        with ``update_info`` containing raw ``ipc_handles`` (Python callables from
-        ``reduce_tensor``).  Since vime communicates with vLLM over HTTP those
-        callables cannot be JSON-serialised; convert them to ``ipc_handles_pickled``
-        (base64-encoded pickle) which the vLLM server's ``IPCWeightTransferUpdateInfo``
-        accepts when ``VLLM_ALLOW_INSECURE_SERIALIZATION=1`` is set.
-        """
-        import base64
-
-        import cloudpickle
-
-        inner = dict(update_info["update_info"])  # shallow copy — do not mutate caller
-        if inner.get("ipc_handles") is not None:
-            # ipc_handles contain local closures from monkey_patch_torch_reductions
-            # (_rebuild_cuda_tensor_modified) that standard pickle cannot serialize.
-            # cloudpickle handles local functions and closures correctly.
-            inner["ipc_handles_pickled"] = base64.b64encode(cloudpickle.dumps(inner.pop("ipc_handles"))).decode(
-                "utf-8"
-            )
-        return self._post_vllm_update_weights_http(inner)
-
     def health_generate(self, timeout: float = 5.0) -> bool:
         """Return True if ``GET /health`` succeeds (SGLang uses ``GET /health_generate`` for the same role)."""
         if self.node_rank != 0:
@@ -624,37 +594,39 @@ class VLLMEngine(RayActor):
 
     def update_weights_from_tensor(
         self,
-        serialized_named_tensors: list[str],
-        load_format: str | None = None,
-        flush_cache: bool = False,
+        *,
+        names: list[str],
+        dtype_names: list[str],
+        shapes: list[list[int]],
+        ipc_handles: list[dict] | None = None,
         weight_version: str | None = None,
-    ):
-        """Post tensor metadata via ``/update_weights`` (vLLM RLHF native protocol).
-
-        Contrasts with SGLang, which posts to ``update_weights_from_tensor`` with a different payload shape.
-
-        If the POST fails this raises — there is intentionally no "fallback to reload"
-        path. The previous fallback restarted vllm from ``self.model_path``, which is
-        the original HF checkpoint (not the just-trained weights), so silently using
-        it would let training continue with stale rollout weights. Failing fast keeps
-        the bug visible until ``UpdateWeightFromTensor`` (vllm-native IPC) is
-        ported — see PR #12 review.
+        flush_cache: bool = False,
+    ) -> dict | None:
+        """IPC weight-transfer RPC. Same signature shape as slime's
+        ``sglang_engine.update_weights_from_tensor`` (explicit named fields,
+        ``weight_version`` recorded on POST success); payload is vLLM-native
+        (``IPCWeightTransferUpdateInfo``: names / dtype_names / shapes /
+        ipc_handles). ``ipc_handles`` are cloudpickle'd before HTTP because
+        the closures injected by ``_apply_monkey_patch_torch_reductions``
+        aren't JSON-serialisable.
         """
-        del load_format
         if self.node_rank != 0:
-            return
+            return None
 
-        if weight_version is not None:
-            self._weight_version = str(weight_version)
+        payload: dict = {"names": names, "dtype_names": dtype_names, "shapes": shapes}
+        if ipc_handles is not None:
+            import base64
+
+            import cloudpickle
+
+            payload["ipc_handles_pickled"] = base64.b64encode(cloudpickle.dumps(ipc_handles)).decode("utf-8")
         if flush_cache:
             self.flush_cache()
 
-        update_info = {
-            "serialized_named_tensors": serialized_named_tensors,
-            "format": "serialized_named_tensors",
-            "weight_version": self._weight_version,
-        }
-        return self._run_vllm_weight_update(update_info, is_checkpoint_format=False)
+        response = self._post_vllm_update_weights_http(payload)
+        if weight_version is not None:
+            self._weight_version = str(weight_version)
+        return response
 
     def flush_cache(self):
         """Clear prefix cache via ``POST /reset_prefix_cache`` (SGLang uses ``GET /flush_cache``)."""
@@ -709,25 +681,25 @@ class VLLMEngine(RayActor):
             pass
         self.process = None
 
-    def get_weight_version(self):
-        """
-        Prefer ``_weight_version`` if weight sync already set it; else try ``GET /v1/models`` for a stable id string.
+    def get_weight_version(self) -> str | None:
+        """Return the version recorded by the last successful weight transfer.
 
-        SGLang exposes ``GET /get_weight_version``; vLLM has no name-equivalent route, so semantics differ from that endpoint.
+        Raises ``RuntimeError`` if no weight transfer has recorded a version
+        yet — we don't fall back to a ``/v1/models`` lookup, which would
+        return the model path string and never match the trainer's integer
+        counter (i.e. produce a misleading "mismatch" downstream).
+        Worker ranks (``node_rank != 0``) short-circuit per the class idiom.
         """
         if self.node_rank != 0:
-            return
-        if self._weight_version is not None:
-            return self._weight_version
-        try:
-            r = requests.get(f"{self._http_base()}/v1/models", timeout=10)
-            r.raise_for_status()
-            data = r.json().get("data") or []
-            if data and isinstance(data[0], dict) and "id" in data[0]:
-                return str(data[0]["id"])
-        except requests.RequestException as e:
-            logger.info("get_weight_version: /v1/models failed (%s)", e)
-        return None
+            return None
+        if self._weight_version is None:
+            raise RuntimeError(
+                "VLLMEngine.get_weight_version called before any successful "
+                "weight transfer recorded a version (update_weights_from_tensor "
+                "/ update_weights_from_distributed never reached their "
+                "post-POST version write)."
+            )
+        return self._weight_version
 
     def release_memory_occupation(self, level: int = 1):
         """``POST /sleep?level={level}`` when sleep mode is enabled (SGLang: ``POST /release_memory_occupation``).
@@ -808,30 +780,16 @@ class VLLMEngine(RayActor):
         except Exception:
             return {"ok": True, "raw": response.text}
 
-    def finish_weight_update(self, weight_version: str | None = None) -> dict:
+    def finish_weight_update(self) -> dict:
         """``POST /finish_weight_update`` — signals vLLM to exit IPC weight-update mode.
 
-        ``weight_version`` records the version the trainer just transferred via IPC.
-        The IPC path bypasses ``update_weights_from_tensor`` (which is the normal
-        place ``_weight_version`` gets recorded for the distributed/NCCL path), so
-        callers must thread the new version through here for ``get_weight_version``
-        to report it back. Otherwise ci_test's engine-vs-updater version check
-        (slime/backends/megatron_utils/actor.py) fails the first time IPC weight
-        sync runs — ``_weight_version`` stays ``None`` and ``get_weight_version``
-        falls back to ``GET /v1/models``, which returns the model path string
-        (e.g. ``/root/models/Qwen2.5-0.5B-Instruct``), never matching the
-        updater's integer version (``"1"``, ``"2"``, …).
+        Purely a state-machine bookend now; ``_weight_version`` is recorded by
+        ``update_weights_from_tensor`` (the IPC data-carrying RPC), matching slime's
+        single-RPC version-with-data semantics.
         """
         update_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
         response = self._post_json("finish_weight_update", {}, timeout=update_timeout_s)
         response.raise_for_status()
-        # Record the new version only after the POST succeeded — if the engine
-        # never actually exited weight-update mode, ``_weight_version`` must not
-        # advance, otherwise a retry would skip the resync. (Defensive: per the
-        # current call sites, any exception above propagates out of
-        # ``update_weights`` and the ci_test check below it would not run.)
-        if weight_version is not None:
-            self._weight_version = str(weight_version)
         try:
             return response.json()
         except Exception:
