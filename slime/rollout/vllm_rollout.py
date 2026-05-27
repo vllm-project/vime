@@ -209,24 +209,6 @@ def _apply_vllm_routed_experts(
     sample.rollout_routed_experts = np.ascontiguousarray(arr.astype(np.int32, copy=True))
 
 
-def _vllm_expected_routed_rows_from_tokens(token_count: int) -> int:
-    """Return expected routed-experts row count given total tokens."""
-    return max(0, token_count - 1)
-
-
-def _decode_generate_routed_experts(choice: dict[str, Any]) -> np.ndarray | None:
-    """Decode `choices[].routed_experts` (base64 npy) from vLLM generate response."""
-    routed = choice.get("routed_experts")
-    if routed is None:
-        return None
-    if not isinstance(routed, str):
-        raise RuntimeError(f"vLLM routed_experts must be base64 npy str, got {type(routed)}")
-    arr = _decode_vllm_routed_experts(routed)
-    if arr.ndim != 3:
-        raise RuntimeError(f"vLLM routed_experts ndim={arr.ndim}, expected 3, shape={arr.shape}")
-    return arr
-
-
 def _inference_generate_tokens_and_logprobs(choice: dict[str, Any]) -> tuple[list[int], list[float]]:
     """Parse ``token_ids`` and ``logprobs.content`` from a vLLM ``/inference/v1/generate`` choice."""
     tids_raw = choice.get("token_ids")

@@ -405,51 +405,6 @@ def _redact_cmd_for_log(cmd: list[str]) -> str:
     return " ".join(parts)
 
 
-def _verify_generate_routed_experts(base_url: str, model: str, timeout_s: float = 120.0) -> None:
-    """Smoke-check MoE routing via ``/inference/v1/generate`` (same path as R3 rollout; vLLM 0.22+)."""
-    from slime.rollout.vllm_rollout import _decode_generate_routed_experts
-
-    base = base_url.rstrip("/")
-    token_ids = [1, 2, 3, 4, 5]
-    payload = {
-        "model": model,
-        "token_ids": token_ids,
-        "sampling_params": {
-            "max_tokens": 8,
-            "temperature": 0.0,
-            "logprobs": 1,
-        },
-    }
-    response = requests.post(f"{base}/inference/v1/generate", json=payload, timeout=timeout_s)
-    response.raise_for_status()
-    body = response.json()
-    choice = (body.get("choices") or [{}])[0]
-    out_ids = choice.get("token_ids") or []
-    num_gen = len(out_ids)
-    num_prompt = len(token_ids)
-
-    arr = _decode_generate_routed_experts(choice)
-    if arr is None:
-        raise RuntimeError(
-            "vLLM /inference/v1/generate returned no routed-experts fields. "
-            "Requires vLLM 0.22+ with --enable-return-routed-experts (use_rollout_routing_replay)."
-        )
-
-    expected_rows = num_prompt + num_gen - 1 if num_prompt > 0 and num_gen > 0 else 0
-    n_rows = int(arr.shape[0])
-    if expected_rows > 0 and n_rows != expected_rows:
-        raise RuntimeError(
-            f"vLLM routing replay smoke check: routing rows {n_rows} != "
-            f"expected {expected_rows} (prompt+gen len(tokens)-1). "
-            "Requires vLLM 0.22+ (PR #39568)."
-        )
-    logger.info(
-        "vLLM routing replay smoke check OK (/inference/v1/generate): routing rows=%s " "(expected %s)",
-        n_rows,
-        expected_rows,
-    )
-
-
 def _wait_server_healthy(base_url: str, process: multiprocessing.Process | None, timeout_s: float = 300.0) -> None:
     """Wait until the vLLM server responds on ``GET /health`` (SGLang stacks typically use ``GET /health_generate``)."""
     start = time.time()
@@ -491,7 +446,6 @@ class VLLMEngine(RayActor):
         self.num_gpus_per_engine = num_gpus_per_engine
         self.process: multiprocessing.Process | None = None
         self._weight_version: str | None = None
-        self._is_local_server = not args.rollout_external
         # Slime runs one vLLM HTTP process per logical engine; multi-node worker rank is not used.
         self.node_rank = 0
 
@@ -616,8 +570,6 @@ class VLLMEngine(RayActor):
         )
         base = self._http_base()
         _wait_server_healthy(base, process=self.process)
-        if getattr(self.args, "use_rollout_routing_replay", False):
-            _verify_generate_routed_experts(base, self.model_path)
 
     def _post_json(self, endpoint: str, payload: dict, timeout: float) -> requests.Response:
         url = f"{self._http_base()}/{endpoint.lstrip('/')}"
