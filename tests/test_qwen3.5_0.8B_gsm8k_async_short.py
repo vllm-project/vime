@@ -81,8 +81,11 @@ def execute():
         "--adam-beta2 0.98 "
     )
 
-    vllm_args = (
-        "--rollout-num-gpus-per-engine 1 " f"--vllm-gpu-memory-utilization {0.55 if TIGHT_DEVICE_MEMORY else 0.65} "
+    sglang_args = (
+        "--rollout-num-gpus-per-engine 1 "
+        f"--sglang-mem-fraction-static {0.55 if TIGHT_DEVICE_MEMORY else 0.65} "
+        "--sglang-cuda-graph-max-bs 32 "
+        "--sglang-enable-metrics "
     )
 
     ci_args = "--ci-test "
@@ -114,7 +117,7 @@ def execute():
         f"{U.get_default_wandb_args(__file__)} "
         f"{perf_args} "
         f"{eval_args} "
-        f"{vllm_args} "
+        f"{sglang_args} "
         f"{ci_args} "
         f"{fault_tolerance_args} "
         f"{misc_args} "
