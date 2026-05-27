@@ -103,6 +103,19 @@ def test_finish_weight_update_posts_empty_body(vllm_engine, monkeypatch):
 
 
 @pytest.mark.unit
+def test_finish_weight_update_records_weight_version_after_success(vllm_engine, monkeypatch):
+    def fake_post(endpoint: str, payload: dict, timeout: float):
+        assert endpoint == "finish_weight_update"
+        return _MockResponse(json_data={"done": True})
+
+    monkeypatch.setattr(vllm_engine, "_post_json", fake_post)
+
+    vllm_engine.finish_weight_update(weight_version="3")
+
+    assert vllm_engine.get_weight_version() == "3"
+
+
+@pytest.mark.unit
 def test_update_weights_from_distributed_posts_update_weights_without_checkpoint_flag(vllm_engine, monkeypatch):
     calls: list[dict] = []
 
