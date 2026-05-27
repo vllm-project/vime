@@ -86,6 +86,7 @@ megatron:
         "--rollout-num-gpus-per-engine 1 "
         "--rollout-num-gpus 2 "
         f"--vllm-gpu-memory-utilization {0.55 if TIGHT_DEVICE_MEMORY else 0.65} "
+        "--vllm-max-cudagraph-capture-size 64"
     )
 
     ci_args = "--ci-test "
