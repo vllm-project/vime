@@ -342,8 +342,14 @@ class UpdateWeightFromTensor:
             dist.barrier(group=get_gloo_group())
 
         # ── 5. Signal colocated engines to exit weight-update mode ───────────
+        # Thread the just-incremented weight_version through finish_weight_update
+        # so each colocated engine records it on ``self._weight_version``. The IPC
+        # path otherwise bypasses ``update_weights_from_tensor`` (the normal hook
+        # for setting it) and ci_test's engine-vs-updater check at
+        # slime/backends/megatron_utils/actor.py would mismatch (engine reports
+        # the model path from /v1/models; updater reports the integer version).
         if self._ipc_engine_coordinator:
-            ray.get(self._ipc_engine.finish_weight_update.remote())
+            ray.get(self._ipc_engine.finish_weight_update.remote(weight_version=str(self.weight_version)))
         dist.barrier(group=get_gloo_group())
 
         # ── 6. Post-process quantization (if needed) and resume ───────────────

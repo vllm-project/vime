@@ -808,11 +808,30 @@ class VLLMEngine(RayActor):
         except Exception:
             return {"ok": True, "raw": response.text}
 
-    def finish_weight_update(self) -> dict:
-        """``POST /finish_weight_update`` — signals vLLM to exit IPC weight-update mode."""
+    def finish_weight_update(self, weight_version: str | None = None) -> dict:
+        """``POST /finish_weight_update`` — signals vLLM to exit IPC weight-update mode.
+
+        ``weight_version`` records the version the trainer just transferred via IPC.
+        The IPC path bypasses ``update_weights_from_tensor`` (which is the normal
+        place ``_weight_version`` gets recorded for the distributed/NCCL path), so
+        callers must thread the new version through here for ``get_weight_version``
+        to report it back. Otherwise ci_test's engine-vs-updater version check
+        (slime/backends/megatron_utils/actor.py) fails the first time IPC weight
+        sync runs — ``_weight_version`` stays ``None`` and ``get_weight_version``
+        falls back to ``GET /v1/models``, which returns the model path string
+        (e.g. ``/root/models/Qwen2.5-0.5B-Instruct``), never matching the
+        updater's integer version (``"1"``, ``"2"``, …).
+        """
         update_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
         response = self._post_json("finish_weight_update", {}, timeout=update_timeout_s)
         response.raise_for_status()
+        # Record the new version only after the POST succeeded — if the engine
+        # never actually exited weight-update mode, ``_weight_version`` must not
+        # advance, otherwise a retry would skip the resync. (Defensive: per the
+        # current call sites, any exception above propagates out of
+        # ``update_weights`` and the ci_test check below it would not run.)
+        if weight_version is not None:
+            self._weight_version = str(weight_version)
         try:
             return response.json()
         except Exception:
