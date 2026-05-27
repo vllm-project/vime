@@ -25,7 +25,9 @@ def _install_stubs():
 
     megatron_core = types.ModuleType("megatron.core")
     megatron_core.mpu = mpu_stub
-    sys.modules.setdefault("megatron", types.ModuleType("megatron"))
+    megatron_mod = types.ModuleType("megatron")
+    megatron_mod.core = megatron_core
+    sys.modules.setdefault("megatron", megatron_mod)
     sys.modules.setdefault("megatron.core", megatron_core)
 
     ray_mod = types.ModuleType("ray")
@@ -142,6 +144,7 @@ def _make_instance(upw_vllm, args=None):
     obj._ipc_engine_coordinator = False
     obj._ipc_engine_slot_start = None
     obj._ipc_engine_slot_end = None
+    obj._ipc_slot_group = None
     obj._distributed_engines = []
     obj._model_update_groups = None
     obj._is_distributed_src_rank = False
@@ -236,6 +239,59 @@ def test_send_via_ipc_dispatches_update_weights_from_tensor_with_version(upw_vll
     # finish_weight_update is a stateless bookend now — no kwargs
     assert len(engine.finish_weight_update.calls) == 1
     assert engine.finish_weight_update.calls[0].kwargs == {}
+
+
+@pytest.mark.unit
+def test_send_via_ipc_dispatches_update_weights_from_tensor_coordinator_multi_gpu(upw_vllm):
+    """slot_size > 1: coordinator gathers payloads from all slot ranks, merges them,
+    and fires a single engine.update_weights_from_tensor.remote() RPC per chunk."""
+    obj = _make_instance(upw_vllm)
+    engine = RecordingVLLMEngine()
+    obj._colocated_engines = [engine]
+    obj._ipc_engine = engine
+    obj._ipc_engine_coordinator = True
+    obj._ipc_engine_slot_start = 0
+    obj._ipc_engine_slot_end = 2
+
+    dummy_info_0 = {
+        "names": ["w"],
+        "dtype_names": ["bfloat16"],
+        "shapes": [[2, 2]],
+        "ipc_handles": [{"uuid-gpu0": ("f", ())}],
+    }
+    dummy_info_1 = {
+        "names": ["w"],
+        "dtype_names": ["bfloat16"],
+        "shapes": [[2, 2]],
+        "ipc_handles": [{"uuid-gpu1": ("f", ())}],
+    }
+
+    def fake_all_gather_object(gathered_payloads, payload, group=None):
+        gathered_payloads[0] = "payload0"
+        gathered_payloads[1] = "payload1"
+
+    with patch("torch.distributed.get_rank", return_value=0), patch(
+        "megatron.core.mpu.get_tensor_model_parallel_rank", return_value=0
+    ), patch(
+        f"{MODULE_PATH}._build_ipc_update_info_from_named_tensors",
+        return_value=dummy_info_0,
+    ), patch(
+        f"{MODULE_PATH}._serialize_ipc_update_info", return_value="payload0"
+    ), patch(
+        f"{MODULE_PATH}._deserialize_ipc_update_info", side_effect=[dummy_info_0, dummy_info_1] * 2
+    ), patch(
+        "torch.distributed.all_gather_object", side_effect=fake_all_gather_object
+    ):
+        _run_update(obj, chunks=_chunks(2))
+
+    assert len(engine.update_weights_from_tensor.calls) == 2
+    kwargs = engine.update_weights_from_tensor.calls[0].kwargs
+    assert kwargs["names"] == dummy_info_0["names"]
+    assert kwargs["dtype_names"] == dummy_info_0["dtype_names"]
+    assert kwargs["shapes"] == dummy_info_0["shapes"]
+    assert len(kwargs["ipc_handles"]) == 1
+    assert set(kwargs["ipc_handles"][0].keys()) == {"uuid-gpu0", "uuid-gpu1"}
+    assert kwargs["weight_version"] == "1"
 
 
 @pytest.mark.unit

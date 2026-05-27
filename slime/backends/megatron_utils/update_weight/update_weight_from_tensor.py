@@ -256,7 +256,7 @@ class UpdateWeightFromTensor:
             slot_start = colocate_gpu_offsets[i]
             slot_end = slot_start + colocate_gpu_counts[i]
             slot_ranks = list(range(slot_start, slot_end))
-            grp = dist.new_group(ranks=slot_ranks)
+            grp = dist.new_group(ranks=slot_ranks, backend="gloo")
             if slot_start <= rank_for_slot < slot_end:
                 self._ipc_slot_group = grp
         # Second pass: bind this rank to its engine + decide coordinator.
@@ -426,10 +426,7 @@ class UpdateWeightFromTensor:
         dist.all_gather_object(gathered_payloads, payload, group=slot_group)
         if self._ipc_engine_coordinator:
             if any(p is None for p in gathered_payloads):
-                raise RuntimeError(
-                    f"Missing IPC payloads on slot ranks {slot_ranks}; "
-                    f"got {gathered_payloads!r}"
-                )
+                raise RuntimeError(f"Missing IPC payloads on slot ranks {slot_ranks}; " f"got {gathered_payloads!r}")
             slot_infos = [_deserialize_ipc_update_info(p) for p in gathered_payloads]
             merged = _merge_ipc_update_infos(slot_infos)
             ray.get(
