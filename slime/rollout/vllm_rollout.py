@@ -161,7 +161,6 @@ def _vllm_meta_from_generate_choice(args: Namespace, choice: dict, usage: dict |
 
 
 def _decode_vllm_routed_experts(value: str) -> np.ndarray:
-    """Decode vLLM routed-experts field returned as base64 ``.npy`` bytes."""
     raw = base64.b64decode(value.encode("ascii"), validate=True)
     return np.load(io.BytesIO(raw), allow_pickle=False)
 

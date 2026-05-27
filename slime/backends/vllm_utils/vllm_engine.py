@@ -450,8 +450,6 @@ class VLLMEngine(RayActor):
         self.node_rank = 0
 
     def _http_base(self) -> str:
-        if not hasattr(self, "server_host") or not hasattr(self, "server_port"):
-            raise RuntimeError("Call init() before using the vLLM HTTP client.")
         return f"http://{self.server_host}:{self.server_port}"
 
     def _weight_transfer_http_timeout(self) -> float:
@@ -568,8 +566,7 @@ class VLLMEngine(RayActor):
             visible_devices=visible_devices,
             model_path=self.model_path,
         )
-        base = self._http_base()
-        _wait_server_healthy(base, process=self.process)
+        _wait_server_healthy(self._http_base(), process=self.process)
 
     def _post_json(self, endpoint: str, payload: dict, timeout: float) -> requests.Response:
         url = f"{self._http_base()}/{endpoint.lstrip('/')}"
