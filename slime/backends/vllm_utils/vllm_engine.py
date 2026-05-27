@@ -32,6 +32,15 @@ def _normalize_vllm_wake_tags(tags: list[str] | None) -> list[str] | None:
     return normalized or None
 
 
+def _response_json(response: requests.Response) -> dict:
+    try:
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        e.add_note(f"{response.text=}")
+        raise
+    return response.json()
+
+
 def get_base_gpu_id(args, rank):
     """First local GPU index on this node for rollout engine *rank* (colocate vs actor[/critic]-offset layout)."""
     num_gpus = min(args.num_gpus_per_node, args.rollout_num_gpus_per_engine)
@@ -455,12 +464,7 @@ class VLLMEngine(RayActor):
         return f"http://{self.server_host}:{self.server_port}"
 
     def _weight_transfer_http_timeout(self) -> float:
-        return float(
-            os.environ.get(
-                "SLIME_VLLM_WEIGHT_TRANSFER_UPDATE_TIMEOUT_SEC",
-                os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"),
-            )
-        )
+        return float(self.args.vllm_weight_transfer_timeout_sec)
 
     def init(
         self,
@@ -585,11 +589,7 @@ class VLLMEngine(RayActor):
             {"update_info": update_info},
             timeout=self._weight_transfer_http_timeout(),
         )
-        response.raise_for_status()
-        try:
-            return response.json()
-        except Exception:
-            return {"ok": True, "raw": response.text}
+        return _response_json(response)
 
     def health_generate(self, timeout: float = 5.0) -> bool:
         """Return True if ``GET /health`` succeeds (SGLang uses ``GET /health_generate`` for the same role)."""
@@ -717,11 +717,7 @@ class VLLMEngine(RayActor):
             params={"level": level},
             timeout=30,
         )
-        response.raise_for_status()
-        try:
-            return response.json()
-        except Exception:
-            return {"ok": True, "raw": response.text}
+        return _response_json(response)
 
     def resume_memory_occupation(self, tags: list[str] | None = None):
         """``POST /wake_up`` when sleep mode is on (SGLang: ``POST /resume_memory_occupation``); else a small placeholder dict."""
@@ -736,11 +732,7 @@ class VLLMEngine(RayActor):
             params=wake_params,
             timeout=30,
         )
-        response.raise_for_status()
-        try:
-            return response.json()
-        except Exception:
-            return {"ok": True, "raw": response.text}
+        return _response_json(response)
 
     def init_weight_transfer_engine(self, payload: dict) -> dict:
         """``POST /init_weight_transfer_engine`` with a caller-supplied payload (IPC path).
@@ -748,16 +740,12 @@ class VLLMEngine(RayActor):
         For IPC mode the payload is ``{"init_info": {}}``; for NCCL use
         ``init_weights_update_group`` which constructs the payload from typed args.
         """
-        init_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
+        init_timeout_s = self._weight_transfer_http_timeout()
         last_error = None
         for attempt in range(1, 4):
             try:
                 response = self._post_json("init_weight_transfer_engine", payload, timeout=init_timeout_s)
-                response.raise_for_status()
-                try:
-                    return response.json()
-                except Exception:
-                    return {"ok": True, "raw": response.text}
+                return _response_json(response)
             except Exception as e:
                 last_error = e
                 if attempt < 3:
@@ -772,11 +760,7 @@ class VLLMEngine(RayActor):
             {"is_checkpoint_format": is_checkpoint_format},
             timeout=self._weight_transfer_http_timeout(),
         )
-        response.raise_for_status()
-        try:
-            return response.json()
-        except Exception:
-            return {"ok": True, "raw": response.text}
+        return _response_json(response)
 
     def finish_weight_update(self) -> dict:
         """``POST /finish_weight_update`` — signals vLLM to exit IPC weight-update mode.
@@ -786,11 +770,7 @@ class VLLMEngine(RayActor):
         single-RPC version-with-data semantics.
         """
         response = self._post_json("finish_weight_update", {}, timeout=self._weight_transfer_http_timeout())
-        response.raise_for_status()
-        try:
-            return response.json()
-        except Exception:
-            return {"ok": True, "raw": response.text}
+        return _response_json(response)
 
     def check_weights(self, action: str):
         """No vLLM ``weights_checker`` route; return a placeholder (SGLang posts to ``/weights_checker``)."""
@@ -812,16 +792,12 @@ class VLLMEngine(RayActor):
                 "world_size": world_size,
             }
         }
-        init_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
+        init_timeout_s = self._weight_transfer_http_timeout()
         last_error = None
         for attempt in range(1, 4):
             try:
                 response = self._post_json("init_weight_transfer_engine", payload, timeout=init_timeout_s)
-                response.raise_for_status()
-                try:
-                    return response.json()
-                except Exception:
-                    return {"ok": True, "raw": response.text}
+                return _response_json(response)
             except Exception as e:
                 last_error = e
                 if attempt < 3:
@@ -875,11 +851,7 @@ class VLLMEngine(RayActor):
             },
             timeout=600,
         )
-        response.raise_for_status()
-        try:
-            return response.json()
-        except Exception:
-            return {"ok": True, "raw": response.text}
+        return _response_json(response)
 
     def pause_generation(self):
         """``POST /pause`` with mode="keep" (SGLang: ``POST /pause_generation``); returns the ``requests.Response``."""

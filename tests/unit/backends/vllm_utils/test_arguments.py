@@ -253,8 +253,20 @@ def test_orchestration_dests_use_new_names(args_mod):
     assert "router_ip" in args_mod._VIME_ORCHESTRATION_DESTS
     assert "router_port" in args_mod._VIME_ORCHESTRATION_DESTS
     assert "router_request_timeout_secs" in args_mod._VIME_ORCHESTRATION_DESTS
+    assert "vllm_weight_transfer_timeout_sec" in args_mod._VIME_ORCHESTRATION_DESTS
     assert "vllm_router_ip" not in args_mod._VIME_ORCHESTRATION_DESTS
     assert "vllm_router_port" not in args_mod._VIME_ORCHESTRATION_DESTS
+
+
+@pytest.mark.unit
+def test_add_vllm_arguments_parses_weight_transfer_timeout(args_mod, monkeypatch):
+    monkeypatch.setattr(args_mod.AsyncEngineArgs, "add_cli_args", staticmethod(lambda parser: parser))
+    parser = argparse.ArgumentParser(add_help=False)
+    args_mod.add_vllm_arguments(parser)
+    default, _ = parser.parse_known_args([])
+    assert default.vllm_weight_transfer_timeout_sec == 900.0
+    parsed, _ = parser.parse_known_args(["--vllm-weight-transfer-timeout-sec", "123.5"])
+    assert parsed.vllm_weight_transfer_timeout_sec == 123.5
 
 
 def _realistic_add_vllm_arguments(parser):
@@ -263,6 +275,12 @@ def _realistic_add_vllm_arguments(parser):
     parser.add_argument("--router-ip", dest="router_ip", type=str, default=None)
     parser.add_argument("--router-port", dest="router_port", type=int, default=None)
     parser.add_argument("--vllm-server-concurrency", dest="vllm_server_concurrency", type=int, default=512)
+    parser.add_argument(
+        "--vllm-weight-transfer-timeout-sec",
+        dest="vllm_weight_transfer_timeout_sec",
+        type=float,
+        default=900.0,
+    )
     return parser
 
 
@@ -285,6 +303,7 @@ def test_action_table_excludes_orchestration(args_mod, monkeypatch):
     assert "router_ip" not in table
     assert "router_port" not in table
     assert "vllm_server_concurrency" not in table
+    assert "vllm_weight_transfer_timeout_sec" not in table
 
 
 @pytest.mark.unit

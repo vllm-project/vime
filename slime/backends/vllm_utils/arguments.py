@@ -200,6 +200,12 @@ def add_vllm_arguments(parser):
         default=512,
         help="Max concurrent inference requests sent to each vLLM server worker.",
     )
+    parser.add_argument(
+        "--vllm-weight-transfer-timeout-sec",
+        type=float,
+        default=900.0,
+        help="Timeout (seconds) for vLLM weight-transfer HTTP control-plane calls.",
+    )
     # vime-only orchestration knob: not part of vllm's CLI but read by
     # UpdateWeightFromDistributed._use_vllm_packed() to choose packed
     # broadcast vs per-bucket NCCL for dense models.
@@ -318,6 +324,7 @@ _VIME_ORCHESTRATION_DESTS = frozenset(
         "router_port",
         "router_request_timeout_secs",
         "vllm_server_concurrency",
+        "vllm_weight_transfer_timeout_sec",
         "vllm_weight_sync_packed",
     }
 )
