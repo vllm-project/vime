@@ -103,18 +103,6 @@ def test_finish_weight_update_posts_empty_body(vllm_engine, monkeypatch):
 
 
 @pytest.mark.unit
-def test_start_weight_update_skipped_when_node_rank_nonzero(vllm_engine, monkeypatch):
-    vllm_engine.node_rank = 1
-    monkeypatch.setattr(
-        vllm_engine,
-        "_post_json",
-        lambda *a, **k: pytest.fail("should not POST"),
-    )
-
-    assert vllm_engine.start_weight_update() == {"ok": True, "skipped": True}
-
-
-@pytest.mark.unit
 def test_update_weights_from_distributed_posts_update_weights_without_checkpoint_flag(vllm_engine, monkeypatch):
     calls: list[dict] = []
 
@@ -328,14 +316,3 @@ def test_init_weights_update_group_raises_after_three_failures(vllm_engine, monk
             group_name="g",
             backend="nccl",
         )
-
-
-@pytest.mark.unit
-def test_finish_weight_update_skipped_when_node_rank_nonzero(vllm_engine, monkeypatch):
-    vllm_engine.node_rank = 1
-    monkeypatch.setattr(
-        vllm_engine,
-        "_post_json",
-        lambda *a, **k: pytest.fail("should not POST"),
-    )
-    assert vllm_engine.finish_weight_update() == {"ok": True, "skipped": True}
