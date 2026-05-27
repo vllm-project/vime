@@ -289,7 +289,7 @@ def test_non_coordinator_skips_start_finish(upw_vllm):
         "megatron.core.mpu.get_tensor_model_parallel_rank", return_value=1
     ), patch(
         f"{MODULE_PATH}._build_ipc_update_info_from_named_tensors",
-        return_value=dummy_info,
+        return_value=(dummy_info, []),
     ), patch(
         f"{MODULE_PATH}._serialize_ipc_update_info", return_value="payload"
     ), patch(

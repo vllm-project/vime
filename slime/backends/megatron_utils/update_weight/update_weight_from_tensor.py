@@ -59,14 +59,20 @@ def _current_gpu_uuid() -> str:
 
 def _build_ipc_update_info_from_named_tensors(
     named_tensors: Iterable[tuple[str, torch.Tensor]],
-) -> dict[str, list]:
-    """Build vLLM IPC ``update_info`` payload from tensors on this rank's GPU."""
+) -> tuple[dict[str, list], list[torch.Tensor]]:
+    """Build vLLM IPC ``update_info`` payload from tensors on this rank's GPU.
+
+    Return the contiguous tensor refs with the payload. ``reduce_tensor`` only
+    exports CUDA IPC metadata, so the producer storage must stay alive until the
+    receiver opens the handle.
+    """
     from torch.multiprocessing.reductions import reduce_tensor
 
     names: list[str] = []
     dtype_names: list[str] = []
     shapes: list[list[int]] = []
     ipc_handles: list[dict[str, tuple]] = []
+    weight_refs: list[torch.Tensor] = []
     gpu_uuid = _current_gpu_uuid()
 
     for name, tensor in named_tensors:
@@ -74,14 +80,19 @@ def _build_ipc_update_info_from_named_tensors(
         dtype_names.append(str(tensor.dtype).split(".")[-1])
         shapes.append(list(tensor.shape))
         weight = tensor.detach().contiguous()
-        ipc_handles.append({gpu_uuid: reduce_tensor(weight)})
+        weight_refs.append(weight)
+        _, ipc_args = reduce_tensor(weight)
+        ipc_handles.append({gpu_uuid: ipc_args})
 
-    return {
-        "names": names,
-        "dtype_names": dtype_names,
-        "shapes": shapes,
-        "ipc_handles": ipc_handles,
-    }
+    return (
+        {
+            "names": names,
+            "dtype_names": dtype_names,
+            "shapes": shapes,
+            "ipc_handles": ipc_handles,
+        },
+        weight_refs,
+    )
 
 
 def _serialize_ipc_update_info(info: dict[str, list]) -> str:
@@ -400,7 +411,7 @@ class UpdateWeightFromTensor:
             )
             return
 
-        local_info = _build_ipc_update_info_from_named_tensors(hf_named_tensors)
+        local_info, weight_refs = _build_ipc_update_info_from_named_tensors(hf_named_tensors)
         payload = _serialize_ipc_update_info(local_info)
 
         tp_group = mpu.get_tensor_model_parallel_group()
@@ -423,6 +434,9 @@ class UpdateWeightFromTensor:
             ray.get(self._ipc_engine.update_weights.remote(dict(update_info=merged)))
 
         dist.barrier(group=tp_group)
+        # Keep CUDA IPC producer tensors alive until every TP worker has opened
+        # the handles and the coordinator's HTTP update has completed.
+        del weight_refs
 
 
 # ---------------------------------------------------------------------------
