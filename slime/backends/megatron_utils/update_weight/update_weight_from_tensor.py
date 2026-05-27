@@ -192,6 +192,8 @@ class UpdateWeightFromTensor:
         # IPC weight transfer engine is initialized once per set of colocated
         # engines (not per update call).
         self._ipc_initialized: bool = False
+        # Per-engine-slot process group for IPC payload gather (created in connect_rollout_engines).
+        self._ipc_slot_group = None
         # vLLM IPC handle payloads may use cloudpickle on the Ray/HTTP bridge.
         os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
@@ -241,8 +243,23 @@ class UpdateWeightFromTensor:
         self._ipc_engine_coordinator = False
         self._ipc_engine_slot_start = None
         self._ipc_engine_slot_end = None
+        # Build per-slot process groups so IPC payload gather covers all ranks in the
+        # engine's GPU slot — Megatron TP group does NOT cover the slot when Megatron
+        # TP != rollout-num-gpus-per-engine (e.g. Megatron TP=1 + rollout TP=2 in
+        # parallel-check). Every trainer rank must enter dist.new_group collectively.
+        self._ipc_slot_group = None
+        rank_for_slot = dist.get_rank()
         colocate_gpu_offsets = engine_gpu_offsets[:colocate_engine_nums]
         colocate_gpu_counts = engine_gpu_counts[:colocate_engine_nums]
+        # First pass: create per-slot process groups collectively (every rank must call new_group).
+        for i in range(colocate_engine_nums):
+            slot_start = colocate_gpu_offsets[i]
+            slot_end = slot_start + colocate_gpu_counts[i]
+            slot_ranks = list(range(slot_start, slot_end))
+            grp = dist.new_group(ranks=slot_ranks)
+            if slot_start <= rank_for_slot < slot_end:
+                self._ipc_slot_group = grp
+        # Second pass: bind this rank to its engine + decide coordinator.
         for i, engine in enumerate(self._colocated_engines):
             start = colocate_gpu_offsets[i]
             end = start + colocate_gpu_counts[i]
@@ -251,8 +268,8 @@ class UpdateWeightFromTensor:
                 self._ipc_engine = engine
                 self._ipc_engine_slot_start = start
                 self._ipc_engine_slot_end = end
-                # TP rank 0 within the engine GPU slot issues start/finish + merged IPC send.
-                if mpu.get_tensor_model_parallel_rank() == 0:
+                # Slot leader (lowest trainer rank in the engine GPU range) issues start/finish.
+                if rank == start:
                     self._ipc_engine_coordinator = True
 
         # Set up NCCL bridge for any overflow (non-colocated) engines.
@@ -399,19 +416,18 @@ class UpdateWeightFromTensor:
         local_info = _build_ipc_update_info_from_named_tensors(hf_named_tensors)
         payload = _serialize_ipc_update_info(local_info)
 
-        tp_group = mpu.get_tensor_model_parallel_group()
-        tp_size = mpu.get_tensor_model_parallel_world_size()
-        tp_ranks = sorted(dist.get_process_group_ranks(tp_group))
+        slot_group = self._ipc_slot_group
+        slot_ranks = list(range(self._ipc_engine_slot_start, self._ipc_engine_slot_end))
 
-        # Use all_gather_object (monkey-patched for ReloadableProcessGroup). gather_object
-        # is not patched and fails after Megatron offload/reload with "Group is not registered".
-        gathered_payloads: list[str | None] = [None] * tp_size
-        dist.all_gather_object(gathered_payloads, payload, group=tp_group)
+        # Gather IPC payloads over the engine slot ranks (NOT Megatron TP group — see
+        # connect_rollout_engines for why). all_gather_object is monkey-patched for
+        # ReloadableProcessGroup; gather_object is not (fails after Megatron reload).
+        gathered_payloads: list[str | None] = [None] * slot_size
+        dist.all_gather_object(gathered_payloads, payload, group=slot_group)
         if self._ipc_engine_coordinator:
             if any(p is None for p in gathered_payloads):
                 raise RuntimeError(
-                    f"Missing IPC payloads on TP group {tp_ranks} (slot "
-                    f"[{self._ipc_engine_slot_start}, {self._ipc_engine_slot_end})); "
+                    f"Missing IPC payloads on slot ranks {slot_ranks}; "
                     f"got {gathered_payloads!r}"
                 )
             slot_infos = [_deserialize_ipc_update_info(p) for p in gathered_payloads]
@@ -423,7 +439,7 @@ class UpdateWeightFromTensor:
                 )
             )
 
-        dist.barrier(group=tp_group)
+        dist.barrier(group=slot_group)
 
 
 # ---------------------------------------------------------------------------
