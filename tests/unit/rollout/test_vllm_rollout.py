@@ -245,6 +245,22 @@ def test_merge_generate_routed_experts_trims_extra_gen_rows():
 
 
 @pytest.mark.unit
+def test_merge_generate_routed_experts_single_buffer_splits_prompt_and_gen():
+    """vLLM 0.22+ may return one merged tensor on choices[].routed_experts only."""
+    prompt_token_count = 5
+    gen_token_count = 8
+    nrow = prompt_token_count + gen_token_count - 1
+    combined = np.arange(nrow * 2 * 1, dtype=np.int32).reshape(nrow, 2, 1)
+    merged = mod._merge_generate_routed_experts(
+        {},
+        {"routed_experts": _encode_routed_npy(combined)},
+        gen_token_count=gen_token_count,
+        prompt_token_count=prompt_token_count,
+    )
+    np.testing.assert_array_equal(merged, combined)
+
+
+@pytest.mark.unit
 def test_apply_vllm_routed_experts_merged_matches_sglang_layout():
     prompt = np.zeros((2, 2, 1), dtype=np.int32)
     gen = np.zeros((2, 2, 1), dtype=np.int32)

@@ -781,7 +781,7 @@ class RolloutManager:
                 raise ValueError(
                     f"use_rollout_routing_replay: {len(missing)}/{len(samples)} samples missing "
                     "rollout_routed_experts (see rollout logs for vLLM routing replay errors). "
-                    "Ensure vLLM serves with --enable-return-routed-experts and --no-async-scheduling."
+                    "Ensure vLLM 0.22+ serves with --enable-return-routed-experts."
                 )
             train_data["rollout_routed_experts"] = routed
         elif samples[0].rollout_routed_experts is not None:

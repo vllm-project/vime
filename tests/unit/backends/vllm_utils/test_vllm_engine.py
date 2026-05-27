@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import dataclasses
+import io
 import json
 
+import numpy as np
 import pytest
 import requests
 import torch
@@ -329,3 +332,36 @@ def test_init_weights_update_group_raises_after_three_failures(vllm_engine, monk
             group_name="g",
             backend="nccl",
         )
+
+
+@pytest.mark.unit
+def test_verify_generate_routed_experts_accepts_single_buffer(monkeypatch):
+    prompt_toks = 5
+    gen_toks = 3
+    nrow = prompt_toks + gen_toks - 1
+    combined = np.zeros((nrow, 2, 1), dtype=np.int32)
+    buf = io.BytesIO()
+    np.save(buf, combined)
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+
+    def fake_post(url, json=None, timeout=None):
+        assert url.endswith("/inference/v1/generate")
+        return _MockResponse(
+            json_data={
+                "choices": [{"token_ids": list(range(gen_toks)), "routed_experts": encoded}],
+            },
+        )
+
+    monkeypatch.setattr(mod.requests, "post", fake_post)
+    mod._verify_generate_routed_experts("http://127.0.0.1:8000", "test-model")
+
+
+@pytest.mark.unit
+def test_verify_generate_routed_experts_raises_when_routing_missing(monkeypatch):
+    monkeypatch.setattr(
+        mod.requests,
+        "post",
+        lambda *a, **k: _MockResponse(json_data={"choices": [{"token_ids": [1, 2]}]}),
+    )
+    with pytest.raises(RuntimeError, match="no routed-experts"):
+        mod._verify_generate_routed_experts("http://127.0.0.1:8000", "test-model")

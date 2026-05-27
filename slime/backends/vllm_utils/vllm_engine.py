@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 import multiprocessing
 import os
@@ -337,21 +338,9 @@ def launch_server_process(
         _, action = entry
         return getattr(args, dest, action.default) != action.default
 
-    # MoE routing replay: routed-experts return + sync scheduling (incompatible with
-    # async scheduling on vLLM 0.21.x). Expert parallel is opt-in via
-    # ``--vllm-enable-expert-parallel``.
+    # MoE routing replay (vLLM 0.22+, PR #39568): routed experts on ``/inference/v1/generate``.
     if getattr(args, "use_rollout_routing_replay", False):
         cmd += ["--enable-return-routed-experts"]
-        if not _user_overrode("vllm_async_scheduling"):
-            cmd += ["--no-async-scheduling"]
-        # Prefix cache hits skip prefill MoE forwards; routed-experts capture then
-        # only covers decode (~gen_len-1 rows) and prompt_routed_experts is missing.
-        if not _user_overrode("vllm_enable_prefix_caching"):
-            cmd += ["--no-enable-prefix-caching"]
-        if getattr(args, "vllm_enable_expert_parallel", False):
-            cmd += ["--enable-expert-parallel"]
-            if not _user_overrode("vllm_expert_placement_strategy"):
-                cmd += ["--expert-placement-strategy", "linear"]
 
     # 1) gpu_memory_utilization: vllm default 0.92 OOMs in colocate training; vime ships 0.55.
     if _user_overrode("vllm_gpu_memory_utilization"):
@@ -422,6 +411,17 @@ def _redact_cmd_for_log(cmd: list[str]) -> str:
     return " ".join(parts)
 
 
+def _response_json_or_fallback(response) -> dict:
+    """Parse JSON from an HTTP response, returning a structured error dict on failure."""
+    try:
+        data = response.json()
+    except (ValueError, json.JSONDecodeError):
+        return {"ok": False, "error": "Invalid JSON response", "raw": getattr(response, "text", "")}
+    if not isinstance(data, dict):
+        return {"ok": False, "error": "Response is not a dictionary", "data": data}
+    return data
+
+
 def _routing_rows_from_http_payload(value: Any) -> np.ndarray | None:
     """Decode vLLM routed-experts HTTP field (base64 npy or nested list)."""
     import base64
@@ -439,54 +439,50 @@ def _routing_rows_from_http_payload(value: Any) -> np.ndarray | None:
 
 
 def _verify_generate_routed_experts(base_url: str, model: str, timeout_s: float = 120.0) -> None:
-    """Smoke-check MoE routing via ``/v1/completions`` (matches R3 rollout on vLLM 0.21.x)."""
-    import numpy as np
+    """Smoke-check MoE routing via ``/inference/v1/generate`` (same path as R3 rollout; vLLM 0.22+)."""
+    from slime.rollout.vllm_rollout import _merge_generate_routed_experts
 
     base = base_url.rstrip("/")
+    token_ids = [1, 2, 3, 4, 5]
     payload = {
         "model": model,
-        "prompt": "Routing replay smoke test.",
-        "max_tokens": 8,
-        "temperature": 0.0,
-        "logprobs": 1,
-        "return_token_ids": True,
-        "stream": False,
+        "token_ids": token_ids,
+        "sampling_params": {
+            "max_tokens": 8,
+            "temperature": 0.0,
+            "logprobs": 1,
+        },
     }
-    response = requests.post(f"{base}/v1/completions", json=payload, timeout=timeout_s)
+    response = requests.post(f"{base}/inference/v1/generate", json=payload, timeout=timeout_s)
     response.raise_for_status()
     body = response.json()
     choice = (body.get("choices") or [{}])[0]
-    pre = _routing_rows_from_http_payload(body.get("prompt_routed_experts"))
-    gen = _routing_rows_from_http_payload(choice.get("routed_experts"))
-    if pre is None and gen is None:
-        raise RuntimeError(
-            "vLLM /v1/completions returned no routed-experts fields. "
-            "Ensure the server was started with --enable-return-routed-experts "
-            "(use_rollout_routing_replay)."
-        )
-    if pre is None or gen is None:
-        raise RuntimeError(
-            "vLLM /v1/completions must return both prompt_routed_experts and "
-            "choices[].routed_experts for routing replay. "
-            "Ensure --enable-return-routed-experts and --no-async-scheduling on the vLLM cmdline."
-        )
-
     out_ids = choice.get("token_ids") or []
-    usage = body.get("usage") or {}
-    num_prompt = int(usage.get("prompt_tokens") or 0)
-    num_gen = int(usage.get("completion_tokens") or len(out_ids))
-    expected_rows = num_prompt + num_gen - 1 if num_prompt > 0 and num_gen > 0 else 0
+    num_gen = len(out_ids)
+    num_prompt = len(token_ids)
 
-    merged = np.concatenate([pre, gen], axis=0)
+    merged = _merge_generate_routed_experts(
+        body,
+        choice,
+        gen_token_count=num_gen,
+        prompt_token_count=num_prompt,
+    )
+    if merged is None:
+        raise RuntimeError(
+            "vLLM /inference/v1/generate returned no routed-experts fields. "
+            "Requires vLLM 0.22+ with --enable-return-routed-experts (use_rollout_routing_replay)."
+        )
+
+    expected_rows = num_prompt + num_gen - 1 if num_prompt > 0 and num_gen > 0 else 0
     n_rows = int(merged.shape[0])
     if expected_rows > 0 and n_rows not in (expected_rows, expected_rows + 1):
         raise RuntimeError(
-            f"vLLM routing replay smoke check: merged routing rows {n_rows} != "
+            f"vLLM routing replay smoke check: routing rows {n_rows} != "
             f"expected {expected_rows} (prompt+gen len(tokens)-1). "
-            "Ensure --enable-return-routed-experts and --no-async-scheduling."
+            "Requires vLLM 0.22+ (PR #39568)."
         )
     logger.info(
-        "vLLM routing replay smoke check OK (/v1/completions): prompt+gen routing rows=%s " "(expected %s)",
+        "vLLM routing replay smoke check OK (/inference/v1/generate): routing rows=%s " "(expected %s)",
         n_rows,
         expected_rows,
     )
@@ -538,7 +534,17 @@ class VLLMEngine(RayActor):
         self.node_rank = 0
 
     def _http_base(self) -> str:
+        if not hasattr(self, "server_host") or not hasattr(self, "server_port"):
+            raise RuntimeError("Call init() before using the vLLM HTTP client.")
         return f"http://{self.server_host}:{self.server_port}"
+
+    def _weight_transfer_http_timeout(self) -> float:
+        return float(
+            os.environ.get(
+                "SLIME_VLLM_WEIGHT_TRANSFER_UPDATE_TIMEOUT_SEC",
+                os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"),
+            )
+        )
 
     def init(
         self,
@@ -661,13 +667,11 @@ class VLLMEngine(RayActor):
         Caller must invoke ``start_weight_update`` / ``finish_weight_update`` around a batch of
         ``/update_weights`` calls (see ``UpdateWeightFromTensor`` / ``UpdateWeightFromDistributed``).
         """
-        timeout_s = float(
-            os.environ.get(
-                "SLIME_VLLM_WEIGHT_TRANSFER_UPDATE_TIMEOUT_SEC",
-                os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"),
-            )
+        response = self._post_json(
+            "update_weights",
+            {"update_info": update_info},
+            timeout=self._weight_transfer_http_timeout(),
         )
-        response = self._post_json("update_weights", {"update_info": update_info}, timeout=timeout_s)
         response.raise_for_status()
         try:
             return response.json()
@@ -886,11 +890,10 @@ class VLLMEngine(RayActor):
 
     def start_weight_update(self, is_checkpoint_format: bool = False) -> dict:
         """``POST /start_weight_update`` — signals vLLM to enter IPC weight-update mode."""
-        update_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
         response = self._post_json(
             "start_weight_update",
             {"is_checkpoint_format": is_checkpoint_format},
-            timeout=update_timeout_s,
+            timeout=self._weight_transfer_http_timeout(),
         )
         response.raise_for_status()
         try:
@@ -912,8 +915,7 @@ class VLLMEngine(RayActor):
         (e.g. ``/root/models/Qwen2.5-0.5B-Instruct``), never matching the
         updater's integer version (``"1"``, ``"2"``, …).
         """
-        update_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
-        response = self._post_json("finish_weight_update", {}, timeout=update_timeout_s)
+        response = self._post_json("finish_weight_update", {}, timeout=self._weight_transfer_http_timeout())
         response.raise_for_status()
         # Record the new version only after the POST succeeded — if the engine
         # never actually exited weight-update mode, ``_weight_version`` must not
