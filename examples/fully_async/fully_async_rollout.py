@@ -4,8 +4,7 @@ import queue
 import threading
 import time
 
-# Import core functions from sglang_rollout directly to avoid code duplication
-from slime.rollout.sglang_rollout import GenerateState, generate_and_rm_group
+from slime.rollout.vllm_rollout import GenerateState, generate_and_rm_group
 from slime.utils.async_utils import run
 from slime.utils.types import Sample
 
@@ -20,7 +19,7 @@ def get_global_worker(args, data_buffer):
     with _worker_lock:
         if _global_worker is None or not _global_worker.worker_thread.is_alive():
             print("Creating new global async worker...")
-            _global_worker = AsyncRolloutWorker(args, data_buffer, concurrency=args.sglang_server_concurrency)
+            _global_worker = AsyncRolloutWorker(args, data_buffer, concurrency=args.vllm_server_concurrency)
             _global_worker.start()
         return _global_worker
 

@@ -79,6 +79,7 @@ def monkey_patch_torch_dist():
     dist.all_gather = get_new_comm_function(dist.all_gather)
     dist.all_gather_into_tensor = get_new_comm_function(dist.all_gather_into_tensor)
     dist.all_gather_object = get_new_comm_function(dist.all_gather_object)
+    dist.gather_object = get_new_comm_function(dist.gather_object)
     dist.all_to_all = get_new_comm_function(dist.all_to_all)
     dist.all_to_all_single = get_new_comm_function(dist.all_to_all_single)
     dist.broadcast = get_new_comm_function(dist.broadcast)

@@ -177,7 +177,7 @@ def start_rollout(api_base_url: str, args, metadata):
     payload = {
         "num_process": str(getattr(args, "rollout_num_process", 100)),
         "num_epoch": str(args.num_epoch or 3),
-        "remote_engine_url": f"http://{args.sglang_router_ip}:{args.sglang_router_port}",
+        "remote_engine_url": f"http://{args.vllm_router_ip}:{args.vllm_router_port}",
         "remote_buffer_url": args.rollout_buffer_url,
         "task_type": args.rollout_task_type,
         "input_file": args.prompt_data,

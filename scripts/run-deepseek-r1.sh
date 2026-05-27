@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # for rerun the task
-pkill -9 sglang
+pkill -9 -f "vllm serve"
 sleep 3
 ray stop --force
 pkill -9 ray
@@ -110,29 +110,20 @@ WANDB_ARGS=(
    # --wandb-key ${WANDB_KEY}
 )
 
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 64
-   --sglang-mem-fraction-static 0.7
-   --sglang-ep-size 64
+   --vllm-gpu-memory-utilization 0.7
 
    # dp attention
-   --sglang-enable-dp-attention
-   --sglang-dp-size 8
-   --sglang-moe-dense-tp-size 1
-   --sglang-enable-dp-lm-head
-
-    # enable deepep for sglang
-    --sglang-moe-a2a-backend deepep
-    --sglang-deepep-mode auto
+   --vllm-data-parallel-size 8
 
     # mtp
-    --sglang-speculative-algorithm EAGLE
-    --sglang-speculative-num-steps 3
-    --sglang-speculative-eagle-topk 1
-    --sglang-speculative-num-draft-tokens 4
 
     # make every dp rank has 128 concurrency
-    --sglang-server-concurrency 1024
+    --vllm-server-concurrency 1024
+   --vllm-enable-expert-parallel
+   --vllm-all2all-backend deepep_high_throughput
+   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3}'
 )
 
 MISC_ARGS=(
@@ -161,7 +152,7 @@ ray job submit --address="http://127.0.0.1:8265" \
         "MASTER_ADDR": "${MASTER_ADDR}",
         "PYTHONPATH": "/root/Megatron-LM/",
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-        "LD_LIBRARY_PATH": "/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/sgl-workspace/nvshmem/install/lib/"
+        "LD_LIBRARY_PATH": "/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
      }
    }' \
    -- python3 train.py \
@@ -176,5 +167,5 @@ ray job submit --address="http://127.0.0.1:8265" \
    ${WANDB_ARGS[@]} \
    ${PERF_ARGS[@]} \
    ${EVAL_ARGS[@]} \
-   ${SGLANG_ARGS[@]} \
+   ${VLLM_ARGS[@]} \
    ${MISC_ARGS[@]}

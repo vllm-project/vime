@@ -5,6 +5,7 @@ import traceback
 from copy import deepcopy
 
 from slime.rollout.rm_hub import batched_async_rm
+from slime.rollout.vllm_rollout import _build_inference_sampling_params, _inference_generate_tokens_and_logprobs
 from slime.utils.http_utils import post
 from slime.utils.types import Sample
 
@@ -18,7 +19,7 @@ async def generate_response(args, prompt, key):
         max_context_length = args.rollout_max_context_len
         sample = deepcopy(args.sample)
 
-        url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+        url = f"http://{args.vllm_router_ip}:{args.vllm_router_port}/inference/v1/generate"
 
         sample.prompt = prompt
         prompt_token_ids = tokenizer(sample.prompt, add_special_tokens=False)["input_ids"]
@@ -32,33 +33,34 @@ async def generate_response(args, prompt, key):
         if current_sampling_params["max_new_tokens"] <= 0:
             return None
 
-        payload = {"input_ids": prompt_token_ids, "sampling_params": current_sampling_params, "return_logprob": True}
+        payload = {
+            "model": args.hf_checkpoint,
+            "token_ids": prompt_token_ids,
+            "sampling_params": _build_inference_sampling_params(current_sampling_params),
+        }
 
         output = await post(url, payload)
-
-        # Extract new response tokens
-        if "output_token_logprobs" in output["meta_info"]:
-            new_response_tokens = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
-        else:
-            # abort
-            new_response_tokens = []
+        choice = output["choices"][0]
+        finish_reason = choice.get("finish_reason") or "stop"
+        new_response_tokens, _ = _inference_generate_tokens_and_logprobs(choice)
+        response_text = tokenizer.decode(new_response_tokens, skip_special_tokens=False) if new_response_tokens else ""
 
         # Update sample with tokens directly - avoiding re-tokenization
         sample.tokens = sample.tokens + new_response_tokens
         sample.response_length += len(new_response_tokens)
-        sample.response = output["text"]
+        sample.response = response_text
 
-        match output["meta_info"]["finish_reason"]["type"]:
+        match finish_reason:
             case "length":
                 sample.status = Sample.Status.TRUNCATED
-            # case "abort":
-            #     sample.status = Sample.Status.ABORTED
-            case "stop":
+            case "abort" | "cancelled":
+                sample.status = Sample.Status.ABORTED
+            case _:
                 sample.status = Sample.Status.COMPLETED
 
         args.results_dict[key].append(sample)
 
-        final = output["text"].replace("<|user|>", "")
+        final = response_text.replace("<|user|>", "")
         if "</think>" in final:
             contents = final.split("</think>")
             if len(contents) == 2 and contents[1] != "":

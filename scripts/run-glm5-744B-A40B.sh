@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # for rerun the task
-pkill -9 sglang
+pkill -9 -f "vllm serve"
 sleep 3
 ray stop --force
 pkill -9 ray
@@ -103,37 +103,26 @@ WANDB_ARGS=(
    # --wandb-key ${WANDB_KEY}
 )
 
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 64
-   --sglang-mem-fraction-static 0.70
-   --sglang-enable-dp-attention
-   --sglang-ep-size 64
-   --sglang-dp-size 64
-   --sglang-moe-dense-tp-size 1
-   --sglang-enable-dp-lm-head
+   --vllm-gpu-memory-utilization 0.70
+   --vllm-data-parallel-size 64
 
-   --sglang-moe-a2a-backend deepep
-   --sglang-deepep-mode auto
 
    --prefill-num-servers 1
 
    # mtp
-   --sglang-speculative-algorithm EAGLE
-   --sglang-speculative-num-steps 3
-   --sglang-speculative-eagle-topk 1
-   --sglang-speculative-num-draft-tokens 4
 
    # dsa
-   --sglang-page-size 64
-   --sglang-nsa-decode-backend flashmla_sparse
-   --sglang-nsa-prefill-backend flashmla_sparse
-   --sglang-attention-backend nsa
-   --sglang-cuda-graph-max-bs 8
+   --vllm-attention-backend FLASHMLA_SPARSE
 
-   --sglang-max-running-requests 512
-   --sglang-chunked-prefill-size 131072
-
-   --sglang-watchdog-timeout 3600
+   --vllm-max-num-seqs 512
+   --vllm-enable-expert-parallel
+   --vllm-all2all-backend deepep_high_throughput
+   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3}'
+   --vllm-block-size 64
+   --vllm-max-cudagraph-capture-size 8
+   --vllm-max-num-batched-tokens 131072
 )
 
 MISC_ARGS=(
@@ -160,7 +149,6 @@ RUNTIME_ENV_JSON="{
     \"no_proxy\": \"${no_proxy}\",
     \"MASTER_ADDR\": \"${MASTER_ADDR}\",
     \"INDEXER_ROPE_NEOX_STYLE\": \"0\",
-    \"SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK\": \"32\",
     \"NVSHMEM_DISABLE_NCCL\": \"1\"
   }
 }"
@@ -180,5 +168,5 @@ ray job submit --address="http://127.0.0.1:8265" \
    ${WANDB_ARGS[@]} \
    ${PERF_ARGS[@]} \
    ${EVAL_ARGS[@]} \
-   ${SGLANG_ARGS[@]} \
+   ${VLLM_ARGS[@]} \
    ${MISC_ARGS[@]}

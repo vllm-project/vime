@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # for rerun the task
-pkill -9 sglang
+pkill -9 -f "vllm serve"
 sleep 3
 ray stop --force
 pkill -9 ray
@@ -123,13 +123,10 @@ WANDB_ARGS=(
    # --wandb-key ${WANDB_KEY}
 )
 
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 2
-   --sglang-mem-fraction-static 0.75
-   --sglang-speculative-algorithm EAGLE
-   --sglang-speculative-num-steps 3
-   --sglang-speculative-eagle-topk 1
-   --sglang-speculative-num-draft-tokens 4
+   --vllm-gpu-memory-utilization 0.75
+   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3}'
 )
 
 MISC_ARGS=(
@@ -151,7 +148,7 @@ if [ -n "${HOSTFILE}" ]; then
     fi
     echo "Starting Ray worker on ${WORKER_IP}"
     ssh root@"${WORKER_IP}" \
-      "pkill -9 sglang ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus ${ACTOR_NUM_GPUS_PER_NODE} --node-ip-address ${WORKER_IP} --disable-usage-stats" &
+      "pkill -9 -f "vllm serve" ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus ${ACTOR_NUM_GPUS_PER_NODE} --node-ip-address ${WORKER_IP} --disable-usage-stats" &
   done
   wait
 fi
@@ -185,5 +182,5 @@ ray job submit --address="http://127.0.0.1:8265" \
    "${WANDB_ARGS[@]}" \
    "${PERF_ARGS[@]}" \
    "${EVAL_ARGS[@]}" \
-   "${SGLANG_ARGS[@]}" \
+   "${VLLM_ARGS[@]}" \
    "${MISC_ARGS[@]}"

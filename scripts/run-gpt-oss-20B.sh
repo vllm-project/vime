@@ -12,7 +12,7 @@
 #                    $(cat scripts/models/gpt-oss-20B.sh | grep -oP "'[^']*'|--[^ ]+( [^ -][^ ]*)?")
 
 # for rerun the task
-pkill -9 sglang
+pkill -9 -f "vllm serve"
 sleep 3
 ray stop --force
 pkill -9 ray
@@ -113,13 +113,12 @@ WANDB_ARGS=(
    # --wandb-exp-name gpt-oss-20b-grpo
 )
 
-SGLANG_ARGS=(
-   --sglang-dp-attention
+VLLM_ARGS=(
    --rollout-num-gpus 8
-   --sglang-tp 1
-   --sglang-mem-fraction-static 0.55
-   --sglang-cuda-graph-max-bs 16
-   --sglang-max-running-requests 64
+   --vllm-tensor-parallel-size 1
+   --vllm-gpu-memory-utilization 0.55
+   --vllm-max-num-seqs 64
+   --vllm-max-cudagraph-capture-size 16
 )
 
 MISC_ARGS=(
@@ -157,5 +156,5 @@ ray job submit --address="http://127.0.0.1:8265" \
    ${WANDB_ARGS[@]} \
    ${PERF_ARGS[@]} \
    ${EVAL_ARGS[@]} \
-   ${SGLANG_ARGS[@]} \
+   ${VLLM_ARGS[@]} \
    ${MISC_ARGS[@]}

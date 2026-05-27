@@ -28,7 +28,7 @@ else
 fi
 
 # Cleanup
-pkill -9 sglang
+pkill -9 -f "vllm serve"
 sleep 3
 if [ "$USE_EXTERNAL_RAY" = "0" ]; then
    ray stop --force
@@ -115,19 +115,16 @@ OPTIMIZER_ARGS=(
    --adam-beta2 0.98
 )
 
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 8
-   --sglang-mem-fraction-static 0.7
-   --sglang-ep-size 8
-   --sglang-cuda-graph-bs 1 2 4 8 16 24 32 40 48 56 64 72 80 88 96 104 112 120 128 136 144 152 160 168 176 184 192 200 208 216 224 232 240 248 256
+   --vllm-gpu-memory-utilization 0.7
+   --vllm-enable-expert-parallel
+   --vllm-cudagraph-capture-sizes 1 2 4 8 $(seq 16 8 256)
 
    # MTP speculative decoding
-   --sglang-speculative-algorithm EAGLE
-   --sglang-speculative-num-steps 2
-   --sglang-speculative-eagle-topk 1
-   --sglang-speculative-num-draft-tokens 3
+   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3}'
 
-   --sglang-max-running-requests 512
+   --vllm-max-num-seqs 512
 )
 
 # Wandb args (only if WANDB_API_KEY is set)
@@ -203,7 +200,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    ${EVAL_ARGS[@]} \
    ${GRPO_ARGS[@]} \
    ${OPTIMIZER_ARGS[@]} \
-   ${SGLANG_ARGS[@]} \
+   ${VLLM_ARGS[@]} \
    ${WANDB_ARGS[@]} \
    ${BACKEND_ARGS[@]} \
    ${MISC_ARGS[@]}

@@ -46,7 +46,6 @@ else
 fi
 
 # Cleanup
-pkill -9 sglang
 sleep 3
 if [ "$USE_EXTERNAL_RAY" = "0" ]; then
    ray stop --force

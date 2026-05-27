@@ -8,28 +8,31 @@ set -ex
 # Start the teacher model server
 TEACHER_IP="127.0.0.1" # Use localhost here, you can change it to your IP
 TEACHER_PORT=13141
-LOG_FILE="/tmp/sglang_$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 6).log"
+LOG_FILE="/tmp/vllm_teacher_$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 6).log"
 
-## Launch the teacher model server in the background
-CUDA_VISIBLE_DEVICES=7 python3 -m sglang.launch_server \
-    --model-path /root/Qwen3-32B \
+## Launch the teacher model server in the background.
+## --enable-prompt-logprobs is required so /v1/completions returns the
+## choices[0].prompt_logprobs that slime/rollout/on_policy_distillation.py
+## consumes (with echo=True + prompt_logprobs=1 on each request).
+CUDA_VISIBLE_DEVICES=7 vllm serve /root/Qwen3-32B \
     --host 0.0.0.0 \
     --port $TEACHER_PORT \
-    --tp 1 \
-    --chunked-prefill-size 4096 \
-    --mem-fraction-static 0.6 \
+    --tensor-parallel-size 1 \
+    --gpu-memory-utilization 0.6 \
+    --enable-prompt-logprobs \
+    --max-num-batched-tokens 4096 \
     > "$LOG_FILE" 2>&1 &
 
 echo "Starting teacher model server..."
 
 ## Wait for the teacher model server to be ready
-until curl -sf http://$TEACHER_IP:$TEACHER_PORT/health_generate > /dev/null; do
+until curl -sf http://$TEACHER_IP:$TEACHER_PORT/health > /dev/null; do
     echo "Waiting for the teacher model server to start..."
     tail -n 10 "$LOG_FILE"
     sleep 5
 done
 
-curl http://$TEACHER_IP:$TEACHER_PORT/get_model_info
+curl http://$TEACHER_IP:$TEACHER_PORT/v1/models
 echo "Teacher model server is up and running at $TEACHER_IP:$TEACHER_PORT."
 sleep 10
 
@@ -73,7 +76,7 @@ ROLLOUT_ARGS=(
 RM_ARGS=(
    --custom-rm-path slime.rollout.on_policy_distillation.reward_func
    --custom-reward-post-process-path slime.rollout.on_policy_distillation.post_process_rewards
-   --rm-url http://$TEACHER_IP:$TEACHER_PORT/generate
+   --rm-url http://$TEACHER_IP:$TEACHER_PORT/v1/completions
 )
 
 EVAL_ARGS=(
@@ -104,7 +107,7 @@ PERF_ARGS=(
 GRPO_ARGS=(
    --advantage-estimator grpo
    --use-opd
-   --opd-type sglang
+   --opd-type vllm
    --opd-kl-coef 1.0
    --use-kl-loss
    --kl-loss-coef 0.00
@@ -128,9 +131,9 @@ WANDB_ARGS=(
    # --wandb-key ${WANDB_KEY}
 )
 
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 1
-   --sglang-mem-fraction-static 0.4
+   --vllm-gpu-memory-utilization 0.4
 )
 
 
@@ -169,14 +172,14 @@ ray job submit --address="http://127.0.0.1:8265" \
    ${WANDB_ARGS[@]} \
    ${PERF_ARGS[@]} \
    ${EVAL_ARGS[@]} \
-   ${SGLANG_ARGS[@]} \
+   ${VLLM_ARGS[@]} \
    ${MISC_ARGS[@]} \
    ${RM_ARGS[@]}
 
 
 
 ####clear after training
-pkill -9 sglang
+pkill -9 -f "vllm serve"
 sleep 3
 ray stop --force
 pkill -9 ray

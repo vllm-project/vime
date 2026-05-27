@@ -28,11 +28,11 @@ We give examples of the algorithms for solving the training-inference mismatch i
 
 ### [Baseline: No Mismatch Correction] Standard PPO
 
-This is the basic PPO algorithm with potentially training-inference mismatch issue when the output of SGLang and Megatron does not exactly match.
+This is the basic PPO algorithm with potentially training-inference mismatch issue when the output of vLLM and Megatron does not exactly match.
 
 $$
 L_{\text{PPO}}(\theta)
-= - \mathbb{E}_{x \sim \mathcal{D},\, y \sim \pi_{\textcolor{red}{\text{SGLang}}}} \left[
+= - \mathbb{E}_{x \sim \mathcal{D},\, y \sim \pi_{\textcolor{red}{\text{vLLM}}}} \left[
   \min \left(
     \frac{\pi_\theta(y \mid x)}{\pi_{\textcolor{blue}{\text{Megatron}}}(y \mid x)} A_t,
     \mathrm{clip}\left(
@@ -50,11 +50,11 @@ Like REINFORCE, we directly use the rollout engine's log probs as the old policy
 
 $$
 L_{\text{PPO-bypass}}(\theta)
-= - \mathbb{E}_{x \sim \mathcal{D}, y \sim \pi_{\textcolor{red}{\text{SGLang}}}} \left[
+= - \mathbb{E}_{x \sim \mathcal{D}, y \sim \pi_{\textcolor{red}{\text{vLLM}}}} \left[
   \min \left(
-    \frac{\pi_\theta(y \mid x)}{\pi_{\textcolor{red}{\text{SGLang}}}(y \mid x)} A_t,
+    \frac{\pi_\theta(y \mid x)}{\pi_{\textcolor{red}{\text{vLLM}}}(y \mid x)} A_t,
     \mathrm{clip}\left(
-      \frac{\pi_\theta(y \mid x)}{\pi_{\textcolor{red}{\text{SGLang}}}(y \mid x)},
+      \frac{\pi_\theta(y \mid x)}{\pi_{\textcolor{red}{\text{vLLM}}}(y \mid x)},
       1 - \epsilon,
       1 + \epsilon
     \right) A_t
@@ -68,12 +68,12 @@ Advantages:
 
 ### Decoupled, 3-policy PPO Importance Sampling  
 
-[Decoupled PPO](https://arxiv.org/pdf/2110.00641) achieves batch-independent PPO by decoupling two roles: Proximal Policy (anchor policy for PPO clipping, control update size) and Behavior Policy (for off-policy correction in importance sampling). Therefore, there are totally 3 roles engaged in this mode, **target policy** $\pi_\theta$, **proximal policy** $\pi_{\textcolor{blue}{\text{old}}}$, and **behavior policy** $\pi_{\textcolor{red}{\text{SGLang}}}$. $\pi_{\textcolor{blue}{\text{old}}}$ is recomputed with Megatron at the beginning of each training step.
+[Decoupled PPO](https://arxiv.org/pdf/2110.00641) achieves batch-independent PPO by decoupling two roles: Proximal Policy (anchor policy for PPO clipping, control update size) and Behavior Policy (for off-policy correction in importance sampling). Therefore, there are totally 3 roles engaged in this mode, **target policy** $\pi_\theta$, **proximal policy** $\pi_{\textcolor{blue}{\text{old}}}$, and **behavior policy** $\pi_{\textcolor{red}{\text{vLLM}}}$. $\pi_{\textcolor{blue}{\text{old}}}$ is recomputed with Megatron at the beginning of each training step.
 
 $$
 L_{\text{PPO-decoupled}}(\theta)
-= - \mathbb{E}_{x \sim \mathcal{D}, y \sim \pi_{\textcolor{red}{\text{SGLang}}}} \left[
-    \frac{\pi_{\textcolor{blue}{\text{old}}}(y \mid x)}{\pi_{\textcolor{red}{\text{SGLang}}}(y \mid x)}
+= - \mathbb{E}_{x \sim \mathcal{D}, y \sim \pi_{\textcolor{red}{\text{vLLM}}}} \left[
+    \frac{\pi_{\textcolor{blue}{\text{old}}}(y \mid x)}{\pi_{\textcolor{red}{\text{vLLM}}}(y \mid x)}
   \min \left(
     \frac{\pi_\theta(y \mid x)}{\pi_{\textcolor{blue}{\text{old}}}(y \mid x)} A_t,
     \mathrm{clip}\left(
@@ -101,8 +101,8 @@ You may choose from above algorithms by specifying arguments below:
 | `use_rollout_logprobs` | `use_rollout_correction` | Algorithm | Policies |Compute old_log_probs | Batch Invariant | Recommended TIS Mode |
 |-----------------|-------------|-----------|--------------|---------------|-----------------|----------------------|
 | False | False | Standard PPO (Algorithm 0) | 2 ($\pi_\theta$, $\pi_{\textcolor{blue}{\text{old}}}$)|Yes | No | N/A |
-| True | False | Bypassing PPO (Algorithm 3) | 2 ($\pi_\theta$, $\pi_{\textcolor{red}{\text{SGLang}}}$) |🚀 Skipped | No | N/A |
-| False | True | Decoupled PPO (Algorithm 2) | 3 ($\pi_\theta$, $\pi_{\textcolor{blue}{\text{old}}}$, $\pi_{\textcolor{red}{\text{SGLang}}}$)  |Yes  | Yes | token/seq/geo |
+| True | False | Bypassing PPO (Algorithm 3) | 2 ($\pi_\theta$, $\pi_{\textcolor{red}{\text{vLLM}}}$) |🚀 Skipped | No | N/A |
+| False | True | Decoupled PPO (Algorithm 2) | 3 ($\pi_\theta$, $\pi_{\textcolor{blue}{\text{old}}}$, $\pi_{\textcolor{red}{\text{vLLM}}}$)  |Yes  | Yes | token/seq/geo |
 
 ## Configs and Recommended Settings
 

@@ -6,7 +6,11 @@ import re
 
 from qa_em_format import compute_score_em
 
-from slime.rollout.sglang_rollout import GenerateState
+from slime.rollout.vllm_rollout import (
+    GenerateState,
+    _build_inference_sampling_params,
+    _inference_generate_tokens_and_logprobs,
+)
 from slime.utils.http_utils import post
 from slime.utils.types import Sample
 
@@ -90,24 +94,6 @@ async def search(query: str) -> str:
     return _passages2string(result)
 
 
-# IMPORTANT: When we need to collect log probabilities (logp), we CANNOT do any postprocessing
-# on the strings returned from the inference engine (sglang). This is because:
-# 1. We don't know how to truncate the corresponding tokens/logp arrays to match the modified string
-# 2. Re-tokenizing the postprocessed string may produce different tokens than what the engine generated,
-#    leading to misalignment between tokens and their log probabilities
-# Therefore, postprocess_responses is only used when return_logprob=False.
-def postprocess_responses(resp: str) -> str:
-    """
-    Post-process response to ensure tag completeness.
-    Only used when SEARCH_R1_CONFIGS["return_logprob"] is False.
-    """
-    return (
-        resp.split("</search>")[0] + "</search>"
-        if "</search>" in resp
-        else resp.split("</answer>")[0] + "</answer>" if "</answer>" in resp else resp
-    )
-
-
 def postprocess_predictions(prediction: str):
     pattern = r"<(search|answer)>(.*?)</\1>"
     match = re.search(pattern, prediction, re.DOTALL)
@@ -147,7 +133,8 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
 
     state = GenerateState(args)
 
-    url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+    url = f"http://{args.vllm_router_ip}:{args.vllm_router_port}/inference/v1/generate"
+    inference_sampling_params = _build_inference_sampling_params(sampling_params)
 
     # Handle partial rollout samples: continue generation from existing response
     prompt_text = sample.prompt
@@ -156,54 +143,39 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
     response_token_ids = []
     loss_mask = []
     rollout_log_probs = [] if SEARCH_R1_CONFIGS["return_logprob"] else None
+    finish_reason: str = "stop"
 
     for _turn_idx in range(SEARCH_R1_CONFIGS["max_turns"]):
         payload = {
-            "text": prompt_text + response,
-            "sampling_params": sampling_params,
+            "model": args.hf_checkpoint,
+            "token_ids": prompt_tokens_ids + response_token_ids,
+            "sampling_params": inference_sampling_params,
         }
-        # Add log probability collection if enabled
-        if SEARCH_R1_CONFIGS["return_logprob"]:
-            payload["return_logprob"] = True
 
         output = await post(url, payload)
+        choice = output["choices"][0]
+        finish_reason = choice.get("finish_reason") or "stop"
 
-        # abort
-        if output["meta_info"]["finish_reason"]["type"] == "abort":
+        if finish_reason in ("abort", "cancelled"):
             sample.status = Sample.Status.ABORTED
             return sample
 
-        cur_response = output["text"]
-
-        # Extract tokens and log probs based on configuration
-        if SEARCH_R1_CONFIGS["return_logprob"]:
-            # Extract log probs from output - required for TIS metrics
-            if "output_token_logprobs" not in output["meta_info"]:
-                raise RuntimeError(
-                    "output_token_logprobs not found in output meta_info. "
-                    "Make sure 'return_logprob': True is set in the payload."
-                )
-
-            # Use token IDs and log probs directly from output_token_logprobs
-            # This ensures perfect alignment between tokens and log probs
-            # output_token_logprobs format: [[log_prob, token_id, ...], ...]
-            cur_response_token_ids = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
-            cur_response_log_probs = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
-        else:
-            # When not collecting log probs, we can safely postprocess the response
-            cur_response = postprocess_responses(cur_response)
-            # Tokenize the (possibly postprocessed) response
-            cur_response_token_ids = state.tokenizer(cur_response, add_special_tokens=False)["input_ids"]
+        cur_response_token_ids, cur_response_log_probs = _inference_generate_tokens_and_logprobs(choice)
+        if SEARCH_R1_CONFIGS["return_logprob"] and not cur_response_log_probs and cur_response_token_ids:
+            raise RuntimeError(
+                "logprobs not found on /inference/v1/generate response. "
+                "Make sure the vLLM router is configured to return logprobs."
+            )
+        cur_response = state.tokenizer.decode(cur_response_token_ids) if cur_response_token_ids else ""
 
         response += cur_response
         response_token_ids += cur_response_token_ids
         loss_mask += [1] * len(cur_response_token_ids)
 
-        # Add log probs if enabled
         if SEARCH_R1_CONFIGS["return_logprob"]:
             rollout_log_probs += cur_response_log_probs
 
-        if output["meta_info"]["finish_reason"]["type"] == "length":
+        if finish_reason == "length":
             break
 
         next_obs, done = await execute_predictions(cur_response)
@@ -236,12 +208,12 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
     if SEARCH_R1_CONFIGS["return_logprob"]:
         sample.rollout_log_probs = rollout_log_probs if rollout_log_probs else None
 
-    match output["meta_info"]["finish_reason"]["type"]:
+    match finish_reason:
         case "length":
             sample.status = Sample.Status.TRUNCATED
-        case "abort":
+        case "abort" | "cancelled":
             sample.status = Sample.Status.ABORTED
-        case "stop":
+        case _:
             sample.status = Sample.Status.COMPLETED
 
     return sample
