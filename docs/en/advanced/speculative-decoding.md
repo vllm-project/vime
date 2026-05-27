@@ -19,10 +19,12 @@ in the same JSON:
 --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3,"model":"/your/draft/model/path"}'
 ```
 
-To train a draft model from scratch, use [vllm-project/speculators](https://github.com/vllm-project/speculators).
-It supports EAGLE-3, DFlash, and MTP-style drafts, ships pre-trained checkpoints
-on Hugging Face (see the `RedHatAI/*-speculator.*` collection), and saves drafts
-in a format that `vllm serve <speculator_model>` can deploy directly.
+To train a draft model from scratch, see [TorchSpec](https://github.com/lightseekorg/TorchSpec)
+and [vllm-project/speculators](https://github.com/vllm-project/speculators).
+TorchSpec provides torch-native, disaggregated draft training.
+Speculators supports EAGLE-3, DFlash, and MTP-style drafts, ships pre-trained
+checkpoints on Hugging Face (see the `RedHatAI/*-speculator.*` collection), and
+saves drafts in a format that `vllm serve <speculator_model>` can deploy directly.
 
 For the full list of `SpeculativeConfig` fields (including `disable_by_batch_size`,
 `acceptance_method`, draft TP, etc.), see vLLM's speculative-decoding

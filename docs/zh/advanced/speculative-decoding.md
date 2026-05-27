@@ -18,8 +18,10 @@ vLLM 把投机采样的所有配置收敛到一个 JSON（`SpeculativeConfig`）
 --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3,"model":"/your/draft/model/path"}'
 ```
 
-要从头训练一个 draft model，可以使用 [vllm-project/speculators](https://github.com/vllm-project/speculators)。
-它支持 EAGLE-3、DFlash 以及 MTP 风格的 draft，HuggingFace 上已有预训练 ckpt
+要从头训练一个 draft model，可以参考 [TorchSpec](https://github.com/lightseekorg/TorchSpec)
+和 [vllm-project/speculators](https://github.com/vllm-project/speculators)。
+TorchSpec 提供 torch-native 的 disaggregated draft training。
+Speculators 支持 EAGLE-3、DFlash 以及 MTP 风格的 draft，HuggingFace 上已有预训练 ckpt
 （参见 `RedHatAI/*-speculator.*` 集合），产物可被 `vllm serve <speculator_model>` 直接部署。
 
 `SpeculativeConfig` 的完整字段（`disable_by_batch_size`、`acceptance_method`、
