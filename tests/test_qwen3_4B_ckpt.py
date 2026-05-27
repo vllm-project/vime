@@ -1,5 +1,4 @@
 import os
-import time
 from argparse import ArgumentParser
 
 import slime.utils.external_utils.command_utils as U
@@ -108,8 +107,6 @@ def execute(mode: str = ""):
         "--actor-num-nodes 1 "
         "--actor-num-gpus-per-node 8 "
         "--colocate "
-        # Required for PAO/offload optimizer shards on save and load (separate Ray jobs).
-        "--dist-ckpt-optim-fully-reshardable "
     )
 
     train_args = (
@@ -138,7 +135,4 @@ if __name__ == "__main__":
     for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         os.environ.pop(proxy_var, None)
     execute("save" if not args.async_save else "async_save")
-    # Let async checkpoint writer finish before the load job starts.
-    if args.async_save:
-        time.sleep(30)
     execute("load")
