@@ -607,8 +607,10 @@ class VLLMEngine(RayActor):
         ``weight_version`` recorded on POST success); payload is vLLM-native
         (``IPCWeightTransferUpdateInfo``: names / dtype_names / shapes /
         ipc_handles). ``ipc_handles`` are cloudpickle'd before HTTP because
-        the closures injected by ``_apply_monkey_patch_torch_reductions``
-        aren't JSON-serialisable.
+        ``torch.multiprocessing.reductions.reduce_tensor`` returns
+        ``(rebuild_fn, args_tuple)`` where ``rebuild_fn`` is a module-level
+        callable that JSON can't serialise — cloudpickle handles function
+        references and tuples uniformly.
         """
         if self.node_rank != 0:
             return None

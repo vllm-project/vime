@@ -11,7 +11,6 @@ from slime.utils.distributed_utils import get_gloo_group
 from slime.utils.types import ParamInfo
 
 from ..megatron_to_hf import convert_to_hf
-from ..sglang import monkey_patch_torch_reductions
 from .common import all_gather_params_async, named_params_and_buffers
 from .hf_weight_iterator_base import HfWeightIteratorBase
 
@@ -45,7 +44,6 @@ def _get_megatron_full_params(
     megatron_local_param_infos: Sequence[ParamInfo],
     megatron_local_weights,
 ) -> Sequence[torch.Tensor]:
-    monkey_patch_torch_reductions()
     pp_size = mpu.get_pipeline_model_parallel_world_size()
     ep_size = mpu.get_expert_model_parallel_world_size()
     rank = dist.get_rank()
