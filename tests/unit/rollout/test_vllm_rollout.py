@@ -430,6 +430,16 @@ def test_apply_vllm_routed_experts_disabled_or_missing():
 
 
 @pytest.mark.unit
+def test_apply_vllm_routed_experts_missing_on_aborted_sample_does_not_raise():
+    sample = Sample(tokens=[1, 2, 3], status=Sample.Status.ABORTED)
+    sample.response_length = 1
+
+    mod._apply_vllm_routed_experts(Namespace(use_rollout_routing_replay=True), sample, {})
+
+    assert sample.rollout_routed_experts is None
+
+
+@pytest.mark.unit
 def test_apply_vllm_routed_experts_skips_bad_shape():
     arr = np.zeros((2, 2), dtype=np.int32)
     sample = Sample(tokens=[1, 2, 3])

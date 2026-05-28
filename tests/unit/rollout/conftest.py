@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import types
+from importlib.util import find_spec
 from unittest.mock import MagicMock
 
 
@@ -16,6 +17,8 @@ def _ensure_vllm_router_stub() -> None:
 def _ensure_pil_stub() -> None:
     if "PIL" in sys.modules:
         return
+    if find_spec("PIL") is not None:
+        return
     pil = types.ModuleType("PIL")
     image_mod = types.ModuleType("PIL.Image")
     pil.Image = image_mod
@@ -25,6 +28,8 @@ def _ensure_pil_stub() -> None:
 
 def _ensure_transformers_stub() -> None:
     if "transformers" in sys.modules:
+        return
+    if find_spec("transformers") is not None:
         return
     mod = types.ModuleType("transformers")
     mod.AutoTokenizer = type(
@@ -45,11 +50,15 @@ def _ensure_transformers_stub() -> None:
 def _ensure_aiohttp_stub() -> None:
     if "aiohttp" in sys.modules:
         return
+    if find_spec("aiohttp") is not None:
+        return
     sys.modules["aiohttp"] = MagicMock()
 
 
 def _ensure_pylatexenc_stub() -> None:
     if "pylatexenc" in sys.modules:
+        return
+    if find_spec("pylatexenc") is not None:
         return
     pylatexenc = types.ModuleType("pylatexenc")
     latex2text = types.ModuleType("pylatexenc.latex2text")

@@ -72,6 +72,17 @@ def _format_v6_uri(addr: str | None) -> str | None:
     return addr
 
 
+def _strip_v6_uri(addr: str) -> str:
+    if addr.startswith("[") and addr.endswith("]"):
+        return addr[1:-1]
+    return addr
+
+
+def _split_dist_init_addr(dist_init_addr: str) -> tuple[str, int]:
+    host, port = dist_init_addr.rsplit(":", 1)
+    return _strip_v6_uri(host), int(port)
+
+
 def _exec_vllm_cmd(cmd: list[str], env: dict[str, str]) -> None:
     """Entry point for multiprocessing child process."""
     os.execvpe(cmd[0], cmd, env)
@@ -241,16 +252,69 @@ def _serialize_weight_transfer_config(value) -> str:
     return serialized
 
 
-def launch_server_process(
-    *,
-    bind_host: str,
-    server_port: int,
+def _get_vllm_tp_size(args, num_gpus_per_engine: int) -> int:
+    if getattr(args, "vllm_tp_size", None) is not None:
+        return args.vllm_tp_size
+    pp_size = _get_vllm_pp_size(args)
+    return num_gpus_per_engine // pp_size
+
+
+def _get_vllm_pp_size(args) -> int:
+    return getattr(args, "vllm_pp_size", getattr(args, "vllm_pipeline_parallel_size", 1))
+
+
+def _get_vllm_dp_size(args) -> int:
+    return getattr(args, "vllm_dp_size", getattr(args, "vllm_data_parallel_size", 1))
+
+
+def _compute_server_args(
     args,
-    rank: int,
-    visible_devices: str,
-    model_path: str,
-) -> multiprocessing.Process:
-    """Spawn ``vllm serve`` (OpenAI API server) in a subprocess.
+    rank,
+    dist_init_addr,
+    nccl_port,
+    host,
+    port,
+    worker_type: str = "regular",
+    disaggregation_bootstrap_port: int | None = None,
+    base_gpu_id: int | None = None,
+    model_path: str | None = None,
+    sglang_overrides: dict | None = None,
+    num_gpus_per_engine: int | None = None,
+) -> dict:
+    """Compute vLLM launch args with a signature kept parallel to SGLang's helper."""
+    del nccl_port, worker_type, disaggregation_bootstrap_port, sglang_overrides
+    gpus_per_engine = num_gpus_per_engine or args.rollout_num_gpus_per_engine
+    if gpus_per_engine > args.num_gpus_per_node and gpus_per_engine % args.num_gpus_per_node != 0:
+        raise ValueError(
+            "vLLM multi-node rollout requires rollout_num_gpus_per_engine to be divisible by "
+            f"num_gpus_per_node, got {gpus_per_engine=} {args.num_gpus_per_node=}."
+        )
+    nnodes = max(1, gpus_per_engine // args.num_gpus_per_node)
+    node_rank = rank % nnodes
+    base = base_gpu_id if base_gpu_id is not None else get_base_gpu_id(args, rank)
+    base = _to_local_gpu_id(base)
+    local_num_gpus = min(args.num_gpus_per_node, gpus_per_engine)
+    master_addr, master_port = _split_dist_init_addr(dist_init_addr)
+    return {
+        "args": args,
+        "rank": rank,
+        "model_path": model_path or args.hf_checkpoint,
+        "host": _format_v6_uri(host),
+        "port": port,
+        "master_addr": master_addr,
+        "master_port": master_port,
+        "nnodes": nnodes,
+        "node_rank": node_rank,
+        "base_gpu_id": base,
+        "visible_devices": ",".join(str(base + i) for i in range(local_num_gpus)),
+        "tp_size": _get_vllm_tp_size(args, gpus_per_engine),
+        "pp_size": _get_vllm_pp_size(args),
+        "dp_size": _get_vllm_dp_size(args),
+    }
+
+
+def _build_vllm_cmd_and_env(server_args: dict) -> tuple[list[str], dict[str, str]]:
+    """Build the ``vllm serve`` command and child environment from computed server args.
 
     Contrasts with SGLang's launcher, which starts the HTTP server in-process from ``ServerArgs``.
 
@@ -258,10 +322,13 @@ def launch_server_process(
     orchestrator. Every other ``vllm serve`` flag is reachable via ``--vllm-<flag>`` and
     auto-forwarded by ``_forward_vllm_cli_args`` when the user overrides the vllm default.
     """
+    args = server_args["args"]
+    rank = server_args["rank"]
+    node_rank = server_args["node_rank"]
     env = os.environ.copy()
     env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
     env.setdefault("NCCL_CUMEM_ENABLE", "0")
-    env["CUDA_VISIBLE_DEVICES"] = visible_devices
+    env["CUDA_VISIBLE_DEVICES"] = server_args["visible_devices"]
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")
     # Colocate loads --worker-extension-cls from slime; vLLM subprocess must see the
     # same tree as the trainer (editable vime), not an older site-packages slime.
@@ -277,26 +344,56 @@ def launch_server_process(
     if getattr(args, "colocate", False):
         env.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
-    host_for_subprocess = bind_host.strip("[]")
-    model = model_path
-    tp = args.rollout_num_gpus_per_engine
+    host_for_subprocess = server_args["host"].strip("[]")
+    # Keep the existing per-Ray-actor seed behavior. Non-zero node ranks are headless
+    # vLLM worker processes and do not own HTTP sampling, so their distinct seeds do
+    # not change request-level rollout determinism.
     seed = getattr(args, "seed", 1234) + rank
+
+    from slime.backends.vllm_utils.arguments import get_vllm_cli_action_table
+
+    user_provided: set[str] = getattr(args, "_vllm_user_provided", set())
+    _vllm_action_table = get_vllm_cli_action_table()
+
+    def _user_overrode(dest: str) -> bool:
+        if dest in user_provided:
+            return True
+        entry = _vllm_action_table.get(dest)
+        if entry is None:
+            return False
+        _, action = entry
+        return getattr(args, dest, action.default) != action.default
 
     # Orchestrator-owned flags (correspond to SKIPPED_DESTS in vllm_utils/arguments.py).
     cmd = [
         "vllm",
         "serve",
-        str(model),
+        str(server_args["model_path"]),
         "--tensor-parallel-size",
-        str(tp),
+        str(server_args["tp_size"]),
+        "--nnodes",
+        str(server_args["nnodes"]),
+        "--node-rank",
+        str(node_rank),
+        "--master-addr",
+        str(server_args["master_addr"]),
+        "--master-port",
+        str(server_args["master_port"]),
         "--port",
-        str(server_port),
+        str(server_args["port"]),
         "--host",
         host_for_subprocess,
         "--seed",
         str(seed),
         "--trust-remote-code",
     ]
+    if node_rank != 0:
+        cmd.append("--headless")
+    if server_args["nnodes"] > 1:
+        if not _user_overrode("vllm_data_parallel_backend"):
+            cmd += ["--data-parallel-backend", "mp"]
+        if not _user_overrode("vllm_distributed_executor_backend"):
+            cmd += ["--distributed-executor-backend", "mp"]
     if getattr(args, "fp16", False):
         cmd += ["--dtype", "float16"]
     # Colocated IPC weight sync releases model weights via POST /sleep?level=0.
@@ -308,7 +405,7 @@ def launch_server_process(
         args.vllm_enable_sleep_mode = True
     # rollout_max_context_len (vime top-level flag) maps to --max-model-len when set,
     # unless the user already passed --vllm-max-model-len explicitly.
-    if args.rollout_max_context_len is not None and getattr(args, "vllm_max_model_len", None) is None:
+    if getattr(args, "rollout_max_context_len", None) is not None and getattr(args, "vllm_max_model_len", None) is None:
         cmd += ["--max-model-len", str(args.rollout_max_context_len)]
     if getattr(args, "use_rollout_routing_replay", False):
         cmd += ["--enable-return-routed-experts"]
@@ -324,20 +421,6 @@ def launch_server_process(
     #   (b) the parsed value differs from the vllm-side default — this catches
     #       overrides loaded later from ``--custom-config-path`` YAML or set
     #       programmatically on the namespace.
-    from slime.backends.vllm_utils.arguments import get_vllm_cli_action_table
-
-    user_provided: set[str] = getattr(args, "_vllm_user_provided", set())
-    _vllm_action_table = get_vllm_cli_action_table()
-
-    def _user_overrode(dest: str) -> bool:
-        if dest in user_provided:
-            return True
-        entry = _vllm_action_table.get(dest)
-        if entry is None:
-            return False
-        _, action = entry
-        return getattr(args, dest, action.default) != action.default
-
     # 1) gpu_memory_utilization: vllm default 0.92 OOMs in colocate training; vime ships 0.55.
     if _user_overrode("vllm_gpu_memory_utilization"):
         gpu_mem = args.vllm_gpu_memory_utilization
@@ -377,9 +460,43 @@ def launch_server_process(
     _forward_vllm_cli_args(args, cmd)
 
     logger.info("Launching vLLM server: %s", _redact_cmd_for_log(cmd))
+    return cmd, env
 
+
+def launch_server_process(server_args: dict) -> multiprocessing.Process:
+    """Spawn one vLLM process for the Ray actor's rank.
+
+    Rank 0 runs the OpenAI HTTP API server. Non-0 ranks use vLLM's
+    ``--headless`` mode so one logical server can span multiple Ray actors,
+    matching SGLang's ``nnodes/node_rank`` topology.
+    """
+    cmd, env = _build_vllm_cmd_and_env(server_args)
     p = _spawn_ctx.Process(target=_exec_vllm_cmd, args=(cmd, env))
     p.start()
+
+    if server_args["node_rank"] != 0:
+        return p
+
+    try:
+        _wait_server_healthy(
+            base_url=f"http://{server_args['host']}:{server_args['port']}",
+            process=p,
+        )
+    except Exception:
+        logger.exception("vLLM server health check failed; terminating subprocess pid=%s", p.pid)
+        try:
+            from vllm.utils.system_utils import kill_process_tree
+
+            kill_process_tree(p.pid)
+        except Exception as e:
+            logger.warning("vLLM kill_process_tree failed during startup cleanup (%s); terminate root only.", e)
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=15)
+                if p.is_alive():
+                    p.kill()
+                    p.join(timeout=15)
+        raise
     return p
 
 
@@ -447,9 +564,12 @@ class VLLMEngine(RayActor):
         self.sglang_overrides = sglang_overrides or {}
         self.num_gpus_per_engine = num_gpus_per_engine
         self.process: multiprocessing.Process | None = None
+        self.node_rank: int = 0
+        self.server_host: str | None = None
+        self.server_port: int | None = None
+        self.router_ip: str | None = None
+        self.router_port: int | None = None
         self._weight_version: str | None = None
-        # Slime runs one vLLM HTTP process per logical engine; multi-node worker rank is not used.
-        self.node_rank = 0
 
     def _http_base(self) -> str:
         return f"http://{self.server_host}:{self.server_port}"
@@ -472,14 +592,28 @@ class VLLMEngine(RayActor):
         router_ip=None,
         router_port=None,
     ):
-        del dist_init_addr, nccl_port, disaggregation_bootstrap_port
-
         self.router_ip = router_ip if router_ip is not None else self.args.router_ip
         self.router_port = router_port if router_port is not None else self.args.router_port
 
         host = host or get_host_info()[1]
-        self.server_host = _format_v6_uri(host)
-        self.server_port = port
+        server_args = _compute_server_args(
+            self.args,
+            self.rank,
+            dist_init_addr,
+            nccl_port,
+            host,
+            port,
+            worker_type=self.worker_type,
+            disaggregation_bootstrap_port=disaggregation_bootstrap_port,
+            base_gpu_id=self.base_gpu_id,
+            model_path=self.model_path,
+            sglang_overrides=self.sglang_overrides,
+            num_gpus_per_engine=self.num_gpus_per_engine,
+        )
+        self.node_rank = server_args["node_rank"]
+        self.server_host = server_args["host"]
+        self.server_port = server_args["port"]
+        self.server_args = server_args
 
         if self.worker_type != "regular":
             logger.warning(
@@ -488,9 +622,20 @@ class VLLMEngine(RayActor):
             )
 
         if self.args.rollout_external:
-            self._init_external()
+            if self.node_rank == 0:
+                self._init_external(
+                    server_args,
+                    external_engine_need_check_fields=("tp_size", "pp_size", "dp_size", "nnodes"),
+                )
+            else:
+                logger.info(
+                    "Use external vLLM headless rank=%s node_rank=%s; skip HTTP health check. "
+                    "This keeps Ray actor topology symmetric with managed multi-node vLLM; only node_rank 0 owns HTTP/router state.",
+                    self.rank,
+                    self.node_rank,
+                )
         else:
-            self._init_normal()
+            self._init_normal(server_args)
 
         if self.node_rank == 0 and self.router_ip and self.router_port:
             self._register_worker_with_router()
@@ -506,7 +651,7 @@ class VLLMEngine(RayActor):
         response.raise_for_status()
 
     def _deregister_worker_from_router(self) -> None:
-        if self.node_rank != 0 or not self.router_ip or not self.router_port:
+        if self.node_rank != 0 or not self.router_ip or not self.router_port or not self.server_host or not self.server_port:
             return
         worker_url = self._http_base()
         try:
@@ -525,50 +670,48 @@ class VLLMEngine(RayActor):
         except Exception as e:
             logger.warning("Failed to list/remove worker on vllm-router: %s", e)
 
-    def _init_external(self) -> None:
-        logger.info("Use external vLLM engine (rank=%s) at %s:%s", self.rank, self.server_host, self.server_port)
-        base = self._http_base()
-        _wait_server_healthy(base, process=None)
-        self._wait_external_config_ready()
+    def _init_external(self, expect_server_args: dict, external_engine_need_check_fields: tuple[str, ...]) -> None:
+        logger.info("Use external vLLM engine (rank=%s, expect_server_args=%s)", self.rank, expect_server_args)
 
-    def _wait_external_config_ready(self) -> None:
-        """External engine: best-effort ``GET /server_info`` TP check (non-fatal)."""
-        try:
+        def _get_actual_server_args() -> dict:
             # SGLang external mode uses ``/get_server_info``; vLLM exposes ``/server_info``.
-            actual = requests.get(f"{self._http_base()}/server_info", params={"config_format": "json"}, timeout=30)
-            actual.raise_for_status()
-            body = actual.json()
-        except requests.RequestException as e:
-            logger.warning("External vLLM: could not GET /server_info (non-fatal): %s", e)
-            return
+            response = requests.get(f"{self._http_base()}/server_info", params={"config_format": "json"}, timeout=30)
+            response.raise_for_status()
+            body = response.json()
+            parallel_cfg = body.get("vllm_config", {}).get("parallel_config", {})
+            if not parallel_cfg:
+                raise RuntimeError(f"External vLLM /server_info missing vllm_config.parallel_config: {body}")
+            return {
+                "tp_size": parallel_cfg.get("tensor_parallel_size"),
+                "pp_size": parallel_cfg.get("pipeline_parallel_size"),
+                "dp_size": parallel_cfg.get("data_parallel_size"),
+                "nnodes": parallel_cfg.get("nnodes"),
+            }
 
-        expect_tp = self.args.rollout_num_gpus_per_engine
-        parallel_cfg = body.get("vllm_config", {}).get("parallel_config", {})
-        actual_tp = parallel_cfg.get("tensor_parallel_size")
-        if actual_tp is not None and actual_tp != expect_tp:
-            logger.warning(
-                "External vLLM server_info TP mismatch: expect=%s actual=%s (weak check)",
-                expect_tp,
-                actual_tp,
-            )
+        def _sanity_check_server_args(actual_server_args: dict, expect_server_args: dict) -> None:
+            for name in external_engine_need_check_fields:
+                expect_value = expect_server_args.get(name)
+                actual_value = actual_server_args.get(name)
+                if actual_value != expect_value:
+                    raise AssertionError(
+                        f"External vLLM server arg mismatch: {name=} {expect_value=} {actual_value=} "
+                        f"{expect_server_args=} {actual_server_args=}"
+                    )
 
-    def _init_normal(self) -> None:
-        logger.info("Launch vLLM OpenAI api_server at: %s:%s", self.server_host, self.server_port)
-        num_gpus = min(self.args.num_gpus_per_node, self.args.rollout_num_gpus_per_engine)
-        base = self.base_gpu_id if self.base_gpu_id is not None else get_base_gpu_id(self.args, self.rank)
-        base = _to_local_gpu_id(base)
-        visible_devices = ",".join(str(base + i) for i in range(num_gpus))
+        _wait_server_healthy(self._http_base(), process=None)
+        actual_server_args = _get_actual_server_args()
+        _sanity_check_server_args(actual_server_args, expect_server_args)
 
-        bind_host = self.server_host
-        self.process = launch_server_process(
-            bind_host=bind_host,
-            server_port=self.server_port,
-            args=self.args,
-            rank=self.rank,
-            visible_devices=visible_devices,
-            model_path=self.model_path,
+    def _init_normal(self, server_args: dict) -> None:
+        logger.info(
+            "Launch vLLM process at %s:%s (rank=%s, node_rank=%s/%s)",
+            self.server_host,
+            self.server_port,
+            self.rank,
+            self.node_rank,
+            server_args["nnodes"],
         )
-        _wait_server_healthy(self._http_base(), process=self.process)
+        self.process = launch_server_process(server_args)
 
     def _post_json(self, endpoint: str, payload: dict, timeout: float) -> requests.Response:
         url = f"{self._http_base()}/{endpoint.lstrip('/')}"
@@ -812,25 +955,13 @@ class VLLMEngine(RayActor):
                 "world_size": world_size,
             }
         }
-        init_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
-        last_error = None
-        for attempt in range(1, 4):
-            try:
-                response = self._post_json("init_weight_transfer_engine", payload, timeout=init_timeout_s)
-                response.raise_for_status()
-                try:
-                    return response.json()
-                except Exception:
-                    return {"ok": True, "raw": response.text}
-            except Exception as e:
-                last_error = e
-                if attempt < 3:
-                    logger.warning("init_weight_transfer_engine attempt %s/3 failed: %s", attempt, e)
-                    time.sleep(2 * attempt)
-        raise RuntimeError(f"vLLM init_weight_transfer_engine failed: {last_error}") from last_error
+        return self.init_weight_transfer_engine(payload)
 
     def destroy_weights_update_group(self, group_name):
-        """No vLLM destroy call; return ``None`` (SGLang may ``POST /destroy_weights_update_group`` and swallow errors)."""
+        """No vLLM destroy route exists for ``/init_weight_transfer_engine`` state.
+
+        vLLM owns transfer-engine teardown with the server process lifetime; callers keep the SGLang-compatible hook.
+        """
         del group_name
         return None
 

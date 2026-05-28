@@ -314,6 +314,20 @@ def test_connect_rollout_engines_always_uses_vllm_trainer_init(upw, monkeypatch)
 
 
 @pytest.mark.unit
+def test_packed_update_noops_without_model_update_groups(upw, monkeypatch):
+    updater = upw.UpdateWeightFromDistributed.__new__(upw.UpdateWeightFromDistributed)
+    updater._model_update_groups = None
+
+    monkeypatch.setattr(
+        upw,
+        "update_weights_from_distributed",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not update")),
+    )
+
+    updater._update_weights_vllm_packed([])
+
+
+@pytest.mark.unit
 def test_weight_update_session_calls_start_and_finish(upw, monkeypatch):
     import torch.distributed as dist
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import sys
+import types
 
 import pytest
 import requests
@@ -26,6 +28,38 @@ class _MockResponse:
         if self._json_data is None:
             raise ValueError("no json")
         return self._json_data
+
+
+class _FakeProcess:
+    instances: list[_FakeProcess] = []
+
+    def __init__(self, *args, **kwargs):
+        type(self).instances.append(self)
+        self.args = args
+        self.kwargs = kwargs
+        self.started = False
+        self.alive = True
+        self.terminated = False
+        self.killed = False
+        self.join_calls: list[float | None] = []
+        self.pid = 123
+
+    def start(self):
+        self.started = True
+
+    def is_alive(self):
+        return self.alive
+
+    def terminate(self):
+        self.terminated = True
+        self.alive = False
+
+    def kill(self):
+        self.killed = True
+        self.alive = False
+
+    def join(self, timeout=None):
+        self.join_calls.append(timeout)
 
 
 @pytest.mark.unit
@@ -65,6 +99,22 @@ def test_get_base_gpu_id_colocate(vllm_args):
     vllm_args.num_gpus_per_node = 8
     vllm_args.rollout_num_gpus_per_engine = 4
     assert mod.get_base_gpu_id(vllm_args, rank=1) == 4
+
+
+@pytest.mark.unit
+def test_compute_server_args_rejects_partial_multi_node(vllm_args):
+    vllm_args.num_gpus_per_node = 8
+    vllm_args.rollout_num_gpus_per_engine = 12
+
+    with pytest.raises(ValueError, match="divisible"):
+        mod._compute_server_args(
+            vllm_args,
+            rank=0,
+            dist_init_addr="127.0.0.1:29500",
+            nccl_port=29501,
+            host="127.0.0.1",
+            port=8000,
+        )
 
 
 @pytest.mark.unit
@@ -248,6 +298,134 @@ def test_redact_cmd_for_log_masks_hf_token():
 
 
 @pytest.mark.unit
+def test_launch_server_process_waits_only_on_node_rank_zero(vllm_args, monkeypatch):
+    _FakeProcess.instances.clear()
+    waits: list[tuple[str, object]] = []
+    monkeypatch.setattr(mod._spawn_ctx, "Process", _FakeProcess)
+    monkeypatch.setattr(mod, "_build_vllm_cmd_and_env", lambda server_args: (["vllm"], {}))
+    monkeypatch.setattr(mod, "_wait_server_healthy", lambda base_url, process: waits.append((base_url, process)))
+
+    process = mod.launch_server_process({"host": "127.0.0.1", "port": 8000, "node_rank": 0})
+
+    assert process.started is True
+    assert waits == [("http://127.0.0.1:8000", process)]
+
+    waits.clear()
+    process = mod.launch_server_process({"host": "127.0.0.1", "port": 8000, "node_rank": 1})
+
+    assert process.started is True
+    assert waits == []
+
+
+@pytest.mark.unit
+def test_launch_server_process_terminates_on_health_failure(monkeypatch):
+    _FakeProcess.instances.clear()
+    killed_pids: list[int] = []
+    system_utils = types.ModuleType("vllm.utils.system_utils")
+    system_utils.kill_process_tree = lambda pid: killed_pids.append(pid)
+    monkeypatch.setitem(sys.modules, "vllm.utils.system_utils", system_utils)
+    monkeypatch.setattr(mod._spawn_ctx, "Process", _FakeProcess)
+    monkeypatch.setattr(mod, "_build_vllm_cmd_and_env", lambda server_args: (["vllm"], {}))
+    monkeypatch.setattr(
+        mod,
+        "_wait_server_healthy",
+        lambda base_url, process: (_ for _ in ()).throw(TimeoutError("not healthy")),
+    )
+
+    with pytest.raises(TimeoutError, match="not healthy"):
+        mod.launch_server_process({"host": "127.0.0.1", "port": 8000, "node_rank": 0})
+
+    process = _FakeProcess.instances[-1]
+    assert process.started is True
+    assert killed_pids == [process.pid]
+    assert process.terminated is False
+
+
+@pytest.mark.unit
+def test_build_vllm_cmd_multi_node_topology_flags(vllm_args):
+    server_args = {
+        "args": vllm_args,
+        "rank": 3,
+        "model_path": "/tmp/model",
+        "host": "127.0.0.1",
+        "port": 8000,
+        "master_addr": "10.0.0.1",
+        "master_port": 29500,
+        "nnodes": 2,
+        "node_rank": 1,
+        "visible_devices": "0,1,2,3",
+        "tp_size": 4,
+    }
+
+    cmd, env = mod._build_vllm_cmd_and_env(server_args)
+
+    assert env["CUDA_VISIBLE_DEVICES"] == "0,1,2,3"
+    assert cmd[cmd.index("--nnodes") + 1] == "2"
+    assert cmd[cmd.index("--node-rank") + 1] == "1"
+    assert cmd[cmd.index("--master-addr") + 1] == "10.0.0.1"
+    assert cmd[cmd.index("--master-port") + 1] == "29500"
+    assert cmd[cmd.index("--data-parallel-backend") + 1] == "mp"
+    assert cmd[cmd.index("--distributed-executor-backend") + 1] == "mp"
+    assert "--headless" in cmd
+
+    server_args["node_rank"] = 0
+    cmd, _ = mod._build_vllm_cmd_and_env(server_args)
+    assert "--headless" not in cmd
+
+
+@pytest.mark.unit
+def test_build_vllm_cmd_multi_node_respects_user_backend_overrides(vllm_args):
+    vllm_args._vllm_user_provided = {"vllm_data_parallel_backend", "vllm_distributed_executor_backend"}
+    vllm_args.vllm_data_parallel_backend = "ray"
+    vllm_args.vllm_distributed_executor_backend = "ray"
+    server_args = {
+        "args": vllm_args,
+        "rank": 0,
+        "model_path": "/tmp/model",
+        "host": "127.0.0.1",
+        "port": 8000,
+        "master_addr": "10.0.0.1",
+        "master_port": 29500,
+        "nnodes": 2,
+        "node_rank": 0,
+        "visible_devices": "0,1,2,3",
+        "tp_size": 4,
+    }
+
+    cmd, _ = mod._build_vllm_cmd_and_env(server_args)
+
+    assert cmd.count("--data-parallel-backend") == 1
+    assert cmd[cmd.index("--data-parallel-backend") + 1] == "ray"
+    assert cmd.count("--distributed-executor-backend") == 1
+    assert cmd[cmd.index("--distributed-executor-backend") + 1] == "ray"
+
+
+@pytest.mark.unit
+def test_init_external_asserts_server_info_mismatch(vllm_engine, monkeypatch):
+    monkeypatch.setattr(mod, "_wait_server_healthy", lambda base_url, process: None)
+
+    def fake_get(url, *, params=None, timeout=None):
+        assert url.endswith("/server_info")
+        return _MockResponse(
+            json_data={
+                "vllm_config": {
+                    "parallel_config": {
+                        "tensor_parallel_size": 2,
+                        "pipeline_parallel_size": 1,
+                        "data_parallel_size": 1,
+                        "nnodes": 1,
+                    }
+                }
+            },
+        )
+
+    monkeypatch.setattr(mod.requests, "get", fake_get)
+
+    with pytest.raises(AssertionError, match="tp_size"):
+        vllm_engine._init_external({"tp_size": 4}, external_engine_need_check_fields=("tp_size",))
+
+
+@pytest.mark.unit
 def test_serialize_for_cli_primitives():
     assert mod._serialize_for_cli(42) == "42"
     assert mod._serialize_for_cli(True) == "True"
@@ -347,4 +525,3 @@ def test_init_weights_update_group_raises_after_three_failures(vllm_engine, monk
             group_name="g",
             backend="nccl",
         )
-

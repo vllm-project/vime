@@ -102,6 +102,11 @@ SKIPPED_DESTS = [
     # network: engine launcher decides per-engine port/host
     "port",
     "host",
+    # multi-node topology: vllm_engine._compute_server_args derives these from dist_init_addr.
+    "master_addr",
+    "master_port",
+    "nnodes",
+    "node_rank",
     # vime decides this based on training algo, not user CLI
     "enable_return_routed_experts",
 ]

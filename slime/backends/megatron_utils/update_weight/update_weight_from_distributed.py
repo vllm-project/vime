@@ -222,6 +222,10 @@ class UpdateWeightFromDistributed:
 
     def _update_weights_vllm_packed(self, converted_named_tensors: list[tuple[str, torch.Tensor]]) -> None:
         """Single-shot vLLM weight update using packed broadcast."""
+        if self._model_update_groups is None:
+            logger.debug("Skip packed vLLM weight update on rank without initialized model update groups.")
+            return
+
         while not ray.get(self.rollout_engine_lock.acquire.remote()):
             time.sleep(0.1)
 

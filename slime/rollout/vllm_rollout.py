@@ -182,6 +182,13 @@ def _apply_vllm_routed_experts(
     if sample.status == Sample.Status.ABORTED and sample.response_length == 0:
         return
     if routed is None:
+        if sample.status == Sample.Status.ABORTED:
+            # Aborted samples can still carry partial tokens, but training masks aborted samples out.
+            logger.warning(
+                "vLLM routing replay: missing routed_experts on aborted sample index=%s; skip replay metadata.",
+                sample.index,
+            )
+            return
         raise RuntimeError(
             "vLLM routing replay: missing choices[0].routed_experts on /inference/v1/generate response. "
             "Check vLLM 0.22+ was launched with --enable-return-routed-experts."
