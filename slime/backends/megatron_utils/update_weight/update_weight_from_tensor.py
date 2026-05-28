@@ -8,29 +8,6 @@ Worker: ``vLLMColocateWorkerExtension`` — passed to ``vllm serve`` via
 ``--worker-extension-cls``; patches IPC receive before handle deserialisation.
 
 https://docs.vllm.ai/en/stable/examples/rl/rlhf_ipc/
-
-The flow for colocated engines:
-1. Megatron params → HF conversion (via HfWeightIteratorBase)
-2. Each trainer rank builds vLLM-protocol IPC handles for its GPU
-   (``reduce_tensor`` from ``torch.multiprocessing.reductions``) and dispatches
-   them via ``engine.update_weights_from_tensor.remote(update_info=..., weight_version=...)``.
-   When ``rollout_num_gpus_per_engine > 1`` (vLLM TP within the engine), the
-   coordinator rank gathers and merges per-rank handles into one RPC so every
-   vLLM worker can pick the handle for its physical GPU UUID. The RPC name
-   ``update_weights_from_tensor`` and the ``weight_version`` kwarg match slime's
-   IPC entry point (``sglang_engine.update_weights_from_tensor``); only the
-   on-the-wire payload differs (vLLM IPCWeightTransferUpdateInfo dict vs
-   SGLang serialized_named_tensors).
-
-We deliberately do not use ``IPCWeightTransferEngine.trainer_send_weights``:
-its hard-coded ``llm_handle.update_weights.remote(...)`` call would force the
-RPC contract to be the vLLM one and would drop ``weight_version`` on the floor
-(ci_test's engine-vs-updater check requires the engine to track the version).
-Reusing only ``reduce_tensor`` for handle creation lets vime keep the RPC
-contract aligned with slime.
-
-For non-colocated overflow engines the existing NCCL distributed broadcast
-(``update_weights_from_distributed``) is used unchanged.
 """
 
 from __future__ import annotations

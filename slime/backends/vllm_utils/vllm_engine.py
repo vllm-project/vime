@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import ipaddress
 import logging
 import multiprocessing
@@ -7,6 +8,7 @@ import os
 import time
 from urllib.parse import quote
 
+import cloudpickle
 import requests
 
 from slime.ray.ray_actor import RayActor
@@ -607,25 +609,15 @@ class VLLMEngine(RayActor):
         weight_version: str | None = None,
         flush_cache: bool = False,
     ) -> dict | None:
-        """IPC weight-transfer RPC. Same signature shape as slime's
-        ``sglang_engine.update_weights_from_tensor`` (explicit named fields,
-        ``weight_version`` recorded on POST success); payload is vLLM-native
-        (``IPCWeightTransferUpdateInfo``: names / dtype_names / shapes /
-        ipc_handles). ``ipc_handles`` are cloudpickle'd before HTTP because
-        ``torch.multiprocessing.reductions.reduce_tensor`` returns
-        ``(rebuild_fn, args_tuple)`` where ``rebuild_fn`` is a module-level
-        callable that JSON can't serialise — cloudpickle handles function
-        references and tuples uniformly.
+        """POST ``IPCWeightTransferUpdateInfo`` (names / dtype_names / shapes /
+        ipc_handles) to ``/update_weights``; record ``weight_version`` only on
+        success. ``ipc_handles`` are base64-cloudpickle'd (rebuild_fn closures).
         """
         if self.node_rank != 0:
             return None
 
         payload: dict = {"names": names, "dtype_names": dtype_names, "shapes": shapes}
         if ipc_handles is not None:
-            import base64
-
-            import cloudpickle
-
             payload["ipc_handles_pickled"] = base64.b64encode(cloudpickle.dumps(ipc_handles)).decode("utf-8")
         if flush_cache:
             self.flush_cache()

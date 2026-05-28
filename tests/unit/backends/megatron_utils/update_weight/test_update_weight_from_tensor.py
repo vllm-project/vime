@@ -330,7 +330,7 @@ def test_connect_marks_one_coordinator_per_engine_gpu_slot(upw_vllm):
         )
         with patch("torch.distributed.get_rank", return_value=rank), patch(
             "megatron.core.mpu.get_tensor_model_parallel_rank", return_value=tp_rank
-        ):
+        ), patch("torch.distributed.new_group", return_value="slot_group"):
             obj.connect_rollout_engines(
                 engines,
                 rollout_engine_lock=MagicMock(),
