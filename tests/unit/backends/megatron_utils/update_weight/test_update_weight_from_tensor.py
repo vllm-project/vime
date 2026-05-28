@@ -174,8 +174,7 @@ def _run_update(obj, *, chunks=None, ipc_engine_cls=None, ipc_args_cls=None) -> 
         with patch("torch.distributed.get_rank", return_value=0), patch(
             "torch.distributed.barrier", side_effect=counting_barrier
         ):
-            with patch(f"{MODULE_PATH}._apply_monkey_patch_torch_reductions"):
-                obj.update_weights()
+            obj.update_weights()
     return barrier_calls["n"]
 
 
