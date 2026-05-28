@@ -181,6 +181,8 @@ class UpdateWeightFromTensor:
         self._ipc_engine_coordinator: bool = False
         self._ipc_engine_slot_start: int | None = None
         self._ipc_engine_slot_end: int | None = None
+        self._ipc_engine_slot_group = None
+        self._ipc_engine_slot_ranks: list[int] | None = None
         self._distributed_engines: list[ActorHandle] = []
         self._model_update_groups = None
         self._is_distributed_src_rank: bool = False
@@ -237,18 +239,26 @@ class UpdateWeightFromTensor:
         self._ipc_engine_coordinator = False
         self._ipc_engine_slot_start = None
         self._ipc_engine_slot_end = None
+        self._ipc_engine_slot_group = None
+        self._ipc_engine_slot_ranks = None
         colocate_gpu_offsets = engine_gpu_offsets[:colocate_engine_nums]
         colocate_gpu_counts = engine_gpu_counts[:colocate_engine_nums]
         for i, engine in enumerate(self._colocated_engines):
             start = colocate_gpu_offsets[i]
             end = start + colocate_gpu_counts[i]
+            slot_ranks = list(range(start, end))
+            slot_group = dist.new_group(ranks=slot_ranks, backend="gloo")
             rank = dist.get_rank()
             if start <= rank < end:
                 self._ipc_engine = engine
                 self._ipc_engine_slot_start = start
                 self._ipc_engine_slot_end = end
-                # TP rank 0 within the engine GPU slot issues start/finish + merged IPC send.
-                if mpu.get_tensor_model_parallel_rank() == 0:
+                self._ipc_engine_slot_group = slot_group
+                self._ipc_engine_slot_ranks = slot_ranks
+                # The first trainer rank in each engine GPU slot issues start/finish
+                # + merged IPC send. Megatron TP rank 0 is not unique when CP/DP
+                # dimensions are present inside the same vLLM engine slot.
+                if rank == start:
                     self._ipc_engine_coordinator = True
 
         # Set up NCCL bridge for any overflow (non-colocated) engines.
@@ -400,21 +410,24 @@ class UpdateWeightFromTensor:
             )
             return
 
+        assert self._ipc_engine_slot_group is not None
+        assert self._ipc_engine_slot_ranks is not None
+        slot_group = self._ipc_engine_slot_group
+        slot_ranks = self._ipc_engine_slot_ranks
+        slot_size = len(slot_ranks)
+
         local_info = _build_ipc_update_info_from_named_tensors(hf_named_tensors)
         payload = _serialize_ipc_update_info(local_info)
 
-        tp_group = mpu.get_tensor_model_parallel_group()
-        tp_size = mpu.get_tensor_model_parallel_world_size()
-        tp_ranks = sorted(dist.get_process_group_ranks(tp_group))
-
-        # Use all_gather_object (monkey-patched for ReloadableProcessGroup). gather_object
-        # is not patched and fails after Megatron offload/reload with "Group is not registered".
-        gathered_payloads: list[str | None] = [None] * tp_size
-        dist.all_gather_object(gathered_payloads, payload, group=tp_group)
+        # Gather over the complete vLLM engine GPU slot, not Megatron's TP group.
+        # With CP/DP inside one vLLM TP engine, Megatron TP groups cover only a
+        # subset of the physical GPUs, leaving sibling vLLM workers without IPC handles.
+        gathered_payloads: list[str | None] = [None] * slot_size
+        dist.all_gather_object(gathered_payloads, payload, group=slot_group)
         if self._ipc_engine_coordinator:
             if any(p is None for p in gathered_payloads):
                 raise RuntimeError(
-                    f"Missing IPC payloads on TP group {tp_ranks} (slot "
+                    f"Missing IPC payloads on vLLM engine slot ranks {slot_ranks} (slot "
                     f"[{self._ipc_engine_slot_start}, {self._ipc_engine_slot_end})); "
                     f"got {gathered_payloads!r}"
                 )
@@ -422,7 +435,7 @@ class UpdateWeightFromTensor:
             merged = _merge_ipc_update_infos(slot_infos)
             ray.get(self._ipc_engine.update_weights.remote(dict(update_info=merged)))
 
-        dist.barrier(group=tp_group)
+        dist.barrier(group=slot_group)
 
 
 # ---------------------------------------------------------------------------

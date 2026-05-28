@@ -43,11 +43,13 @@ def _install_stubs():
     dist_stub.get_process_group_ranks.return_value = [0, 1]
     dist_stub.barrier = MagicMock()
     dist_stub.all_gather_object = MagicMock()
+    dist_stub.new_group = MagicMock(side_effect=lambda ranks=None, backend=None: f"{backend}:{tuple(ranks or [])}")
     _dist.get_rank = dist_stub.get_rank
     _dist.get_world_size = dist_stub.get_world_size
     _dist.get_process_group_ranks = dist_stub.get_process_group_ranks
     _dist.barrier = dist_stub.barrier
     _dist.all_gather_object = dist_stub.all_gather_object
+    _dist.new_group = dist_stub.new_group
 
     slime_utils = types.ModuleType("slime.utils.distributed_utils")
     slime_utils.get_gloo_group = MagicMock(return_value="gloo")
@@ -109,6 +111,7 @@ class RecordingVLLMEngine:
     resume_memory_occupation: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     init_weight_transfer_engine: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     start_weight_update: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
+    update_weights: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     finish_weight_update: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     pause_generation: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     flush_cache: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
@@ -141,6 +144,8 @@ def _make_instance(upw_vllm, args=None):
     obj._ipc_engine_coordinator = False
     obj._ipc_engine_slot_start = None
     obj._ipc_engine_slot_end = None
+    obj._ipc_engine_slot_group = None
+    obj._ipc_engine_slot_ranks = None
     obj._distributed_engines = []
     obj._model_update_groups = None
     obj._is_distributed_src_rank = False
@@ -271,6 +276,78 @@ def test_connect_marks_one_coordinator_per_engine_gpu_slot(upw_vllm):
             )
         assert obj._ipc_engine is engines[engine_idx]
         assert obj._ipc_engine_coordinator is is_coordinator
+        assert obj._ipc_engine_slot_group == f"gloo:{tuple(range(engine_idx * 2, engine_idx * 2 + 2))}"
+        assert obj._ipc_engine_slot_ranks == list(range(engine_idx * 2, engine_idx * 2 + 2))
+
+
+@pytest.mark.unit
+def test_connect_uses_engine_slot_start_not_megatron_tp_rank_for_coordinator(upw_vllm):
+    """Megatron TP rank 0 can repeat inside one vLLM engine slot when CP/DP is present."""
+    engine = RecordingVLLMEngine()
+    for rank, tp_rank, is_coordinator in [
+        (0, 0, True),
+        (4, 0, False),
+    ]:
+        obj = _make_instance(
+            upw_vllm,
+            args=_default_args(actor_num_gpus_per_node=8, rollout_num_gpus_per_engine=8),
+        )
+        with patch("torch.distributed.get_rank", return_value=rank), patch(
+            "megatron.core.mpu.get_tensor_model_parallel_rank", return_value=tp_rank
+        ):
+            obj.connect_rollout_engines(
+                [engine],
+                rollout_engine_lock=MagicMock(),
+                engine_gpu_counts=[8],
+                engine_gpu_offsets=[0],
+            )
+
+        assert obj._ipc_engine is engine
+        assert obj._ipc_engine_coordinator is is_coordinator
+        assert obj._ipc_engine_slot_group == "gloo:(0, 1, 2, 3, 4, 5, 6, 7)"
+        assert obj._ipc_engine_slot_ranks == list(range(8))
+
+
+@pytest.mark.unit
+def test_ipc_chunk_gathers_over_full_vllm_engine_slot_not_megatron_tp_group(upw_vllm):
+    obj = _make_instance(upw_vllm)
+    engine = RecordingVLLMEngine()
+    obj._ipc_engine = engine
+    obj._ipc_engine_coordinator = True
+    obj._ipc_engine_slot_start = 0
+    obj._ipc_engine_slot_end = 8
+    obj._ipc_engine_slot_group = "slot_group"
+    obj._ipc_engine_slot_ranks = list(range(8))
+
+    def fake_all_gather(output, payload, group=None):
+        assert group == "slot_group"
+        assert len(output) == 8
+        for i in range(8):
+            output[i] = f"payload-{i}"
+
+    seen_infos = []
+
+    def fake_merge(infos):
+        seen_infos.extend(infos)
+        return {"merged": len(infos)}
+
+    with patch("megatron.core.mpu.get_tensor_model_parallel_world_size", return_value=4), patch(
+        "torch.distributed.all_gather_object", side_effect=fake_all_gather
+    ) as all_gather_obj, patch("torch.distributed.barrier") as barrier, patch(
+        f"{MODULE_PATH}._build_ipc_update_info_from_named_tensors", return_value={"local": True}
+    ), patch(
+        f"{MODULE_PATH}._serialize_ipc_update_info", return_value="payload-local"
+    ), patch(
+        f"{MODULE_PATH}._deserialize_ipc_update_info", side_effect=lambda payload: {"payload": payload}
+    ), patch(
+        f"{MODULE_PATH}._merge_ipc_update_infos", side_effect=fake_merge
+    ):
+        obj._send_hf_chunk_via_ipc(_chunks(1)[0])
+
+    all_gather_obj.assert_called_once()
+    barrier.assert_called_once_with(group="slot_group")
+    assert seen_infos == [{"payload": f"payload-{i}"} for i in range(8)]
+    assert engine.update_weights.calls[0].args[0] == {"update_info": {"merged": 8}}
 
 
 @pytest.mark.unit
@@ -282,6 +359,8 @@ def test_non_coordinator_skips_start_finish(upw_vllm):
     obj._ipc_engine_coordinator = False
     obj._ipc_engine_slot_start = 0
     obj._ipc_engine_slot_end = 2
+    obj._ipc_engine_slot_group = "slot_group"
+    obj._ipc_engine_slot_ranks = [0, 1]
 
     dummy_info = {"names": [], "dtype_names": [], "shapes": [], "ipc_handles": []}
 
