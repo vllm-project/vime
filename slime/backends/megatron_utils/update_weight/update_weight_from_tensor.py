@@ -56,13 +56,6 @@ from .update_weight_from_distributed import (
 )
 
 
-def _apply_monkey_patch_torch_reductions() -> None:
-    """CUDA IPC tensor rebuild uses GPU UUIDs; patch torch reductions before IPC."""
-    from slime.backends.megatron_utils.sglang import monkey_patch_torch_reductions
-
-    monkey_patch_torch_reductions()
-
-
 def _current_gpu_uuid() -> str:
     device_index = torch.cuda.current_device()
     props = torch.cuda.get_device_properties(device_index)
@@ -72,7 +65,16 @@ def _current_gpu_uuid() -> str:
 def _build_ipc_update_info_from_named_tensors(
     named_tensors: Iterable[tuple[str, torch.Tensor]],
 ) -> dict[str, list]:
-    """Build vLLM IPC ``update_info`` payload from tensors on this rank's GPU."""
+    """Build vLLM IPC ``update_info`` payload from tensors on this rank's GPU.
+
+    Each handle is keyed by the physical GPU UUID of the producing rank rather
+    than by a local device index. The coordinator gathers all ranks' dicts and
+    merges them; the receiver looks up its own UUID to pick the matching handle,
+    then vLLM unconditionally overwrites ``args[6]`` (device_index) with its own
+    local index before ``rebuild_cuda_tensor``. This UUID-keyed routing makes
+    the path correct under any ``CUDA_VISIBLE_DEVICES`` ordering without
+    relying on a torch reductions monkey-patch.
+    """
     from torch.multiprocessing.reductions import reduce_tensor
 
     names: list[str] = []
@@ -339,9 +341,6 @@ class UpdateWeightFromTensor:
             ray.get(self._ipc_engine.start_weight_update.remote(is_checkpoint_format=True))
         dist.barrier(group=get_gloo_group())
 
-        if self._colocated_engines:
-            _apply_monkey_patch_torch_reductions()
-
         # ── 4. Iterate HF weight chunks and send ─────────────────────────────
         megatron_local_weights = self.weights_getter()
         for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(megatron_local_weights):
@@ -457,7 +456,6 @@ class _VLLMHijack:
         _orig = IPCWeightTransferEngine.receive_weights
 
         def _slime_receive_weights(self, update_info, load_weights, _orig=_orig):
-            _apply_monkey_patch_torch_reductions()
             _orig(self, update_info, load_weights)
 
         IPCWeightTransferEngine.receive_weights = _slime_receive_weights
