@@ -822,10 +822,11 @@ class VLLMEngine(RayActor):
 
     def start_weight_update(self, is_checkpoint_format: bool = False) -> dict:
         """``POST /start_weight_update`` — signals vLLM to enter IPC weight-update mode."""
+        update_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
         response = self._post_json(
             "start_weight_update",
             {"is_checkpoint_format": is_checkpoint_format},
-            timeout=self._weight_transfer_http_timeout(),
+            timeout=update_timeout_s,
         )
         response.raise_for_status()
         try:
@@ -847,7 +848,8 @@ class VLLMEngine(RayActor):
         (e.g. ``/root/models/Qwen2.5-0.5B-Instruct``), never matching the
         updater's integer version (``"1"``, ``"2"``, …).
         """
-        response = self._post_json("finish_weight_update", {}, timeout=self._weight_transfer_http_timeout())
+        update_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
+        response = self._post_json("finish_weight_update", {}, timeout=update_timeout_s)
         response.raise_for_status()
         # Record the new version only after the POST succeeded — if the engine
         # never actually exited weight-update mode, ``_weight_version`` must not
