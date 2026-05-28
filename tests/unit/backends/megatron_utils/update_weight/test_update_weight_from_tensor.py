@@ -178,8 +178,7 @@ def _run_update(obj, *, chunks=None, ipc_engine_cls=None, ipc_args_cls=None) -> 
         with patch("torch.distributed.get_rank", return_value=0), patch(
             "torch.distributed.barrier", side_effect=counting_barrier
         ):
-            with patch(f"{MODULE_PATH}._apply_monkey_patch_torch_reductions"):
-                obj.update_weights()
+            obj.update_weights()
     return barrier_calls["n"]
 
 
@@ -223,7 +222,10 @@ def test_send_via_ipc_dispatches_update_weights_from_tensor_with_version(upw_vll
     obj._ipc_engine_slot_end = 1
 
     dummy_info = {"names": ["w"], "dtype_names": ["bfloat16"], "shapes": [[2, 2]], "ipc_handles": [{"u": ("f", ())}]}
-    with patch(f"{MODULE_PATH}._build_ipc_update_info_from_named_tensors", return_value=dummy_info):
+    with patch(
+        f"{MODULE_PATH}._build_ipc_update_info_from_named_tensors",
+        return_value=(dummy_info, []),
+    ):
         _run_update(obj, chunks=_chunks(2))
 
     # 2 HF chunks → 2 IPC RPCs
@@ -274,7 +276,7 @@ def test_send_via_ipc_dispatches_update_weights_from_tensor_coordinator_multi_gp
         "megatron.core.mpu.get_tensor_model_parallel_rank", return_value=0
     ), patch(
         f"{MODULE_PATH}._build_ipc_update_info_from_named_tensors",
-        return_value=dummy_info_0,
+        return_value=(dummy_info_0, []),
     ), patch(
         f"{MODULE_PATH}._serialize_ipc_update_info", return_value="payload0"
     ), patch(
@@ -355,7 +357,7 @@ def test_non_coordinator_skips_start_finish(upw_vllm):
         "megatron.core.mpu.get_tensor_model_parallel_rank", return_value=1
     ), patch(
         f"{MODULE_PATH}._build_ipc_update_info_from_named_tensors",
-        return_value=dummy_info,
+        return_value=(dummy_info, []),
     ), patch(
         f"{MODULE_PATH}._serialize_ipc_update_info", return_value="payload"
     ), patch(

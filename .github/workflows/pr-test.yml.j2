@@ -105,8 +105,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+
+  pre-commit:
+    name: Run pre-commit (gate)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+
+      - name: Run pre-commit
+        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+        with:
+          extra_args: --all-files --show-diff-on-failure --color=always
+
 <% for job_name, config in jobs.items() %>
   << job_name >>:
+    needs: pre-commit
 <% if config.get('always') %>
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
 <% else %>
@@ -228,6 +249,7 @@ jobs:
 <% endfor %>
 
   e2e-test-changed-detect:
+    needs: pre-commit
     if: (github.event_name == 'workflow_dispatch') || (github.event.pull_request && contains(github.event.pull_request.labels.*.name, 'run-ci-changed'))
     runs-on: self-hosted
     outputs:
@@ -267,7 +289,7 @@ jobs:
           fi
 
   e2e-test-changed:
-    needs: e2e-test-changed-detect
+    needs: [pre-commit, e2e-test-changed-detect]
     if: needs.e2e-test-changed-detect.outputs.has_tests == 'true'
     runs-on: self-hosted
     strategy:

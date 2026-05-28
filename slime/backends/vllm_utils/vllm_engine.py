@@ -446,12 +446,19 @@ class VLLMEngine(RayActor):
         self.num_gpus_per_engine = num_gpus_per_engine
         self.process: multiprocessing.Process | None = None
         self._weight_version: str | None = None
-        self._is_local_server = not args.rollout_external
         # Slime runs one vLLM HTTP process per logical engine; multi-node worker rank is not used.
         self.node_rank = 0
 
     def _http_base(self) -> str:
         return f"http://{self.server_host}:{self.server_port}"
+
+    def _weight_transfer_http_timeout(self) -> float:
+        return float(
+            os.environ.get(
+                "SLIME_VLLM_WEIGHT_TRANSFER_UPDATE_TIMEOUT_SEC",
+                os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"),
+            )
+        )
 
     def init(
         self,
@@ -571,13 +578,11 @@ class VLLMEngine(RayActor):
         Caller must invoke ``start_weight_update`` / ``finish_weight_update`` around a batch of
         ``/update_weights`` calls (see ``UpdateWeightFromTensor`` / ``UpdateWeightFromDistributed``).
         """
-        timeout_s = float(
-            os.environ.get(
-                "SLIME_VLLM_WEIGHT_TRANSFER_UPDATE_TIMEOUT_SEC",
-                os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"),
-            )
+        response = self._post_json(
+            "update_weights",
+            {"update_info": update_info},
+            timeout=self._weight_transfer_http_timeout(),
         )
-        response = self._post_json("update_weights", {"update_info": update_info}, timeout=timeout_s)
         response.raise_for_status()
         try:
             return response.json()
@@ -770,11 +775,10 @@ class VLLMEngine(RayActor):
 
     def start_weight_update(self, is_checkpoint_format: bool = False) -> dict:
         """``POST /start_weight_update`` — signals vLLM to enter IPC weight-update mode."""
-        update_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
         response = self._post_json(
             "start_weight_update",
             {"is_checkpoint_format": is_checkpoint_format},
-            timeout=update_timeout_s,
+            timeout=self._weight_transfer_http_timeout(),
         )
         response.raise_for_status()
         try:
@@ -789,8 +793,7 @@ class VLLMEngine(RayActor):
         ``update_weights_from_tensor`` (the IPC data-carrying RPC), matching slime's
         single-RPC version-with-data semantics.
         """
-        update_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
-        response = self._post_json("finish_weight_update", {}, timeout=update_timeout_s)
+        response = self._post_json("finish_weight_update", {}, timeout=self._weight_transfer_http_timeout())
         response.raise_for_status()
         try:
             return response.json()

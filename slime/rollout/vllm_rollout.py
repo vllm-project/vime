@@ -168,42 +168,44 @@ def _decode_vllm_routed_experts(value: str) -> np.ndarray:
 def _apply_vllm_routed_experts(
     args: Namespace,
     sample: Sample,
-    _output: dict,
     choice: dict,
 ) -> None:
-    """Populate ``sample.rollout_routed_experts`` from vLLM ``choices[].routed_experts`` when enabled.
+    """Populate ``sample.rollout_routed_experts`` from vLLM ``/inference/v1/generate`` (R3 only).
 
-    vLLM ``/inference/v1/generate`` returns routed experts as a base64 encoded
-    ``.npy`` payload on each response choice when the server is launched with
-    ``--enable-return-routed-experts``.
+    vLLM's contract is a single base64 `.npy` buffer on `choices[].routed_experts` with decoded
+    shape `(len(tokens) - 1, num_layers, top_k)`.
     """
     if not getattr(args, "use_rollout_routing_replay", False):
         return
-    gen_re = choice.get("routed_experts")
-    if gen_re is None:
+
+    routed = choice.get("routed_experts")
+    if sample.status == Sample.Status.ABORTED and sample.response_length == 0:
         return
-    arr = _decode_vllm_routed_experts(gen_re)
-    n_tok = len(sample.tokens)
-    expected_rows = max(0, n_tok - 1)
-    if arr.ndim != 3:
-        logger.warning(f"Unexpected routed_experts ndim={arr.ndim} shape={arr.shape}")
-        return
-    if arr.shape[0] == n_tok:
-        arr = arr[:-1]
-    elif arr.shape[0] != expected_rows:
-        logger.warning(
-            f"routed_experts row count {arr.shape[0]} not in {{{expected_rows}, {n_tok}}}; "
-            "skipping rollout_routed_experts assign",
+    if routed is None:
+        raise RuntimeError(
+            "vLLM routing replay: missing choices[0].routed_experts on /inference/v1/generate response. "
+            "Check vLLM 0.22+ was launched with --enable-return-routed-experts."
         )
-        return
+    if not isinstance(routed, str):
+        raise RuntimeError(
+            f"vLLM routing replay: choices[0].routed_experts must be base64 npy str, got {type(routed)}"
+        )
+
+    arr = _decode_vllm_routed_experts(routed)
+    if arr.ndim != 3:
+        raise RuntimeError(f"vLLM routing replay: routed_experts ndim={arr.ndim}, expected 3, shape={arr.shape}")
+
+    expected_rows = max(0, len(sample.tokens) - 1)
+    if arr.shape[0] != expected_rows:
+        raise RuntimeError(
+            f"vLLM routing replay: routed_experts rows {arr.shape[0]} != expected {expected_rows} (len(tokens)-1)."
+        )
+
     nl = getattr(args, "num_layers", None)
     mtk = getattr(args, "moe_router_topk", None)
     if nl is not None and mtk is not None and (arr.shape[1] != nl or arr.shape[2] != mtk):
-        logger.warning(
-            f"routed_experts shape {arr.shape} does not match args (num_layers={nl}, moe_router_topk={mtk})",
-        )
-        return
-    sample.rollout_routed_experts = arr
+        raise RuntimeError(f"vLLM routing replay: routed_experts shape {arr.shape} != (rows,{nl},{mtk}) from args.")
+    sample.rollout_routed_experts = np.ascontiguousarray(arr.astype(np.int32, copy=True))
 
 
 def _inference_generate_tokens_and_logprobs(choice: dict[str, Any]) -> tuple[list[int], list[float]]:
@@ -491,9 +493,8 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         sample.rollout_log_probs = []
     sample.rollout_log_probs += new_response_log_probs
 
-    _apply_vllm_routed_experts(args, sample, output, choice)
-
     sample.update_from_meta_info(args, meta)
+    _apply_vllm_routed_experts(args, sample, choice)
     return sample
 
 

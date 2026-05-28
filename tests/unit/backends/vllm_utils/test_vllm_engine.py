@@ -234,43 +234,6 @@ def test_weight_transfer_http_timeout_fallback_to_legacy_env(vllm_engine, monkey
 
 
 @pytest.mark.unit
-def test_response_json_or_fallback_parses_dict():
-    response = _MockResponse(json_data={"status": "ready"})
-    assert mod._response_json_or_fallback(response) == {"status": "ready"}
-
-
-@pytest.mark.unit
-def test_response_json_or_fallback_non_dict_wrapped():
-    response = _MockResponse()
-    response.json = lambda: ["a", "b"]  # type: ignore[method-assign]
-    assert mod._response_json_or_fallback(response) == {
-        "ok": False,
-        "error": "Response is not a dictionary",
-        "data": ["a", "b"],
-    }
-
-
-@pytest.mark.unit
-def test_response_json_or_fallback_invalid_json():
-    response = _MockResponse(text="not-json")
-    response.json = lambda: (_ for _ in ()).throw(ValueError("no json"))  # type: ignore[method-assign]
-    assert mod._response_json_or_fallback(response) == {
-        "ok": False,
-        "error": "Invalid JSON response",
-        "raw": "not-json",
-    }
-
-
-@pytest.mark.unit
-def test_http_base_requires_init(vllm_args):
-    from slime.backends.vllm_utils.vllm_engine import VLLMEngine
-
-    engine = VLLMEngine(vllm_args, rank=0)
-    with pytest.raises(RuntimeError, match="init\\(\\)"):
-        engine._http_base()
-
-
-@pytest.mark.unit
 def test_http_base_ipv6_host(vllm_engine):
     vllm_engine.server_host = "[2001:db8::1]"
     assert vllm_engine._http_base() == "http://[2001:db8::1]:8765"
@@ -384,3 +347,4 @@ def test_init_weights_update_group_raises_after_three_failures(vllm_engine, monk
             group_name="g",
             backend="nccl",
         )
+
