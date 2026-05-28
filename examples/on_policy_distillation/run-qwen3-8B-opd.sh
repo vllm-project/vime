@@ -11,15 +11,16 @@ TEACHER_PORT=13141
 LOG_FILE="/tmp/vllm_teacher_$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 6).log"
 
 ## Launch the teacher model server in the background.
-## --enable-prompt-logprobs is required so /v1/completions returns the
-## choices[0].prompt_logprobs that slime/rollout/on_policy_distillation.py
-## consumes (with echo=True + prompt_logprobs=1 on each request).
+## OPD teacher uses /v1/completions with echo=True + prompt_logprobs=1 set
+## per-request (see slime/rollout/on_policy_distillation.py reward_func).
+## prompt_logprobs is a per-request SamplingParams field in vLLM; no
+## server-side flag gates it. --max-logprobs defaults to 20, which is
+## plenty for prompt_logprobs=1.
 CUDA_VISIBLE_DEVICES=7 vllm serve /root/Qwen3-32B \
     --host 0.0.0.0 \
     --port $TEACHER_PORT \
     --tensor-parallel-size 1 \
     --gpu-memory-utilization 0.6 \
-    --enable-prompt-logprobs \
     --max-num-batched-tokens 4096 \
     > "$LOG_FILE" 2>&1 &
 

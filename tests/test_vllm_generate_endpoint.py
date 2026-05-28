@@ -181,7 +181,13 @@ def _execute_case(case: VLLMGenerateCase):
         assert len(sample.rollout_log_probs) == sample.response_length
         assert sample.status in (Sample.Status.COMPLETED, Sample.Status.TRUNCATED)
         if case.use_rollout_routing_replay:
-            assert sample.rollout_routed_experts is not None
+            re = sample.rollout_routed_experts
+            assert re is not None
+            assert re.ndim == 3
+            expected_rows = len(sample.tokens) - 1
+            assert (
+                re.shape[0] == expected_rows
+            ), f"rollout_routed_experts rows {re.shape[0]} != len(tokens)-1 ({expected_rows})"
     finally:
         _stop_process_tree(process)
 

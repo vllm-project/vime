@@ -7,12 +7,6 @@ except ImportError:
     transform_scale_ue8m0 = None
     should_deepgemm_weight_requant_ue8m0 = None
 
-try:
-    from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
-except ImportError:
-    from sglang.srt.patch_torch import monkey_patch_torch_reductions
-
-
 from sglang.srt.utils import MultiprocessingSerializer
 
 
@@ -25,7 +19,6 @@ __all__ = [
     "quant_weight_ue8m0",
     "transform_scale_ue8m0",
     "should_deepgemm_weight_requant_ue8m0",
-    "monkey_patch_torch_reductions",
     "MultiprocessingSerializer",
     "FlattenedTensorBucket",
 ]

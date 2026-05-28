@@ -36,7 +36,8 @@ def execute(mode: str = ""):
     elif mode == "async_save":
         ckpt_args += f"--save /root/models/{MODEL_NAME}_slime "
         ckpt_args += "--save-interval 2 "
-        ckpt_args += "--async-save "
+        # Real async save (Megatron disables async without persistent ckpt worker).
+        ckpt_args += "--async-save --use-persistent-ckpt-worker "
     elif mode == "load":
         ckpt_args += f"--load /root/models/{MODEL_NAME}_slime "
         ckpt_args += "--ckpt-step 1 "
