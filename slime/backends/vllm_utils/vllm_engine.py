@@ -589,13 +589,18 @@ class VLLMEngine(RayActor):
         Caller must invoke ``start_weight_update`` / ``finish_weight_update`` around a batch of
         ``/update_weights`` calls (see ``UpdateWeightFromTensor`` / ``UpdateWeightFromDistributed``).
         """
-        response = self._post_json(
-            "update_weights",
-            {"update_info": update_info},
-            timeout=self._weight_transfer_http_timeout(),
+        timeout_s = float(
+            os.environ.get(
+                "SLIME_VLLM_WEIGHT_TRANSFER_UPDATE_TIMEOUT_SEC",
+                os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"),
+            )
         )
+        response = self._post_json("update_weights", {"update_info": update_info}, timeout=timeout_s)
         response.raise_for_status()
-        return _response_json_or_fallback(response)
+        try:
+            return response.json()
+        except Exception:
+            return {"ok": True, "raw": response.text}
 
     def _run_vllm_weight_update(self, update_info: dict, *, is_checkpoint_format: bool = False):
         """Backward-compatible alias for non-NCCL ``update_info`` shapes (e.g. tensor/IPC path)."""
@@ -790,13 +795,16 @@ class VLLMEngine(RayActor):
         For IPC mode the payload is ``{"init_info": {}}``; for NCCL use
         ``init_weights_update_group`` which constructs the payload from typed args.
         """
-        init_timeout_s = self._weight_transfer_http_timeout()
+        init_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
         last_error = None
         for attempt in range(1, 4):
             try:
                 response = self._post_json("init_weight_transfer_engine", payload, timeout=init_timeout_s)
                 response.raise_for_status()
-                return _response_json_or_fallback(response)
+                try:
+                    return response.json()
+                except Exception:
+                    return {"ok": True, "raw": response.text}
             except Exception as e:
                 last_error = e
                 if attempt < 3:
@@ -820,7 +828,10 @@ class VLLMEngine(RayActor):
             timeout=self._weight_transfer_http_timeout(),
         )
         response.raise_for_status()
-        return _response_json_or_fallback(response)
+        try:
+            return response.json()
+        except Exception:
+            return {"ok": True, "raw": response.text}
 
     def finish_weight_update(self, weight_version: str | None = None) -> dict:
         """``POST /finish_weight_update`` — signals vLLM to exit IPC weight-update mode.
@@ -845,7 +856,10 @@ class VLLMEngine(RayActor):
         # ``update_weights`` and the ci_test check below it would not run.)
         if weight_version is not None:
             self._weight_version = str(weight_version)
-        return _response_json_or_fallback(response)
+        try:
+            return response.json()
+        except Exception:
+            return {"ok": True, "raw": response.text}
 
     def check_weights(self, action: str):
         """No vLLM ``weights_checker`` route; return a placeholder (SGLang posts to ``/weights_checker``)."""
