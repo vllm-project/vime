@@ -55,10 +55,6 @@ def _install_stubs():
     slime_utils.get_gloo_group = MagicMock(return_value="gloo")
     sys.modules.setdefault("slime.utils.distributed_utils", slime_utils)
 
-    sglang_mod = types.ModuleType("slime.backends.megatron_utils.sglang")
-    sglang_mod.monkey_patch_torch_reductions = MagicMock()
-    sys.modules.setdefault("slime.backends.megatron_utils.sglang", sglang_mod)
-
     hf_iter_stub = MagicMock()
     hf_iter_stub.get_hf_weight_chunks.return_value = iter([])
 
