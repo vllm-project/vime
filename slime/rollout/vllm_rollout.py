@@ -28,7 +28,7 @@ from slime.utils.processing_utils import (
     load_processor,
     load_tokenizer,
 )
-from slime.utils.trace_utils import trace_function, trace_span
+from slime.utils.trace_utils import build_vllm_meta_trace_attrs, trace_function, trace_span
 from slime.utils.types import Sample
 
 from .rm_hub import async_rm, batched_async_rm
@@ -460,8 +460,15 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
             "token_ids": token_ids,
             "sampling_params": inference_sampling_params,
         }
-        with trace_span(sample, "vllm_inference_generate", attrs={"max_new_tokens": params["max_new_tokens"]}):
+        with trace_span(
+            sample, "vllm_inference_generate", attrs={"max_new_tokens": params["max_new_tokens"]}
+        ) as span:
             output = await post(url, payload, headers=headers)
+            # Enrich the span with response meta (finish reason + token usage), mirroring
+            # SGLang's build_sglang_meta_trace_attrs. trace_span yields the raw target when
+            # tracing is disabled, so guard on `.update`.
+            if hasattr(span, "update"):
+                span.update(build_vllm_meta_trace_attrs(output))
 
     choice = output["choices"][0]
     skip_sp = params.get("skip_special_tokens")
