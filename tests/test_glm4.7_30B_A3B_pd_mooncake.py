@@ -47,7 +47,7 @@ def write_vllm_config() -> str:
             }
         ]
     }
-    f = tempfile.NamedTemporaryFile("w", suffix=".yaml", prefix="rollout_pd_mooncake_", delete=False)
+    f = tempfile.NamedTemporaryFile("w", suffix=".yaml", prefix="vllm_pd_mooncake_", delete=False)
     with f:
         yaml.safe_dump(config, f, sort_keys=False)
     return f.name
@@ -109,8 +109,11 @@ def execute():
         "--rollout-num-gpus 8 "
         "--rollout-num-gpus-per-engine 4 "
         "--vllm-data-parallel-size 4 "
+        "--vllm-enable-expert-parallel "
         "--vllm-gpu-memory-utilization 0.45 "
-        "--vllm-max-num-seqs 8 "
+        "--vllm-max-num-seqs 16 "
+        "--vllm-max-cudagraph-capture-size 8 "
+        "--vllm-speculative-config '{\"method\":\"eagle\",\"num_speculative_tokens\":3}' "
         "--vllm-router-request-timeout-secs 1200 "
         f"--vllm-config {vllm_config} "
     )

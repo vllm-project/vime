@@ -47,7 +47,7 @@ def prepare():
 
 def execute():
     config_file = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yaml", prefix="rollout_mixed_offload_ft_", delete=False
+        mode="w", suffix=".yaml", prefix="vllm_mixed_offload_ft_", delete=False
     )
     config_file.write(VLLM_CONFIG_YAML)
     config_file.flush()
@@ -111,6 +111,7 @@ def execute():
         "--rollout-num-gpus-per-engine 1 "
         f"--vllm-gpu-memory-utilization {0.6 if TIGHT_DEVICE_MEMORY else 0.7} "
         "--vllm-max-num-seqs 32 "
+        "--vllm-max-cudagraph-capture-size 32 "
         f"--vllm-config {config_path} "
     )
 

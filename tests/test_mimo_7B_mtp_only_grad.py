@@ -87,7 +87,13 @@ def execute():
         "--adam-beta2 0.98 "
     )
 
-    vllm_args = "--rollout-num-gpus-per-engine 2 " "--rollout-num-gpus 8 " "--vllm-gpu-memory-utilization 0.8 "
+    vllm_args = (
+        "--rollout-num-gpus-per-engine 2 "
+        "--rollout-num-gpus 8 "
+        "--vllm-gpu-memory-utilization 0.8 "
+        "--vllm-max-cudagraph-capture-size 8 "
+        "--vllm-speculative-config '{\"method\":\"eagle\",\"num_speculative_tokens\":2}' "
+    )
 
     # Enable MTP training with loss scaling
     mtp_args = "--mtp-num-layers 1 " "--enable-mtp-training " "--mtp-loss-scaling-factor 0.2 "

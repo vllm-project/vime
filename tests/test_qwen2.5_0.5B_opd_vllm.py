@@ -159,6 +159,7 @@ def execute():
             "--rollout-num-gpus-per-engine 1 "
             f"--vllm-gpu-memory-utilization {0.6 if TIGHT_DEVICE_MEMORY else 0.7} "
             "--vllm-max-num-seqs 32 "
+            "--vllm-max-cudagraph-capture-size 32 "
         )
 
         ci_args = "--ci-test "

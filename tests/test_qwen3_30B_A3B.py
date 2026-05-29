@@ -91,7 +91,12 @@ def execute():
         "--use-precision-aware-optimizer "
     )
 
-    vllm_args = "--rollout-num-gpus-per-engine 8 " "--vllm-gpu-memory-utilization 0.8 " "--vllm-max-num-seqs 512 "
+    vllm_args = (
+        "--rollout-num-gpus-per-engine 8 "
+        "--vllm-gpu-memory-utilization 0.8 "
+        "--vllm-max-num-seqs 512 "
+        "--vllm-max-cudagraph-capture-size 32 "
+    )
 
     if USE_DEEPEP:
         vllm_args += "--vllm-all2all-backend deepep_high_throughput "

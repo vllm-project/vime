@@ -14,8 +14,8 @@ def _write_yaml(data: dict) -> str:
 
 
 class TestVllmConfigUpdateWeights:
-    def test_update_weights_default_true(self):
-        """Models without explicit update_weights should default to True."""
+    def test_update_weights_defaults_to_none(self):
+        """Models without explicit update_weights parse as None (resolved to True/False at runtime by VllmConfig.resolve based on hf_checkpoint match)."""
         from slime.backends.vllm_utils.vllm_config import VllmConfig
 
         path = _write_yaml(

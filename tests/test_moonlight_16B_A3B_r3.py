@@ -80,7 +80,12 @@ def execute():
         "--adam-beta2 0.98 "
     )
 
-    vllm_args = "--rollout-num-gpus-per-engine 2 " "--vllm-gpu-memory-utilization 0.8 " "--vllm-max-num-seqs 512 "
+    vllm_args = (
+        "--rollout-num-gpus-per-engine 2 "
+        "--vllm-gpu-memory-utilization 0.8 "
+        "--vllm-max-num-seqs 512 "
+        "--vllm-max-cudagraph-capture-size 32 "
+    )
 
     ci_args = "--ci-test "
 

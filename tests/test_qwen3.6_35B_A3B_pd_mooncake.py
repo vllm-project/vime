@@ -96,7 +96,10 @@ def execute():
         "--rollout-num-gpus-per-engine 4 "
         "--vllm-gpu-memory-utilization 0.75 "
         "--vllm-data-parallel-size 4 "
+        "--vllm-enable-expert-parallel "
         "--vllm-max-num-seqs 512 "
+        "--vllm-cudagraph-capture-sizes 1 2 4 8 16 24 32 "
+        "--vllm-speculative-config '{\"method\":\"eagle\",\"num_speculative_tokens\":3}' "
         "--prefill-num-servers 1 "
     )
 

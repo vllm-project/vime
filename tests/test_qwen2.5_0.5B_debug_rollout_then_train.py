@@ -88,7 +88,9 @@ def execute_rollout_only(debug_data_dir: str):
     """Phase 1: rollout-only, save data."""
 
     vllm_args = (
-        "--rollout-num-gpus-per-engine 1 " f"--vllm-gpu-memory-utilization {0.6 if TIGHT_DEVICE_MEMORY else 0.7} "
+        "--rollout-num-gpus-per-engine 1 "
+        f"--vllm-gpu-memory-utilization {0.6 if TIGHT_DEVICE_MEMORY else 0.7} "
+        "--vllm-max-cudagraph-capture-size 32 "
     )
 
     phase1_args = (
