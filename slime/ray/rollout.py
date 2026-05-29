@@ -974,6 +974,25 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
         if router_port is None:
             router_port = find_available_port(random.randint(3000, 4000))
 
+    # vLLM-native PD (prefill/decode) via the NIXL KV connector. The stock
+    # vllm_router only does SGLang-style PD, so for the vLLM backend we launch
+    # slime's own NIXL relay proxy (pd_proxy). Opt-in via SLIME_VLLM_PD_NIXL=1.
+    # Engines register against it with worker_type just as they do the router.
+    if has_pd_disaggregation and os.environ.get("SLIME_VLLM_PD_NIXL", "") == "1":
+        from slime.backends.vllm_utils.pd_proxy import run_pd_proxy
+
+        proxy_proc = multiprocessing.get_context("spawn").Process(
+            target=run_pd_proxy,
+            args=(router_ip, router_port, args.router_request_timeout_secs),
+            daemon=True,
+        )
+        proxy_proc.start()
+        time.sleep(3)
+        if not proxy_proc.is_alive():
+            raise RuntimeError(f"vLLM NIXL PD proxy exited (exitcode={proxy_proc.exitcode}).")
+        logger.info("Launched vLLM NIXL PD proxy at %s:%s", router_ip, router_port)
+        return router_ip, router_port
+
     from slime.utils.http_utils import run_router
 
     router_args = _vllm_router_args_from_cli(args)
