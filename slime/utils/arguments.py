@@ -1011,6 +1011,17 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--opd-teacher-ckpt-step", type=int, default=None, help="The checkpoint step for OPD teacher model."
             )
+            parser.add_argument(
+                "--opd-teacher-model",
+                type=str,
+                default=None,
+                help=(
+                    "Served model name of the OPD teacher for --opd-type=vllm. Sent as the `model` field to "
+                    "the teacher's /inference/v1/generate endpoint. Optional: if unset, the field is omitted "
+                    "(single-model teacher servers use their loaded model). Never defaults to the student "
+                    "hf_checkpoint, which would mis-name a teacher!=student server."
+                ),
+            )
             return parser
 
         def add_router_arguments(parser):
