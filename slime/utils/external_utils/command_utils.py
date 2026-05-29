@@ -108,6 +108,7 @@ def execute_train(
     master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
 
     exec_command(
+        'pkill -9 -f "vllm serve"; '
         "sleep 3; "
         f"{'' if external_ray else 'ray stop --force; '}"
         f"{'' if external_ray else 'pkill -9 ray; '}"

@@ -149,10 +149,9 @@ class VllmConfig:
                 f"vllm config must have a 'vllm' key, got {list(data.keys())}. "
                 "Wrap your server_groups inside a model entry under 'vllm'."
             )
-        models_raw = data["vllm"]
-
         models = []
-        for m in models_raw:
+        for m in data["vllm"]:
+            # Accept both "server_groups" and legacy "engine_groups".
             raw_groups = m.get("server_groups") or m.get("engine_groups") or []
             groups = [ServerGroupConfig(**g) for g in raw_groups]
             models.append(
