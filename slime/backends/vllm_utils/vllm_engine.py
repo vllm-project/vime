@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import ipaddress
+import json
 import logging
 import multiprocessing
 import os
@@ -282,7 +283,7 @@ def _compute_server_args(
     num_gpus_per_engine: int | None = None,
 ) -> dict:
     """Compute vLLM launch args with a signature kept parallel to SGLang's helper."""
-    del nccl_port, worker_type, disaggregation_bootstrap_port, sglang_overrides
+    del nccl_port, sglang_overrides
     gpus_per_engine = num_gpus_per_engine or args.rollout_num_gpus_per_engine
     if gpus_per_engine > args.num_gpus_per_node and gpus_per_engine % args.num_gpus_per_node != 0:
         raise ValueError(
@@ -310,6 +311,9 @@ def _compute_server_args(
         "tp_size": _get_vllm_tp_size(args, gpus_per_engine),
         "pp_size": _get_vllm_pp_size(args),
         "dp_size": _get_vllm_dp_size(args),
+        # PD (prefill/decode) disaggregation: role + NIXL side-channel port.
+        "worker_type": worker_type,
+        "disaggregation_bootstrap_port": disaggregation_bootstrap_port,
     }
 
 
@@ -455,6 +459,25 @@ def _build_vllm_cmd_and_env(server_args: dict) -> tuple[list[str], dict[str, str
             "--worker-extension-cls",
             "slime.backends.megatron_utils.update_weight.update_weight_from_tensor.vLLMColocateWorkerExtension",
         ]
+
+    # PD (prefill/decode) disaggregation: launch this engine with the NIXL KV
+    # connector so prefill-produced KV can be pulled by the decode engine. Both
+    # roles run kv_role="kv_both"; the PD proxy (slime/backends/vllm_utils/pd_proxy.py)
+    # drives the do_remote_decode -> do_remote_prefill handshake. Each engine needs
+    # a unique NIXL side-channel port — use the orchestrator-allocated bootstrap
+    # port when present, else derive deterministically from the HTTP port. Only the
+    # rank-0 (HTTP-owning) process of a multi-node engine registers a side channel.
+    worker_type = server_args.get("worker_type", "regular")
+    if worker_type in ("prefill", "decode") and node_rank == 0:
+        side_port = server_args.get("disaggregation_bootstrap_port") or (int(server_args["port"]) + 1100)
+        engine_id = f"{worker_type}-{host_for_subprocess}-{server_args['port']}"
+        if "--kv-transfer-config" not in cmd:
+            cmd += [
+                "--kv-transfer-config",
+                json.dumps({"kv_connector": "NixlConnector", "kv_role": "kv_both", "engine_id": engine_id}),
+            ]
+        env["VLLM_NIXL_SIDE_CHANNEL_HOST"] = host_for_subprocess
+        env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(side_port)
 
     # Auto-forward all other args.vllm_* that differ from their vllm-side default.
     _forward_vllm_cli_args(args, cmd)
