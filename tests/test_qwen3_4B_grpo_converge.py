@@ -19,10 +19,19 @@ NUM_GPUS = 8  # per node; actor-num-nodes=2 => 16 GPU total
 
 
 def prepare():
+    # Model, datasets and torch_dist ckpt are pre-staged in the mounted
+    # models-shared (as HF-cache symlinks), so guard every download to skip
+    # when present — a bare `hf download --local-dir` trips on the symlinks.
     U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/dapo-math-17k")
-    U.hf_download_dataset("zhuzilin/aime-2024")
+    U.exec_command(
+        f"test -f /root/models/{MODEL_NAME}/config.json || hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}"
+    )
+    U.exec_command(
+        "test -d /root/datasets/dapo-math-17k || hf download --repo-type dataset zhuzilin/dapo-math-17k --local-dir /root/datasets/dapo-math-17k"
+    )
+    U.exec_command(
+        "test -d /root/datasets/aime-2024 || hf download --repo-type dataset zhuzilin/aime-2024 --local-dir /root/datasets/aime-2024"
+    )
     U.convert_checkpoint(
         model_name=MODEL_NAME, megatron_model_type=MODEL_TYPE, num_gpus_per_node=NUM_GPUS, dir_dst="/root/models"
     )
