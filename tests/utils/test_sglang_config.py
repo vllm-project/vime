@@ -1,4 +1,4 @@
-"""Unit tests for VllmConfig multi-model parsing and get_model_url."""
+"""Unit tests for SglangConfig multi-model parsing with update_weights."""
 
 import tempfile
 
@@ -13,14 +13,14 @@ def _write_yaml(data: dict) -> str:
     return f.name
 
 
-class TestVllmConfigUpdateWeights:
+class TestSglangConfigUpdateWeights:
     def test_update_weights_default_true(self):
         """Models without explicit update_weights should default to True."""
-        from slime.backends.vllm_utils.vllm_config import VllmConfig
+        from slime.backends.sglang_utils.sglang_config import SglangConfig
 
         path = _write_yaml(
             {
-                "vllm": [
+                "sglang": [
                     {
                         "name": "actor",
                         "engine_groups": [{"worker_type": "regular", "num_gpus": 4}],
@@ -28,17 +28,17 @@ class TestVllmConfigUpdateWeights:
                 ]
             }
         )
-        config = VllmConfig.from_yaml(path)
+        config = SglangConfig.from_yaml(path)
         assert len(config.models) == 1
-        assert config.models[0].update_weights is None
+        assert config.models[0].update_weights is True
 
     def test_update_weights_explicit_false(self):
         """Models with update_weights: false should be parsed correctly."""
-        from slime.backends.vllm_utils.vllm_config import VllmConfig
+        from slime.backends.sglang_utils.sglang_config import SglangConfig
 
         path = _write_yaml(
             {
-                "vllm": [
+                "sglang": [
                     {
                         "name": "actor",
                         "update_weights": True,
@@ -53,7 +53,7 @@ class TestVllmConfigUpdateWeights:
                 ]
             }
         )
-        config = VllmConfig.from_yaml(path)
+        config = SglangConfig.from_yaml(path)
         assert len(config.models) == 2
         assert config.models[0].name == "actor"
         assert config.models[0].update_weights is True
@@ -63,11 +63,11 @@ class TestVllmConfigUpdateWeights:
 
     def test_multi_model_total_gpus(self):
         """total_num_gpus should sum across all models."""
-        from slime.backends.vllm_utils.vllm_config import VllmConfig
+        from slime.backends.sglang_utils.sglang_config import SglangConfig
 
         path = _write_yaml(
             {
-                "vllm": [
+                "sglang": [
                     {
                         "name": "actor",
                         "server_groups": [{"worker_type": "regular", "num_gpus": 8}],
@@ -80,7 +80,7 @@ class TestVllmConfigUpdateWeights:
                 ]
             }
         )
-        config = VllmConfig.from_yaml(path)
+        config = SglangConfig.from_yaml(path)
         assert config.total_num_gpus == 12
 
 
@@ -89,44 +89,44 @@ class TestGetModelUrl:
         """get_model_url should return the correct URL for a named model."""
         from argparse import Namespace
 
-        from slime.rollout.vllm_rollout import get_model_url
+        from slime.rollout.sglang_rollout import get_model_url
 
         args = Namespace(
-            vllm_router_ip="10.0.0.1",
-            vllm_router_port=3000,
-            vllm_model_routers={
+            sglang_router_ip="10.0.0.1",
+            sglang_router_port=3000,
+            sglang_model_routers={
                 "actor": ("10.0.0.1", 3000),
                 "ref": ("10.0.0.1", 3001),
             },
         )
-        assert get_model_url(args, "actor") == "http://10.0.0.1:3000/inference/v1/generate"
-        assert get_model_url(args, "ref") == "http://10.0.0.1:3001/inference/v1/generate"
+        assert get_model_url(args, "actor") == "http://10.0.0.1:3000/generate"
+        assert get_model_url(args, "ref") == "http://10.0.0.1:3001/generate"
         assert get_model_url(args, "ref", "/v1/chat/completions") == "http://10.0.0.1:3001/v1/chat/completions"
 
     def test_get_model_url_fallback(self):
         """get_model_url should fall back to default router if model not found."""
         from argparse import Namespace
 
-        from slime.rollout.vllm_rollout import get_model_url
+        from slime.rollout.sglang_rollout import get_model_url
 
         args = Namespace(
-            vllm_router_ip="10.0.0.1",
-            vllm_router_port=3000,
-            vllm_model_routers={"actor": ("10.0.0.1", 3000)},
+            sglang_router_ip="10.0.0.1",
+            sglang_router_port=3000,
+            sglang_model_routers={"actor": ("10.0.0.1", 3000)},
         )
-        assert get_model_url(args, "unknown") == "http://10.0.0.1:3000/inference/v1/generate"
+        assert get_model_url(args, "unknown") == "http://10.0.0.1:3000/generate"
 
     def test_get_model_url_no_routers(self):
-        """get_model_url should work when model_routers is not set."""
+        """get_model_url should work when sglang_model_routers is not set."""
         from argparse import Namespace
 
-        from slime.rollout.vllm_rollout import get_model_url
+        from slime.rollout.sglang_rollout import get_model_url
 
         args = Namespace(
-            vllm_router_ip="10.0.0.1",
-            vllm_router_port=3000,
+            sglang_router_ip="10.0.0.1",
+            sglang_router_port=3000,
         )
-        assert get_model_url(args, "anything") == "http://10.0.0.1:3000/inference/v1/generate"
+        assert get_model_url(args, "anything") == "http://10.0.0.1:3000/generate"
 
 
 if __name__ == "__main__":
