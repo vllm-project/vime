@@ -99,8 +99,8 @@ class TestGetModelUrl:
                 "ref": ("10.0.0.1", 3001),
             },
         )
-        assert get_model_url(args, "actor") == "http://10.0.0.1:3000/v1/completions"
-        assert get_model_url(args, "ref") == "http://10.0.0.1:3001/v1/completions"
+        assert get_model_url(args, "actor") == "http://10.0.0.1:3000/inference/v1/generate"
+        assert get_model_url(args, "ref") == "http://10.0.0.1:3001/inference/v1/generate"
         assert get_model_url(args, "ref", "/v1/chat/completions") == "http://10.0.0.1:3001/v1/chat/completions"
 
     def test_get_model_url_fallback(self):
@@ -114,7 +114,7 @@ class TestGetModelUrl:
             vllm_router_port=3000,
             vllm_model_routers={"actor": ("10.0.0.1", 3000)},
         )
-        assert get_model_url(args, "unknown") == "http://10.0.0.1:3000/v1/completions"
+        assert get_model_url(args, "unknown") == "http://10.0.0.1:3000/inference/v1/generate"
 
     def test_get_model_url_no_routers(self):
         """get_model_url should work when model_routers is not set."""
@@ -126,7 +126,7 @@ class TestGetModelUrl:
             vllm_router_ip="10.0.0.1",
             vllm_router_port=3000,
         )
-        assert get_model_url(args, "anything") == "http://10.0.0.1:3000/v1/completions"
+        assert get_model_url(args, "anything") == "http://10.0.0.1:3000/inference/v1/generate"
 
 
 if __name__ == "__main__":
