@@ -261,6 +261,13 @@ def launch_server_process(
     env.setdefault("NCCL_CUMEM_ENABLE", "0")
     env["CUDA_VISIBLE_DEVICES"] = visible_devices
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")
+    # DeepGEMM fp8 kernels: vLLM enables them by default; set explicitly so the
+    # rollout engine is pinned regardless of the base image's defaults (replaces
+    # SGLang's SGLANG_JIT_DEEPGEMM_PRECOMPILE / _FAST_WARMUP). WARMUP="relax" JITs
+    # the required kernels before serving (no hot-path JIT) without the longer
+    # "full" sweep. Both overridable via the environment.
+    env.setdefault("VLLM_USE_DEEP_GEMM", "1")
+    env.setdefault("VLLM_DEEP_GEMM_WARMUP", "relax")
     # Deterministic inference: VLLM_BATCH_INVARIANT=1 makes attention / comm /
     # MM kernels pick batch-invariant variants so the same token sequence yields
     # the same logits regardless of batch composition. Per-sample seed alone (see
