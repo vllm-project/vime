@@ -45,6 +45,13 @@ CONFIGS = {
     "s11": (1, 8, 8, 8, 8, "colocate", 4, 1, 2, 8, 1, 2),   # dp=2 → vllm tp=4, ep across 8
     "s12": (1, 8, 8, 8, 8, "colocate", 4, 1, 2, 8, 1, 4),   # dp=4 → vllm tp=2, ep across 8
     "s13": (2, 8, 16, 16, 8, "colocate", 8, 1, 2, 8, 1, 2), # cross-host dp=2 nnodes=2 → vllm tp=8
+    # Combined-dimension topology (vllm tp = engine_gpus // (pp*dp)).
+    "s14": (1, 8, 8, 8, 8, "colocate", 4, 1, 2, 8, 2, 2),   # single-host PP=2 + DP=2 → vllm tp=2
+    "s15": (1, 8, 8, 8, 8, "colocate", 4, 1, 2, 8, 4, 1),   # single-host PP=4 → vllm tp=2
+    "s16": (1, 8, 8, 8, 8, "colocate", 4, 1, 2, 8, 2, 4),   # single-host PP=2 + DP=4 → vllm tp=1
+    "s17": (2, 8, 16, 16, 8, "colocate", 8, 1, 2, 8, 2, 2), # cross-host TP+PP+DP all on → vllm tp=4 pp=2 dp=2 nnodes=2
+    "s18": (2, 8, 16, 16, 8, "colocate", 8, 1, 2, 8, 4, 1), # cross-host PP=4 → vllm tp=4 nnodes=2
+    "s19": (2, 8, 16, 16, 8, "colocate", 8, 1, 2, 8, 1, 4), # cross-host DP=4 → vllm tp=4 nnodes=2
 }
 
 
