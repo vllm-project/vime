@@ -458,7 +458,7 @@ class RolloutManager:
     def dispose(self):
         for monitor in self._health_monitors:
             monitor.stop()
-        # Release inference workers. debug_rollout_only still hits this path at train.py end.
+        # Release vLLM inference workers. debug_rollout_only still hits this path at train.py end.
         shutdown_refs = []
         for srv in self.servers.values():
             for group in srv.server_groups:

@@ -5,7 +5,6 @@ FROM ${BASE_IMAGE}
 
 ARG PATCH_VERSION=latest
 ARG MEGATRON_COMMIT=1dcf0dafa884ad52ffb243625717a3471643e087
-ARG SGLANG_VERSION=0.5.10.post1
 
 ARG ENABLE_CUDA_13=0
 
@@ -74,12 +73,9 @@ RUN if [ "$ENABLE_CUDA_13" = "1" ]; then \
     (cd /root && git clone -b feat/v350_plus_8045 https://github.com/fzyzcjy/triton.git && cd triton && pip install -r python/requirements.txt && pip install --verbose -e .); \
   fi
 
-# Skip sglang lines from requirements (we install --no-deps below; the full
-# transitive set conflicts with the vllm base environment).
 COPY requirements.txt /tmp/requirements.txt
-RUN grep -vE '^[[:space:]]*(sglang|sglang-router)([[:space:]]|[<>=!]|$)' /tmp/requirements.txt > /tmp/requirements-vllm.txt && \
-    pip install --ignore-installed PyJWT && \
-    pip install -r /tmp/requirements-vllm.txt
+RUN pip install --ignore-installed PyJWT && \
+    pip install -r /tmp/requirements.txt
 
 # Temporarily install another sgl-kernel version for GB300 without rebuilding the whole image
 RUN if [ "$ENABLE_CUDA_13" = "1" ]; then \
@@ -93,10 +89,7 @@ RUN pip install nvidia-cudnn-cu12==9.16.0.29
 # reinstall numpy 1.x for megatron
 RUN pip install "numpy<2"
 
-# vime's slime/utils/arguments.py + slime/ray/rollout.py top-level import sglang_router;
-# the cu129 vllm base does not ship sglang, so install --no-deps stubs here.
-RUN pip install --no-deps "sglang==${SGLANG_VERSION}" sglang-router==0.3.2 && \
-    pip install IPython
+RUN pip install IPython
 
 # Pin vllm-router explicitly so the vllm rollout routing layer is a visible build step
 # (also in requirements.txt; pulling it here makes the layer cache-able and fail-fast).
@@ -135,10 +128,9 @@ RUN cd /root/slime/slime/backends/megatron_utils/kernels/int4_qat && \
 # Fail-fast import smoke + flashinfer version pin check. Catches ABI / version
 # regressions at build time instead of first GPU run.
 RUN python3 -c "\
-import vllm, sglang, slime, flashinfer; \
+import vllm, slime, flashinfer; \
 from slime.backends.vllm_utils.vllm_engine import VLLMEngine; \
 print('vllm', vllm.__version__); \
-print('sglang', sglang.__version__); \
 print('flashinfer', flashinfer.__version__); \
 print('VLLMEngine import ok')"
 

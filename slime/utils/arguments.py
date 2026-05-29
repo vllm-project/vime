@@ -134,7 +134,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 "--megatron-to-hf-mode",
                 choices=["raw", "bridge"],
                 default="raw",
-                help="The method to convert megatron weights to hugging face weights for the rollout engine.",
+                help="The method to convert megatron weights to hugging face weights for vLLM.",
             )
             parser.add_argument(
                 "--custom-model-provider-path",
@@ -211,8 +211,8 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=(
                     "The huggingface checkpoint of the trained model. "
-                    "This is used to initialize the rollout engine and also provide the tokenizer. "
-                    "Note that, we will always update the parameters in the rollout engine with that of megatron before training, "
+                    "This is used to initialize vLLM and also provide the tokenizer. "
+                    "Note that, we will always update the parameters in vLLM with that of megatron before training, "
                     "so you only need to provide a huggingface checkpoint that has the same architecture as the model you want to train. "
                     "It doesn't necessary need to contain the most up-to-date parameters."
                 ),
@@ -448,7 +448,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 "--rollout-external",
                 action="store_true",
                 default=False,
-                help="Use external rollout engine instances instead of launching them inside the framework.",
+                help="Use external vLLM instances instead of launching them inside the framework.",
             )
             parser.add_argument(
                 "--rollout-external-engine-addrs",
@@ -1702,7 +1702,7 @@ def slime_validate_args(args):
     if args.load_debug_rollout_data is not None:
         logger.info(
             f"load_debug_rollout_data {args.load_debug_rollout_data} is set, "
-            "will not instantiate rollout engine servers and will only run the training process."
+            "will not instantiate vLLM servers and will only run the training process."
         )
         args.debug_train_only = True
 

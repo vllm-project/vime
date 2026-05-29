@@ -440,7 +440,7 @@ class VLLMEngine(RayActor):
         worker_type: str = "regular",
         base_gpu_id: int | None = None,
         model_path: str | None = None,
-        engine_overrides: dict | None = None,
+        vllm_overrides: dict | None = None,
         num_gpus_per_engine: int | None = None,
     ):
         self.args = args
@@ -449,7 +449,7 @@ class VLLMEngine(RayActor):
         self.base_gpu_id = base_gpu_id
         self.model_path = model_path or args.hf_checkpoint
         # Uniform Ray ``start_engines`` kwargs; unused when launching vLLM over HTTP.
-        self.engine_overrides = engine_overrides or {}
+        self.vllm_overrides = vllm_overrides or {}
         self.num_gpus_per_engine = num_gpus_per_engine
         self.process: multiprocessing.Process | None = None
         self._weight_version: str | None = None

@@ -125,6 +125,23 @@ def add_vllm_router_arguments(parser):
         default=14400,
         help="Timeout (seconds) for HTTP requests vime makes to the vllm router.",
     )
+    # dest is ``router_policy`` (NOT ``vllm_router_policy``): this is a real
+    # vllm-router knob, so it must flow into ``RouterArgs.from_cli_args(args,
+    # use_router_prefix=True)`` (which reads ``args.router_policy``) AND is read
+    # by ``vllm_rollout.generate`` to decide whether to send the ``x-session-id``
+    # header for consistent-hash session-affinity routing (routing replay).
+    parser.add_argument(
+        "--vllm-router-policy",
+        type=str,
+        default="cache_aware",
+        dest="router_policy",
+        choices=["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash"],
+        help=(
+            "vllm-router load-balancing policy. Use 'consistent_hash' to enable "
+            "session-affinity routing replay (routes a sample's requests to the same "
+            "engine via the x-session-id header)."
+        ),
+    )
     return parser
 
 
@@ -330,6 +347,9 @@ _VIME_ORCHESTRATION_DESTS = frozenset(
         "vllm_router_ip",
         "vllm_router_port",
         "vllm_router_request_timeout_secs",
+        # vllm-router routing policy: consumed by RouterArgs.from_cli_args when
+        # launching the router; never a `vllm serve` flag.
+        "router_policy",
         "vllm_server_concurrency",
         "vllm_enable_deterministic_inference",
         "vllm_weight_sync_packed",
