@@ -254,6 +254,30 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 "--rollout-top-k", type=int, default=-1, help="the top-k for the inference engine during rollout."
             )
             parser.add_argument(
+                "--rollout-min-p",
+                type=float,
+                default=0.0,
+                help="the min-p for the inference engine during rollout (vLLM default 0.0 == disabled).",
+            )
+            parser.add_argument(
+                "--rollout-repetition-penalty",
+                type=float,
+                default=1.0,
+                help="the repetition penalty for the inference engine during rollout (vLLM default 1.0 == disabled).",
+            )
+            parser.add_argument(
+                "--rollout-presence-penalty",
+                type=float,
+                default=0.0,
+                help="the presence penalty for the inference engine during rollout (vLLM default 0.0 == disabled).",
+            )
+            parser.add_argument(
+                "--rollout-frequency-penalty",
+                type=float,
+                default=0.0,
+                help="the frequency penalty for the inference engine during rollout (vLLM default 0.0 == disabled).",
+            )
+            parser.add_argument(
                 "--rollout-max-context-len",
                 type=int,
                 default=None,

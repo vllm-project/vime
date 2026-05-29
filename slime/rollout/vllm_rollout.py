@@ -273,6 +273,10 @@ class GenerateState(metaclass=SingletonMeta):
             temperature=args.rollout_temperature,
             top_p=args.rollout_top_p,
             top_k=args.rollout_top_k,
+            min_p=getattr(args, "rollout_min_p", 0.0),
+            repetition_penalty=getattr(args, "rollout_repetition_penalty", 1.0),
+            presence_penalty=getattr(args, "rollout_presence_penalty", 0.0),
+            frequency_penalty=getattr(args, "rollout_frequency_penalty", 0.0),
             max_new_tokens=args.rollout_max_response_len,
             stop=args.rollout_stop,
             stop_token_ids=args.rollout_stop_token_ids,
@@ -335,6 +339,20 @@ def _build_inference_sampling_params(sampling_params: dict[str, Any]) -> dict[st
     tk = sampling_params.get("top_k")
     if tk is not None and tk > 0:
         sp["top_k"] = tk
+    # Forward optional sampling params only when they differ from vLLM's disabled-defaults,
+    # so existing runs that never set them keep byte-identical request bodies.
+    mp = sampling_params.get("min_p")
+    if mp:
+        sp["min_p"] = float(mp)
+    rp = sampling_params.get("repetition_penalty")
+    if rp is not None and rp != 1.0:
+        sp["repetition_penalty"] = float(rp)
+    pp = sampling_params.get("presence_penalty")
+    if pp:
+        sp["presence_penalty"] = float(pp)
+    fp = sampling_params.get("frequency_penalty")
+    if fp:
+        sp["frequency_penalty"] = float(fp)
     if sampling_params.get("stop"):
         sp["stop"] = sampling_params["stop"]
     if sampling_params.get("stop_token_ids"):
@@ -801,6 +819,10 @@ async def eval_rollout_single_dataset(
         temperature=dataset_cfg.temperature,
         top_p=dataset_cfg.top_p,
         top_k=dataset_cfg.top_k,
+        min_p=getattr(args, "rollout_min_p", 0.0),
+        repetition_penalty=getattr(args, "rollout_repetition_penalty", 1.0),
+        presence_penalty=getattr(args, "rollout_presence_penalty", 0.0),
+        frequency_penalty=getattr(args, "rollout_frequency_penalty", 0.0),
         max_new_tokens=dataset_cfg.max_response_len,
         stop=args.rollout_stop,
         stop_token_ids=args.rollout_stop_token_ids,
