@@ -2,10 +2,10 @@ release-primary:
     ARG_TAG_POSTFIX="" ARG_BUILD_EXTRA_ARGS="" just _release-raw
 
 # Should be executed on ARM machines.
-# vLLM tags are multi-arch manifests, so docker selects the arm64 image
-# automatically on an ARM host; the `-cu129` tag is the CUDA 12.9 build.
+# Inherits the Dockerfile's default cu129 BASE_IMAGE; that tag is a multi-arch
+# manifest, so docker selects the arm64 image automatically on an ARM host.
 release-cu129-arm64:
-    ARG_TAG_POSTFIX="-cu129-arm64" ARG_BUILD_EXTRA_ARGS='--build-arg BASE_IMAGE=vllm/vllm-openai:v0.22.0-cu129-ubuntu2404' just _release-raw
+    ARG_TAG_POSTFIX="-cu129-arm64" ARG_BUILD_EXTRA_ARGS="" just _release-raw
 
 # Should be executed on ARM machines.
 # The default-CUDA vLLM tag (no cuXXX suffix) already ships CUDA 13.0;

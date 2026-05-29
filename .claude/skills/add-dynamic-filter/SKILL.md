@@ -27,7 +27,7 @@ Use this skill when:
 
 ### Step 2: Implement the Function Signature
 
-Dynamic sampling filter (called in `slime/rollout/sglang_rollout.py`):
+Dynamic sampling filter (called in `slime/rollout/vllm_rollout.py`):
 
 ```python
 def filter_function(args, samples, **kwargs):
@@ -97,5 +97,5 @@ Example wiring:
 
 - Dynamic filter types: `slime/rollout/filter_hub/base_types.py`
 - Dynamic filter example: `slime/rollout/filter_hub/dynamic_sampling_filters.py`
-- Rollout generation hook points: `slime/rollout/sglang_rollout.py`
+- Rollout generation hook points: `slime/rollout/vllm_rollout.py`
 - Buffer filter hook point: `slime/rollout/data_source.py`

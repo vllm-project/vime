@@ -1,6 +1,6 @@
 ---
 name: add-rollout-function
-description: Guide for adding a new rollout function in slime and wiring it through --rollout-function-path. Use when user wants to implement custom rollout data generation logic, custom train/eval rollout outputs, or migrate from the default sglang rollout path.
+description: Guide for adding a new rollout function in slime and wiring it through --rollout-function-path. Use when user wants to implement custom rollout data generation logic, custom train/eval rollout outputs, or migrate from the default vLLM rollout path.
 ---
 
 # Add Rollout Function
@@ -12,7 +12,7 @@ Implement a custom rollout function and integrate it safely with slime training/
 Use this skill when:
 
 - User asks to add a new rollout task or rollout generation function
-- User asks to replace default `slime.rollout.sglang_rollout.generate_rollout`
+- User asks to replace default `slime.rollout.vllm_rollout.generate_rollout`
 - User asks to customize train/eval data generation behavior
 
 ## Step-by-Step Guide
@@ -21,10 +21,10 @@ Use this skill when:
 
 Start from one of these references:
 
-- Async RL-style rollout: `slime/rollout/sglang_rollout.py`
+- Async RL-style rollout: `slime/rollout/vllm_rollout.py`
 - Simple SFT-style rollout: `slime/rollout/sft_rollout.py`
 
-If the task needs engine-based async generation and rewards, use the sglang path as base.
+If the task needs engine-based async generation and rewards, use the vLLM path as base.
 If the task is file/buffer-driven and simple, use sft path as base.
 
 ### Step 2: Create the New Rollout Module
@@ -100,7 +100,7 @@ The default and signature expectation are documented in:
 
 ## Reference Locations
 
-- Default rollout: `slime/rollout/sglang_rollout.py`
+- Default rollout: `slime/rollout/vllm_rollout.py`
 - Simple custom example: `slime/rollout/sft_rollout.py`
 - Output dataclasses: `slime/rollout/base_types.py`
 - Wiring/loading: `slime/ray/rollout.py`
