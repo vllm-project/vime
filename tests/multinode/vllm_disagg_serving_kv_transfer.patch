@@ -1,0 +1,15 @@
+--- /p/serving_orig.py	2026-05-29 06:09:10.776063862 +0000
++++ /p/serving.py	2026-05-29 06:04:50.971952270 +0000
+@@ -165,6 +165,12 @@
+         # Schedule the request and get the result generator.
+         result_generator: AsyncGenerator[RequestOutput, None] | None = None
+         sampling_params = request.sampling_params
++        # PD: thread request kv_transfer_params into the engine via
++        # SamplingParams.extra_args (vLLM v1 reads it there for NIXL).
++        if getattr(request, "kv_transfer_params", None):
++            _extra = dict(sampling_params.extra_args or {})
++            _extra["kv_transfer_params"] = dict(request.kv_transfer_params)
++            sampling_params.extra_args = _extra
+ 
+         # Apply server-side ``max_tokens`` defaulting when the client did
+         # not set it, matching the OpenAI-compat endpoints. ``SamplingParams``
