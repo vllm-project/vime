@@ -109,6 +109,11 @@ def execute():
         f"--vllm-pipeline-parallel-size {vllm_pp} "
         "--vllm-gpu-memory-utilization 0.6 --vllm-max-num-seqs 256 "
         "--vllm-enable-expert-parallel "
+        # vLLM pipeline-parallel CUDA-graph capture deadlocks for this MoE model
+        # in the colocate setup (all ranks spin at 100% GPU, no progress). The
+        # hang is in vllm's PP graph capture, not the rollout topology this test
+        # validates, so PP configs run eager to exercise the real PP code path.
+        f"{'--vllm-enforce-eager ' if vllm_pp > 1 else ''}"
     )
 
     ci_args = "--ci-test "
