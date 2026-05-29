@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=vllm/vllm-openai:v0.21.0-cu129-ubuntu2404
+ARG BASE_IMAGE=vllm/vllm-openai:v0.22.0-cu129-ubuntu2404
 FROM ${BASE_IMAGE}
 
 # ======================================== Arguments =============================================
@@ -76,12 +76,6 @@ RUN if [ "$ENABLE_CUDA_13" = "1" ]; then \
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --ignore-installed PyJWT && \
     pip install -r /tmp/requirements.txt
-
-# Temporarily install another sgl-kernel version for GB300 without rebuilding the whole image
-RUN if [ "$ENABLE_CUDA_13" = "1" ]; then \
-    SGL_KERNEL_VERSION=0.3.17.post2 && \
-    python3 -m pip install https://github.com/sgl-project/whl/releases/download/v${SGL_KERNEL_VERSION}/sgl_kernel-${SGL_KERNEL_VERSION}+cu130-cp310-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps; \
-  fi
 
 # https://github.com/pytorch/pytorch/issues/168167
 RUN pip install nvidia-cudnn-cu12==9.16.0.29

@@ -45,7 +45,7 @@ class ReplayStats:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Replay OpenAI-compatible chat completion payloads from a JSONL file against an SGLang router.",
+        description="Replay OpenAI-compatible chat completion payloads from a JSONL file against a vLLM router.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         epilog=(
             "Examples:\n"

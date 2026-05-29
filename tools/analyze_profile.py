@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-SGLang Decode Profile Analyzer
-==============================
-Analyzes PyTorch profiler traces (.trace.json.gz) from SGLang decode workers.
+vLLM Decode Profile Analyzer
+============================
+Analyzes PyTorch profiler traces (.trace.json.gz) from vLLM decode workers.
 
 Usage:
     python tools/analyze_profile.py --profile-dir profiles/20260303_052303_my_run
@@ -587,7 +587,7 @@ def print_analysis(r: TraceAnalysis):
                     "portion that runs OUTSIDE the CUDA graph (DeepEP dispatch/combine + NCCL allgather).",
                     "The 3-launch pattern per step = (1) pre-MoE graph, (2) post-MoE graph, (3) MoE-expert graph.",
                     "Optimization: try increasing decode batch size to amortize graph launch overhead per token.",
-                    "Check if `--sglang-disable-cuda-graph` helps isolate whether the overhead is in graph "
+                    "Check if `--enforce-eager` helps isolate whether the overhead is in graph "
                     "management vs. actual compute.",
                     "Consider padding batch sizes to avoid frequent graph re-capture for different sizes.",
                 ],
@@ -633,7 +633,7 @@ def print_analysis(r: TraceAnalysis):
                 ),
                 "Increase batch size to improve GPU SM occupancy — many kernels are memory-bound at small batch.",
                 "Speculative decoding could help if generation is latency-bound.",
-                "Verify `--sglang-mem-fraction-static` is set high enough for large KV cache.",
+                "Verify `--gpu-memory-utilization` is set high enough for large KV cache.",
             ],
         )
     )
@@ -676,7 +676,7 @@ def print_cross_rank_summary(analyses: list[TraceAnalysis]):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Analyze SGLang decode profile traces")
+    parser = argparse.ArgumentParser(description="Analyze vLLM decode profile traces")
     parser.add_argument("--profile-dir", type=str, required=True, help="Directory containing .trace.json.gz files")
     parser.add_argument("--rank", type=int, default=None, help="Specific rank to analyze (default: first file)")
     parser.add_argument("--all-ranks", action="store_true", help="Analyze all ranks and show comparison")
