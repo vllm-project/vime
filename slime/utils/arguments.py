@@ -1674,6 +1674,22 @@ def slime_validate_args(args):
     if args.use_rollout_logprobs:
         assert not args.use_tis, "use_rollout_logprobs and use_tis cannot be set at the same time."
 
+    # When rollout logprobs feed the training objective (PPO old-logprobs or TIS), they must
+    # match Megatron's recomputed logprobs. Megatron only divides logits by rollout_temperature
+    # (full-vocab log-softmax); it does NOT apply top-k/top-p truncation. vLLM's
+    # ``processed_logprobs`` (the mode that aligns the temperature) is computed AFTER top-k/top-p
+    # masking, so a residual, unfixable mismatch remains when top_p<1.0 or top_k>0.
+    if (args.use_rollout_logprobs or args.use_tis) and (args.rollout_top_p < 1.0 or args.rollout_top_k > 0):
+        logger.warning(
+            "use_rollout_logprobs/use_tis is enabled with rollout_top_p=%s, rollout_top_k=%s. "
+            "vLLM logprobs are computed after top-k/top-p truncation while Megatron recomputes "
+            "on the full vocabulary, so rollout vs train logprobs will not fully align even with "
+            "--logprobs-mode processed_logprobs. Use rollout_top_p=1.0 and rollout_top_k=-1 "
+            "(control randomness via temperature only) to remove this bias.",
+            args.rollout_top_p,
+            args.rollout_top_k,
+        )
+
     if args.get_mismatch_metrics:
         assert (
             args.custom_tis_function_path is not None
