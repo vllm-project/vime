@@ -251,7 +251,24 @@ def _align_engine_tokens_and_logprobs(
     if m == n:
         return new_response_tokens, [float(x) for x in new_response_log_probs]
     if m > n:
+        logger.warning(
+            "vLLM rollout returned more logprobs (%d) than response tokens (%d); truncating. "
+            "This is unexpected for /inference/v1/generate (one logprob per generated token).",
+            m,
+            n,
+        )
         return new_response_tokens, [float(x) for x in new_response_log_probs[:n]]
+    # Padding with 0.0 means "this token had probability 1.0" — a non-physical value that
+    # silently distorts importance-sampling / TIS ratios (exp(train_logprob - 0.0)) when
+    # --use-rollout-logprobs or --use-tis is enabled. Surface it loudly instead of hiding it.
+    logger.warning(
+        "vLLM rollout returned fewer logprobs (%d) than response tokens (%d); padding %d "
+        "missing entries with 0.0 (== logprob of prob 1.0). If --use-rollout-logprobs / "
+        "--use-tis is on, these padded tokens will bias the policy gradient.",
+        m,
+        n,
+        n - m,
+    )
     return new_response_tokens, [float(x) for x in new_response_log_probs] + [0.0] * (n - m)
 
 
