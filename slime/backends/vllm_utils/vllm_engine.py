@@ -345,7 +345,12 @@ def launch_server_process(
         gpu_mem = 0.55  # vime preferred
     cmd += ["--gpu-memory-utilization", str(gpu_mem)]
 
-    # 2) weight_transfer_config: vllm default None disables /init_weight_transfer_engine,
+    # 2) logprobs_mode: vllm's raw_logprobs are pre-temperature, while Megatron
+    #    replay compares against rollout-temperature-scaled logprobs.
+    if not _user_overrode("vllm_logprobs_mode"):
+        cmd += ["--logprobs-mode", "processed_logprobs"]
+
+    # 3) weight_transfer_config: vllm default None disables /init_weight_transfer_engine,
     #    so vime's weight sync would fail.
     #    - Colocated mode: use IPC backend. UpdateWeightFromTensor calls
     #      IPCWeightTransferEngine.trainer_send_weights and passes an empty init_info

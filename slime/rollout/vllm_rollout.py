@@ -384,6 +384,63 @@ def _mm_render_response_to_generate_body(render_data: Any, model: str) -> dict[s
     )
 
 
+def _find_token_subsequence(haystack: list[int], needle: list[int], start: int = 0) -> int:
+    if not needle:
+        return max(start, 0)
+
+    end = len(haystack) - len(needle) + 1
+    for i in range(max(start, 0), max(end, 0)):
+        if haystack[i : i + len(needle)] == needle:
+            return i
+    return -1
+
+
+def _align_mm_feature_placeholders_to_tokens(generate_body: dict[str, Any], token_ids: list[int]) -> None:
+    """Point vLLM-rendered multimodal features at VIME's canonical prompt ids."""
+    features = generate_body.get("features")
+    if not isinstance(features, dict):
+        return
+    placeholders = features.get("mm_placeholders")
+    if not isinstance(placeholders, dict):
+        raise ValueError("vLLM multimodal features missing mm_placeholders")
+
+    render_token_ids = _coerce_flat_int_token_ids(generate_body.get("token_ids"))
+    if not render_token_ids:
+        raise ValueError("Cannot align vLLM multimodal placeholders: render response missing token_ids")
+
+    ordered_entries: list[tuple[int, str, dict[str, Any]]] = []
+    for modality, entries in placeholders.items():
+        if not entries:
+            continue
+        if not isinstance(entries, list):
+            raise ValueError(f"Cannot align vLLM {modality} placeholders: entries is {type(entries)!r}, expected list")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError(f"Cannot align vLLM {modality} placeholder: entry is {type(entry)!r}, expected dict")
+            offset = int(entry.get("offset", -1))
+            length = int(entry.get("length", -1))
+            if offset < 0 or length <= 0 or offset + length > len(render_token_ids):
+                raise ValueError(
+                    f"Cannot align vLLM {modality} placeholder: invalid render range "
+                    f"offset={offset}, length={length}, render_len={len(render_token_ids)}"
+                )
+            ordered_entries.append((offset, str(modality), entry))
+
+    search_start = 0
+    for render_offset, modality, entry in sorted(ordered_entries, key=lambda item: item[0]):
+        length = int(entry["length"])
+        placeholder_tokens = render_token_ids[render_offset : render_offset + length]
+        offset = _find_token_subsequence(token_ids, placeholder_tokens, search_start)
+        if offset < 0:
+            raise ValueError(
+                f"Cannot align vLLM {modality} placeholder from render offset={render_offset}, length={length}: "
+                "placeholder token slice not found in canonical token_ids"
+            )
+        entry["offset"] = offset
+        entry["length"] = len(placeholder_tokens)
+        search_start = offset + len(placeholder_tokens)
+
+
 async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, Any]) -> Sample:
     """Generate using vLLM ``/inference/v1/generate`` on the router host/port."""
     if args.ci_test:
@@ -439,6 +496,10 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         with trace_span(sample, "vllm_mm_render", attrs={"model": args.hf_checkpoint}):
             render_data = await post(render_url, render_payload, headers=headers)
         generate_body = _mm_render_response_to_generate_body(render_data, args.hf_checkpoint)
+        canonical_token_ids = _coerce_flat_int_token_ids(sample.tokens)
+        if canonical_token_ids:
+            _align_mm_feature_placeholders_to_tokens(generate_body, canonical_token_ids)
+            generate_body["token_ids"] = canonical_token_ids
         generate_body["sampling_params"] = inference_sampling_params
         gen_url = f"{base}/inference/v1/generate"
         with trace_span(sample, "vllm_mm_generate", attrs={"max_tokens": params["max_new_tokens"]}):
