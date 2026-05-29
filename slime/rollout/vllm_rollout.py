@@ -337,6 +337,13 @@ def _build_inference_sampling_params(sampling_params: dict[str, Any]) -> dict[st
         sp["top_k"] = tk
     if sampling_params.get("stop"):
         sp["stop"] = sampling_params["stop"]
+        # SGLang's ``no_stop_trim=True`` means "keep the matched stop string in the output".
+        # vLLM's equivalent is ``include_stop_str_in_output`` (default False == trim the stop
+        # string). Without this mapping, the vLLM and SGLang rollout paths return different
+        # response token sequences whenever a string ``stop`` is configured, breaking
+        # reproducibility and train/inference token alignment.
+        if sampling_params.get("no_stop_trim"):
+            sp["include_stop_str_in_output"] = True
     if sampling_params.get("stop_token_ids"):
         sp["stop_token_ids"] = sampling_params["stop_token_ids"]
     if sampling_params.get("seed") is not None:
