@@ -21,24 +21,30 @@ MODEL_NAME = "Qwen3-30B-A3B"
 MODEL_TYPE = "qwen3-30B-A3B"
 
 # (actor_nodes, actor_gpus_per_node, rollout_gpus, engine_gpus,
-#  num_gpus_per_node, mode, mt_tp, mt_pp, mt_cp, mt_ep, vllm_pp)
+#  num_gpus_per_node, mode, mt_tp, mt_pp, mt_cp, mt_ep, vllm_pp, vllm_dp)
+# vLLM grabs tp*pp*dp GPUs per engine, with tp = engine_gpus // (pp * dp).
 CONFIGS = {
     # Single-host colocate baselines (PR #66 with nnodes==1)
-    "ref": (1, 8, 8, 8, 8, "colocate", 4, 1, 2, 8, 1),
-    "s1":  (1, 8, 8, 4, 8, "colocate", 4, 1, 2, 8, 1),
-    "s2":  (1, 8, 8, 2, 8, "colocate", 4, 1, 2, 8, 1),
+    "ref": (1, 8, 8, 8, 8, "colocate", 4, 1, 2, 8, 1, 1),
+    "s1":  (1, 8, 8, 4, 8, "colocate", 4, 1, 2, 8, 1, 1),
+    "s2":  (1, 8, 8, 2, 8, "colocate", 4, 1, 2, 8, 1, 1),
     # Cross-host colocate (PR #66 multi-node vLLM, nnodes>1)
-    "s3":  (2, 8, 16, 16, 8, "colocate", 8, 1, 2, 8, 1),
-    "s4":  (2, 8, 16, 8, 4, "colocate", 8, 1, 2, 8, 1),
-    "s5":  (2, 8, 16, 8, 8, "colocate", 8, 1, 2, 8, 1),
+    "s3":  (2, 8, 16, 16, 8, "colocate", 8, 1, 2, 8, 1, 1),
+    "s4":  (2, 8, 16, 8, 4, "colocate", 8, 1, 2, 8, 1, 1),
+    "s5":  (2, 8, 16, 8, 8, "colocate", 8, 1, 2, 8, 1, 1),
     # Disagg (train / rollout on disjoint GPU pools)
-    "s6":  (1, 4, 4, 4, 4, "disagg",   4, 1, 1, 4, 1),
-    "s7":  (1, 8, 8, 8, 8, "disagg",   4, 1, 2, 8, 1),
+    "s6":  (1, 4, 4, 4, 4, "disagg",   4, 1, 1, 4, 1, 1),
+    "s7":  (1, 8, 8, 8, 8, "disagg",   4, 1, 2, 8, 1, 1),
     # vLLM PP > 1 — exercises _get_vllm_tp_size's pp-divisor path
-    "s8":  (1, 8, 8, 8, 8, "colocate", 4, 1, 2, 8, 2),
-    "s9":  (2, 8, 16, 16, 8, "colocate", 8, 1, 2, 8, 2),
+    "s8":  (1, 8, 8, 8, 8, "colocate", 4, 1, 2, 8, 2, 1),
+    "s9":  (2, 8, 16, 16, 8, "colocate", 8, 1, 2, 8, 2, 1),
     # Megatron PP > 1 — exercises the pipeline-stage weight-iterator path
-    "s10": (1, 8, 8, 8, 8, "colocate", 4, 2, 1, 4, 1),
+    "s10": (1, 8, 8, 8, 8, "colocate", 4, 2, 1, 4, 1, 1),
+    # vLLM DP + EP — wide-expert-parallel MoE rollout: DP attention replicas +
+    # experts sharded across the dp*tp world. vLLM tp = engine_gpus//(pp*dp).
+    "s11": (1, 8, 8, 8, 8, "colocate", 4, 1, 2, 8, 1, 2),   # dp=2 → vllm tp=4, ep across 8
+    "s12": (1, 8, 8, 8, 8, "colocate", 4, 1, 2, 8, 1, 4),   # dp=4 → vllm tp=2, ep across 8
+    "s13": (2, 8, 16, 16, 8, "colocate", 8, 1, 2, 8, 1, 2), # cross-host dp=2 nnodes=2 → vllm tp=8
 }
 
 
@@ -57,12 +63,14 @@ def prepare():
 def execute():
     cfg_id = os.environ.get("PR66_CONFIG", "ref")
     (actor_nodes, actor_gpus_per_node, rollout_gpus, engine_gpus,
-     num_gpus_per_node, mode, mt_tp, mt_pp, mt_cp, mt_ep, vllm_pp) = CONFIGS[cfg_id]
+     num_gpus_per_node, mode, mt_tp, mt_pp, mt_cp, mt_ep, vllm_pp, vllm_dp) = CONFIGS[cfg_id]
 
     nnodes_per_engine = max(1, engine_gpus // num_gpus_per_node)
+    vllm_tp = engine_gpus // (vllm_pp * vllm_dp)
     print(
         f"[PR66 sweep] config={cfg_id}: actor={actor_nodes}n*{actor_gpus_per_node}g, "
         f"rollout={rollout_gpus}g (engine={engine_gpus}g, nnodes_per_engine={nnodes_per_engine}), "
+        f"vllm tp={vllm_tp} pp={vllm_pp} dp={vllm_dp} (ep on), "
         f"num_gpus_per_node={num_gpus_per_node}, mode={mode}, "
         f"megatron tp={mt_tp} pp={mt_pp} cp={mt_cp} ep={mt_ep}, vllm_pp={vllm_pp}"
     )
@@ -107,13 +115,16 @@ def execute():
         f"--rollout-num-gpus-per-engine {engine_gpus} "
         f"--num-gpus-per-node {num_gpus_per_node} "
         f"--vllm-pipeline-parallel-size {vllm_pp} "
+        f"--vllm-data-parallel-size {vllm_dp} "
         "--vllm-gpu-memory-utilization 0.6 --vllm-max-num-seqs 256 "
         "--vllm-enable-expert-parallel "
-        # vLLM pipeline-parallel CUDA-graph capture deadlocks for this MoE model
-        # in the colocate setup (all ranks spin at 100% GPU, no progress). The
-        # hang is in vllm's PP graph capture, not the rollout topology this test
-        # validates, so PP configs run eager to exercise the real PP code path.
-        f"{'--vllm-enforce-eager ' if vllm_pp > 1 else ''}"
+        # vLLM multi-dim (PP>1 or DP>1) CUDA-graph capture deadlocks for this MoE
+        # model in the colocate setup: all ranks spin at 100% GPU and a cross-rank
+        # collective during _capture_cudagraphs times out (NCCL "last completed
+        # work: -1"). The hang is in vllm's graph capture, not the rollout topology
+        # this test validates, so PP/DP configs run eager to exercise the real
+        # parallel code path without tripping the capture deadlock.
+        f"{'--vllm-enforce-eager ' if (vllm_pp > 1 or vllm_dp > 1) else ''}"
     )
 
     ci_args = "--ci-test "

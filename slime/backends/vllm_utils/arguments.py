@@ -270,15 +270,18 @@ def validate_args(args):
     args.vllm_dp_size = args.vllm_data_parallel_size
     args.vllm_pp_size = args.vllm_pipeline_parallel_size
 
-    # Compute effective TP size considering PP size
-    if args.vllm_pp_size > 1:
-        assert args.rollout_num_gpus_per_engine % args.vllm_pp_size == 0, (
-            f"rollout_num_gpus_per_engine ({args.rollout_num_gpus_per_engine}) must be divisible by "
-            f"vllm_pipeline_parallel_size ({args.vllm_pp_size})"
-        )
-        args.vllm_tp_size = args.rollout_num_gpus_per_engine // args.vllm_pp_size
-    else:
-        args.vllm_tp_size = args.rollout_num_gpus_per_engine
+    # Compute effective TP size considering PP and DP.
+    # vLLM grabs tp*pp*dp GPUs per engine under the mp/ray backend
+    # (ParallelConfig.world_size_across_dp = tp*pp*dp), so the per-engine TP
+    # must leave room for both PP and DP:  tp = engine_gpus // (pp * dp).
+    # For DP=1 this reduces to the previous tp = engine_gpus // pp.
+    parallel_divisor = args.vllm_pp_size * args.vllm_dp_size
+    assert args.rollout_num_gpus_per_engine % parallel_divisor == 0, (
+        f"rollout_num_gpus_per_engine ({args.rollout_num_gpus_per_engine}) must be divisible by "
+        f"vllm_pipeline_parallel_size * vllm_data_parallel_size "
+        f"({args.vllm_pp_size} * {args.vllm_dp_size} = {parallel_divisor})"
+    )
+    args.vllm_tp_size = args.rollout_num_gpus_per_engine // parallel_divisor
 
     if getattr(args, "router_ip", None):
         args.router_ip = _wrap_ipv6(args.router_ip)
