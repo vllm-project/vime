@@ -114,32 +114,17 @@ def _wrap_ipv6(host):
         return host
 
 
-def run_router(payload):
-    """Start the HTTP router gateway in a child process.
-
-    ``payload`` is either ``(impl, router_args)`` with ``impl`` in ``{"sglang","vllm"}``,
-    or a legacy single ``router_args`` object (treated as ``sglang``).
-    """
+def run_router(router_args):
+    """Start the vllm-router HTTP gateway in a child process."""
     try:
-        if isinstance(payload, tuple) and len(payload) == 2:
-            impl, router_args = payload
-        else:
-            impl, router_args = "sglang", payload
-
-        if impl == "vllm":
-            from vllm_router.launch_router import launch_router
-        else:
-            from sglang_router.launch_router import launch_router
+        from vllm_router.launch_router import launch_router
 
         router = launch_router(router_args)
         if router is None:
             return 1
         return 0
     except Exception:
-        logger.exception(
-            "run_router failed (impl=%s). For vllm-router, ensure the package is installed and RouterArgs are valid.",
-            payload[0] if isinstance(payload, tuple) and len(payload) == 2 else "sglang",
-        )
+        logger.exception("run_router failed. Ensure vllm-router is installed and RouterArgs are valid.")
         return 1
 
 
@@ -225,7 +210,7 @@ def init_http_client(args):
         _http_client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=_client_concurrency),
             timeout=httpx.Timeout(None),
-            trust_env=False,  # internal SGLang comm only — never route through system proxy
+            trust_env=False,  # internal rollout comm only — never route through system proxy
         )
 
     # Optionally initialize distributed POST via Ray without changing interfaces
@@ -260,7 +245,7 @@ def _init_ray_distributed_post(args):
             self._client = httpx.AsyncClient(
                 limits=httpx.Limits(max_connections=max(1, concurrency)),
                 timeout=httpx.Timeout(None),
-                trust_env=False,  # internal SGLang comm only — never route through system proxy
+                trust_env=False,  # internal rollout comm only — never route through system proxy
             )
 
         async def do_post(self, url, payload, max_retries=60, headers=None):

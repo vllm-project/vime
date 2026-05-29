@@ -28,7 +28,7 @@ except ImportError:
         )
 
 install_paths()
-install_stubs(with_sglang_router=True, with_transformers=True)
+install_stubs(with_transformers=True)
 
 NUM_GPUS = 0
 
@@ -36,7 +36,7 @@ from slime.rollout.base_types import RolloutFnEvalOutput, call_rollout_fn
 from slime.rollout.data_source import RolloutDataSourceWithBuffer
 from slime.rollout.filter_hub.base_types import DynamicFilterOutput, call_dynamic_filter
 from slime.rollout.rm_hub import async_rm, batched_async_rm
-from slime.rollout.sglang_rollout import generate_rollout as default_generate_rollout
+from slime.rollout.vllm_rollout import generate_rollout as default_generate_rollout
 from slime.utils.misc import load_function
 from slime.utils.types import Sample
 
@@ -178,7 +178,7 @@ def check_eval_function_path(path: str) -> None:
     default_sig = inspect.signature(default_generate_rollout)
     candidate_sig = inspect.signature(fn)
     assert tuple(candidate_sig.parameters) == tuple(default_sig.parameters)
-    if path != "slime.rollout.sglang_rollout.generate_rollout":
+    if path != "slime.rollout.vllm_rollout.generate_rollout":
         output = call_rollout_fn(fn, None, 5, ContractEvalDataSource(), evaluation=True)
         assert isinstance(output, RolloutFnEvalOutput)
         assert output.data
@@ -255,7 +255,7 @@ SYNC_CASES = [
     SyncCase(
         "eval_function",
         "EVAL_FUNCTION_PATH",
-        "slime.rollout.sglang_rollout.generate_rollout",
+        "slime.rollout.vllm_rollout.generate_rollout",
         check_eval_function_default,
         check_eval_function_path,
     ),

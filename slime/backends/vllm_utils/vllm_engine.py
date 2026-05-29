@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 _spawn_ctx = multiprocessing.get_context("spawn")
 
-# vLLM sleep/wake only supports these tags (SGLang also uses ``cuda_graph``, which must be dropped).
+# vLLM sleep/wake only supports these tags.
 _VLLM_WAKE_TAGS = frozenset({"weights", "kv_cache"})
 
 
@@ -252,8 +252,6 @@ def launch_server_process(
 ) -> multiprocessing.Process:
     """Spawn ``vllm serve`` (OpenAI API server) in a subprocess.
 
-    Contrasts with SGLang's launcher, which starts the HTTP server in-process from ``ServerArgs``.
-
     Fixed flags (model identity, distributed topology, port/host, seed) are set by the
     orchestrator. Every other ``vllm serve`` flag is reachable via ``--vllm-<flag>`` and
     auto-forwarded by ``_forward_vllm_cli_args`` when the user overrides the vllm default.
@@ -263,6 +261,13 @@ def launch_server_process(
     env.setdefault("NCCL_CUMEM_ENABLE", "0")
     env["CUDA_VISIBLE_DEVICES"] = visible_devices
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")
+    # Deterministic inference: VLLM_BATCH_INVARIANT=1 makes attention / comm /
+    # MM kernels pick batch-invariant variants so the same token sequence yields
+    # the same logits regardless of batch composition. Per-sample seed alone (see
+    # GenerateState / eval_rollout_single_dataset in vllm_rollout.py) is necessary
+    # but not sufficient for determinism.
+    if getattr(args, "vllm_enable_deterministic_inference", False):
+        env["VLLM_BATCH_INVARIANT"] = "1"
     # Colocate loads --worker-extension-cls from slime; vLLM subprocess must see the
     # same tree as the trainer (editable vime), not an older site-packages slime.
     if getattr(args, "colocate", False):
@@ -408,7 +413,7 @@ def _redact_cmd_for_log(cmd: list[str]) -> str:
 
 
 def _wait_server_healthy(base_url: str, process: multiprocessing.Process | None, timeout_s: float = 300.0) -> None:
-    """Wait until the vLLM server responds on ``GET /health`` (SGLang stacks typically use ``GET /health_generate``)."""
+    """Wait until the vLLM server responds on ``GET /health``."""
     start = time.time()
     while True:
         try:
@@ -435,7 +440,7 @@ class VLLMEngine(RayActor):
         worker_type: str = "regular",
         base_gpu_id: int | None = None,
         model_path: str | None = None,
-        sglang_overrides: dict | None = None,
+        engine_overrides: dict | None = None,
         num_gpus_per_engine: int | None = None,
     ):
         self.args = args
@@ -444,7 +449,7 @@ class VLLMEngine(RayActor):
         self.base_gpu_id = base_gpu_id
         self.model_path = model_path or args.hf_checkpoint
         # Uniform Ray ``start_engines`` kwargs; unused when launching vLLM over HTTP.
-        self.sglang_overrides = sglang_overrides or {}
+        self.engine_overrides = engine_overrides or {}
         self.num_gpus_per_engine = num_gpus_per_engine
         self.process: multiprocessing.Process | None = None
         self._weight_version: str | None = None
@@ -474,8 +479,8 @@ class VLLMEngine(RayActor):
     ):
         del dist_init_addr, nccl_port, disaggregation_bootstrap_port
 
-        self.router_ip = router_ip if router_ip is not None else self.args.router_ip
-        self.router_port = router_port if router_port is not None else self.args.router_port
+        self.router_ip = router_ip if router_ip is not None else self.args.vllm_router_ip
+        self.router_port = router_port if router_port is not None else self.args.vllm_router_port
 
         host = host or get_host_info()[1]
         self.server_host = _format_v6_uri(host)
@@ -534,7 +539,6 @@ class VLLMEngine(RayActor):
     def _wait_external_config_ready(self) -> None:
         """External engine: best-effort ``GET /server_info`` TP check (non-fatal)."""
         try:
-            # SGLang external mode uses ``/get_server_info``; vLLM exposes ``/server_info``.
             actual = requests.get(f"{self._http_base()}/server_info", params={"config_format": "json"}, timeout=30)
             actual.raise_for_status()
             body = actual.json()
@@ -592,7 +596,7 @@ class VLLMEngine(RayActor):
             return {"ok": True, "raw": response.text}
 
     def health_generate(self, timeout: float = 5.0) -> bool:
-        """Return True if ``GET /health`` succeeds (SGLang uses ``GET /health_generate`` for the same role)."""
+        """Return True if ``GET /health`` succeeds."""
         if self.node_rank != 0:
             return True
         response = requests.get(f"{self._http_base()}/health", timeout=timeout)
@@ -628,7 +632,7 @@ class VLLMEngine(RayActor):
         return response
 
     def flush_cache(self):
-        """Clear prefix cache via ``POST /reset_prefix_cache`` (SGLang uses ``GET /flush_cache``)."""
+        """Clear prefix cache via ``POST /reset_prefix_cache``."""
         if self.node_rank != 0:
             return
         params = {"reset_running_requests": False, "reset_external": False}
@@ -701,7 +705,7 @@ class VLLMEngine(RayActor):
         return self._weight_version
 
     def release_memory_occupation(self, level: int = 1):
-        """``POST /sleep?level={level}`` when sleep mode is enabled (SGLang: ``POST /release_memory_occupation``).
+        """``POST /sleep?level={level}`` when sleep mode is enabled.
 
         level=1 (default) releases KV cache only.
         level=0 releases both KV cache and model weights (required before IPC tensor injection).
@@ -724,7 +728,7 @@ class VLLMEngine(RayActor):
             return {"ok": True, "raw": response.text}
 
     def resume_memory_occupation(self, tags: list[str] | None = None):
-        """``POST /wake_up`` when sleep mode is on (SGLang: ``POST /resume_memory_occupation``); else a small placeholder dict."""
+        """``POST /wake_up`` when sleep mode is on; else a small placeholder dict."""
         if not getattr(self.args, "vllm_enable_sleep_mode", False):
             return {"ok": True, "sleep_mode": False}
         tags = _normalize_vllm_wake_tags(tags)
@@ -793,7 +797,7 @@ class VLLMEngine(RayActor):
             return {"ok": True, "raw": response.text}
 
     def check_weights(self, action: str):
-        """No vLLM ``weights_checker`` route; return a placeholder (SGLang posts to ``/weights_checker``)."""
+        """No vLLM ``weights_checker`` route; return a placeholder."""
         del action
         return {"ok": True, "supported": False, "note": "vLLM has no weights_checker endpoint."}
 
@@ -830,7 +834,7 @@ class VLLMEngine(RayActor):
         raise RuntimeError(f"vLLM init_weight_transfer_engine failed: {last_error}") from last_error
 
     def destroy_weights_update_group(self, group_name):
-        """No vLLM destroy call; return ``None`` (SGLang may ``POST /destroy_weights_update_group`` and swallow errors)."""
+        """No vLLM destroy call; return ``None``."""
         del group_name
         return None
 
@@ -844,7 +848,7 @@ class VLLMEngine(RayActor):
         weight_version: str | None = None,
         packed: bool = True,
     ):
-        """NCCL path: POST ``/update_weights`` (SGLang: ``POST /update_weights_from_distributed``).
+        """NCCL path: POST ``/update_weights``.
 
         Payload matches vLLM NCCL weight transfer (see upstream rlhf_http_nccl example).
         """
@@ -863,7 +867,7 @@ class VLLMEngine(RayActor):
         return self._post_vllm_update_weights_http(update_info)
 
     def update_weights_from_disk(self, model_path: str, load_format: str | None = None):
-        """``POST /collective_rpc`` with ``reload_weights`` and ``weights_path`` (SGLang uses a dedicated disk API)."""
+        """``POST /collective_rpc`` with ``reload_weights`` and ``weights_path``."""
         if self.node_rank != 0:
             return
         del load_format
@@ -882,7 +886,7 @@ class VLLMEngine(RayActor):
             return {"ok": True, "raw": response.text}
 
     def pause_generation(self):
-        """``POST /pause`` with mode="keep" (SGLang: ``POST /pause_generation``); returns the ``requests.Response``."""
+        """``POST /pause`` with mode="keep"; returns the ``requests.Response``."""
         if self.node_rank != 0:
             return None
         response = requests.post(
@@ -895,7 +899,7 @@ class VLLMEngine(RayActor):
         return response
 
     def continue_generation(self):
-        """``POST /resume`` (SGLang: ``POST /continue_generation``)."""
+        """``POST /resume``."""
         if self.node_rank != 0:
             return None
         response = requests.post(f"{self._http_base()}/resume", json={}, timeout=120)
@@ -907,7 +911,7 @@ class VLLMEngine(RayActor):
         restore_weights_before_load: bool = False,
         post_process_quantization: bool = False,
     ):
-        """No vLLM HTTP hook (SGLang: ``POST /post_process_weights``); return a noop placeholder dict."""
+        """No vLLM HTTP hook; return a noop placeholder dict."""
         del restore_weights_before_load, post_process_quantization
         return {"ok": True, "noop": True, "note": "vLLM post_process is internal to load; no HTTP API."}
 

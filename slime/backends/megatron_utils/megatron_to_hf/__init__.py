@@ -59,7 +59,7 @@ def _convert_to_hf_core(args, model_name, name, param):
     else:
         raise ValueError(f"Unsupported model: {model_name}")
 
-    # to compatible with sglang implementation
+    # Merge MLA q_a / kv_a projections into the single fused name vLLM expects.
     if args.q_lora_rank is not None:
         old_converted_named_tensors = converted_named_tensors
         converted_named_tensors = []

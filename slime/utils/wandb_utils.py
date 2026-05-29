@@ -85,7 +85,7 @@ def reinit_wandb_primary_with_open_metrics(args, router_addr):
     The primary wandb init happens before rollout servers start (to obtain
     ``wandb_run_id`` for secondary processes).  This function is called
     *after* servers are up so the router address is available for scraping
-    SGLang Prometheus metrics via the primary process's stats monitor.
+    vLLM Prometheus metrics via the primary process's stats monitor.
     """
     if not args.use_wandb or _is_offline_mode(args):
         return
@@ -97,15 +97,7 @@ def reinit_wandb_primary_with_open_metrics(args, router_addr):
     if wandb_run_id is None:
         return
 
-    import sglang_router
-
-    if "slime" not in sglang_router.__version__:
-        logger.warning(
-            "Only customized sglang_router from https://github.com/zhuzilin/sgl-router supports uploading metrics."
-        )
-        return
-
-    logger.info(f"Re-initializing primary W&B with SGLang metrics at {router_addr}.")
+    logger.info(f"Re-initializing primary W&B with vLLM metrics at {router_addr}.")
 
     wandb.finish()
 
@@ -119,10 +111,12 @@ def reinit_wandb_primary_with_open_metrics(args, router_addr):
             mode="shared",
             x_primary=True,
             x_stats_open_metrics_endpoints={
-                "sgl_engine": f"{router_addr}/engine_metrics",
+                # router_addr already includes the /metrics path on the vllm-router
+                # prometheus port (see RolloutManager._get_metrics_router_addr).
+                "vllm_engine": router_addr,
             },
             x_stats_open_metrics_filters={
-                "sgl_engine.*": {},
+                "vllm_engine.*": {},
             },
         ),
     }

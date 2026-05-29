@@ -108,7 +108,6 @@ def execute_train(
     master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
 
     exec_command(
-        "pkill -9 sglang; "
         "sleep 3; "
         f"{'' if external_ray else 'ray stop --force; '}"
         f"{'' if external_ray else 'pkill -9 ray; '}"
@@ -222,7 +221,6 @@ def create_run_id() -> str:
 _warned_bool_env_var_keys = set()
 
 
-# copied from SGLang
 def get_bool_env_var(name: str, default: str = "false") -> bool:
     value = os.getenv(name, default)
     value = value.lower()
