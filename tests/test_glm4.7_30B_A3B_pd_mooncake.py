@@ -114,7 +114,7 @@ def execute():
         "--vllm-max-num-seqs 16 "
         "--vllm-max-cudagraph-capture-size 8 "
         "--vllm-speculative-config '{\"method\":\"mtp\",\"num_speculative_tokens\":3}' "
-        "--vllm-router-request-timeout-secs 1200 "
+        "--router-request-timeout-secs 1200 "
         f"--vllm-config {vllm_config} "
     )
     misc_args = (
