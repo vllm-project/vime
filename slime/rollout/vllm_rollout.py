@@ -255,6 +255,17 @@ def _align_engine_tokens_and_logprobs(
     return new_response_tokens, [float(x) for x in new_response_log_probs] + [0.0] * (n - m)
 
 
+def _warn_if_sampling_filters_may_affect_logprobs(sampling_params: dict[str, Any]) -> None:
+    top_p = sampling_params.get("top_p")
+    top_k = sampling_params.get("top_k")
+    if (top_p is not None and top_p < 1.0) or (top_k is not None and top_k > 0):
+        logger.warning(
+            "Using rollout top_p < 1 or top_k > 0 with vLLM processed_logprobs may make rollout "
+            "logprobs differ from training replay logprobs, because vLLM processed_logprobs are "
+            "computed after sampling filters while replay only applies temperature scaling."
+        )
+
+
 class GenerateState(metaclass=SingletonMeta):
     """
     The global state for the generation process.
@@ -280,6 +291,7 @@ class GenerateState(metaclass=SingletonMeta):
             no_stop_trim=True,
             spaces_between_special_tokens=False,
         )
+        _warn_if_sampling_filters_may_affect_logprobs(self.sampling_params)
 
         if getattr(args, "sglang_enable_deterministic_inference", False):
             sampling_seed_base = args.rollout_seed

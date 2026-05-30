@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import logging
 from argparse import Namespace
 from contextlib import contextmanager
 from unittest.mock import AsyncMock
@@ -289,6 +290,21 @@ def test_align_engine_tokens_and_logprobs(tokens, logprobs, expected_lps):
     out_toks, out_lps = mod._align_engine_tokens_and_logprobs(tokens, logprobs)
     assert out_toks == tokens
     assert out_lps == expected_lps
+
+
+@pytest.mark.unit
+def test_warn_if_sampling_filters_may_affect_logprobs(caplog):
+    caplog.set_level(logging.WARNING, logger=mod.logger.name)
+    mod._warn_if_sampling_filters_may_affect_logprobs({"top_p": 0.9, "top_k": -1})
+    assert "processed_logprobs may make rollout logprobs differ" in caplog.text
+
+
+@pytest.mark.unit
+def test_warn_if_sampling_filters_may_affect_logprobs_skips_defaults(caplog):
+    caplog.set_level(logging.WARNING, logger=mod.logger.name)
+    mod._warn_if_sampling_filters_may_affect_logprobs({"top_p": 1.0, "top_k": -1})
+    mod._warn_if_sampling_filters_may_affect_logprobs({"top_p": 1.0, "top_k": 0})
+    assert caplog.text == ""
 
 
 @pytest.mark.unit
