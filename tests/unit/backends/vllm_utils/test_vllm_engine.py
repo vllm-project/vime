@@ -580,3 +580,41 @@ def test_resolve_parallel_sizes_rejects_dp_gt_1(vllm_args):
     vllm_args.vllm_dp_size = 2
     with pytest.raises(NotImplementedError, match="data parallelism"):
         mod._resolve_vllm_parallel_sizes(vllm_args, gpus_per_engine=4)
+
+
+@pytest.mark.unit
+def test_response_json_tolerates_none():
+    # _post_json short-circuits to None on headless workers; _response_json must propagate None.
+    assert mod._response_json(None) is None
+
+
+@pytest.mark.unit
+def test_post_json_short_circuits_on_headless(vllm_engine, monkeypatch):
+    def _boom(*a, **k):
+        raise AssertionError("control-plane HTTP must not be called on a headless worker")
+
+    monkeypatch.setattr(mod.requests, "post", _boom)
+    vllm_engine.node_rank = 1
+    assert vllm_engine._post_json("whatever", {}, timeout=1) is None
+
+
+@pytest.mark.unit
+def test_control_plane_methods_noop_on_headless_worker(vllm_engine, monkeypatch):
+    """node_rank>0 (headless) workers own no HTTP server; every control-plane method must
+    no-op (return None) without issuing an HTTP request."""
+
+    def _boom(*a, **k):
+        raise AssertionError("control-plane HTTP must not be called on a headless worker")
+
+    monkeypatch.setattr(mod.requests, "post", _boom)
+    monkeypatch.setattr(mod.requests, "get", _boom)
+    vllm_engine.node_rank = 1
+    vllm_engine.args.vllm_enable_sleep_mode = True
+
+    assert vllm_engine.init_weight_transfer_engine({"init_info": {}}) is None
+    assert vllm_engine.start_weight_update() is None
+    assert vllm_engine.finish_weight_update() is None
+    assert vllm_engine.init_weights_update_group("addr", 1, 0, 4, "g", "nccl") is None
+    assert vllm_engine.update_weights_from_distributed(["w"], [torch.float32], [[1]], "g") is None
+    assert vllm_engine.release_memory_occupation() is None
+    assert vllm_engine.resume_memory_occupation() is None

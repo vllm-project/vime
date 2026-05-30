@@ -71,7 +71,11 @@ def _format_v6_uri(addr: str | None) -> str | None:
     return addr
 
 
-def _response_json(response: requests.Response) -> dict:
+def _response_json(response: requests.Response | None) -> dict | None:
+    # A headless worker's control-plane POST short-circuits to None (see _post_json);
+    # propagate that no-op cleanly so callers don't each need a node_rank special-case.
+    if response is None:
+        return None
     try:
         response.raise_for_status()
     except requests.exceptions.HTTPError as e:
@@ -759,7 +763,13 @@ class VLLMEngine(RayActor):
         else:
             _wait_worker_process_alive(self.process)
 
-    def _post_json(self, endpoint: str, payload: dict, timeout: float) -> requests.Response:
+    def _post_json(self, endpoint: str, payload: dict, timeout: float) -> requests.Response | None:
+        # Central control-plane POST choke point (mirrors SGLang's _make_request): the single
+        # place the node_rank guard lives, so every control-plane method that POSTs through here
+        # is guarded by construction. Headless workers (node_rank>0) own no HTTP server, so they
+        # short-circuit to None; _response_json(None) -> None lets that no-op propagate to callers.
+        if self.node_rank != 0:
+            return None
         url = f"{self._http_base()}/{endpoint.lstrip('/')}"
         return requests.post(url, json=payload, timeout=timeout)
 
@@ -892,6 +902,8 @@ class VLLMEngine(RayActor):
         level=0 releases both KV cache and model weights (required before IPC tensor injection).
         Returns a no-op dict when ``--vllm-enable-sleep-mode`` was not set.
         """
+        if self.node_rank != 0:  # /sleep bypasses _post_json (query params); guard explicitly.
+            return None
         self.flush_cache()
         if not getattr(self.args, "vllm_enable_sleep_mode", False):
             return {"ok": True, "sleep_mode": False, "note": "vLLM sleep mode disabled; no /sleep call."}
@@ -906,6 +918,8 @@ class VLLMEngine(RayActor):
 
     def resume_memory_occupation(self, tags: list[str] | None = None):
         """``POST /wake_up`` when sleep mode is on; else a no-op placeholder dict."""
+        if self.node_rank != 0:  # /wake_up bypasses _post_json (query params); guard explicitly.
+            return None
         if not getattr(self.args, "vllm_enable_sleep_mode", False):
             return {"ok": True, "sleep_mode": False}
         tags = _normalize_vllm_wake_tags(tags)
