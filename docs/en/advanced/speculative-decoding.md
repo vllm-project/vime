@@ -9,7 +9,7 @@ which slime forwards via `--vllm-speculative-config`. For models with MTP layers
 (e.g., GLM-4.7, DeepSeek-V3/R1), pass:
 
 ```bash
---vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3}'
+--vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 ```
 
 To use a separately trained draft model, set `model` (and optionally `draft_tensor_parallel_size`)

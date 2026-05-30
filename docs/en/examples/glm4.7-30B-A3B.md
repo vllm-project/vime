@@ -89,7 +89,7 @@ GLM-4.7-Flash includes 1 MTP (Multi-Token Prediction) layer, which can be used f
 VLLM_ARGS=(
    ...
    # MTP speculative decoding (EAGLE)
-   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3}'
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 )
 ```
 

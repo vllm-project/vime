@@ -112,7 +112,7 @@ VLLM_ARGS=(
 
    # sometimes flashinfer has IMA bugs. Use fa3 as instead
    --vllm-attention-backend FLASH_ATTN
-   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3}'
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 )
 
 MISC_ARGS=(

@@ -121,7 +121,7 @@ VLLM_ARGS=(
 
 
    --vllm-max-num-seqs 512
-   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3}'
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
    --vllm-max-cudagraph-capture-size 64
 )
 

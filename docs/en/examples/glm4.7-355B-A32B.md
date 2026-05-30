@@ -105,7 +105,7 @@ GLM-4.7 includes MTP (Multi-Token Prediction) layers that can be used for specul
 VLLM_ARGS=(
    ...
    # MTP speculative decoding (EAGLE)
-   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3}'
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 )
 ```
 
@@ -176,7 +176,7 @@ VLLM_ARGS=(
    --vllm-enable-expert-parallel
    --vllm-cudagraph-capture-sizes 1 2 4 8 $(seq 16 8 128)
 
-   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3}'
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 
    --vllm-all2all-backend deepep_high_throughput
 )
