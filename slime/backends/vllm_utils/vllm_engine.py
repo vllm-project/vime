@@ -123,11 +123,26 @@ def _get_vllm_dp_size(args) -> int:
 
 
 def _resolve_vllm_parallel_sizes(args, *, gpus_per_engine: int) -> tuple[int, int]:
+    # Derive TP per-engine from THIS engine's GPU count (matches upstream slime's
+    # sglang_engine: tp = _gpus_per_engine // pp). Deliberately does NOT consult a global
+    # ``args.vllm_tp_size``: validate_args used to set that from the *global*
+    # rollout_num_gpus_per_engine, which shadowed this per-engine value and made a
+    # heterogeneous per-group engine (e.g. a tp=2 group) launch with the global TP —
+    # desyncing the weight-transfer rendezvous (the 300s "3/4 clients joined" hang).
     pp = _get_vllm_pp_size(args)
-    if getattr(args, "vllm_tp_size", None) is not None:
-        tp = int(args.vllm_tp_size)
-    else:
-        tp = gpus_per_engine // pp
+    dp = _get_vllm_dp_size(args)
+    if dp != 1:
+        raise NotImplementedError(
+            "vLLM data parallelism (vllm_data_parallel_size>1) is not wired in this base: TP is "
+            "computed as gpus_per_engine // pp (no DP term) and --data-parallel-size is not "
+            "forwarded. DP/EP support lands in a follow-up PR."
+        )
+    if gpus_per_engine % pp != 0:
+        raise ValueError(
+            f"num_gpus_per_engine ({gpus_per_engine}) must be divisible by "
+            f"vllm_pipeline_parallel_size ({pp})"
+        )
+    tp = gpus_per_engine // pp
     return tp, pp
 
 
@@ -648,7 +663,18 @@ class VLLMEngine(RayActor):
             )
 
         if self.args.rollout_external:
-            self._init_external()
+            # Only the HTTP-owning head node (node_rank 0) can hit /health and
+            # /server_info. Headless workers (node_rank>0) expose no HTTP endpoint,
+            # so skip the check for them — mirrors the head/worker split in _init_normal.
+            if self.node_rank == 0:
+                self._init_external()
+            else:
+                logger.info(
+                    "External vLLM headless worker (rank=%s node_rank=%s): skip HTTP health/config "
+                    "check (only node_rank 0 owns HTTP).",
+                    self.rank,
+                    self.node_rank,
+                )
         else:
             self._init_normal()
 
@@ -687,29 +713,46 @@ class VLLMEngine(RayActor):
 
     def _init_external(self) -> None:
         logger.info("Use external vLLM engine (rank=%s) at %s:%s", self.rank, self.server_host, self.server_port)
-        base = self._http_base()
-        _wait_server_healthy(base, process=None)
-        self._wait_external_config_ready()
+        _wait_server_healthy(self._http_base(), process=None)
+        self._sanity_check_external_server_args()
 
-    def _wait_external_config_ready(self) -> None:
-        """External engine: best-effort ``GET /server_info`` TP check (non-fatal)."""
-        try:
-            actual = requests.get(f"{self._http_base()}/server_info", params={"config_format": "json"}, timeout=30)
-            actual.raise_for_status()
-            body = actual.json()
-        except requests.RequestException as e:
-            logger.warning("External vLLM: could not GET /server_info (non-fatal): %s", e)
-            return
+    def _sanity_check_external_server_args(self) -> None:
+        """Strictly verify an external engine's parallel config matches what we expect; raise on mismatch.
 
-        expect_tp = self.args.rollout_num_gpus_per_engine
+        Replaces the previous warn-only check, which (a) compared against the *global*
+        ``rollout_num_gpus_per_engine`` — wrong for heterogeneous / multi-node groups — and
+        (b) only logged a warning, so a misconfigured external engine sailed through and then
+        hung the weight-sync rendezvous ~300s later with no clear error.
+
+        We now compare every field in ``EXTERNAL_ENGINE_CHECK_FIELDS`` against the per-engine
+        expectation in ``self._server_args`` and raise immediately on mismatch. A field that the
+        engine's ``/server_info`` does not report (``actual is None``) is skipped rather than
+        treated as a mismatch (e.g. vLLM ``parallel_config`` may not surface ``nnodes``), so the
+        check stays strict for reported fields without false-failing on unreported ones.
+        """
+        response = requests.get(f"{self._http_base()}/server_info", params={"config_format": "json"}, timeout=30)
+        response.raise_for_status()
+        body = response.json()
         parallel_cfg = body.get("vllm_config", {}).get("parallel_config", {})
-        actual_tp = parallel_cfg.get("tensor_parallel_size")
-        if actual_tp is not None and actual_tp != expect_tp:
-            logger.warning(
-                "External vLLM server_info TP mismatch: expect=%s actual=%s (weak check)",
-                expect_tp,
-                actual_tp,
-            )
+        if not parallel_cfg:
+            raise RuntimeError(f"External vLLM /server_info missing vllm_config.parallel_config: {body}")
+        actual = {
+            "tp_size": parallel_cfg.get("tensor_parallel_size"),
+            "pp_size": parallel_cfg.get("pipeline_parallel_size"),
+            "dp_size": parallel_cfg.get("data_parallel_size"),
+            "nnodes": parallel_cfg.get("nnodes"),
+        }
+        expect = {name: self._server_args.get(name) for name in EXTERNAL_ENGINE_CHECK_FIELDS}
+        for name in EXTERNAL_ENGINE_CHECK_FIELDS:
+            actual_value = actual.get(name)
+            if actual_value is None:
+                logger.debug("External vLLM /server_info did not report %s; skipping that check.", name)
+                continue
+            if actual_value != expect.get(name):
+                raise AssertionError(
+                    f"External vLLM server arg mismatch: {name}: expect={expect.get(name)} "
+                    f"actual={actual_value} (full expect={expect} actual={actual})"
+                )
 
     def _init_normal(self) -> None:
         topology = self._topology

@@ -497,3 +497,86 @@ def test_init_weights_update_group_raises_after_three_failures(vllm_engine, monk
             group_name="g",
             backend="nccl",
         )
+
+
+def _stub_server_info(monkeypatch, parallel_config: dict) -> None:
+    def fake_get(url, *, params=None, timeout=30):
+        return _MockResponse(json_data={"vllm_config": {"parallel_config": parallel_config}})
+
+    monkeypatch.setattr(mod.requests, "get", fake_get)
+
+
+@pytest.mark.unit
+def test_sanity_check_external_server_args_passes_on_match(vllm_engine, monkeypatch):
+    vllm_engine._server_args = {"tp_size": 2, "pp_size": 1, "dp_size": 1, "nnodes": 1}
+    _stub_server_info(
+        monkeypatch,
+        {"tensor_parallel_size": 2, "pipeline_parallel_size": 1, "data_parallel_size": 1, "nnodes": 1},
+    )
+    # All reported fields match the per-engine expectation → no raise.
+    vllm_engine._sanity_check_external_server_args()
+
+
+@pytest.mark.unit
+def test_sanity_check_external_server_args_raises_on_tp_mismatch(vllm_engine, monkeypatch):
+    # Expect a tp=2 engine but the external server reports tp=1 → fail fast (the bug class
+    # that used to only warn and then hang the weight-sync rendezvous 300s later).
+    vllm_engine._server_args = {"tp_size": 2, "pp_size": 1, "dp_size": 1, "nnodes": 1}
+    _stub_server_info(
+        monkeypatch,
+        {"tensor_parallel_size": 1, "pipeline_parallel_size": 1, "data_parallel_size": 1, "nnodes": 1},
+    )
+    with pytest.raises(AssertionError, match="tp_size"):
+        vllm_engine._sanity_check_external_server_args()
+
+
+@pytest.mark.unit
+def test_sanity_check_external_server_args_skips_unreported_field(vllm_engine, monkeypatch):
+    # vLLM /server_info may not surface ``nnodes``: an unreported (None) field is skipped,
+    # not treated as a mismatch — so a single-node external engine doesn't false-fail.
+    vllm_engine._server_args = {"tp_size": 1, "pp_size": 1, "dp_size": 1, "nnodes": 2}
+    _stub_server_info(
+        monkeypatch,
+        {"tensor_parallel_size": 1, "pipeline_parallel_size": 1, "data_parallel_size": 1},
+    )
+    vllm_engine._sanity_check_external_server_args()
+
+
+@pytest.mark.unit
+def test_sanity_check_external_server_args_raises_when_parallel_config_missing(vllm_engine, monkeypatch):
+    vllm_engine._server_args = {"tp_size": 1, "pp_size": 1, "dp_size": 1, "nnodes": 1}
+    _stub_server_info(monkeypatch, {})
+    with pytest.raises(RuntimeError, match="missing vllm_config.parallel_config"):
+        vllm_engine._sanity_check_external_server_args()
+
+
+@pytest.mark.unit
+def test_resolve_parallel_sizes_is_per_engine_not_global(vllm_args):
+    # The global flag is 1, but THIS engine has 2 GPUs → tp must be 2 (per-engine), not 1.
+    # A stale global vllm_tp_size must NOT shadow the per-engine value.
+    vllm_args.rollout_num_gpus_per_engine = 1
+    vllm_args.vllm_pipeline_parallel_size = 1
+    vllm_args.vllm_tp_size = 1  # stale global; must be ignored now
+    tp, pp = mod._resolve_vllm_parallel_sizes(vllm_args, gpus_per_engine=2)
+    assert (tp, pp) == (2, 1)
+
+
+@pytest.mark.unit
+def test_compute_topology_heterogeneous_per_group_tp(vllm_args):
+    # Reproduces the rendezvous bug's root: global=1 but a per-group engine uses 2 GPUs.
+    vllm_args.num_gpus_per_node = 8
+    vllm_args.rollout_num_gpus_per_engine = 1
+    vllm_args.vllm_pipeline_parallel_size = 1
+    vllm_args.vllm_tp_size = 1  # stale global
+    topo = mod.compute_vllm_engine_topology(vllm_args, global_rank=0, num_gpus_per_engine=2)
+    assert topo.tensor_parallel_size == 2
+    assert topo.nnodes == 1
+
+
+@pytest.mark.unit
+def test_resolve_parallel_sizes_rejects_dp_gt_1(vllm_args):
+    vllm_args.vllm_pipeline_parallel_size = 1
+    vllm_args.vllm_data_parallel_size = 2
+    vllm_args.vllm_dp_size = 2
+    with pytest.raises(NotImplementedError, match="data parallelism"):
+        mod._resolve_vllm_parallel_sizes(vllm_args, gpus_per_engine=4)
