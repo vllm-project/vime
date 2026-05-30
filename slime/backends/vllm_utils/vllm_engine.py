@@ -249,6 +249,7 @@ def launch_server_process(
     rank: int,
     visible_devices: str,
     model_path: str,
+    num_gpus_per_engine: int | None = None,
 ) -> multiprocessing.Process:
     """Spawn ``vllm serve`` (OpenAI API server) in a subprocess.
 
@@ -291,7 +292,11 @@ def launch_server_process(
 
     host_for_subprocess = bind_host.strip("[]")
     model = model_path
-    tp = args.rollout_num_gpus_per_engine
+    # Per-engine TP: honor this engine's ServerGroup num_gpus_per_engine so a group
+    # configured with tp>1 launches tp>1, matching the weight-sync world_size
+    # accounting in update_weight_from_distributed (engine_gpu_counts). Falls back
+    # to the global flag for single-GPU-per-engine groups.
+    tp = num_gpus_per_engine or args.rollout_num_gpus_per_engine
     seed = getattr(args, "seed", 1234) + rank
 
     # Orchestrator-owned flags (correspond to SKIPPED_DESTS in vllm_utils/arguments.py).
@@ -565,7 +570,8 @@ class VLLMEngine(RayActor):
 
     def _init_normal(self) -> None:
         logger.info("Launch vLLM OpenAI api_server at: %s:%s", self.server_host, self.server_port)
-        num_gpus = min(self.args.num_gpus_per_node, self.args.rollout_num_gpus_per_engine)
+        gpus_per_engine = self.num_gpus_per_engine or self.args.rollout_num_gpus_per_engine
+        num_gpus = min(self.args.num_gpus_per_node, gpus_per_engine)
         base = self.base_gpu_id if self.base_gpu_id is not None else get_base_gpu_id(self.args, self.rank)
         base = _to_local_gpu_id(base)
         visible_devices = ",".join(str(base + i) for i in range(num_gpus))
@@ -578,6 +584,7 @@ class VLLMEngine(RayActor):
             rank=self.rank,
             visible_devices=visible_devices,
             model_path=self.model_path,
+            num_gpus_per_engine=gpus_per_engine,
         )
         _wait_server_healthy(self._http_base(), process=self.process)
 
