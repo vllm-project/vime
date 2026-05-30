@@ -56,23 +56,21 @@ Here, we will briefly introduce the MoE-related parts in the [run-qwen3-30B-A3B.
     )
     ```
 
-3.  Enable MoE optimization supported by SGLang. The current configuration is ep8:
+3.  Enable MoE expert parallelism in vLLM. EP size is auto-derived as
+    `tensor_parallel_size × data_parallel_size`, so for an 8-GPU engine
+    `--vllm-enable-expert-parallel` alone gives you EP=8:
 
     ```bash
-    SGLANG_ARGS=(
+    VLLM_ARGS=(
        --rollout-num-gpus-per-engine 8
-       --sglang-mem-fraction-static 0.7
-       --sglang-ep-size 8
-       --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 256)
+       --vllm-gpu-memory-utilization 0.7
+       --vllm-enable-expert-parallel
+       --vllm-cudagraph-capture-sizes 1 2 4 8 $(seq 16 8 256)
     )
     ```
 
-    Similarly, you can also add DP attention, for example, by configuring:
-
-    ```bash
-       --sglang-enable-dp-attention
-       --sglang-dp-size 8
-    ```
+    For DP on the attention block plus EP on the experts, combine
+    `--vllm-data-parallel-size N` with `--vllm-enable-expert-parallel`.
 
 ### BF16 Training with FP8 Inference
 
@@ -103,18 +101,15 @@ For a multi-node environment, the following modifications are necessary:
 
 In addition, you can make the following changes:
 
-  - When the total number of GPUs is not a multiple or divisor of the total number of experts, you can use `--sglang-ep-num-redundant-experts` to add redundant experts. For example, in a 24-GPU scenario, you can configure it as follows:
+  - When the total number of GPUs is not a multiple or divisor of the total number of experts, enable vLLM's EPLB (Expert Parallelism Load Balancer) and configure redundant experts via `--vllm-eplb-config`. For example, in a 24-GPU scenario:
 
    ```bash
-   SGLANG_ARGS=(
+   VLLM_ARGS=(
       --rollout-num-gpus-per-engine 24
-      --sglang-mem-fraction-static 0.7
-      --sglang-ep-size 24
-      --sglang-enable-dp-attention
-      --sglang-dp-size 3
-
-      --sglang-moe-dense-tp-size 1
-      --sglang-enable-dp-lm-head
-      --sglang-ep-num-redundant-experts 16   
+      --vllm-gpu-memory-utilization 0.7
+      --vllm-data-parallel-size 3
+      --vllm-enable-expert-parallel
+      --vllm-enable-eplb
+      --vllm-eplb-config '{"num_redundant_experts": 16}'
    )
    ```

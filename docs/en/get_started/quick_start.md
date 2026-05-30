@@ -5,7 +5,7 @@ This document will guide you through setting up the environment and getting star
 
 ## Basic Environment Setup
 
-Since slime may contain temporary patches for sglang/megatron, to avoid potential environment configuration issues, we strongly recommend **users to use our latest Docker image**, which comes pre-configured with all dependencies.
+Since slime may contain temporary patches for vllm/megatron, to avoid potential environment configuration issues, we strongly recommend **users to use our latest Docker image**, which comes pre-configured with all dependencies.
 
 ### Hardware Support
 
@@ -28,12 +28,12 @@ Please execute the following commands to pull the latest image and start an inte
 
 ```shell
 # Pull the latest image
-docker pull slimerl/slime:latest
+docker pull inferactinc/public:vime-vllm-cu129-latest
 
 # Start the container
 docker run --rm --gpus all --ipc=host --shm-size=16g \
   --ulimit memlock=-1 --ulimit stack=67108864 \
-  -it slimerl/slime:latest /bin/bash
+  -it inferactinc/public:vime-vllm-cu129-latest /bin/bash
 ```
 
 ### Install slime
@@ -286,17 +286,17 @@ OPTIMIZER_ARGS=(
 )
 ```
 
-### SGLANG_ARGS: SGLang Service Parameters
+### VLLM_ARGS: vLLM Service Parameters
 
-This part of parameters is used to configure SGLang inference service.
-- `--rollout-num-gpus-per-engine`: Basically equivalent to SGLang's `tp_size`.
-- Other SGLang parameters can be passed to slime by adding the `--sglang-` prefix, and slime will automatically forward them to SGLang. For example, to set SGLang's `--log-level INFO` parameter, just use `--sglang-log-level INFO`.
+This part of parameters is used to configure the vLLM inference service.
+- `--rollout-num-gpus-per-engine`: Equivalent to vLLM's `tp_size`.
+- Other vLLM parameters can be passed to slime by adding the `--vllm-` prefix, and slime will automatically forward them to vLLM. For example, to set vLLM's `--log-level INFO` parameter, just use `--vllm-log-level INFO`.
 
 > ⚠️ **Note**:
-> slime uses `sgl-router` to schedule multiple SGLang Servers. Without enabling DP Attention, `dp_size` will be calculated through `rollout-num-gpus/rollout-num-gpus-per-engine`.
+> slime uses `vllm-router` to schedule multiple vLLM engines. `dp_size` is calculated through `rollout-num-gpus / rollout-num-gpus-per-engine`.
 
 ```bash
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 2
 )
 ```
@@ -332,7 +332,7 @@ ray job submit ... \
 At this time, training and inference will share all 8 GPUs.
 
 > ⚠️ **Note**:
-> In training-inference integration mode, Megatron will occupy a certain amount of GPU memory before it can be offloaded after initialization. You need to adjust the `--sglang-mem-fraction-static` parameter to reduce SGLang's GPU memory usage ratio to avoid insufficient GPU memory. We usually recommend 0.8.
+> In training-inference integration mode, Megatron will occupy a certain amount of GPU memory before it can be offloaded after initialization. You need to adjust the `--vllm-gpu-memory-utilization` parameter to reduce vLLM's GPU memory usage ratio to avoid insufficient GPU memory. We usually recommend 0.8.
 
 ### Dynamic Sampling
 
@@ -477,7 +477,7 @@ First, specify a custom asynchronous Python function through the `--custom-gener
 **Core Implementation Points**:
 
 1. **Build Interaction Loop**: Create a loop to control maximum interaction rounds (such as `for _ in range(max_turns):`).
-2. **Call Model to Generate Action**: In each round of the loop, call SGLang service to let the model generate the next action (such as `<search>query</search>`) based on the current conversation history.
+2. **Call Model to Generate Action**: In each round of the loop, call the vLLM service to let the model generate the next action (such as `<search>query</search>`) based on the current conversation history.
 3. **Parse and Execute Action**: Parse model output, identify actions and parameters, and call external tools or APIs (such as Google search).
 4. **Build Observation Results**: Format the results returned by tools and append them to the conversation history as input for the next round.
 5. **Handle Loss Masking**: This is the key to Agent training.
@@ -495,7 +495,7 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
 
     for _ in range(max_turns):
         # 1. Model generates action
-        model_output = await call_sglang(prompt + full_response, ...)
+        model_output = await call_vllm(prompt + full_response, ...)
         # ... tokenization and appending ...
         loss_masks += [1] * len(model_tokens) # loss_mask = 1
         full_response += model_output
@@ -565,7 +565,7 @@ ray job submit --address="http://127.0.0.1:8265" \
      }
    }' \
    -- python3 train.py \
-   --... # Other Megatron/SGLang/slime arguments
+   --... # Other Megatron/vLLM/slime arguments
 ```
 
 Optionally, the following environment variables may be needed based on your environment. For example, when there are multiple IPs and the wrong one is chosen in a Docker or SLURM envionment. We provide an example used in a SLURM + enroot multi-node system as follows:

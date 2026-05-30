@@ -4,7 +4,7 @@
 
 ## 基础环境搭建
 
-由于 slime 可能会包含针对 sglang/megatron 的临时补丁（patch）。为避免潜在的环境配置问题，强烈建议**用户使用我们提供的最新 Docker 镜像**，它已预置好所有依赖。
+由于 slime 可能会包含针对 vllm/megatron 的临时补丁（patch）。为避免潜在的环境配置问题，强烈建议**用户使用我们提供的最新 Docker 镜像**，它已预置好所有依赖。
 
 ### 硬件支持说明
 
@@ -27,12 +27,12 @@
 
 ```shell
 # 拉取最新镜像
-docker pull slimerl/slime:latest
+docker pull inferactinc/public:vime-vllm-cu129-latest
 
 # 启动容器
 docker run --rm --gpus all --ipc=host --shm-size=16g \
   --ulimit memlock=-1 --ulimit stack=67108864 \
-  -it slimerl/slime:latest /bin/bash
+  -it inferactinc/public:vime-vllm-cu129-latest /bin/bash
 ```
 
 ### 安装 slime
@@ -285,17 +285,17 @@ OPTIMIZER_ARGS=(
 )
 ```
 
-### SGLANG_ARGS: SGLang 服务参数
+### VLLM_ARGS: vLLM 服务参数
 
-这部分参数用于配置 SGLang 推理服务。
-- `--rollout-num-gpus-per-engine`: 基本等同于 SGLang 的 `tp_size`。
-- 其他 SGLang 参数可以通过添加 `--sglang-` 前缀传递给 slime,  slime 会自动透传给 SGLang。例如，要设置 SGLang 的 `--log-level INFO` 参数，只需使用 `--sglang-log-level INFO` 即可。
+这部分参数用于配置 vLLM 推理服务。
+- `--rollout-num-gpus-per-engine`: 等同于 vLLM 的 `tp_size`。
+- 其他 vLLM 参数可以通过添加 `--vllm-` 前缀传递给 slime，slime 会自动透传给 vLLM。例如，要设置 vLLM 的 `--log-level INFO` 参数，只需使用 `--vllm-log-level INFO` 即可。
 
 > ⚠️ **注意**：
-> slime 使用 `sgl-router` 调度多个 SGLang Server。在不开启 DP Attention 的情况下， `dp_size` 会通过 `rollout-num-gpus / rollout-num-gpus-per-engine` 计算得到。
+> slime 使用 `vllm-router` 调度多个 vLLM 引擎。`dp_size` 会通过 `rollout-num-gpus / rollout-num-gpus-per-engine` 计算得到。
 
 ```bash
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 2
 )
 ```
@@ -332,7 +332,7 @@ ray job submit ... \
 此时，训练和推理将共享全部 8 张 GPU。
 
 > ⚠️ **注意**：
-> 在训推一体化模式下，Megatron 初始化后才能被 offload 掉，会占据一定量的显存。您需要通过调整 `--sglang-mem-fraction-static` 参数来降低 SGLang 的显存占用比例，以避免显存不足。通常我们建议为 0.8。
+> 在训推一体化模式下，Megatron 初始化后才能被 offload 掉，会占据一定量的显存。您需要通过调整 `--vllm-gpu-memory-utilization` 参数来降低 vLLM 的显存占用比例，以避免显存不足。通常我们建议为 0.8。
 
 > 此外，[torch_memory_saver](https://github.com/fzyzcjy/torch_memory_saver) 里面的一些优化只能在训推一体模式中使用，因为需要释放 GPU 显存。训推分离模式暂不支持。
 
@@ -482,7 +482,7 @@ ROLLOUT_ARGS=(
 **核心实现要点**:
 
 1.  **构建交互循环**: 创建循环以控制最大交互轮次（如 `for _ in range(max_turns):`）。
-2.  **调用模型生成动作**: 每轮循环中，调用 SGLang 服务，让模型根据当前对话历史生成下一步动作（如 `<search>query</search>`）。
+2.  **调用模型生成动作**: 每轮循环中，调用 vLLM 服务，让模型根据当前对话历史生成下一步动作（如 `<search>query</search>`）。
 3.  **解析并执行动作**: 解析模型输出，识别动作与参数，并调用外部工具或 API（如 Google 搜索）。
 4.  **构建观察结果**: 将工具返回的结果格式化后，追加到对话历史中，作为下一轮的输入。
 5.  **处理 Loss Masking**: 这是 Agent 训练的关键。
@@ -501,7 +501,7 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
 
     for _ in range(max_turns):
         # 1. 模型生成动作
-        model_output = await call_sglang(prompt + full_response, ...)
+        model_output = await call_vllm(prompt + full_response, ...)
         # ... tokenization and appending ...
         loss_masks += [1] * len(model_tokens) # loss_mask = 1
         full_response += model_output
@@ -571,7 +571,7 @@ ray job submit --address="http://127.0.0.1:8265" \
      }
    }' \
    -- python3 train.py \
-   --...（其他 Megatron/SGLang/slime 参数）
+   --...（其他 Megatron/vLLM/slime 参数）
 ```
 
 slime 针对大规模混合专家（MoE）模型的分布式训练进行了深度优化。我们提供了一些端到端的训练案例以供参考：

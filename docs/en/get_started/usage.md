@@ -7,7 +7,7 @@ When using slime, parameters are primarily passed for the following purposes:
 
 1.  To allocate a portion of the GPUs in the cluster for training and another portion for inference.
 2.  To load Megatron for the training portion.
-3.  To load SGLang for the inference portion.
+3.  To load vLLM for the inference portion.
 4.  To configure the hyperparameters required for RL training.
 
 Following this order, we need to configure these parameters:
@@ -19,8 +19,7 @@ There are four main parameters for cluster resource allocation:
   - `--actor-num-nodes`: The number of nodes required for RL actor training.
   - `--actor-num-gpus-per-node`: The number of GPUs per node for RL actor training.
   - `--rollout-num-gpus`: The total number of GPUs required for rollout (inference).
-  - `--rollout-num-gpus-per-engine`: The number of GPUs per inference engine. This parameter is similar to SGLang's `tp_size`. When performing multi-node serving, this value should be the total number of GPUs. For example, if serving one model with 2 nodes and 16 GPUs, this value should be 16.
-    The reason for not using a parameter like `--sglang-tp-size` is that we might consider supporting SGLang's `dp_size` parameter in the future, which means an engine could contain multiple SGLang servers (currently, only `--sglang-dp-size` under the `--sglang-enable-dp-attention` condition is supported).
+  - `--rollout-num-gpus-per-engine`: The number of GPUs per inference engine. This parameter is similar to vLLM's `tp_size`. When performing multi-node serving, this value should be the total number of GPUs. For example, if serving one model with 2 nodes and 16 GPUs, this value should be 16.
 
 With the default configuration, we use these parameters to allocate `actor_num_nodes * actor_num_gpus_per_node` GPUs for training and `rollout_num_gpus` GPUs for inference via Ray, thus achieving a separation of training and inference resources.
 
@@ -38,7 +37,7 @@ slime supports multiple training backends, which can be selected via the `--trai
 
 ### Loading Megatron
 
-Unlike tools such as SGLang, vLLM, or Hugging Face Trainer, Megatron cannot directly read Hugging Face checkpoints. Instead, the user must configure the parameters for the model to be trained and load Megatron's own checkpoint format.
+Unlike tools such as vLLM or Hugging Face Trainer, Megatron cannot directly read Hugging Face checkpoints. Instead, the user must configure the parameters for the model to be trained and load Megatron's own checkpoint format.
 
 Generally, we need to perform three preparatory steps:
 
@@ -135,20 +134,20 @@ Note:
 
   - Regardless of the checkpoint storage method (i.e., however `--ckpt-format` is set), Megatron can load both `torch` and `torch_dist` formats.
 
-### Loading SGLang
+### Loading vLLM
 
-Loading SGLang is very simple. You only need:
+Loading vLLM is very simple. You only need:
 
-  - `--hf-checkpoint`: The Hugging Face checkpoint used to initialize SGLang.
+  - `--hf-checkpoint`: The Hugging Face checkpoint used to initialize vLLM.
 
 Note:
 
-  - Before the first training step, slime will synchronize the parameters from Megatron to SGLang. Therefore, the `--hf-checkpoint` does not need to contain the latest training parameters, and you do not need to change the HF checkpoint when resuming training.
-  - By default, SGLang reads the maximum context length from the `config.json` in the Hugging Face checkpoint. You can use the `--sglang-context-length` parameter to override this value to support longer inference.
-  - During co-located training and inference, although Megatron and SGLang will offload sequentially, they still need to leave some memory for each other. You need to adjust SGLang's total VRAM usage by reducing `--sglang-mem-fraction-static`.
-  - slime supports passing through sgl-router parameters by adding a `router` prefix to the original parameter name. For example, sgl-router's `--balance-abs-threshold` parameter should be set as `--router-balance-abs-threshold`. Since sgl-router uses cache-aware routing by default, it may cause uneven request distribution. You can set `--router-balance-abs-threshold 0` to force balanced distribution, but this may affect prefix cache hit rate in multi-turn conversation scenarios.
+  - Before the first training step, slime will synchronize the parameters from Megatron to vLLM. Therefore, the `--hf-checkpoint` does not need to contain the latest training parameters, and you do not need to change the HF checkpoint when resuming training.
+  - By default, vLLM reads the maximum context length from the `config.json` in the Hugging Face checkpoint. You can use the `--vllm-max-model-len` parameter to override this value to support longer inference.
+  - During co-located training and inference, although Megatron and vLLM will offload sequentially, they still need to leave some memory for each other. You need to adjust vLLM's total VRAM usage by reducing `--vllm-gpu-memory-utilization`.
+  - slime supports passing through vllm-router parameters by adding a `router` prefix to the original parameter name. For example, vllm-router's `--balance-abs-threshold` parameter should be set as `--router-balance-abs-threshold`. Since vllm-router uses cache-aware routing by default, it may cause uneven request distribution. You can set `--router-balance-abs-threshold 0` to force balanced distribution, but this may affect prefix cache hit rate in multi-turn conversation scenarios.
 
-For details on some of SGLang's customizations and the principles behind how slime incorporates SGLang, please see the "How to Use SGLang" section.
+For details on some of vLLM's customizations and the principles behind how slime incorporates vLLM, please see the "How to Use vLLM" section.
 
 ### Data Format
 
@@ -278,9 +277,9 @@ megatron:
 
 slime supports customizing data generation (rollout) to various degrees.
 
-  - By default, it uses the `generate_rollout` function from [slime/rollout/sglang_rollout.py](https://github.com/THUDM/slime/blob/main/slime/rollout/sglang_rollout.py) for data generation. This file implements an asynchronous (asyncio) data generation flow based on SGLang and supports features like dynamic sampling and partial rollout.
+  - By default, it uses the `generate_rollout` function from [slime/rollout/vllm_rollout.py](https://github.com/vllm-project/vime/blob/main/slime/rollout/vllm_rollout.py) for data generation. This file implements an asynchronous (asyncio) data generation flow based on vLLM and supports features like dynamic sampling and partial rollout.
 
-  - You can completely replace the `generate_rollout` in sglang\_example.py by using the `--rollout-function-path` parameter. You just need to ensure that the function signature passed via `--rollout-function-path` is as follows:
+  - You can completely replace the default `generate_rollout` by using the `--rollout-function-path` parameter. You just need to ensure that the function signature passed via `--rollout-function-path` is as follows:
 
     ```python
     def generate_rollout(args, rollout_id, data_source, evaluation=False) -> RolloutFnTrainOutput | RolloutFnEvalOutput:
@@ -325,71 +324,73 @@ slime supports customizing data generation (rollout) to various degrees.
             TOKENIZER = AutoTokenizer.from_pretrained(args.hf_checkpoint, trust_remote_code=True)
 
         # send request to router
+        prompt_token_ids = TOKENIZER(sample.prompt, add_special_tokens=False)["input_ids"]
         output = await post(
-            f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate",
+            f"http://{args.vllm_router_ip}:{args.vllm_router_port}/inference/v1/generate",
             {
-                "text": sample.prompt,
-                "sampling_params": sampling_params,
+                "model": args.hf_checkpoint,
+                "token_ids": prompt_token_ids,
+                "sampling_params": {"max_tokens": sampling_params["max_new_tokens"]},
             }
         )
 
-        prompt_tokens_ids = TOKENIZER(sample.prompt, add_special_tokens=False)["input_ids"]
-        response_token_ids = TOKENIZER(output["text"], add_special_tokens=False)["input_ids"]
+        choice = output["choices"][0]
+        response_token_ids = list(choice.get("token_ids") or [])
 
         # set sample
-        sample.tokens = prompt_tokens_ids + response_token_ids
+        sample.tokens = prompt_token_ids + response_token_ids
         sample.response_length = len(response_token_ids)
-        finish_reason = output["meta_info"]["finish_reason"]["type"]
+        finish_reason = choice.get("finish_reason") or "stop"
         if finish_reason == "length":
             sample.status = Sample.Status.TRUNCATED
-        elif finish_reason == "abort":
+        elif finish_reason in ("abort", "cancelled"):
             sample.status = Sample.Status.ABORTED
         else:
             sample.status = Sample.Status.COMPLETED
-        sample.response = output["text"]
+        sample.response = TOKENIZER.decode(response_token_ids) if response_token_ids else ""
 
         return sample
     ```
 
-    For a more complete version, please refer to [slime/rollout/sglang_rollout.py](https://github.com/THUDM/slime/blob/main/slime/rollout/sglang_rollout.py).
+    For a more complete version, please refer to [slime/rollout/vllm_rollout.py](https://github.com/vllm-project/vime/blob/main/slime/rollout/vllm_rollout.py).
 
   - Sometimes, you may also need to support a custom reward model. This can be configured by setting `--custom-rm-path`.
 
-## How to Use SGLang
+## How to Use vLLM
 
-slime implements a server-based engine using SGLang via the `HttpServerEngineAdapter` as an intermediary.
+slime runs vLLM in server mode and talks to it over HTTP.
 
 ### Parameter Configuration
 
-slime incorporates almost all SGLang parameters by using SGLang's `ServerArgs.add_cli_args`. When setting an SGLang parameter, you need to add the `--sglang-` prefix. For example:
+slime incorporates almost all vLLM parameters by forwarding vLLM's `EngineArgs` CLI flags. When setting a vLLM parameter, you need to add the `--vllm-` prefix. For example:
 
-  - In co-located training and inference, you often need to limit `--mem-fraction-static`. This parameter should be changed to `--sglang-mem-fraction-static`.
-  - During training, if you want SGLang to infer beyond the maximum context length specified in the Hugging Face checkpoint's `config.json`, you need to use `--context-length`, which becomes `--sglang-context-length` in slime.
-  - For multi-node large EP inference, you might need `--ep-size`, `--enable-dp-attention`, `--dp-size`, `--moe-a2a-backend deepep`, etc. These can be passed as `--sglang-ep-size`, `--sglang-enable-dp-attention`, `--sglang-dp-size`, and `--sglang-moe-a2a-backend deepep` respectively.
+  - In co-located training and inference, you often need to limit GPU memory utilization. Pass it as `--vllm-gpu-memory-utilization`.
+  - During training, if you want vLLM to infer beyond the maximum context length specified in the Hugging Face checkpoint's `config.json`, you need to use `--max-model-len`, which becomes `--vllm-max-model-len` in slime.
+  - For multi-node large EP inference, you might need `--enable-expert-parallel`, `--data-parallel-size`, etc. These can be passed as `--vllm-enable-expert-parallel` and `--vllm-data-parallel-size` respectively.
 
 Some parameters related to slime's resource scheduling are configured by slime itself, for example:
 
-  - `--tp-size` in slime is set using `--rollout-num-gpus-per-engine`.
-  - `--model-path` in slime is set using `--hf-checkpoint`.
+  - `--tensor-parallel-size` in slime is set using `--rollout-num-gpus-per-engine`.
+  - `--model` in slime is set using `--hf-checkpoint`.
 
-The way SGLang parameters are integrated into slime can be found in [slime/backends/sglang_utils/arguments.py](https://github.com/THUDM/slime/blob/main/slime/backends/sglang_utils/arguments.py).
+The way vLLM parameters are integrated into slime can be found in [slime/backends/vllm_utils/arguments.py](https://github.com/vllm-project/vime/blob/main/slime/backends/vllm_utils/arguments.py).
 
 ### How to Use the Router
 
-slime uses [sglang-router](https://github.com/sgl-project/sglang/tree/main/sgl-model-gateway) to manage the SGLang servers during the training process. You can configure the address of the [sglang-router](https://github.com/sgl-project/sglang/tree/main/sgl-model-gateway) using `--sglang-router-ip` and `--sglang-router-port`. If not configured, a router will be started by default within the cluster.
+slime uses [vllm-router](https://github.com/vllm-project/router) to manage the vLLM engines during the training process. You can configure the address of the router using `--vllm-router-ip` and `--vllm-router-port`. If not configured, a router will be started by default within the cluster.
 
-After starting, all SGLang servers will register with the router via the `/add_worker` endpoint. When actually generating data, you only need to send HTTP requests to the router, which will perform load balancing and forward the requests to the servers.
+After starting, all vLLM engines will register with the router. When actually generating data, you only need to send HTTP requests to the router, which will perform load balancing and forward the requests to the engines.
 
-When you configure an external router using `--sglang-router-ip` and `--sglang-router-port`, slime will not start an internal router. Instead, it will register all its servers with this external router. You can then use this external router's address to implement more complex data generation workflows. Note that the router supports OpenAI-compatible APIs.
+When you configure an external router using `--vllm-router-ip` and `--vllm-router-port`, slime will not start an internal router. Instead, it will register all its engines with this external router. You can then use this external router's address to implement more complex data generation workflows. Note that the router supports OpenAI-compatible APIs.
 
-### Advanced Engine Configuration (--sglang-config)
+### Advanced Engine Configuration (--vllm-config)
 
-For advanced deployments, you can use `--sglang-config` with a YAML file to configure server groups, multi-model serving, and selective weight updates.
+For advanced deployments, you can use `--vllm-config` with a YAML file to configure server groups, multi-model serving, and selective weight updates.
 
 **Multi-model deployment** allows serving multiple models simultaneously (e.g., an actor model that receives weight updates and a frozen reference/reward model):
 
 ```yaml
-sglang:
+vllm:
   - name: actor
     update_weights: true          # receives weight updates from training (default)
     server_groups:
@@ -405,11 +406,11 @@ sglang:
         num_gpus_per_engine: 2
 ```
 
-Each model gets its own router. The per-model router info is accessible via `args.sglang_model_routers` (a dict mapping model name to `(ip, port)` tuples). Custom rollout functions can use `get_model_url(args, "ref")` from `slime.rollout.sglang_rollout` to route requests to a specific model.
+Each model gets its own router. The per-model router info is accessible via `args.vllm_model_routers` (a dict mapping model name to `(ip, port)` tuples). Custom rollout functions can use `get_model_url(args, "ref")` from `slime.rollout.vllm_rollout` to route requests to a specific model.
 
 **Server group features:**
 - `worker_type`: `regular`, `prefill`, `decode`, or `placeholder` (reserves GPU slots without creating engines)
-- `overrides`: Dict of SGLang `ServerArgs` field overrides applied on top of `--sglang-*` CLI args
+- `overrides`: Dict of vLLM `EngineArgs` field overrides applied on top of `--vllm-*` CLI args
 - `num_gpus_per_engine`: Per-group TP size override
 
 ## How to Use Megatron

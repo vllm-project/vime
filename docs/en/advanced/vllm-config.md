@@ -1,33 +1,33 @@
-# SGLang Config: Advanced Engine Deployment
+# vLLM Config: Advanced Engine Deployment
 
-`--sglang-config` is a YAML-based configuration system for fine-grained control over SGLang engine deployment in slime. It enables **multi-model serving**, **Prefill-Decode (PD) disaggregation**, **heterogeneous server groups**, and can even serve as a **standalone SGLang launcher** for complex inference topologies.
+`--vllm-config` is a YAML-based configuration system for fine-grained control over vLLM engine deployment in slime. It enables **multi-model serving**, **Prefill-Decode (PD) disaggregation**, **heterogeneous server groups**, and can even serve as a **standalone vLLM launcher** for complex inference topologies.
 
 ---
 
 ## Architecture Overview
 
-In the default setup (without `--sglang-config`), slime deploys a single model behind a single router with uniform server groups:
+In the default setup (without `--vllm-config`), slime deploys a single model behind a single router with uniform server groups:
 
-![architecture overview](../../_static/image/arch.png)
+![architecture overview](../../../imgs/arch.png)
 
-With `--sglang-config`, the SGLang deployment expands into a multi-model, multi-router topology:
+With `--vllm-config`, the vLLM deployment expands into a multi-model, multi-router topology:
 
-![sglang-config architecture](../../_static/image/sglang_config.png)
+![vllm-config architecture](../../_static/image/vllm_config.png)
 
 **Key design principles:**
 
 - **Each model gets its own router.** Models are isolated at the routing layer, allowing independent load balancing and fault tolerance.
-- **Server groups within a model can be heterogeneous.** Different groups can have different TP sizes, worker types (prefill/decode/regular), and SGLang server argument overrides.
+- **Server groups within a model can be heterogeneous.** Different groups can have different TP sizes, worker types (prefill/decode/regular), and vLLM engine argument overrides.
 - **Weight sync is per-model.** Only models with `update_weights: true` receive weight updates from training. Frozen models (reference, reward, etc.) are served as-is.
 
 ---
 
 ## Config Format
 
-The config file is a YAML document with a top-level `sglang` key containing a list of model definitions:
+The config file is a YAML document with a top-level `vllm` key containing a list of model definitions:
 
 ```yaml
-sglang:
+vllm:
   - name: <model_name>              # Required. Unique identifier for this model.
     model_path: <path>              # Optional. HF checkpoint path. Defaults to --hf-checkpoint.
     update_weights: <bool>          # Optional. Whether to sync weights from training. Auto-inferred.
@@ -36,7 +36,7 @@ sglang:
       - worker_type: <type>         # Required. One of: regular, prefill, decode, placeholder.
         num_gpus: <int>             # Required. Total GPUs allocated to this group.
         num_gpus_per_engine: <int>  # Optional. TP size override for this group.
-        overrides: <dict>           # Optional. SGLang ServerArgs field overrides.
+        overrides: <dict>           # Optional. vLLM EngineArgs field overrides.
 ```
 
 ### Field Reference
@@ -45,7 +45,7 @@ sglang:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `name` | `str` | **Required** | Unique name for this model (e.g., `"actor"`, `"ref"`, `"reward"`). Used as the key in `args.sglang_model_routers`. |
+| `name` | `str` | **Required** | Unique name for this model (e.g., `"actor"`, `"ref"`, `"reward"`). Used as the key in `args.vllm_model_routers`. |
 | `model_path` | `str` | `args.hf_checkpoint` | HuggingFace checkpoint path. All server groups within a model must use the same model path. |
 | `update_weights` | `bool` | Auto | Whether this model receives weight updates from training. When not set, automatically inferred: `true` if `model_path` matches `--hf-checkpoint`, `false` otherwise. |
 | `num_gpus_per_engine` | `int` | `args.rollout_num_gpus_per_engine` | Default TP size for server groups in this model. Individual groups can override. |
@@ -58,13 +58,13 @@ sglang:
 | `worker_type` | `str` | **Required** | Engine type: `regular` (standard), `prefill` (PD prefill worker), `decode` (PD decode worker), or `placeholder` (reserve GPU slots without launching engines). |
 | `num_gpus` | `int` | **Required** | Total number of GPUs for this group. Must be > 0. |
 | `num_gpus_per_engine` | `int` | Model's `num_gpus_per_engine` | TP size override. Number of GPUs per engine instance. |
-| `overrides` | `dict` | `{}` | SGLang `ServerArgs` field overrides. Applied on top of `--sglang-*` CLI args with highest priority. |
+| `overrides` | `dict` | `{}` | vLLM `EngineArgs` field overrides. Applied on top of `--vllm-*` CLI args with highest priority. |
 
 ### Worker Types
 
 | Type | Description | Use Case |
 |------|-------------|----------|
-| `regular` | Standard SGLang engine | Default mode, handles both prefill and decode |
+| `regular` | Standard vLLM engine | Default mode, handles both prefill and decode |
 | `prefill` | PD disaggregation prefill worker | Dedicated to prompt processing; paired with `decode` workers |
 | `decode` | PD disaggregation decode worker | Dedicated to token generation; paired with `prefill` workers |
 | `placeholder` | Reserves GPU slots, no engine created | Reserve GPUs for training co-location or future use |
@@ -78,8 +78,8 @@ sglang:
 The simplest config replicates the default behavior:
 
 ```yaml
-# sglang_basic.yaml
-sglang:
+# vllm_basic.yaml
+vllm:
   - name: default
     server_groups:
       - worker_type: regular
@@ -88,7 +88,7 @@ sglang:
 
 ```bash
 python train.py \
-  --sglang-config sglang_basic.yaml \
+  --vllm-config vllm_basic.yaml \
   --rollout-num-gpus 8 \
   --rollout-num-gpus-per-engine 2 \
   ...
@@ -101,8 +101,8 @@ This creates 4 engines (8 GPUs ÷ 2 GPUs/engine) behind a single router.
 Separate prefill and decode phases onto dedicated server groups for better throughput in multi-turn and agentic workloads:
 
 ```yaml
-# sglang_pd.yaml
-sglang:
+# vllm_pd.yaml
+vllm:
   - name: actor
     server_groups:
       - worker_type: prefill
@@ -115,7 +115,7 @@ sglang:
 
 ```bash
 python train.py \
-  --sglang-config sglang_pd.yaml \
+  --vllm-config vllm_pd.yaml \
   --rollout-num-gpus 16 \
   ...
 ```
@@ -125,15 +125,15 @@ python train.py \
 - Using larger TP for decode (lower latency)
 - Independent scaling of prefill vs. decode capacity
 
-> **Note:** PD disaggregation uses SGLang Model Gateway (sgl-router) with `pd_disaggregation=True`.
+> **Note:** PD disaggregation uses vllm-router with `pd_disaggregation=True`.
 
 ### 3. Multi-Model Serving
 
 Deploy multiple models simultaneously, each behind its own router:
 
 ```yaml
-# sglang_multi_model.yaml
-sglang:
+# vllm_multi_model.yaml
+vllm:
   - name: actor
     update_weights: true              # receives weight updates from training
     server_groups:
@@ -160,7 +160,7 @@ sglang:
 
 ```bash
 python train.py \
-  --sglang-config sglang_multi_model.yaml \
+  --vllm-config vllm_multi_model.yaml \
   --rollout-num-gpus 16 \
   --hf-checkpoint /path/to/actor_model \
   --rollout-function-path my_rollout.generate_rollout \
@@ -170,7 +170,7 @@ python train.py \
 **Accessing models in custom rollout functions:**
 
 ```python
-from slime.rollout.sglang_rollout import get_model_url
+from slime.rollout.vllm_rollout import get_model_url
 from slime.utils.http_utils import post
 
 async def my_generate(args, sample, sampling_params):
@@ -189,15 +189,15 @@ async def my_generate(args, sample, sampling_params):
     ...
 ```
 
-The `get_model_url()` helper reads from `args.sglang_model_routers`, a dict mapping model names to `(ip, port)` tuples that is automatically populated after engine startup.
+The `get_model_url()` helper reads from `args.vllm_model_routers`, a dict mapping model names to `(ip, port)` tuples that is automatically populated after engine startup.
 
 ### 4. Multi-Model with PD Disaggregation
 
 Combine multi-model and PD disaggregation for maximum flexibility:
 
 ```yaml
-# sglang_full.yaml
-sglang:
+# vllm_full.yaml
+vllm:
   - name: actor
     update_weights: true
     server_groups:
@@ -222,7 +222,7 @@ sglang:
 Use `placeholder` groups to reserve GPU slots without creating engines. This is useful for co-located training where some GPUs need to be reserved for training:
 
 ```yaml
-sglang:
+vllm:
   - name: actor
     server_groups:
       - worker_type: regular
@@ -234,10 +234,10 @@ sglang:
 
 ### 6. Per-Group ServerArgs Overrides
 
-Use `overrides` to apply SGLang `ServerArgs` fields to specific server groups without affecting others:
+Use `overrides` to apply vLLM `ServerArgs` fields to specific server groups without affecting others:
 
 ```yaml
-sglang:
+vllm:
   - name: actor
     server_groups:
       - worker_type: regular
@@ -250,23 +250,23 @@ sglang:
           enable_torch_compile: true
 ```
 
-Overrides take **highest priority**, overriding both the base `--sglang-*` CLI args and model-level defaults. This is especially useful for:
+Overrides take **highest priority**, overriding both the base `--vllm-*` CLI args and model-level defaults. This is especially useful for:
 - Different memory configurations per group
 - Different context lengths for prefill vs. decode
 - Enabling experimental features on specific groups
 
-### 7. Standalone SGLang Launcher
+### 7. Standalone vLLM Launcher
 
-While `--sglang-config` is designed for slime's training pipeline, it also works as a powerful launcher for pure inference scenarios using the `--rollout-external` pattern or by configuring slime to focus solely on serving.
+While `--vllm-config` is designed for slime's training pipeline, it also works as a powerful launcher for pure inference scenarios using the `--rollout-external` pattern or by configuring slime to focus solely on serving.
 
 **Using external engines with a pre-launched topology:**
 
-For complex production deployments, you may want to pre-launch SGLang engines independently and connect them to slime:
+For complex production deployments, you may want to pre-launch vLLM engines independently and connect them to slime:
 
 ```bash
-# Step 1: Launch SGLang engines externally
-python -m sglang.launch_server --model-path /path/to/model --port 10090 ...
-python -m sglang.launch_server --model-path /path/to/model --port 10091 ...
+# Step 1: Launch vLLM engines externally
+vllm serve /path/to/model --port 10090 ...
+vllm serve /path/to/model --port 10091 ...
 
 # Step 2: Connect slime to external engines
 python train.py \
@@ -275,39 +275,39 @@ python train.py \
   ...
 ```
 
-> **Note:** `--sglang-config` and `--rollout-external` are mutually exclusive. Use `--sglang-config` when you want slime to manage the full engine lifecycle; use `--rollout-external` when engines are pre-deployed.
+> **Note:** `--vllm-config` and `--rollout-external` are mutually exclusive. Use `--vllm-config` when you want slime to manage the full engine lifecycle; use `--rollout-external` when engines are pre-deployed.
 
 ---
 
 ## Router Configuration
 
-Each model in the config gets its own independent router (SGLang Model Gateway by default).
+Each model in the config gets its own independent router (vllm-router by default).
 
 ### Router Policies
 
 You can configure the routing policy:
 
 ```bash
---router-policy round_robin        # Simple round-robin
---router-policy consistent_hashing  # Session affinity for multi-turn
---router-policy cache_aware         # Cache-aware routing (default)
+--router-policy round_robin     # Simple round-robin
+--router-policy consistent_hash # Session affinity for multi-turn
+--router-policy cache_aware     # Cache-aware routing (default)
 ```
 
 ### Session-Affinity Routing for Multi-Turn Agents
 
 For multi-turn dialogues and agentic workloads, session affinity ensures that all requests belonging to the same conversation are routed to the same backend worker. This significantly improves prefix cache hit rates because the worker already has the conversation history cached.
 
-slime automatically assigns each sample a unique `session_id` (stored in `sample.session_id`). When the router policy is `consistent_hashing`, this ID is passed as the `X-SMG-Routing-Key` header, and SGLang Model Gateway uses it to deterministically route all turns of the same session to the same worker.
+slime automatically assigns each sample a unique `session_id` (stored in `sample.session_id`). When the router policy is `consistent_hash`, this ID is passed as the `x-session-id` header, and vllm-router uses it to deterministically route all turns of the same session to the same worker.
 
 ```bash
---router-policy consistent_hashing
+--router-policy consistent_hash
 ```
 
 **How it works:**
 
 1. Each sample is assigned a unique `session_id` via UUID
-2. On each request, slime passes `X-SMG-Routing-Key: <session_id>` in the HTTP header
-3. SGLang Model Gateway's consistent hashing policy maps this key to a specific worker
+2. On each request, slime passes `x-session-id: <session_id>` in the HTTP header
+3. vllm-router's consistent-hash policy maps this key to a specific worker
 4. Subsequent turns reuse the same `session_id`, ensuring they hit the same worker
 
 ---
@@ -327,7 +327,7 @@ When the config is loaded, slime applies the following resolution cascade:
 
 ## Mutual Exclusion
 
-`--sglang-config` is mutually exclusive with:
+`--vllm-config` is mutually exclusive with:
 
 | Flag | Conflict Reason |
 |------|----------------|
@@ -340,10 +340,10 @@ When the config is loaded, slime applies the following resolution cascade:
 
 Below is a complete example showing a multi-model setup for agentic RL training with PD disaggregation on 32 GPUs:
 
-**Config file (`sglang_agent.yaml`):**
+**Config file (`vllm_agent.yaml`):**
 
 ```yaml
-sglang:
+vllm:
   - name: actor
     update_weights: true
     server_groups:
@@ -379,7 +379,7 @@ sglang:
 
 ```bash
 python train.py \
-  --sglang-config sglang_agent.yaml \
+  --vllm-config vllm_agent.yaml \
   --hf-checkpoint /data/models/Qwen3-8B \
   --rollout-num-gpus 32 \
   --rollout-function-path my_agent.rollout.generate_rollout \
@@ -392,7 +392,7 @@ python train.py \
 **Custom rollout function (`my_agent/rollout.py`):**
 
 ```python
-from slime.rollout.sglang_rollout import get_model_url
+from slime.rollout.vllm_rollout import get_model_url
 from slime.utils.http_utils import post
 
 async def generate_with_models(args, sample, sampling_params):
@@ -442,12 +442,12 @@ No. All server groups within a model must share the same `model_path`. This is v
 
 ### Q: How do I access the router address for a specific model at runtime?
 
-Use `get_model_url(args, "model_name", "/endpoint")` from `slime.rollout.sglang_rollout`. It reads from `args.sglang_model_routers`, which is a dict `{ model_name: (ip, port) }` populated automatically.
+Use `get_model_url(args, "model_name", "/endpoint")` from `slime.rollout.vllm_rollout`. It reads from `args.vllm_model_routers`, which is a dict `{ model_name: (ip, port) }` populated automatically.
 
-### Q: Can I use `--sglang-config` without training (inference only)?
+### Q: Can I use `--vllm-config` without training (inference only)?
 
-While `--sglang-config` is designed for slime's training loop, you can effectively use it for inference-only scenarios by configuring a rollout-only run. For fully standalone SGLang serving, consider using SGLang's native `launch_server` directly or the `--rollout-external` mode for connecting to pre-deployed engines.
+While `--vllm-config` is designed for slime's training loop, you can effectively use it for inference-only scenarios by configuring a rollout-only run. For fully standalone vLLM serving, consider using vLLM's native `vllm serve` directly or the `--rollout-external` mode for connecting to pre-deployed engines.
 
-### Q: What is the relationship between `--sglang-config` and `--prefill-num-servers`?
+### Q: What is the relationship between `--vllm-config` and `--prefill-num-servers`?
 
-`--prefill-num-servers` is the legacy way to enable PD disaggregation (it creates a single model with prefill + decode groups). `--sglang-config` is the newer, more flexible approach. They are mutually exclusive. We recommend migrating to `--sglang-config` for all new deployments.
+`--prefill-num-servers` is the legacy way to enable PD disaggregation (it creates a single model with prefill + decode groups). `--vllm-config` is the newer, more flexible approach. They are mutually exclusive. We recommend migrating to `--vllm-config` for all new deployments.

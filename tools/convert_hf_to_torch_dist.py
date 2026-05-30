@@ -25,7 +25,7 @@ def add_convertion_args(parser):
         "--megatron-to-hf-mode",
         choices=["raw", "bridge"],
         default="raw",
-        help="The method to convert megatron weights to hugging face weights for SGLang.",
+        help="The method to convert megatron weights to hugging face weights for vLLM.",
     )
     try:
         parser.add_argument("--padded-vocab-size", type=int, default=None)

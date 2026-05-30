@@ -4,22 +4,31 @@ Speculative decoding is a key optimization for speeding up rollouts. Instead of 
 
 ## Accelerating Inference with Speculative Decoding
 
-For models with MTP layers (e.g., GLM-4.7, DeepSeek-V3/R1), simply add:
+vLLM exposes speculative decoding as a single JSON config (`SpeculativeConfig`),
+which slime forwards via `--vllm-speculative-config`. For models with MTP layers
+(e.g., GLM-4.7, DeepSeek-V3/R1), pass:
 
 ```bash
---sglang-speculative-algorithm EAGLE
---sglang-speculative-num-steps 3
---sglang-speculative-eagle-topk 1
---sglang-speculative-num-draft-tokens 4
+--vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 ```
 
-If you want to use a separately trained draft model (e.g., one trained with [SpecForge](https://docs.sglang.ai/SpecForge/)), also set:
+To use a separately trained draft model, set `model` (and optionally `draft_tensor_parallel_size`)
+in the same JSON:
 
 ```bash
---sglang-speculative-draft-model-path /your/draft/model/path
+--vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3,"model":"/your/draft/model/path"}'
 ```
 
-For detailed parameter meanings and configuration, see SGLang’s speculative decoding [documentation](https://docs.sglang.ai/advanced_features/speculative_decoding.html).
+To train a draft model from scratch, see [TorchSpec](https://github.com/lightseekorg/TorchSpec)
+and [vllm-project/speculators](https://github.com/vllm-project/speculators).
+TorchSpec provides torch-native, disaggregated draft training.
+Speculators supports EAGLE-3, DFlash, and MTP-style drafts, ships pre-trained
+checkpoints on Hugging Face (see the `RedHatAI/*-speculator.*` collection), and
+saves drafts in a format that `vllm serve <speculator_model>` can deploy directly.
+
+For the full list of `SpeculativeConfig` fields (including `disable_by_batch_size`,
+`acceptance_method`, draft TP, etc.), see vLLM's speculative-decoding
+[documentation](https://docs.vllm.ai/en/latest/features/speculative_decoding/).
 
 ## Online SFT for the Draft Model
 

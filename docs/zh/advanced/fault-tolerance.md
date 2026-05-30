@@ -6,7 +6,7 @@
 
 ## rollout 容灾
 
-slime 会在 rollout 过程中，定期向所有 SGLang server 发送心跳请求（`/health_generate`），如果心跳超时，则会停止这个 SGLang server。并在这轮 rollout 完成之后进行重启和正确的参数更新。
+slime 会在 rollout 过程中，定期向所有 vLLM 引擎发送心跳请求（`/health`），如果心跳超时，则会停止这个 vLLM 引擎。并在这轮 rollout 完成之后进行重启和正确的参数更新。
 
 - `--rollout-health-check-first-wait`：由于一些大的 MoE 模型在第一次运行时需要处理一些编译，我们会在第一次 rollout 前等待 `rollout_health_check_first_wait` 秒再开始发送心跳，默认为 300s；
 - `--rollout-health-check-interval`：心跳检查间隔，默认为 10s；

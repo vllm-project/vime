@@ -272,9 +272,6 @@ def process_param(args, model_name, name, param, vocab_size=None):
 
 
 def save_tensors(args, model_name, state_dict, output_dir, chunk_size, vocab_size=None, max_workers=1, worker_id=None):
-    # for slime update_weight compatible
-    args.sglang_enable_ep_moe = False
-
     print(f"start saving to {output_dir}")
     os.makedirs(output_dir, exist_ok=True)
     param_list = list(get_named_params(args, state_dict))

@@ -123,7 +123,7 @@ VLLM_ARGS=(
     --vllm-server-concurrency 1024
    --vllm-enable-expert-parallel
    --vllm-all2all-backend deepep_high_throughput
-   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3}'
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 )
 
 MISC_ARGS=(

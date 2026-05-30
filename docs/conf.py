@@ -122,8 +122,8 @@ html_theme_options = {
 
 html_context = {
     "display_github": True,
-    "github_user": "sgl-project",
-    "github_repo": "sgl-project.github.io",
+    "github_user": "vllm-project",
+    "github_repo": "vime",
     "github_version": "main",
     "conf_py_path": "/docs/",
 }

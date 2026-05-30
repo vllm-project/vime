@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
-import vllm_router  # noqa: F401 — same side-effect as ``import sglang_router`` in sglang rollout
+import vllm_router  # noqa: F401 — ensures vllm-router is importable on startup
 from tqdm import tqdm
 
 from slime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
@@ -28,7 +28,7 @@ from slime.utils.processing_utils import (
     load_processor,
     load_tokenizer,
 )
-from slime.utils.trace_utils import trace_function, trace_span
+from slime.utils.trace_utils import build_vllm_meta_trace_attrs, trace_function, trace_span
 from slime.utils.types import Sample
 
 from .rm_hub import async_rm, batched_async_rm
@@ -86,7 +86,7 @@ def _prepare_prompt_ids(sample: Sample, tokenizer, processor: Any) -> list[int]:
 def _base_dataset_prompt_ids(sample: Sample, tokenizer, processor: Any) -> list[int]:
     """Token ids for the dataset prompt only (never reuse ``sample.tokens``).
 
-    Used for partial-continuation budgeting to match ``dev_vllm`` ``sglang_rollout``:
+    Used for partial-continuation budgeting:
     ``max_new_tokens -= len(sample.tokens) - len(base_prompt_ids)`` when ``sample.response`` is non-empty.
     """
     raw_multimodal_inputs = sample.multimodal_inputs or {}
@@ -102,24 +102,24 @@ def get_model_url(args: Namespace, model_name: str, endpoint: str = "/inference/
     """Return the router URL for a named model.
 
     Use this in custom rollout functions to route requests to a specific
-    model when multiple models are deployed via ``--sglang-config``::
+    model when multiple models are deployed via ``--vllm-config``::
 
         url = get_model_url(args, "ref", "/inference/v1/generate")
         resp = await post(url, json=payload)
 
     Falls back to the default router if *model_name* is not found or
-    ``sglang_model_routers`` is not set.
+    ``vllm_model_routers`` is not set.
     """
-    routers = getattr(args, "sglang_model_routers", None)
+    routers = getattr(args, "vllm_model_routers", None)
     if routers and model_name in routers:
         ip, port = routers[model_name]
         return f"http://{ip}:{port}{endpoint}"
-    return f"http://{args.router_ip}:{args.router_port}{endpoint}"
+    return f"http://{args.vllm_router_ip}:{args.vllm_router_port}{endpoint}"
 
 
 async def _router_worker_urls(args: Namespace) -> list[str]:
-    """Resolve worker base URLs from the vLLM router (same HTTP shape as SGLang router)."""
-    base = f"http://{args.router_ip}:{args.router_port}"
+    """Resolve worker base URLs from the vLLM router."""
+    base = f"http://{args.vllm_router_ip}:{args.vllm_router_port}"
     try:
         response = await get(f"{base}/workers")
         return [worker["url"] for worker in response["workers"]]
@@ -243,7 +243,7 @@ def _inference_generate_tokens_and_logprobs(choice: dict[str, Any]) -> tuple[lis
 def _align_engine_tokens_and_logprobs(
     new_response_tokens: list[int], new_response_log_probs: list[float]
 ) -> tuple[list[int], list[float]]:
-    """Pad or truncate logprobs so ``len(.) == len(new_response_tokens)`` (SGLang always has matched OTL pairs)."""
+    """Pad or truncate logprobs so ``len(.) == len(new_response_tokens)``."""
     n = len(new_response_tokens)
     if n == 0:
         return [], []
@@ -281,7 +281,7 @@ class GenerateState(metaclass=SingletonMeta):
             spaces_between_special_tokens=False,
         )
 
-        if getattr(args, "sglang_enable_deterministic_inference", False):
+        if getattr(args, "vllm_enable_deterministic_inference", False):
             sampling_seed_base = args.rollout_seed
             self.group_sampling_seeds = [sampling_seed_base + i for i in range(args.n_samples_per_prompt)]
 
@@ -390,7 +390,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         assert isinstance(sample.prompt, str)
 
     state = GenerateState(args)
-    base = f"http://{args.router_ip}:{args.router_port}"
+    base = f"http://{args.vllm_router_ip}:{args.vllm_router_port}"
 
     assert (
         sample.status == Sample.Status.PENDING or sample.status == Sample.Status.ABORTED
@@ -417,11 +417,15 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     if not sample.tokens:
         sample.tokens = prompt_ids
 
-    # Use session_id for consistent hashing routing (SGLang Model Gateway)
+    # Use session_id for consistent_hash routing. vllm-router's
+    # ConsistentHashPolicy.extract_hash_key_from_headers recognizes
+    # x-session-id / x-user-id / x-tenant-id (and session_params.session_id
+    # in the request body) — see vllm_router_rs::policies::consistent_hash.
+    # NB: vllm-router's policy enum is "consistent_hash" (no -ing).
     headers = None
     if sample.session_id:
-        if getattr(args, "router_policy", None) == "consistent_hashing":
-            headers = {"X-SMG-Routing-Key": sample.session_id}
+        if getattr(args, "router_policy", None) == "consistent_hash":
+            headers = {"x-session-id": sample.session_id}
 
     if images:
         # Disaggregated MM flow: render (preprocess) then tokens-only generate — see vLLM docs
@@ -456,8 +460,15 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
             "token_ids": token_ids,
             "sampling_params": inference_sampling_params,
         }
-        with trace_span(sample, "vllm_inference_generate", attrs={"max_new_tokens": params["max_new_tokens"]}):
+        with trace_span(
+            sample, "vllm_inference_generate", attrs={"max_new_tokens": params["max_new_tokens"]}
+        ) as span:
             output = await post(url, payload, headers=headers)
+            # Enrich the span with response meta (finish reason + token usage), mirroring
+            # SGLang's build_sglang_meta_trace_attrs. trace_span yields the raw target when
+            # tracing is disabled, so guard on `.update`.
+            if hasattr(span, "update"):
+                span.update(build_vllm_meta_trace_attrs(output))
 
     choice = output["choices"][0]
     skip_sp = params.get("skip_special_tokens")
@@ -590,7 +601,7 @@ async def generate_and_rm_group(
     tasks = []
     for idx, sample in enumerate(group):
         current_sampling_params = sampling_params.copy()
-        if getattr(args, "sglang_enable_deterministic_inference", False):
+        if getattr(args, "vllm_enable_deterministic_inference", False):
             seed = state.group_sampling_seeds[idx]
             current_sampling_params["seed"] = seed
         tasks.append(
@@ -821,7 +832,7 @@ async def eval_rollout_single_dataset(
             sample.metadata = dataset_cfg.inject_metadata(getattr(sample, "metadata", None))
             sample.generate_function_path = getattr(dataset_cfg, "custom_generate_function_path", None)
             sampling_params = base_sampling_params
-            if getattr(args, "sglang_enable_deterministic_inference", False):
+            if getattr(args, "vllm_enable_deterministic_inference", False):
                 sampling_params = base_sampling_params.copy()
                 sampling_params["seed"] = args.rollout_seed + j
             tasks.append(

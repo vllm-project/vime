@@ -36,7 +36,7 @@ By default it also starts a local static server so you can open the generated HT
 - Each row corresponds to one sample.
 - Bars represent spans, while point markers represent instant events.
 - Span attributes recorded at the start or end of `trace_span(...)` are shown in the details panel.
-- When SGLang returns PD disaggregation timings, the viewer adds synthetic `[P]` and `[D]` lanes to break out prefill/decode work.
+- When vLLM returns PD disaggregation timings, the viewer adds synthetic `[P]` and `[D]` lanes to break out prefill/decode work.
 - When PD is not enabled, those virtual lanes are omitted automatically and the base trace still renders normally.
 
 ## Instrument custom code
@@ -101,19 +101,18 @@ If you need to add attrs after part of the function has executed, use an inner `
 - `trace_function(...)` for the outer function-level lifecycle span
 - nested `trace_span(...)` for important sub-steps such as generation, RM, filtering, or post-processing
 
-If you want to record SGLang generation metadata in a consistent way, reuse `build_sglang_meta_trace_attrs`:
+For per-turn attrs around an HTTP call, wrap it in `trace_span` directly:
 
 ```python
-from slime.utils.trace_utils import build_sglang_meta_trace_attrs, trace_span
+from slime.utils.trace_utils import trace_span
 
-with trace_span(sample, "sglang_generate") as span:
+with trace_span(sample, "vllm_generate", attrs={"max_tokens": params["max_new_tokens"]}):
     output = await post(url, payload)
-    span.update(build_sglang_meta_trace_attrs(output["meta_info"]))
 ```
 
 ## Tips
 
 - Save a small number of rollouts first; the viewer is easiest to read when each dump contains a manageable number of samples.
 - The viewer is built from the saved `.pt` dump, so traces can be inspected offline on another machine.
-- For GPU/kernel-level SGLang profiling traces, see [Profiling](./profiling.md).
+- For GPU/kernel-level vLLM profiling traces, see [Profiling](./profiling.md).
 

@@ -43,21 +43,21 @@
 
     Yes. Data packing refers to the process of concatenating samples of varying lengths during training to improve GPU utilization. slime performs this operation by default.
 
-8.  **What should I do if the sglang component shows a `Max retries exceeded with url: /get_model_info (Caused by NewConnectionError)` error?**
+8.  **What should I do if the vLLM component shows a `Max retries exceeded with url: /health (Caused by NewConnectionError)` error?**
 
-    This issue primarily stems from port conflicts caused by multiple sglang servers running on a single machine. We are currently working with the sglang team to resolve this. A temporary workaround is to minimize the number of sglang servers on a single machine, for example, by setting `tp=8`.
+    slime probes `GET /health` to wait for each vLLM engine to come up; this error means the readiness probe never connected. The most common cause is port conflicts when multiple vLLM engines share a single machine. A temporary workaround is to minimize the number of vLLM engines per machine, for example, by setting `tp=8`.
 
 9.  **My gradient norm is very high and the training crashes. What should I do?**
 
     First, ensure that your data and model are compatible. For example, if your data already uses a chat template, check if this template matches the one used by the original model. If the data is correct, please refer to our [Debug Guide](../developer_guide/debug.md) for a more in-depth analysis.
 
-10. **My sglang generation takes an extremely long time, GPU power is maxed out, and there's no output for a long while. Why?**
+10. **My vLLM generation takes an extremely long time, GPU power is maxed out, and there's no output for a long while. Why?**
 
     Please verify that the model corresponding to `--hf-checkpoint` has its stop tokens configured correctly. If not, you can set them using the `--rollout-stop` or `--rollout-stop-token-ids` arguments.
 
-11. **Sglang shows an `an illegal memory access was encountered` error.**
+11. **vLLM shows an `an illegal memory access was encountered` error.**
 
-    According to [SGLang documentation](https://docs.sglang.io/references/faq.html), this could be an OOM error. Consider reducing the value of `--sglang-mem-fraction-static`.
+    This is often an OOM. Consider reducing `--vllm-gpu-memory-utilization`.
 
 12. **A `JSONDecodeError` occurs related to torch compile/inductor.**
 

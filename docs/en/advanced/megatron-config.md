@@ -2,7 +2,7 @@
 
 `--megatron-config-path` is a YAML-based configuration system for applying role-specific overrides on top of the shared Megatron CLI arguments. Today it is mainly intended for PPO actor / critic configuration.
 
-Unlike `--sglang-config`, `--megatron-config-path` does not manage deployment, routing, or GPU orchestration. Its only job is to decide which training arguments each role should finally use.
+Unlike `--vllm-config`, `--megatron-config-path` does not manage deployment, routing, or GPU orchestration. Its only job is to decide which training arguments each role should finally use.
 
 ---
 

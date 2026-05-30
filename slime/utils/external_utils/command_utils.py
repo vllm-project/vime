@@ -108,17 +108,21 @@ def execute_train(
     master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
 
     exec_command(
-        "pkill -9 sglang; "
+        # vLLM renames its VRAM-holding subprocesses via set_process_title()
+        # (VLLM::EngineCore, VLLM::Worker_TP*, vllm::router), so their cmdline no
+        # longer contains "vllm serve". Matching only the launcher would leave the
+        # engine/worker children holding GPU memory and leak it into the next run.
+        # Match both the launcher and the renamed children; the [v]/[M] bracket
+        # trick keeps this pattern from matching pkill's own cmdline. This targets
+        # exactly the vLLM tree, so the old indiscriminate `pkill -9 python`
+        # (dangerous on colocate/shared nodes) is no longer needed.
+        "pkill -9 -f '[v]llm serve|VLL[M]::'; "
         "sleep 3; "
         f"{'' if external_ray else 'ray stop --force; '}"
         f"{'' if external_ray else 'pkill -9 ray; '}"
-        # cannot be run in CI, o/w kill the parent script
-        # TODO: do we really need this kill? (or can we instead kill slime)
-        # "pkill -9 python; "
         "pkill -9 slime; "
         "sleep 3; "
         f"{'' if external_ray else 'pkill -9 ray; '}"
-        # "pkill -9 python; "
         "pkill -9 slime; "
         "pkill -9 redis; "
         "true; "
@@ -222,7 +226,6 @@ def create_run_id() -> str:
 _warned_bool_env_var_keys = set()
 
 
-# copied from SGLang
 def get_bool_env_var(name: str, default: str = "false") -> bool:
     value = os.getenv(name, default)
     value = value.lower()

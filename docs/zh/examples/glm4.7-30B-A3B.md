@@ -66,38 +66,34 @@ GLM-4.7-Flash 是一个 MoE（混合专家）模型，包含 64 个路由专家�
    )
    ```
 
-3. 开启 SGLang 支持的 MoE 优化，使用 DP attention：
+3. 在 vLLM 侧开启 MoE expert parallelism。GLM-4.7-Flash 是非 MLA 模型，
+   这里用 attention 上 8 路 data parallel + expert 上 expert parallel：
 
    ```bash
-   SGLANG_ARGS=(
+   VLLM_ARGS=(
       --rollout-num-gpus-per-engine 8
-      --sglang-mem-fraction-static 0.7
-      --sglang-enable-dp-attention
-      --sglang-dp-size 8
-      --sglang-enable-dp-lm-head
-      --sglang-moe-dense-tp-size 1
+      --vllm-gpu-memory-utilization 0.7
+      --vllm-data-parallel-size 8
+      --vllm-enable-expert-parallel
       ...
    )
    ```
 
 #### MTP 投机解码（推理加速）
 
-GLM-4.7-Flash 包含 1 层 MTP（Multi-Token Prediction）层，可用于推理时的投机解码来加速 rollout 生成。要启用此功能，在 `SGLANG_ARGS` 中添加以下配置：
+GLM-4.7-Flash 包含 1 层 MTP（Multi-Token Prediction）层，可用于推理时的投机解码来加速 rollout 生成。要启用此功能，在 `VLLM_ARGS` 中添加以下配置：
 
 ```bash
-SGLANG_ARGS=(
+VLLM_ARGS=(
    ...
    # MTP 投机解码 (EAGLE)
-   --sglang-speculative-algorithm EAGLE
-   --sglang-speculative-num-steps 3
-   --sglang-speculative-eagle-topk 1
-   --sglang-speculative-num-draft-tokens 4
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 )
 ```
 
-这会让 SGLang 使用模型的 MTP 层作为 EAGLE 风格投机解码的 draft 模型。MTP 层预测多个未来 token，SGLang 并行验证它们，从而加速生成。
+这会让 vLLM 使用模型的 MTP 层作为 EAGLE 风格投机解码的 draft 模型。MTP 层预测多个未来 token，vLLM 并行验证它们，从而加速生成。
 
-> ⚠️ **注意**：投机解码会占用额外的 GPU 显存。如果遇到 OOM 问题，可以尝试降低 `--sglang-mem-fraction-static` 或关闭投机解码。
+> ⚠️ **注意**：投机解码会占用额外的 GPU 显存。如果遇到 OOM 问题，可以尝试降低 `--vllm-gpu-memory-utilization` 或关闭投机解码。
 
 #### MTP 训练
 
@@ -139,17 +135,15 @@ bash scripts/run-glm4.7-30B-A3B.sh
 - 去掉 CPU Adam 相关的配置，因为使用了 distributed optimizer，多机环境下 optimizer 的显存占比会明显下降。
 - 调整并行度：例如 TP=4, PP=2, EP=8, CP=2。
 
-当总卡数并不能被 expert 总数（64）乘除时，可以使用 `--sglang-ep-num-redundant-experts` 来增加冗余的 expert。例如对于 24 卡的场景：
+当总卡数并不能被 expert 总数（64）整除时，可以开启 vLLM 的 EPLB（Expert Parallelism Load Balancer），通过 `--vllm-eplb-config` 配置冗余 expert 数量。例如对于 24 卡的场景：
 
 ```bash
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 24
-   --sglang-mem-fraction-static 0.7
-   --sglang-ep-size 24
-   --sglang-enable-dp-attention
-   --sglang-dp-size 3
-   --sglang-moe-dense-tp-size 1
-   --sglang-enable-dp-lm-head
-   --sglang-ep-num-redundant-experts 16
+   --vllm-gpu-memory-utilization 0.7
+   --vllm-data-parallel-size 3
+   --vllm-enable-expert-parallel
+   --vllm-enable-eplb
+   --vllm-eplb-config '{"num_redundant_experts": 16}'
 )
 ```

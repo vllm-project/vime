@@ -119,7 +119,7 @@ VLLM_ARGS=(
    --vllm-max-num-seqs 512
    --vllm-enable-expert-parallel
    --vllm-all2all-backend deepep_high_throughput
-   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3}'
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
    --vllm-block-size 64
    --vllm-max-cudagraph-capture-size 8
    --vllm-max-num-batched-tokens 131072

@@ -83,39 +83,35 @@ GLM-4.7 is a Mixture-of-Experts (MoE) model with 160 routed experts (top-8 activ
    )
    ```
 
-3. Enable MoE optimization in SGLang with DP attention:
+3. Enable MoE expert parallelism in vLLM. GLM-4.7 is non-MLA, so we use 4-way
+   data parallelism on the attention block with expert parallelism on the
+   experts (EP size is auto-derived as `tensor_parallel_size × data_parallel_size`):
 
    ```bash
-   SGLANG_ARGS=(
+   VLLM_ARGS=(
       --rollout-num-gpus-per-engine 32
-      --sglang-mem-fraction-static 0.7
-      --sglang-enable-dp-attention
-      --sglang-dp-size 4
-      --sglang-ep-size 32
-      --sglang-enable-dp-lm-head
-      --sglang-moe-dense-tp-size 1
+      --vllm-gpu-memory-utilization 0.7
+      --vllm-data-parallel-size 4
+      --vllm-enable-expert-parallel
       ...
    )
    ```
 
 #### MTP Speculative Decoding (Inference Acceleration)
 
-GLM-4.7 includes MTP (Multi-Token Prediction) layers that can be used for speculative decoding during inference to speed up rollout generation. To enable this, add the following to `SGLANG_ARGS`:
+GLM-4.7 includes MTP (Multi-Token Prediction) layers that can be used for speculative decoding during inference to speed up rollout generation. To enable this, add the following to `VLLM_ARGS`:
 
 ```bash
-SGLANG_ARGS=(
+VLLM_ARGS=(
    ...
    # MTP speculative decoding (EAGLE)
-   --sglang-speculative-algorithm EAGLE
-   --sglang-speculative-num-steps 3
-   --sglang-speculative-eagle-topk 1
-   --sglang-speculative-num-draft-tokens 4
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 )
 ```
 
-This lets SGLang use the model's MTP layer as the draft model for EAGLE-style speculative decoding.
+This lets vLLM use the model's MTP layer as the draft model for EAGLE-style speculative decoding.
 
-> ⚠️ **Note**: Speculative decoding requires additional GPU memory. If you encounter OOM issues, try reducing `--sglang-mem-fraction-static` or disabling speculative decoding.
+> ⚠️ **Note**: Speculative decoding requires additional GPU memory. If you encounter OOM issues, try reducing `--vllm-gpu-memory-utilization` or disabling speculative decoding.
 
 #### MTP Training
 
@@ -146,13 +142,18 @@ This example already targets multi-node training. Before launching:
 - Set `MASTER_ADDR` to an address reachable by all nodes.
 - Unset proxy variables before starting Ray workers.
 - Provide a `HOSTFILE` listing worker IPs (one per line) and export `HOSTFILE=/path/to/hostfile` before launching.
-- Adjust parallelism coherently. The default example uses TP=8, PP=4, EP=16, CP=2, while rollout uses 32 GPUs per engine with SGLang DP attention.
+- Adjust parallelism coherently. The default example uses TP=8, PP=4, EP=16, CP=2, while rollout uses 32 GPUs per engine with DP=4 + expert parallel.
 
-If your rollout GPU count does not divide the expert count cleanly, you can use `--sglang-ep-num-redundant-experts` to add redundant experts.
+If your rollout GPU count does not divide the expert count cleanly, enable vLLM's EPLB (Expert Parallelism Load Balancer) and configure redundant experts via `--vllm-eplb-config`, e.g.:
+
+```bash
+--vllm-enable-eplb
+--vllm-eplb-config '{"num_redundant_experts": 16}'
+```
 
 ## FP8 Rollout
 
-The open-source FP8 checkpoint of GLM-4.7 uses per-channel quantization, which cannot currently enable DeepEP in SGLang. You can convert it to a 128x128 per-block FP8 checkpoint with the tool provided in slime:
+The open-source FP8 checkpoint of GLM-4.7 uses per-channel quantization, which cannot currently enable DeepEP in vLLM. You can convert it to a 128x128 per-block FP8 checkpoint with the tool provided in slime:
 
 ```bash
 cd /root/slime
@@ -165,25 +166,18 @@ python tools/convert_hf_to_fp8.py \
 
 Then switch `--hf-checkpoint` to `$BASE_DIR/GLM-4.7-355B-A32B-FP8/` to enable FP8 rollout.
 
-An example FP8 `SGLANG_ARGS` setup is:
+An example FP8 `VLLM_ARGS` setup is:
 
 ```bash
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 32
-   --sglang-mem-fraction-static 0.7
-   --sglang-enable-dp-attention
-   --sglang-dp-size 32
-   --sglang-ep-size 32
-   --sglang-moe-dense-tp-size 1
-   --sglang-enable-dp-lm-head
-   --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 128)
+   --vllm-gpu-memory-utilization 0.7
+   --vllm-data-parallel-size 32
+   --vllm-enable-expert-parallel
+   --vllm-cudagraph-capture-sizes 1 2 4 8 $(seq 16 8 128)
 
-   --sglang-speculative-algorithm EAGLE
-   --sglang-speculative-num-steps 3
-   --sglang-speculative-eagle-topk 1
-   --sglang-speculative-num-draft-tokens 4
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 
-   --sglang-moe-a2a-backend deepep
-   --sglang-deepep-mode auto
+   --vllm-all2all-backend deepep_high_throughput
 )
 ```

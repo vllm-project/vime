@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 _spawn_ctx = multiprocessing.get_context("spawn")
 
-# vLLM sleep/wake only supports these tags (SGLang also uses ``cuda_graph``, which must be dropped).
+# vLLM sleep/wake only supports these tags.
 _VLLM_WAKE_TAGS = frozenset({"weights", "kv_cache"})
 
 
@@ -30,6 +30,15 @@ def _normalize_vllm_wake_tags(tags: list[str] | None) -> list[str] | None:
     if dropped:
         logger.debug("vLLM wake_up: dropped tags not supported by vLLM: %s", sorted(dropped))
     return normalized or None
+
+
+def _response_json(response: requests.Response) -> dict:
+    try:
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        e.add_note(f"{response.text=}")
+        raise
+    return response.json()
 
 
 def get_base_gpu_id(args, rank):
@@ -249,10 +258,9 @@ def launch_server_process(
     rank: int,
     visible_devices: str,
     model_path: str,
+    num_gpus_per_engine: int | None = None,
 ) -> multiprocessing.Process:
     """Spawn ``vllm serve`` (OpenAI API server) in a subprocess.
-
-    Contrasts with SGLang's launcher, which starts the HTTP server in-process from ``ServerArgs``.
 
     Fixed flags (model identity, distributed topology, port/host, seed) are set by the
     orchestrator. Every other ``vllm serve`` flag is reachable via ``--vllm-<flag>`` and
@@ -263,6 +271,20 @@ def launch_server_process(
     env.setdefault("NCCL_CUMEM_ENABLE", "0")
     env["CUDA_VISIBLE_DEVICES"] = visible_devices
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")
+    # DeepGEMM fp8 kernels: vLLM enables them by default; set explicitly so the
+    # rollout engine is pinned regardless of the base image's defaults (replaces
+    # SGLang's SGLANG_JIT_DEEPGEMM_PRECOMPILE / _FAST_WARMUP). WARMUP="relax" JITs
+    # the required kernels before serving (no hot-path JIT) without the longer
+    # "full" sweep. Both overridable via the environment.
+    env.setdefault("VLLM_USE_DEEP_GEMM", "1")
+    env.setdefault("VLLM_DEEP_GEMM_WARMUP", "relax")
+    # Deterministic inference: VLLM_BATCH_INVARIANT=1 makes attention / comm /
+    # MM kernels pick batch-invariant variants so the same token sequence yields
+    # the same logits regardless of batch composition. Per-sample seed alone (see
+    # GenerateState / eval_rollout_single_dataset in vllm_rollout.py) is necessary
+    # but not sufficient for determinism.
+    if getattr(args, "vllm_enable_deterministic_inference", False):
+        env["VLLM_BATCH_INVARIANT"] = "1"
     # Colocate loads --worker-extension-cls from slime; vLLM subprocess must see the
     # same tree as the trainer (editable vime), not an older site-packages slime.
     if getattr(args, "colocate", False):
@@ -279,7 +301,11 @@ def launch_server_process(
 
     host_for_subprocess = bind_host.strip("[]")
     model = model_path
-    tp = args.rollout_num_gpus_per_engine
+    # Per-engine TP: honor this engine's ServerGroup num_gpus_per_engine so a group
+    # configured with tp>1 launches tp>1, matching the weight-sync world_size
+    # accounting in update_weight_from_distributed (engine_gpu_counts). Falls back
+    # to the global flag for single-GPU-per-engine groups.
+    tp = num_gpus_per_engine or args.rollout_num_gpus_per_engine
     seed = getattr(args, "seed", 1234) + rank
 
     # Orchestrator-owned flags (correspond to SKIPPED_DESTS in vllm_utils/arguments.py).
@@ -408,7 +434,7 @@ def _redact_cmd_for_log(cmd: list[str]) -> str:
 
 
 def _wait_server_healthy(base_url: str, process: multiprocessing.Process | None, timeout_s: float = 300.0) -> None:
-    """Wait until the vLLM server responds on ``GET /health`` (SGLang stacks typically use ``GET /health_generate``)."""
+    """Wait until the vLLM server responds on ``GET /health``."""
     start = time.time()
     while True:
         try:
@@ -435,7 +461,7 @@ class VLLMEngine(RayActor):
         worker_type: str = "regular",
         base_gpu_id: int | None = None,
         model_path: str | None = None,
-        sglang_overrides: dict | None = None,
+        vllm_overrides: dict | None = None,
         num_gpus_per_engine: int | None = None,
     ):
         self.args = args
@@ -444,7 +470,7 @@ class VLLMEngine(RayActor):
         self.base_gpu_id = base_gpu_id
         self.model_path = model_path or args.hf_checkpoint
         # Uniform Ray ``start_engines`` kwargs; unused when launching vLLM over HTTP.
-        self.sglang_overrides = sglang_overrides or {}
+        self.vllm_overrides = vllm_overrides or {}
         self.num_gpus_per_engine = num_gpus_per_engine
         self.process: multiprocessing.Process | None = None
         self._weight_version: str | None = None
@@ -455,12 +481,7 @@ class VLLMEngine(RayActor):
         return f"http://{self.server_host}:{self.server_port}"
 
     def _weight_transfer_http_timeout(self) -> float:
-        return float(
-            os.environ.get(
-                "SLIME_VLLM_WEIGHT_TRANSFER_UPDATE_TIMEOUT_SEC",
-                os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"),
-            )
-        )
+        return float(self.args.vllm_weight_transfer_timeout_sec)
 
     def init(
         self,
@@ -474,8 +495,8 @@ class VLLMEngine(RayActor):
     ):
         del dist_init_addr, nccl_port, disaggregation_bootstrap_port
 
-        self.router_ip = router_ip if router_ip is not None else self.args.router_ip
-        self.router_port = router_port if router_port is not None else self.args.router_port
+        self.router_ip = router_ip if router_ip is not None else self.args.vllm_router_ip
+        self.router_port = router_port if router_port is not None else self.args.vllm_router_port
 
         host = host or get_host_info()[1]
         self.server_host = _format_v6_uri(host)
@@ -534,7 +555,6 @@ class VLLMEngine(RayActor):
     def _wait_external_config_ready(self) -> None:
         """External engine: best-effort ``GET /server_info`` TP check (non-fatal)."""
         try:
-            # SGLang external mode uses ``/get_server_info``; vLLM exposes ``/server_info``.
             actual = requests.get(f"{self._http_base()}/server_info", params={"config_format": "json"}, timeout=30)
             actual.raise_for_status()
             body = actual.json()
@@ -554,7 +574,8 @@ class VLLMEngine(RayActor):
 
     def _init_normal(self) -> None:
         logger.info("Launch vLLM OpenAI api_server at: %s:%s", self.server_host, self.server_port)
-        num_gpus = min(self.args.num_gpus_per_node, self.args.rollout_num_gpus_per_engine)
+        gpus_per_engine = self.num_gpus_per_engine or self.args.rollout_num_gpus_per_engine
+        num_gpus = min(self.args.num_gpus_per_node, gpus_per_engine)
         base = self.base_gpu_id if self.base_gpu_id is not None else get_base_gpu_id(self.args, self.rank)
         base = _to_local_gpu_id(base)
         visible_devices = ",".join(str(base + i) for i in range(num_gpus))
@@ -567,6 +588,7 @@ class VLLMEngine(RayActor):
             rank=self.rank,
             visible_devices=visible_devices,
             model_path=self.model_path,
+            num_gpus_per_engine=gpus_per_engine,
         )
         _wait_server_healthy(self._http_base(), process=self.process)
 
@@ -585,14 +607,10 @@ class VLLMEngine(RayActor):
             {"update_info": update_info},
             timeout=self._weight_transfer_http_timeout(),
         )
-        response.raise_for_status()
-        try:
-            return response.json()
-        except Exception:
-            return {"ok": True, "raw": response.text}
+        return _response_json(response)
 
     def health_generate(self, timeout: float = 5.0) -> bool:
-        """Return True if ``GET /health`` succeeds (SGLang uses ``GET /health_generate`` for the same role)."""
+        """Return True if ``GET /health`` succeeds."""
         if self.node_rank != 0:
             return True
         response = requests.get(f"{self._http_base()}/health", timeout=timeout)
@@ -628,7 +646,7 @@ class VLLMEngine(RayActor):
         return response
 
     def flush_cache(self):
-        """Clear prefix cache via ``POST /reset_prefix_cache`` (SGLang uses ``GET /flush_cache``)."""
+        """Clear prefix cache via ``POST /reset_prefix_cache``."""
         if self.node_rank != 0:
             return
         params = {"reset_running_requests": False, "reset_external": False}
@@ -701,7 +719,7 @@ class VLLMEngine(RayActor):
         return self._weight_version
 
     def release_memory_occupation(self, level: int = 1):
-        """``POST /sleep?level={level}`` when sleep mode is enabled (SGLang: ``POST /release_memory_occupation``).
+        """``POST /sleep?level={level}`` when sleep mode is enabled.
 
         level=1 (default) releases KV cache only.
         level=0 releases both KV cache and model weights (required before IPC tensor injection).
@@ -717,14 +735,10 @@ class VLLMEngine(RayActor):
             params={"level": level},
             timeout=30,
         )
-        response.raise_for_status()
-        try:
-            return response.json()
-        except Exception:
-            return {"ok": True, "raw": response.text}
+        return _response_json(response)
 
     def resume_memory_occupation(self, tags: list[str] | None = None):
-        """``POST /wake_up`` when sleep mode is on (SGLang: ``POST /resume_memory_occupation``); else a small placeholder dict."""
+        """``POST /wake_up`` when sleep mode is on; else a small placeholder dict."""
         if not getattr(self.args, "vllm_enable_sleep_mode", False):
             return {"ok": True, "sleep_mode": False}
         tags = _normalize_vllm_wake_tags(tags)
@@ -736,11 +750,7 @@ class VLLMEngine(RayActor):
             params=wake_params,
             timeout=30,
         )
-        response.raise_for_status()
-        try:
-            return response.json()
-        except Exception:
-            return {"ok": True, "raw": response.text}
+        return _response_json(response)
 
     def init_weight_transfer_engine(self, payload: dict) -> dict:
         """``POST /init_weight_transfer_engine`` with a caller-supplied payload (IPC path).
@@ -748,16 +758,12 @@ class VLLMEngine(RayActor):
         For IPC mode the payload is ``{"init_info": {}}``; for NCCL use
         ``init_weights_update_group`` which constructs the payload from typed args.
         """
-        init_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
+        init_timeout_s = self._weight_transfer_http_timeout()
         last_error = None
         for attempt in range(1, 4):
             try:
                 response = self._post_json("init_weight_transfer_engine", payload, timeout=init_timeout_s)
-                response.raise_for_status()
-                try:
-                    return response.json()
-                except Exception:
-                    return {"ok": True, "raw": response.text}
+                return _response_json(response)
             except Exception as e:
                 last_error = e
                 if attempt < 3:
@@ -772,11 +778,7 @@ class VLLMEngine(RayActor):
             {"is_checkpoint_format": is_checkpoint_format},
             timeout=self._weight_transfer_http_timeout(),
         )
-        response.raise_for_status()
-        try:
-            return response.json()
-        except Exception:
-            return {"ok": True, "raw": response.text}
+        return _response_json(response)
 
     def finish_weight_update(self) -> dict:
         """``POST /finish_weight_update`` — signals vLLM to exit IPC weight-update mode.
@@ -786,14 +788,10 @@ class VLLMEngine(RayActor):
         single-RPC version-with-data semantics.
         """
         response = self._post_json("finish_weight_update", {}, timeout=self._weight_transfer_http_timeout())
-        response.raise_for_status()
-        try:
-            return response.json()
-        except Exception:
-            return {"ok": True, "raw": response.text}
+        return _response_json(response)
 
     def check_weights(self, action: str):
-        """No vLLM ``weights_checker`` route; return a placeholder (SGLang posts to ``/weights_checker``)."""
+        """No vLLM ``weights_checker`` route; return a placeholder."""
         del action
         return {"ok": True, "supported": False, "note": "vLLM has no weights_checker endpoint."}
 
@@ -812,16 +810,12 @@ class VLLMEngine(RayActor):
                 "world_size": world_size,
             }
         }
-        init_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
+        init_timeout_s = self._weight_transfer_http_timeout()
         last_error = None
         for attempt in range(1, 4):
             try:
                 response = self._post_json("init_weight_transfer_engine", payload, timeout=init_timeout_s)
-                response.raise_for_status()
-                try:
-                    return response.json()
-                except Exception:
-                    return {"ok": True, "raw": response.text}
+                return _response_json(response)
             except Exception as e:
                 last_error = e
                 if attempt < 3:
@@ -830,7 +824,7 @@ class VLLMEngine(RayActor):
         raise RuntimeError(f"vLLM init_weight_transfer_engine failed: {last_error}") from last_error
 
     def destroy_weights_update_group(self, group_name):
-        """No vLLM destroy call; return ``None`` (SGLang may ``POST /destroy_weights_update_group`` and swallow errors)."""
+        """No vLLM destroy call; return ``None``."""
         del group_name
         return None
 
@@ -844,7 +838,7 @@ class VLLMEngine(RayActor):
         weight_version: str | None = None,
         packed: bool = True,
     ):
-        """NCCL path: POST ``/update_weights`` (SGLang: ``POST /update_weights_from_distributed``).
+        """NCCL path: POST ``/update_weights``.
 
         Payload matches vLLM NCCL weight transfer (see upstream rlhf_http_nccl example).
         """
@@ -863,7 +857,7 @@ class VLLMEngine(RayActor):
         return self._post_vllm_update_weights_http(update_info)
 
     def update_weights_from_disk(self, model_path: str, load_format: str | None = None):
-        """``POST /collective_rpc`` with ``reload_weights`` and ``weights_path`` (SGLang uses a dedicated disk API)."""
+        """``POST /collective_rpc`` with ``reload_weights`` and ``weights_path``."""
         if self.node_rank != 0:
             return
         del load_format
@@ -875,14 +869,10 @@ class VLLMEngine(RayActor):
             },
             timeout=600,
         )
-        response.raise_for_status()
-        try:
-            return response.json()
-        except Exception:
-            return {"ok": True, "raw": response.text}
+        return _response_json(response)
 
     def pause_generation(self):
-        """``POST /pause`` with mode="keep" (SGLang: ``POST /pause_generation``); returns the ``requests.Response``."""
+        """``POST /pause`` with mode="keep"; returns the ``requests.Response``."""
         if self.node_rank != 0:
             return None
         response = requests.post(
@@ -895,7 +885,7 @@ class VLLMEngine(RayActor):
         return response
 
     def continue_generation(self):
-        """``POST /resume`` (SGLang: ``POST /continue_generation``)."""
+        """``POST /resume``."""
         if self.node_rank != 0:
             return None
         response = requests.post(f"{self._http_base()}/resume", json={}, timeout=120)
@@ -907,7 +897,7 @@ class VLLMEngine(RayActor):
         restore_weights_before_load: bool = False,
         post_process_quantization: bool = False,
     ):
-        """No vLLM HTTP hook (SGLang: ``POST /post_process_weights``); return a noop placeholder dict."""
+        """No vLLM HTTP hook; return a noop placeholder dict."""
         del restore_weights_before_load, post_process_quantization
         return {"ok": True, "noop": True, "note": "vLLM post_process is internal to load; no HTTP API."}
 

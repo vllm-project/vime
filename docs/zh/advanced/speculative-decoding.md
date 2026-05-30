@@ -4,22 +4,28 @@
 
 ## 使用投机采样加速推理
 
-对于有 MTP 层的模型（例如 GLM-4.6、Deepseek-V3/R1），只需要添加：
+vLLM 把投机采样的所有配置收敛到一个 JSON（`SpeculativeConfig`），slime 通过
+`--vllm-speculative-config` 透传。对于有 MTP 层的模型（例如 GLM-4.7、DeepSeek-V3/R1），传入：
 
 ```bash
---sglang-speculative-algorithm EAGLE
---sglang-speculative-num-steps 3
---sglang-speculative-eagle-topk 1
---sglang-speculative-num-draft-tokens 4
+--vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 ```
 
-如果要使用单独训练的 draft model（例如 [SpecForge](https://docs.sglang.ai/SpecForge/) 训练的），还需要额外设置：
+如果要使用单独训练的 draft model，在同一个 JSON 里加上 `model`（可选还可加
+`draft_tensor_parallel_size` 等）：
 
 ```bash
---sglang-speculative-draft-model-path /your/draft/model/path
+--vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3,"model":"/your/draft/model/path"}'
 ```
 
-详细参数含义及配置方法，请参考 SGLang 的 speculative decoding [文档](https://docs.sglang.ai/advanced_features/speculative_decoding.html)
+要从头训练一个 draft model，可以参考 [TorchSpec](https://github.com/lightseekorg/TorchSpec)
+和 [vllm-project/speculators](https://github.com/vllm-project/speculators)。
+TorchSpec 提供 torch-native 的 disaggregated draft training。
+Speculators 支持 EAGLE-3、DFlash 以及 MTP 风格的 draft，HuggingFace 上已有预训练 ckpt
+（参见 `RedHatAI/*-speculator.*` 集合），产物可被 `vllm serve <speculator_model>` 直接部署。
+
+`SpeculativeConfig` 的完整字段（`disable_by_batch_size`、`acceptance_method`、
+draft TP 等）请参考 vLLM 的 speculative decoding [文档](https://docs.vllm.ai/en/latest/features/speculative_decoding/)。
 
 ## 在线 SFT draft model
 

@@ -51,7 +51,7 @@ bash script/run-qwen3-4B-base-sft.sh
 
 可以将 [run-qwen3-4B-base-sft.sh](https://github.com/THUDM/slime/blob/main/scripts/run-qwen3-4B-base-sft.sh) 与 [run-qwen3-4B.sh](https://github.com/THUDM/slime/blob/main/scripts/run-qwen3-4B.sh) 进行对比。会发现除了我们将模型由 instruct 模型换为了 base 模型之外，主要进行了如下的几个调整：
 
-1. 移除了 `SGLANG_ARGS` 和 `GRPO_ARGS`。这是因为 sft 的过程中不需要启动 sglang 或者做 grpo 相关的配置；
+1. 移除了 `VLLM_ARGS` 和 `GRPO_ARGS`。这是因为 sft 的过程中不需要启动 vLLM 或者做 grpo 相关的配置；
 
 2. 将 `ROLLOUT_ARGS` 改名为了 `SFT_ARGS`，并配置为：
 
@@ -72,7 +72,7 @@ bash script/run-qwen3-4B-base-sft.sh
    )
    ```
 
-   slime 中的 sft 实际上是复用了 slime 的 custom rollout 功能，通过 `--rollout-function-path` 将数据生成部分从使用 sglang 的 RL rollout，切换成了从文件中读取数据的 sft 版本，即 `slime.rollout.sft_rollout.generate_rollout`。
+   slime 中的 sft 实际上是复用了 slime 的 custom rollout 功能，通过 `--rollout-function-path` 将数据生成部分从使用 vLLM 的 RL rollout，切换成了从文件中读取数据的 sft 版本，即 `slime.rollout.sft_rollout.generate_rollout`。
 
    对于 sft 来说，建议将 `rollout_batch_size` 与 `global_batch_size` 设置成相同的，并不要配置 `n_samples_per_prompt`，这样相当于是读一个 batch 就训一个 batch。
 
@@ -80,6 +80,6 @@ bash script/run-qwen3-4B-base-sft.sh
 
    至于 `--calculate-per-token-loss`，这是因为 slime 默认是以 GRPO 的 per sample mean 进行计算的，而一般 sft 训练都是按一个 batch 的所有不被 mask 的 token 取平均，所以建议配置上。
 
-   最后 `--disable-compute-advantages-and-returns` 表示 sft 的过程中不需要预先计算 log prob，`--debug-train-only` 表示不需要初始化 sglang。
+   最后 `--disable-compute-advantages-and-returns` 表示 sft 的过程中不需要预先计算 log prob，`--debug-train-only` 表示不需要初始化 vLLM。
 
 3. 使用了 `train_async.py` 而不是 `train.py`。这是为了利用异步训练的流程，来实现数据 prefetch。

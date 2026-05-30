@@ -7,9 +7,9 @@
 | 参数 | 说明 |
 |------|------|
 | `--use-opd` | 启用在策略蒸馏。使用 OPD 的必需标志。 |
-| `--opd-type` | OPD 类型：`sglang` 或 `megatron`。启用 `--use-opd` 时必须设置。 |
+| `--opd-type` | OPD 类型：`vllm` 或 `megatron`。启用 `--use-opd` 时必须设置。 |
 | `--opd-kl-coef` | OPD KL 惩罚系数（默认值：1.0）。控制蒸馏信号相对于 RL advantage 的权重。 |
-| `--opd-teacher-load` | 教师模型的 Megatron checkpoint 路径。`--opd-type=megatron` 时**必须**设置，`--opd-type=sglang` 时**不可**设置。 |
+| `--opd-teacher-load` | 教师模型的 Megatron checkpoint 路径。`--opd-type=megatron` 时**必须**设置，`--opd-type=vllm` 时**不可**设置。 |
 | `--opd-teacher-ckpt-step` | 可选的教师模型 checkpoint 步数。 |
 
 ## 原理
@@ -26,14 +26,14 @@ $$
 
 ## 两种教师模式
 
-### SGLang 模式 (`--opd-type sglang`)
+### vLLM 模式 (`--opd-type vllm`)
 
-教师模型运行在外部 SGLang 服务器上，教师的 log-probs 在 rollout 阶段获取。
+教师模型运行在外部 vLLM 服务器上，教师的 log-probs 在 rollout 阶段获取。
 
 **适用场景**：教师与学生架构不同，或教师模型太大无法与训练模型同时加载。
 
 **工作流程**：
-1. 外部 SGLang 服务器运行教师模型。
+1. 外部 vLLM 服务器运行教师模型。
 2. 在 rollout 阶段，自定义 reward 函数（`slime.rollout.on_policy_distillation.reward_func`）将每个样本发送到教师服务器以获取 token 级 log-probs。
 3. 自定义后处理函数（`slime.rollout.on_policy_distillation.post_process_rewards`）将教师 log-probs 裁剪到 response 范围并存储到 `sample.teacher_log_probs` 中。
 4. 在训练阶段，从存储的教师 log-probs 计算 KL 惩罚并应用到 advantages 上。
@@ -41,11 +41,11 @@ $$
 **配置**：
 ```bash
 --use-opd
---opd-type sglang
+--opd-type vllm
 --opd-kl-coef 1.0
 --custom-rm-path slime.rollout.on_policy_distillation.reward_func
 --custom-reward-post-process-path slime.rollout.on_policy_distillation.post_process_rewards
---rm-url http://<TEACHER_IP>:<TEACHER_PORT>/generate
+--rm-url http://<TEACHER_IP>:<TEACHER_PORT>/inference/v1/generate
 ```
 
 ### Megatron 模式 (`--opd-type megatron`)
@@ -73,7 +73,7 @@ $$
 
 完整的示例脚本在 `examples/on_policy_distillation/` 中：
 
-### SGLang 教师
+### vLLM 教师
 
 ```bash
 # 1. 下载模型和数据

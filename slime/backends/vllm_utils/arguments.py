@@ -1,6 +1,5 @@
 """vLLM rollout backend argument definitions.
 
-Mirrors slime/backends/sglang_utils/arguments.py:
 - Wholesale-imports ``AsyncEngineArgs.add_cli_args(parser)`` with a wrapper that
   prefixes every flag with ``--vllm-`` and every dest with ``vllm_``.
 - Adds a small set of vime-specific orchestration extras (router endpoint,
@@ -77,8 +76,7 @@ def _detect_user_provided_dests(parser, argv: list[str]) -> tuple[set[str], dict
 
 
 # Dests already managed at vime / megatron level (orchestrator decides them)
-# or non-applicable to subprocess `vllm serve` mode. Same intent as
-# sglang_utils/arguments.py:43-61 `skipped_args`.
+# or non-applicable to subprocess `vllm serve` mode.
 SKIPPED_DESTS = [
     # model identity: hf_checkpoint owns this
     "model",
@@ -97,7 +95,7 @@ SKIPPED_DESTS = [
     # tp_size is fully owned by the orchestrator (rollout_num_gpus_per_engine
     # // pp_size) — see validate_args. pipeline_parallel_size and
     # data_parallel_size remain user-controllable and auto-forward to the vllm
-    # subprocess when set; mirrors slime sglang_utils which exposes both via CLI.
+    # subprocess when set.
     "tensor_parallel_size",
     # network: engine launcher decides per-engine port/host
     "port",
@@ -108,30 +106,47 @@ SKIPPED_DESTS = [
 
 
 def add_vllm_router_arguments(parser):
-    """vime's router orchestration flags (where to reach the router; not in vllm-router's CLI).
-
-    Named without a ``--vllm-`` backend prefix so they sit alongside
-    ``vllm_router.RouterArgs`` knobs (``--router-policy``, ``--router-cache-threshold``,
-    …) under a single ``--router-*`` namespace. PR #10 hardcodes a single vllm backend,
-    so backend-disambiguation prefix would only leak implementation.
-    """
+    """vime's vllm-router orchestration flags (where to reach the router; not in vllm-router's CLI)."""
     parser.add_argument(
-        "--router-ip",
+        "--vllm-router-ip",
         type=str,
         default=None,
-        help="IP address of the router (where vime connects to send rollout requests).",
+        help="IP address of the vllm router (where vime connects to send rollout requests).",
     )
     parser.add_argument(
-        "--router-port",
+        "--vllm-router-port",
         type=int,
         default=None,
-        help="Port of the router.",
+        help="Port of the vllm router.",
     )
+    # Bare ``--router-request-timeout-secs`` (dest ``router_request_timeout_secs``):
+    # this is a genuine vllm-router knob (a RouterArgs field), so it shares the
+    # ``--router-*`` namespace with policy / cache_threshold / retries / … rather
+    # than vime's ``--vllm-router-*`` endpoint flags. Only --vllm-router-ip and
+    # --vllm-router-port keep the vllm_ prefix (RouterArgs excludes host/port from
+    # its CLI via exclude_host_port=True, so vime owns those two outright).
     parser.add_argument(
         "--router-request-timeout-secs",
         type=int,
         default=14400,
-        help="Timeout (seconds) for HTTP requests vime makes to the router.",
+        help="Timeout (seconds) for HTTP requests vime makes to the vllm router.",
+    )
+    # dest is ``router_policy`` (NOT ``vllm_router_policy``): this is a real
+    # vllm-router knob, so it must flow into ``RouterArgs.from_cli_args(args,
+    # use_router_prefix=True)`` (which reads ``args.router_policy``) AND is read
+    # by ``vllm_rollout.generate`` to decide whether to send the ``x-session-id``
+    # header for consistent-hash session-affinity routing (routing replay).
+    parser.add_argument(
+        "--vllm-router-policy",
+        type=str,
+        default="cache_aware",
+        dest="router_policy",
+        choices=["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash"],
+        help=(
+            "vllm-router load-balancing policy. Use 'consistent_hash' to enable "
+            "session-affinity routing replay (routes a sample's requests to the same "
+            "engine via the x-session-id header)."
+        ),
     )
     return parser
 
@@ -200,6 +215,24 @@ def add_vllm_arguments(parser):
         default=512,
         help="Max concurrent inference requests sent to each vLLM server worker.",
     )
+    parser.add_argument(
+        "--vllm-enable-deterministic-inference",
+        action="store_true",
+        default=False,
+        help=(
+            "Make rollout sampling deterministic. Forwards a per-sample ``seed`` "
+            "(derived from ``--rollout-seed`` and the sample's index in the group) "
+            "AND exports ``VLLM_BATCH_INVARIANT=1`` to the vLLM subprocess so attention "
+            "/ comm / MM kernels pick batch-invariant variants. Both are required for "
+            "true determinism — seed alone does not control kernel selection."
+        ),
+    )
+    parser.add_argument(
+        "--vllm-weight-transfer-timeout-sec",
+        type=float,
+        default=900.0,
+        help="Timeout (seconds) for vLLM weight-transfer HTTP control-plane calls.",
+    )
     # vime-only orchestration knob: not part of vllm's CLI but read by
     # UpdateWeightFromDistributed._use_vllm_packed() to choose packed
     # broadcast vs per-bucket NCCL for dense models.
@@ -246,15 +279,26 @@ def add_vllm_arguments(parser):
     # weight_transfer_config based on colocate) are applied explicitly in
     # ``vllm_engine.launch_server_process``.
 
-    # PD disaggregation / multi-group config — mirrors slime sglang_utils/arguments.py.
-    # vllm-side PD plumbing is not yet wired; the CLI surface is reserved so that
-    # rollout.py's `args.prefill_num_servers is not None` check is well-defined and
-    # the eventual vllm PD wiring can light up without further arg-layer changes.
+    # PD disaggregation / multi-group config.
+    # The CLI surface is reserved so that rollout.py's
+    # `args.prefill_num_servers is not None` check is well-defined.
     parser.add_argument(
         "--prefill-num-servers",
         type=int,
         default=None,
         help="Number of prefill servers for PD disaggregation.",
+    )
+
+    parser.add_argument(
+        "--vllm-config",
+        type=str,
+        default=None,
+        dest="vllm_config",
+        help=(
+            "Path to a YAML config file for fine-grained vLLM rollout engine deployment. "
+            "Enables multi-model serving, PD disaggregation, and heterogeneous server groups. "
+            "Mutually exclusive with --prefill-num-servers and --rollout-external."
+        ),
     )
 
     return parser
@@ -275,15 +319,13 @@ def validate_args(args):
     else:
         args.vllm_tp_size = args.rollout_num_gpus_per_engine
 
-    if getattr(args, "router_ip", None):
-        args.router_ip = _wrap_ipv6(args.router_ip)
+    if getattr(args, "vllm_router_ip", None):
+        args.vllm_router_ip = _wrap_ipv6(args.vllm_router_ip)
 
 
 def vllm_parse_args():
     """Parse vllm flags via an independent ArgumentParser + parse_known_args.
 
-    Mirrors ``sglang_parse_args()`` so the merge flow in
-    ``slime/utils/arguments.py`` is symmetric.
     Returns an ``argparse.Namespace`` with all attrs prefixed ``vllm_``, plus:
       - ``_vllm_user_provided``: set of dests the user named on argv
       - ``_vllm_raw_values``: per-dest mapping to the user's literal CLI string
@@ -314,11 +356,22 @@ def vllm_parse_args():
 # try to forward them as command-line flags to the subprocess.
 _VIME_ORCHESTRATION_DESTS = frozenset(
     {
-        "router_ip",
-        "router_port",
+        "vllm_router_ip",
+        "vllm_router_port",
+        # bare dest: shares the --router-* namespace with the other vllm-router knobs.
         "router_request_timeout_secs",
+        # vllm-router routing policy: consumed by RouterArgs.from_cli_args when
+        # launching the router; never a `vllm serve` flag.
+        "router_policy",
         "vllm_server_concurrency",
+        "vllm_enable_deterministic_inference",
+        "vllm_weight_transfer_timeout_sec",
         "vllm_weight_sync_packed",
+        # vime-only flags for fine-grained deployment; consumed in slime/ray/rollout.py
+        # (start_rollout_servers / _resolve_vllm_config) and must NOT be forwarded to
+        # the per-engine "vllm serve" subprocess.
+        "vllm_config",
+        "prefill_num_servers",
     }
 )
 

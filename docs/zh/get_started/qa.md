@@ -43,21 +43,21 @@
 
    data packing 是指在训练过程中，将长短不一的 sample 拼接到一起，从而提升训练的利用率。slime 默认会进行这样的操作。
 
-1. **sglang 部分出现 `Max retries exceeded with url: /get_model_info (Caused by NewConnectionError` 的问题怎么办？**
+1. **vLLM 部分出现 `Max retries exceeded with url: /health (Caused by NewConnectionError)` 的问题怎么办？**
 
-   这个问题主要来源于单机内多个 sglang server 导致的端口冲突，目前我们仍在和 sglang 团队一起解决这个问题。一个临时的缓解方案是尽可能减少单机内的 sglang server 数量，例如设置 tp=8。
+   slime 通过 `GET /health` 探测 vLLM engine 是否就绪;这个错误意味着 readiness 探测从未连通。最常见的原因是单机内多个 vLLM 引擎导致的端口冲突。一个临时的缓解方案是尽可能减少单机内的 vLLM 引擎数量，例如设置 tp=8。
 
 1. **grad norm 好高，训练训崩了怎么办？**
 
    首先请确保数据和模型是匹配的，例如说，如果数据是实现已经做好 chat template 的了，这个 chat template 是否和原模型一致。如果数据正确的话，可以参考 [debug 指南](../developer_guide/debug.md) 进行更深入的分析。
 
-1. **我的 sglang 生成时间特别特别久，gpu 功率都打满了，跑了好久好没有输出是为什么？**
+1. **我的 vLLM 生成时间特别特别久，gpu 功率都打满了，跑了好久好没有输出是为什么？**
 
    请确认一下 `--hf-checkpoint` 对应的模型是否正确设置了 stop token，如果没有，可以通过 `--rollout-stop` 或者 `--rollout-stop-token-ids` 来进行设置。
 
-1. **sglang 出现 an illegal memory access was encountered**
+1. **vLLM 出现 an illegal memory access was encountered**
 
-   根据 sglang 的文档（https://docs.sglang.ai/references/troubleshooting.html），有可能是 OOM 了，可以考虑缩小 `--sglang-mem-fraction-static`。
+   常见原因是 OOM，可以考虑缩小 `--vllm-gpu-memory-utilization`。
 
 1. **出现 torch compile/inducer 的 `JSONDecodeError`**
 

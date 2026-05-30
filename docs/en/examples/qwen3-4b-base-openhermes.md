@@ -52,7 +52,7 @@ bash script/run-qwen3-4B-base-sft.sh
 
 You can compare [run-qwen3-4B-base-sft.sh](https://github.com/THUDM/slime/blob/main/scripts/run-qwen3-4B-base-sft.sh) with [run-qwen3-4B.sh](https://github.com/THUDM/slime/blob/main/scripts/run-qwen3-4B.sh). You will find that besides changing the model from the instruct version to the base model, the main adjustments are as follows:
 
-1.  Removed `SGLANG_ARGS` and `GRPO_ARGS`. This is because it is not necessary to start SGLang or configure GRPO-related settings during the SFT process.
+1.  Removed `VLLM_ARGS` and `GRPO_ARGS`. This is because it is not necessary to start vLLM or configure GRPO-related settings during the SFT process.
 
 2.  Renamed `ROLLOUT_ARGS` to `SFT_ARGS` and configured it as follows:
 
@@ -73,7 +73,7 @@ You can compare [run-qwen3-4B-base-sft.sh](https://github.com/THUDM/slime/blob/m
     )
     ```
 
-    SFT actually reuses the custom rollout functionality of slime. By using `--rollout-function-path`, the data generation part is switched from the RL rollout that uses `sglang` to the SFT version that reads data from a file, which is `slime.rollout.sft_rollout.generate_rollout`.
+    SFT actually reuses the custom rollout functionality of slime. By using `--rollout-function-path`, the data generation part is switched from the RL rollout that uses `vLLM` to the SFT version that reads data from a file, which is `slime.rollout.sft_rollout.generate_rollout`.
 
     For SFT, it is recommended to set `rollout_batch_size` and `global_batch_size` to the same value and not to configure `n_samples_per_prompt`. This is equivalent to training one batch right after reading one batch.
 
@@ -81,6 +81,6 @@ You can compare [run-qwen3-4B-base-sft.sh](https://github.com/THUDM/slime/blob/m
 
     As for `--calculate-per-token-loss`, this is because `slime` defaults to calculating the per-sample mean for GRPO. In general SFT training, the average is taken over all unmasked tokens in a batch, so it is recommended to configure this.
 
-    Finally, `--disable-compute-advantages-and-returns` indicates that there is no need to pre-calculate log probabilities during the SFT process, and `--debug-train-only` means that `sglang` does not need to be initialized.
+    Finally, `--disable-compute-advantages-and-returns` indicates that there is no need to pre-calculate log probabilities during the SFT process, and `--debug-train-only` means that `vLLM` does not need to be initialized.
 
 3.  Used `train_async.py` instead of `train.py`. This is to leverage the asynchronous training process to implement data prefetching.

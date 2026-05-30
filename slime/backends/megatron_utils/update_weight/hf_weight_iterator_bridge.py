@@ -14,7 +14,7 @@ def _patch_bridge_expert_cache_to_cpu():
     """Monkey-patch GPTOSSBridge class to cache expert weights on CPU.
 
     This avoids GPU OOM when torch.cat merges all experts, especially in
-    colocated mode where SGLang and Megatron share the same GPU.
+    colocated mode where vLLM and Megatron share the same GPU.
     """
     try:
         from megatron.bridge.models.gpt_oss.gpt_oss_bridge import GPTOSSBridge

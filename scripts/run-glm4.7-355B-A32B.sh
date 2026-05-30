@@ -117,7 +117,7 @@ VLLM_ARGS=(
 
    # mtp
    --vllm-enable-expert-parallel
-   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3}'
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 )
 
 MISC_ARGS=(

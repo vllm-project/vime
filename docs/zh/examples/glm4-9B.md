@@ -2,7 +2,7 @@
 
 ## 环境准备
 
-拉取 `slimerl/slime:latest` 镜像后，用如下方式初始化镜像环境：
+拉取 `inferactinc/public:vime-vllm-cu129-latest` 镜像后，用如下方式初始化镜像环境：
 
 ```bash
 cd /root/
@@ -72,7 +72,7 @@ MODEL_ARGS += ( --rotary-base 10000 )
 
 ```bash
 CKPT_ARGS=(
-   # sglang 需要的 hf ckpt，我们也会从这里读 tokenizer
+   # vLLM 需要的 hf ckpt，我们也会从这里读 tokenizer
    --hf-checkpoint /root/GLM-Z1-9B-0414
    # reference model 的 ckp
    --ref-load /root/GLM-Z1-9B-0414_torch_dist
@@ -191,17 +191,17 @@ OPTIMIZER_ARGS=(
 )
 ```
 
-#### SGLANG_ARGS
+#### VLLM_ARGS
 
-sglang 所需的参数，这里 `--rollout-num-gpus-per-engine` 基本对应 sglang 的 `tp_size`，除此之外的 sglang 参数均通过添加 `--sglang-` 的前缀来传给 slime。
+vLLM 所需的参数，这里 `--rollout-num-gpus-per-engine` 对应 vLLM 的 `tp_size`，除此之外的 vLLM 参数均通过添加 `--vllm-` 的前缀来传给 slime。
 
 ```bash
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 2
 )
 ```
 
-⚠️  slime 会用 sgl-router 来调度多个 sglang server，在不开启 dp attention 的情况下不支持 `dp_size`。
+⚠️  slime 会用 vllm-router 来调度多个 vLLM 引擎。
 
 ### 训推一体
 
@@ -231,7 +231,7 @@ ray job submit ... \
 
 此时，训练和推理就会共用这 8 张卡了。
 
-⚠️  在训推一体的训练时，megatron 始终会占据一些显存，所以需要通过调整 `--sglang-mem-fraction-static` 来降低 sglang 占据的显存比例。
+⚠️  在训推一体的训练时，megatron 始终会占据一些显存，所以需要通过调整 `--vllm-gpu-memory-utilization` 来降低 vLLM 占据的显存比例。
 
 ### dynamic sampling
 

@@ -87,5 +87,5 @@ Use a separate eval function when inference/eval behavior must differ from train
 
 - Eval config model: `slime/utils/eval_config.py`
 - Eval config resolution: `slime/utils/arguments.py`
-- Eval rollout path: `slime/rollout/sglang_rollout.py`
+- Eval rollout path: `slime/rollout/vllm_rollout.py`
 - Customization docs: `docs/en/get_started/customization.md`

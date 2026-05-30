@@ -67,38 +67,35 @@ GLM-4.7-Flash is a Mixture-of-Experts (MoE) model with 64 routed experts (top-4 
     )
     ```
 
-3.  Enable MoE optimization in SGLang with DP attention:
+3.  Enable MoE expert parallelism in vLLM. GLM-4.7-Flash is a non-MLA model,
+    so we use 8-way data parallelism on the attention block with expert
+    parallelism on the experts:
 
     ```bash
-    SGLANG_ARGS=(
+    VLLM_ARGS=(
        --rollout-num-gpus-per-engine 8
-       --sglang-mem-fraction-static 0.7
-       --sglang-enable-dp-attention
-       --sglang-dp-size 8
-       --sglang-enable-dp-lm-head
-       --sglang-moe-dense-tp-size 1
+       --vllm-gpu-memory-utilization 0.7
+       --vllm-data-parallel-size 8
+       --vllm-enable-expert-parallel
        ...
     )
     ```
 
 #### MTP Speculative Decoding (Inference Acceleration)
 
-GLM-4.7-Flash includes 1 MTP (Multi-Token Prediction) layer, which can be used for speculative decoding during inference to speed up rollout generation. To enable this, add the following to `SGLANG_ARGS`:
+GLM-4.7-Flash includes 1 MTP (Multi-Token Prediction) layer, which can be used for speculative decoding during inference to speed up rollout generation. To enable this, add the following to `VLLM_ARGS`:
 
 ```bash
-SGLANG_ARGS=(
+VLLM_ARGS=(
    ...
    # MTP speculative decoding (EAGLE)
-   --sglang-speculative-algorithm EAGLE
-   --sglang-speculative-num-steps 3
-   --sglang-speculative-eagle-topk 1
-   --sglang-speculative-num-draft-tokens 4
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 )
 ```
 
-This enables SGLang to use the model's MTP layer as a draft model for EAGLE-style speculative decoding. The MTP layer predicts multiple future tokens, and SGLang verifies them in parallel, leading to faster generation.
+This enables vLLM to use the model's MTP layer as a draft model for EAGLE-style speculative decoding. The MTP layer predicts multiple future tokens, and vLLM verifies them in parallel, leading to faster generation.
 
-> ⚠️ **Note**: Speculative decoding requires additional GPU memory. If you encounter OOM issues, try reducing `--sglang-mem-fraction-static` or disabling speculative decoding.
+> ⚠️ **Note**: Speculative decoding requires additional GPU memory. If you encounter OOM issues, try reducing `--vllm-gpu-memory-utilization` or disabling speculative decoding.
 
 #### MTP Training
 
@@ -140,17 +137,15 @@ Key modifications for multi-node:
   - Remove CPU Adam configurations (distributed optimizer reduces per-GPU memory usage).
   - Adjust parallelism: e.g., TP=4, PP=2, EP=8, CP=2.
 
-When the total number of GPUs is not a multiple or divisor of the total number of experts (64), you can use `--sglang-ep-num-redundant-experts` to add redundant experts. For example, in a 24-GPU scenario:
+When the total number of GPUs is not a multiple or divisor of the total number of experts (64), enable vLLM's EPLB (Expert Parallelism Load Balancer) and configure redundant experts via `--vllm-eplb-config`. For example, in a 24-GPU scenario:
 
 ```bash
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 24
-   --sglang-mem-fraction-static 0.7
-   --sglang-ep-size 24
-   --sglang-enable-dp-attention
-   --sglang-dp-size 3
-   --sglang-moe-dense-tp-size 1
-   --sglang-enable-dp-lm-head
-   --sglang-ep-num-redundant-experts 16
+   --vllm-gpu-memory-utilization 0.7
+   --vllm-data-parallel-size 3
+   --vllm-enable-expert-parallel
+   --vllm-enable-eplb
+   --vllm-eplb-config '{"num_redundant_experts": 16}'
 )
 ```

@@ -4,7 +4,7 @@
 
 我们会使用 bf16 进行训练，128x128 blockwise quant 的 fp8 格式进行推理，模型最大回复长度为 32k，并训练中会使用 dynamic sampling 对数据进行筛选。
 
-在并行上，sglang 方面我们会启用 ep64，开启 dp attention 与 deepep；megatron 部分我们采用 tp8、pp4、ep32、cp4。
+在并行上，vLLM 方面我们会启用 expert parallelism 与 data parallelism；megatron 部分我们采用 tp8、pp4、ep32、cp4。
 
 ⚠️  为了节省 GPU 显存，我们会使用 CPU Adam，每个 node（8xH100）会占用 1.4~1.5B 内存。如果单机的内存不够，可以通过增加 GPU，扩大并行的方式解决。
 
@@ -72,7 +72,7 @@ for WORKER_IP in $(awk '{print $1}' $BASE_DIR/mpi_hostfile); do
   fi
   echo "Starting Ray worker on ${WORKER_IP}"
   ssh root@"${WORKER_IP}" \
-    "pkill -9 sglang ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats" &
+    "pkill -9 vllm ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats" &
 done
 wait
 ```
@@ -91,7 +91,7 @@ source "${SCRIPT_DIR}/models/deepseek-v3.sh"
 
 ```bash
 CKPT_ARGS=(
-   # sglang 需要的 hf ckpt，我们也会从这里读 tokenizer
+   # vLLM 需要的 hf ckpt，我们也会从这里读 tokenizer
    --hf-checkpoint $BASE_DIR/DeepSeek-R1/
    #--hf-checkpoint $BASE_DIR/DeepSeek-R1-bf16/
    --ref-load $BASE_DIR/DeepSeek-R1_torch_dist/
@@ -102,7 +102,7 @@ CKPT_ARGS=(
 )
 ```
 
-slime 会根据 `hf_checkpoint` 中的量化配置从而在训练中进行在线量化。例如当前的例子中，我们使用的是 DeepSeek R1 的 fp8 ckpt，那么在进行参数更新的时候，我们会首先将参数进行 blockwise quant，再传至 sglang。
+slime 会根据 `hf_checkpoint` 中的量化配置从而在训练中进行在线量化。例如当前的例子中，我们使用的是 DeepSeek R1 的 fp8 ckpt，那么在进行参数更新的时候，我们会首先将参数进行 blockwise quant，再传至 vLLM。
 
 #### PERF_ARGS
 
@@ -167,30 +167,23 @@ OPTIMIZER_ARGS=(
 )
 ```
 
-#### SGLANG_ARGS
+#### VLLM_ARGS
 
-sglang 所需的参数，这里 `--rollout-num-gpus-per-engine` 基本对应 sglang 的 `tp_size`，除此之外的 sglang 参数均通过添加 `--sglang-` 的前缀来传给 slime。为了充分利用 sglang 的大 EP 推理能力，我们加上了 ep64、dp_attention dp8、deepep mode auto 等配置。
+vLLM 所需的参数，这里 `--rollout-num-gpus-per-engine` 对应 vLLM 的 `tp_size`，除此之外的 vLLM 参数均通过添加 `--vllm-` 的前缀来传给 slime。
 
-最后的 `--sglang-server-concurrency` 是 slime 的特有参数，是为了方式同时发给 sglang server 的并发太大打爆 http server，默认为 512。但是我们现在是 8 机一个 server，为了保证每个 dp rank 能有 128 的并发，我们调整为 1024。
+`--vllm-server-concurrency` 是 slime 的特有参数，用于防止同时发给 vLLM 引擎的并发太大打爆 HTTP server，默认为 512。但是我们现在是 8 机一个 server，为了保证每个 dp rank 能有 128 的并发，我们调整为 1024。
 
 ```bash
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 64
-   --sglang-mem-fraction-static 0.7
-   --sglang-ep-size 64
+   --vllm-gpu-memory-utilization 0.7
+   --vllm-enable-expert-parallel
 
-   # dp attention
-   --sglang-enable-dp-attention
-   --sglang-dp-size 8
-   --sglang-moe-dense-tp-size 1
-   --sglang-enable-dp-lm-head
-
-   # enable deepep for sglang
-   --sglang-moe-a2a-backend deepep
-   --sglang-deepep-mode auto
+   # data parallelism for the attention block
+   --vllm-data-parallel-size 8
 
    # make every dp rank has 128 concurrency
-   --sglang-server-concurrency 1024
+   --vllm-server-concurrency 1024
 )
 ```
 

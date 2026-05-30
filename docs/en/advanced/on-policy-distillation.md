@@ -7,9 +7,9 @@ On-policy distillation (OPD) enables a student model to learn from a larger teac
 | Argument | Description |
 |----------|-------------|
 | `--use-opd` | Enable on-policy distillation. Required flag to use OPD. |
-| `--opd-type` | Type of OPD: `sglang` or `megatron`. Required when `--use-opd` is set. |
+| `--opd-type` | Type of OPD: `vllm` or `megatron`. Required when `--use-opd` is set. |
 | `--opd-kl-coef` | OPD KL penalty coefficient (default: 1.0). Controls the weight of the distillation signal relative to the RL advantage. |
-| `--opd-teacher-load` | Path to teacher Megatron checkpoint. **Required** when `--opd-type=megatron`, **must not be set** when `--opd-type=sglang`. |
+| `--opd-teacher-load` | Path to teacher Megatron checkpoint. **Required** when `--opd-type=megatron`, **must not be set** when `--opd-type=vllm`. |
 | `--opd-teacher-ckpt-step` | Optional checkpoint step for teacher model. |
 
 ## How It Works
@@ -26,14 +26,14 @@ This means OPD can be combined with any advantage estimator, including GRPO, PPO
 
 ## Two Teacher Modes
 
-### SGLang Mode (`--opd-type sglang`)
+### vLLM Mode (`--opd-type vllm`)
 
-The teacher runs on an external SGLang server. Teacher log-probs are obtained during the rollout phase.
+The teacher runs on an external vLLM server. Teacher log-probs are obtained during the rollout phase.
 
 **When to use**: The teacher has a different architecture from the student, or the teacher is too large to load alongside the training model.
 
 **How it works**:
-1. An external SGLang server runs the teacher model.
+1. An external vLLM server runs the teacher model.
 2. During rollout, the custom reward function (`slime.rollout.on_policy_distillation.reward_func`) sends each sample to the teacher server to obtain token-level log-probs.
 3. The custom post-processing function (`slime.rollout.on_policy_distillation.post_process_rewards`) trims the teacher log-probs to the response span and stores them in `sample.teacher_log_probs`.
 4. During training, the KL penalty is computed from the stored teacher log-probs and applied to advantages.
@@ -41,11 +41,11 @@ The teacher runs on an external SGLang server. Teacher log-probs are obtained du
 **Configuration**:
 ```bash
 --use-opd
---opd-type sglang
+--opd-type vllm
 --opd-kl-coef 1.0
 --custom-rm-path slime.rollout.on_policy_distillation.reward_func
 --custom-reward-post-process-path slime.rollout.on_policy_distillation.post_process_rewards
---rm-url http://<TEACHER_IP>:<TEACHER_PORT>/generate
+--rm-url http://<TEACHER_IP>:<TEACHER_PORT>/inference/v1/generate
 ```
 
 ### Megatron Mode (`--opd-type megatron`)
@@ -73,7 +73,7 @@ The teacher model is loaded directly into Megatron via `--opd-teacher-load`. Tea
 
 Complete example scripts are provided in `examples/on_policy_distillation/`:
 
-### SGLang Teacher
+### vLLM Teacher
 
 ```bash
 # 1. Download models and data

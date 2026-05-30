@@ -4,7 +4,7 @@ import torch
 
 
 def convert_gpt_oss_to_hf(args, name, param):
-    """Convert Megatron GPT-OSS parameter names to HF format for weight update to SGLang."""
+    """Convert Megatron GPT-OSS parameter names to HF format for weight update to vLLM."""
 
     if name == "module.module.embedding.word_embeddings.weight":
         return [("model.embed_tokens.weight", param)]

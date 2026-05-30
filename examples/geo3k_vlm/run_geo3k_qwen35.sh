@@ -122,7 +122,7 @@ VLLM_ARGS=(
    --vllm-cudagraph-capture-sizes 1 2 4 8 $(seq 16 8 256)
 
    # MTP speculative decoding
-   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3}'
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 
    --vllm-max-num-seqs 512
 )

@@ -1,6 +1,6 @@
 # Profiling
 
-In slime, we can perform detailed performance analysis of the rollout process using the profiling interface provided by SGLang.
+In slime, we can perform detailed performance analysis of the rollout process using the profiling interface provided by vLLM.
 
 ## 1. Sleeping the Rollout Process
 
@@ -16,9 +16,9 @@ python train.py \
 
 This function will make the rollout process enter an infinite wait loop, allowing you to manually send requests or run stress testing tools.
 
-## 2. Obtaining SGLang Engine List
+## 2. Obtaining vLLM Engine List
 
-SGLang engines (workers) are registered with the router. You can retrieve the list of all active engines by accessing the `/workers` endpoint of the router.
+vLLM engines (workers) are registered with the router. You can retrieve the list of all active engines by accessing the `/workers` endpoint of the router.
 
 The router address is typically printed in the startup logs:
 ```
@@ -61,6 +61,6 @@ python tools/profile_rollout.py --router-url http://127.0.0.1:3000 --action stop
 
 While the Rollout process is in a waiting state via `sleep_rollout`, you can:
 1. Start profiling using `tools/profile_rollout.py`.
-2. Use stress testing tools (such as SGLang's built-in benchmark tools) to send requests to the router or directly to the engines.
+2. Use stress testing tools (such as vLLM's built-in benchmark tools) to send requests to the router or directly to the engines.
 3. Wait for profiling to complete (if `num_steps` was set) or stop it manually.
 4. Collect the `.json` trace files from the `output_dir` and view them using `chrome://tracing` in Chrome or [Perfetto](https://ui.perfetto.dev/).

@@ -5,7 +5,7 @@ This is an example of doing DeepSeek R1 RL training using 128xH100 GPUs.
 
 We will use bf16 for training, and an fp8 format with 128x128 blockwise quantization for inference. The maximum response length is 32k, and dynamic sampling will be used to filter data during training.
 
-Regarding parallelism, for sglang we will enable EP64, activate dp attention, and deepep. For the Megatron part, we will use TP8, PP4, EP32, and CP4.
+Regarding parallelism, for vLLM we will enable expert parallelism with DP. For the Megatron part, we will use TP8, PP4, EP32, and CP4.
 
 ⚠️ To save GPU memory, we will use CPU Adam. Each node (8xH100) will occupy 1.4\~1.5TB of host memory. If a single machine's host memory is insufficient, this can be resolved by adding more GPUs to expand the parallelism.
 
@@ -73,7 +73,7 @@ for WORKER_IP in $(awk '{print $1}' $BASE_DIR/mpi_hostfile); do
   fi
   echo "Starting Ray worker on ${WORKER_IP}"
   ssh root@"${WORKER_IP}" \
-    "pkill -9 sglang ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats" &
+    "pkill -9 vllm ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats" &
 done
 wait
 ```
@@ -91,7 +91,7 @@ This reads the model's config from [scripts/models/deepseek-v3.sh](https://githu
 
 ```bash
 CKPT_ARGS=(
-   # HF ckpt required by sglang, we also read the tokenizer from here
+   # HF ckpt required by vLLM, we also read the tokenizer from here
    --hf-checkpoint $BASE_DIR/DeepSeek-R1/
    #--hf-checkpoint $BASE_DIR/DeepSeek-R1-bf16/
    --ref-load $BASE_DIR/DeepSeek-R1_torch_dist/
@@ -102,7 +102,7 @@ CKPT_ARGS=(
 )
 ```
 
-slime will perform online quantization during training based on the quantization configuration in `hf_checkpoint`. For instance, in the current example, we are using the fp8 checkpoint of DeepSeek R1. This means that when updating parameters, we will first perform blockwise quantization on the parameters before passing them to sglang.
+slime will perform online quantization during training based on the quantization configuration in `hf_checkpoint`. For instance, in the current example, we are using the fp8 checkpoint of DeepSeek R1. This means that when updating parameters, we will first perform blockwise quantization on the parameters before passing them to vLLM.
 
 #### PERF\_ARGS
 
@@ -167,30 +167,23 @@ OPTIMIZER_ARGS=(
 )
 ```
 
-#### SGLANG\_ARGS
+#### VLLM\_ARGS
 
-These are the parameters required by sglang. Here, `--rollout-num-gpus-per-engine` basically corresponds to sglang's `tp_size`. Other sglang parameters are passed to slime by adding a `--sglang-` prefix. To fully leverage sglang's large EP inference capabilities, we have added configurations like ep64, dp\_attention dp8, and deepep mode auto.
+These are the parameters required by vLLM. Here, `--rollout-num-gpus-per-engine` corresponds to vLLM's `tp_size`. Other vLLM parameters are passed to slime by adding a `--vllm-` prefix.
 
-The final `--sglang-server-concurrency` is a parameter specific to slime. It is used to prevent the sglang server's concurrent requests from becoming too large and crashing the HTTP server. The default is 512. However, since we now have one server for 8 nodes, we have adjusted it to 1024 to ensure that each dp rank can have a concurrency of 128.
+`--vllm-server-concurrency` is a parameter specific to slime. It is used to prevent the vLLM engine's concurrent requests from becoming too large and crashing the HTTP server. The default is 512. However, since we now have one server for 8 nodes, we have adjusted it to 1024 to ensure that each dp rank can have a concurrency of 128.
 
 ```bash
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 64
-   --sglang-mem-fraction-static 0.7
-   ----sglang-ep-size 64
+   --vllm-gpu-memory-utilization 0.7
+   --vllm-enable-expert-parallel
 
-   # dp attention
-   --sglang-enable-dp-attention
-   --sglang-dp-size 8
-   --sglang-moe-dense-tp-size 1
-   --sglang-enable-dp-lm-head
-
-   # enable deepep for sglang
-   --sglang-moe-a2a-backend deepep
-   --sglang-deepep-mode auto
+   # data parallelism for the attention block
+   --vllm-data-parallel-size 8
 
    # make every dp rank have 128 concurrency
-   --sglang-server-concurrency 1024
+   --vllm-server-concurrency 1024
 )
 ```
 

@@ -83,39 +83,35 @@ GLM-4.7 是一个 MoE（混合专家）模型，包含 160 个路由专家（top
    )
    ```
 
-3. 在 SGLang 中开启带 DP attention 的 MoE 优化：
+3. 在 vLLM 侧开启 MoE expert parallelism。GLM-4.7 是非 MLA 模型，
+   这里用 attention 上 4 路 data parallel + expert 上 expert parallel
+   （EP size 由 `tensor_parallel_size × data_parallel_size` 自动推导）：
 
    ```bash
-   SGLANG_ARGS=(
+   VLLM_ARGS=(
       --rollout-num-gpus-per-engine 32
-      --sglang-mem-fraction-static 0.7
-      --sglang-enable-dp-attention
-      --sglang-dp-size 4
-      --sglang-ep-size 32
-      --sglang-enable-dp-lm-head
-      --sglang-moe-dense-tp-size 1
+      --vllm-gpu-memory-utilization 0.7
+      --vllm-data-parallel-size 4
+      --vllm-enable-expert-parallel
       ...
    )
    ```
 
 #### MTP 投机解码（推理加速）
 
-GLM-4.7 包含 MTP（Multi-Token Prediction）层，可以在推理阶段用于投机解码，加速 rollout 生成。启用方法是在 `SGLANG_ARGS` 中加入：
+GLM-4.7 包含 MTP（Multi-Token Prediction）层，可以在推理阶段用于投机解码，加速 rollout 生成。启用方法是在 `VLLM_ARGS` 中加入：
 
 ```bash
-SGLANG_ARGS=(
+VLLM_ARGS=(
    ...
    # MTP 投机解码 (EAGLE)
-   --sglang-speculative-algorithm EAGLE
-   --sglang-speculative-num-steps 3
-   --sglang-speculative-eagle-topk 1
-   --sglang-speculative-num-draft-tokens 4
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 )
 ```
 
-这样 SGLang 就会使用模型自带的 MTP 层作为 EAGLE 风格投机解码的 draft model。
+这样 vLLM 就会使用模型自带的 MTP 层作为 EAGLE 风格投机解码的 draft model。
 
-> ⚠️ **注意**：投机解码会额外占用 GPU 显存。如果遇到 OOM，可以尝试降低 `--sglang-mem-fraction-static` 或暂时关闭投机解码。
+> ⚠️ **注意**：投机解码会额外占用 GPU 显存。如果遇到 OOM，可以尝试降低 `--vllm-gpu-memory-utilization` 或暂时关闭投机解码。
 
 #### MTP 训练
 
@@ -146,13 +142,18 @@ MTP_ARGS=(
 - `MASTER_ADDR` 设置为所有节点都能访问到的地址；
 - 在启动 Ray worker 前先取消代理；
 - 提供一个 `HOSTFILE` 列出 worker IP（每行一个），并在启动前 `export HOSTFILE=/path/to/hostfile`；
-- 并行度需要成套调整。默认示例使用 TP=8、PP=4、EP=16、CP=2，rollout 侧则使用 32 张卡 / engine + SGLang DP attention。
+- 并行度需要成套调整。默认示例使用 TP=8、PP=4、EP=16、CP=2，rollout 侧则使用 32 张卡 / engine + DP=4 + expert parallel。
 
-如果 rollout GPU 数与 expert 数（160）之间不能整除，可以通过 `--sglang-ep-num-redundant-experts` 增加冗余 expert。
+如果 rollout GPU 数与 expert 数（160）之间不能整除，可以开启 vLLM 的 EPLB（Expert Parallelism Load Balancer），通过 `--vllm-eplb-config` 配置冗余 expert，例如：
+
+```bash
+--vllm-enable-eplb
+--vllm-eplb-config '{"num_redundant_experts": 16}'
+```
 
 ## FP8 Rollout
 
-开源版 GLM-4.7 的 FP8 checkpoint 使用的是 per-channel 量化，目前无法在 SGLang 中直接启用 DeepEP。可以利用 slime 自带工具将其转换为 128x128 的 per-block FP8 checkpoint：
+开源版 GLM-4.7 的 FP8 checkpoint 使用的是 per-channel 量化，目前无法在 vLLM 中直接启用 DeepEP。可以利用 slime 自带工具将其转换为 128x128 的 per-block FP8 checkpoint：
 
 ```bash
 cd /root/slime
@@ -165,25 +166,18 @@ python tools/convert_hf_to_fp8.py \
 
 随后把 `--hf-checkpoint` 改成 `$BASE_DIR/GLM-4.7-355B-A32B-FP8/` 即可开启 FP8 rollout。
 
-一个可参考的 FP8 `SGLANG_ARGS` 配置如下：
+一个可参考的 FP8 `VLLM_ARGS` 配置如下：
 
 ```bash
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 32
-   --sglang-mem-fraction-static 0.7
-   --sglang-enable-dp-attention
-   --sglang-dp-size 32
-   --sglang-ep-size 32
-   --sglang-moe-dense-tp-size 1
-   --sglang-enable-dp-lm-head
-   --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 128)
+   --vllm-gpu-memory-utilization 0.7
+   --vllm-data-parallel-size 32
+   --vllm-enable-expert-parallel
+   --vllm-cudagraph-capture-sizes 1 2 4 8 $(seq 16 8 128)
 
-   --sglang-speculative-algorithm EAGLE
-   --sglang-speculative-num-steps 3
-   --sglang-speculative-eagle-topk 1
-   --sglang-speculative-num-draft-tokens 4
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 
-   --sglang-moe-a2a-backend deepep
-   --sglang-deepep-mode auto
+   --vllm-all2all-backend deepep_high_throughput
 )
 ```

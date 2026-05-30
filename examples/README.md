@@ -12,6 +12,4 @@ These examples provide concrete examples to leverage slime in your own RL workfl
 - **[multi_agent](./multi_agent)**: Example of running multi-agent RL with `slime`.
 - **[on_policy_distillation](./on_policy_distillation)**: Example implementation for on-policy distillation, extending the reinforcement learning pipeline to support teacher–student distillation directly within on-policy training.
 - **[reproducibility](./reproducibility)**: Guides on achieving bitwise experiment reproduction using deterministic modes.
-- **[retool](./retool)**: Demonstrates the retool functionality for tool-enabled language model generation.
-- **[search-r1](./search-r1)**: A minimal reproduction of Search-R1, featuring multi-turn conversation and tool-calling.
 - **[train_infer_mismatch_helper](./train_infer_mismatch_helper)**: Algorithmic methods for rollout correction (e.g., TIS, MIS).

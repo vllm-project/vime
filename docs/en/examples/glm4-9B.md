@@ -2,7 +2,7 @@
 
 ## Environment Setup
 
-After pulling the `slimerl/slime:latest` image, initialize the image environment as follows:
+After pulling the `inferactinc/public:vime-vllm-cu129-latest` image, initialize the image environment as follows:
 
 ```bash
 cd /root/
@@ -72,7 +72,7 @@ MODEL_ARGS += ( --rotary-base 10000 )
 
 ```bash
 CKPT_ARGS=(
-   # HF checkpoint required by sglang; we also read the tokenizer from here
+   # HF checkpoint required by vLLM; we also read the tokenizer from here
    --hf-checkpoint /root/GLM-Z1-9B-0414
    # Checkpoint for the reference model
    --ref-load /root/GLM-Z1-9B-0414_torch_dist
@@ -191,17 +191,17 @@ OPTIMIZER_ARGS=(
 )
 ```
 
-#### SGLANG\_ARGS
+#### VLLM\_ARGS
 
-Parameters required by sglang. Here, `--rollout-num-gpus-per-engine` basically corresponds to sglang's `tp_size`. Other sglang parameters are passed to slime by adding the `--sglang-` prefix.
+Parameters required by vLLM. Here, `--rollout-num-gpus-per-engine` corresponds to vLLM's `tp_size`. Other vLLM parameters are passed to slime by adding the `--vllm-` prefix.
 
 ```bash
-SGLANG_ARGS=(
+VLLM_ARGS=(
    --rollout-num-gpus-per-engine 2
 )
 ```
 
-⚠️  slime uses `sgl-router` to schedule multiple sglang servers. `dp_size` is not supported when DP attention is disabled.
+⚠️  slime uses `vllm-router` to schedule multiple vLLM engines.
 
 ### Co-located Training and Inference
 
@@ -231,7 +231,7 @@ ray job submit ... \
 
 In this case, both training and inference will share these 8 GPUs.
 
-⚠️ When using co-located training and inference, Megatron will always occupy some GPU memory. Therefore, you need to adjust `--sglang-mem-fraction-static` to reduce the proportion of memory occupied by sglang.
+⚠️ When using co-located training and inference, Megatron will always occupy some GPU memory. Therefore, you need to adjust `--vllm-gpu-memory-utilization` to reduce the proportion of memory occupied by vLLM.
 
 ### Dynamic Sampling
 

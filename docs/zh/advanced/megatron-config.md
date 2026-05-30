@@ -2,7 +2,7 @@
 
 `--megatron-config-path` 是一个基于 YAML 的配置系统，用于在公共 Megatron CLI 参数之上，为不同训练角色追加覆盖。目前它主要用于 PPO 场景中的 actor / critic 配置。
 
-与 `--sglang-config` 不同，`--megatron-config-path` 不负责部署、路由或 GPU 资源编排；它只负责决定“这个角色最终使用哪些训练参数”。
+与 `--vllm-config` 不同，`--megatron-config-path` 不负责部署、路由或 GPU 资源编排；它只负责决定“这个角色最终使用哪些训练参数”。
 
 ---
 

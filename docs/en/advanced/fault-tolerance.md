@@ -6,7 +6,7 @@ To enable the fault tolerance function in slime, please set `--use-fault-toleran
 
 ## Rollout Fault Tolerance
 
-During the rollout process, slime periodically sends heartbeat requests (`/health_generate`) to all SGLang servers. If a heartbeat times out, that SGLang server will be stopped. After the current rollout round is complete, the server will be restarted and its parameters will be correctly updated.
+During the rollout process, slime periodically sends heartbeat requests (`/health`) to all vLLM engines. If a heartbeat times out, that vLLM engine will be stopped. After the current rollout round is complete, the engine will be restarted and its parameters will be correctly updated.
 
 - `--rollout-health-check-first-wait`: Since some large MoE models require compilation on their first run, slime will wait for `rollout_health_check_first_wait` seconds before the first rollout to start sending heartbeats. Defaults to 300s.
 - `--rollout-health-check-interval`: The interval between heartbeat checks. Defaults to 10s.

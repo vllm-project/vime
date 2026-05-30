@@ -12,11 +12,11 @@ def train(args):
     pgs = create_placement_groups(args)
     init_tracking(args)
 
-    # create the rollout manager, with sglang engines inside.
+    # create the rollout manager, with vLLM engines inside.
     # need to initialize rollout manager first to calculate num_rollout
     rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
 
-    # Update primary W&B with SGLang metrics endpoint now that servers are up.
+    # Update primary W&B with vLLM metrics endpoint now that servers are up.
     router_addr = ray.get(rollout_manager.get_metrics_router_addr.remote())
     update_tracking_open_metrics(args, router_addr)
 

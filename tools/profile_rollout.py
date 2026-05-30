@@ -43,10 +43,10 @@ def stop_profile(worker_url):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Automate SGLang profiling across all workers via router.")
+    parser = argparse.ArgumentParser(description="Automate vLLM profiling across all workers via router.")
     parser.add_argument("--router-url", type=str, required=True, help="Router URL (e.g., http://127.0.0.1:3000)")
     parser.add_argument("--action", type=str, choices=["start", "stop"], default="start", help="Action to perform")
-    parser.add_argument("--output-dir", type=str, default="/tmp/sglang_profile", help="Output directory for traces")
+    parser.add_argument("--output-dir", type=str, default="/tmp/vllm_profile", help="Output directory for traces")
     parser.add_argument("--num-steps", type=int, default=3, help="Number of steps to profile (default: 3)")
     parser.add_argument("--activities", type=str, nargs="+", default=["GPU"], help="Activities to profile (CPU, GPU)")
     parser.add_argument("--profile-by-stage", action="store_true", help="Profile by stage (prefill/decode)")

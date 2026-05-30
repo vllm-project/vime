@@ -20,7 +20,9 @@ class _MockResponse:
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
-            raise RuntimeError(f"HTTP {self.status_code}")
+            error = requests.exceptions.HTTPError(f"HTTP {self.status_code}")
+            error.response = self  # type: ignore[assignment]
+            raise error
 
     def json(self) -> dict:
         if self._json_data is None:
@@ -221,16 +223,74 @@ def test_post_vllm_update_weights_http_wraps_update_info(vllm_engine, monkeypatc
 
 
 @pytest.mark.unit
-def test_weight_transfer_http_timeout_reads_env(vllm_engine, monkeypatch):
-    monkeypatch.setenv("SLIME_VLLM_WEIGHT_TRANSFER_UPDATE_TIMEOUT_SEC", "123.5")
+def test_weight_transfer_http_timeout_reads_config(vllm_engine):
+    vllm_engine.args.vllm_weight_transfer_timeout_sec = 123.5
     assert vllm_engine._weight_transfer_http_timeout() == 123.5
 
 
 @pytest.mark.unit
-def test_weight_transfer_http_timeout_fallback_to_legacy_env(vllm_engine, monkeypatch):
-    monkeypatch.delenv("SLIME_VLLM_WEIGHT_TRANSFER_UPDATE_TIMEOUT_SEC", raising=False)
-    monkeypatch.setenv("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "42")
-    assert vllm_engine._weight_transfer_http_timeout() == 42.0
+def test_weight_transfer_http_timeout_uses_argument_default(vllm_engine):
+    assert vllm_engine.args.vllm_weight_transfer_timeout_sec == 900.0
+    assert vllm_engine._weight_transfer_http_timeout() == 900.0
+
+
+@pytest.mark.unit
+def test_start_weight_update_uses_config_timeout(vllm_engine, monkeypatch):
+    vllm_engine.args.vllm_weight_transfer_timeout_sec = 123.5
+    calls: list[tuple] = []
+
+    def fake_post(endpoint: str, payload: dict, timeout: float):
+        calls.append((endpoint, payload, timeout))
+        return _MockResponse(json_data={"ok": True})
+
+    monkeypatch.setattr(vllm_engine, "_post_json", fake_post)
+
+    vllm_engine.start_weight_update()
+    assert calls[0][2] == 123.5
+
+
+@pytest.mark.unit
+def test_init_weights_update_group_uses_config_timeout(vllm_engine, monkeypatch):
+    vllm_engine.args.vllm_weight_transfer_timeout_sec = 123.5
+    calls: list[tuple] = []
+
+    def fake_post(endpoint: str, payload: dict, timeout: float):
+        calls.append((endpoint, payload, timeout))
+        return _MockResponse(json_data={"initialized": True})
+
+    monkeypatch.setattr(vllm_engine, "_post_json", fake_post)
+
+    vllm_engine.init_weights_update_group(
+        "127.0.0.1",
+        29500,
+        rank_offset=1,
+        world_size=4,
+        group_name="unused",
+        backend="nccl",
+    )
+    assert calls[0][2] == 123.5
+
+
+@pytest.mark.unit
+def test_response_json_parses_dict():
+    response = _MockResponse(json_data={"status": "ready"})
+    assert mod._response_json(response) == {"status": "ready"}
+
+
+@pytest.mark.unit
+def test_response_json_invalid_json_raises():
+    response = _MockResponse(text="not-json")
+    response.json = lambda: (_ for _ in ()).throw(ValueError("no json"))  # type: ignore[method-assign]
+    with pytest.raises(ValueError, match="no json"):
+        mod._response_json(response)
+
+
+@pytest.mark.unit
+def test_response_json_http_error_adds_response_text_note():
+    response = _MockResponse(json_data={"error": "bad"}, text="server exploded", status_code=500)
+    with pytest.raises(requests.exceptions.HTTPError) as exc_info:
+        mod._response_json(response)
+    assert "response.text='server exploded'" in exc_info.value.__notes__
 
 
 @pytest.mark.unit
@@ -347,4 +407,3 @@ def test_init_weights_update_group_raises_after_three_failures(vllm_engine, monk
             group_name="g",
             backend="nccl",
         )
-

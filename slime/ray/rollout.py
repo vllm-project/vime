@@ -13,9 +13,12 @@ import numpy as np
 import ray
 import torch
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS
+from slime.backends.vllm_utils.vllm_config import ModelConfig, ServerGroupConfig, VllmConfig
 
-from slime.backends.sglang_utils.sglang_config import ModelConfig, ServerGroupConfig, SglangConfig
+# Memory-type tag strings shared with the vLLM engine's sleep/wake_up API.
+GPU_MEMORY_TYPE_KV_CACHE = "kv_cache"
+GPU_MEMORY_TYPE_WEIGHTS = "weights"
+GPU_MEMORY_TYPE_CUDA_GRAPH = "cuda_graph"
 from slime.rollout.base_types import call_rollout_fn
 from slime.utils import logging_utils
 from slime.utils.health_monitor import RolloutHealthMonitor
@@ -36,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 def _sanitize_vllm_router_args(ra: Any) -> Any:
-    """Replace negative int fields with dataclass defaults (sglang CLI may use -1; vllm-router rejects it)."""
+    """Replace negative int fields with dataclass defaults (legacy CLI may use -1; vllm-router rejects it)."""
     from vllm_router.router_args import RouterArgs as VR
 
     fixes: dict[str, Any] = {}
@@ -62,7 +65,7 @@ def _vllm_router_args_from_cli(args: Namespace) -> Any:
 
 @dataclasses.dataclass
 class ServerGroup:
-    """A group of homogeneous SGLang engines with the same configuration.
+    """A group of homogeneous vLLM engines with the same configuration.
 
     All engines in a group share the same tp_size / nodes_per_engine / pg.
     A RolloutServer may contain multiple ServerGroups (e.g. prefill vs decode
@@ -77,7 +80,7 @@ class ServerGroup:
     worker_type: str = "regular"  # "regular", "prefill", "decode", or "placeholder"
     rank_offset: int = 0  # cumulative engine count before this group
     gpu_offset: int = 0  # cumulative GPU count before this group
-    sglang_overrides: dict = dataclasses.field(default_factory=dict)
+    vllm_overrides: dict = dataclasses.field(default_factory=dict)
     needs_offload: bool = False  # True when this group's GPUs overlap with megatron
     model_path: str | None = None  # checkpoint path for update_weights_from_disk
     router_ip: str | None = None
@@ -139,14 +142,6 @@ class ServerGroup:
             env_vars = {name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST} | {
                 key: os.environ.get(key, default_val)
                 for key, default_val in {
-                    "SGLANG_JIT_DEEPGEMM_PRECOMPILE": "true",
-                    "SGLANG_JIT_DEEPGEMM_FAST_WARMUP": "true",
-                    "SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK": "true",
-                    "SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK": "true",
-                    "SGLANG_MEMORY_SAVER_CUDA_GRAPH": "true",
-                    "SGLANG_BATCH_INVARIANT_OPS_ENABLE_MM_FALLBACK_VARIANT": "true",
-                    "SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION": "false",
-                    "SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_IDLE": "false",
                     "SLIME_ENABLE_PROFILING": "true",
                 }.items()
             }
@@ -163,7 +158,7 @@ class ServerGroup:
                 worker_type=self.worker_type,
                 base_gpu_id=base_gpu_id,
                 model_path=self.model_path,
-                sglang_overrides=self.sglang_overrides,
+                vllm_overrides=self.vllm_overrides,
                 num_gpus_per_engine=self.num_gpus_per_engine,
             )
 
@@ -247,6 +242,7 @@ class RolloutServer:
     server_groups: list[ServerGroup]
     router_ip: str | None = None
     router_port: int | None = None
+    prometheus_port: int | None = None
     model_name: str = "default"
     update_weights: bool = True
 
@@ -420,17 +416,19 @@ class RolloutManager:
             self._ci_fault_injection_pending = self.args.ci_test  # Flag for CI fault injection
 
     def _get_metrics_router_addr(self) -> str | None:
-        """Return the router address for scraping SGLang engine metrics.
+        """Return the full Prometheus scrape URL for the rollout router.
 
-        The sglang_router gateway exposes ``/engine_metrics`` on its main port,
-        which aggregates Prometheus metrics from all backend sglang servers.
-        Returns ``http://{ip}:{port}`` for the first server, or ``None`` when
-        metrics are disabled or no servers are running.
+        vllm-router exposes Prometheus on a dedicated ``prometheus_port``
+        (see ``router_args.prometheus_port`` in ``_start_router``), not via
+        a path on the main router port. The metrics endpoint is the default
+        ``/metrics`` served by the metrics-exporter-prometheus crate.
+        Returns ``http://{ip}:{prom_port}/metrics``, or ``None`` if metrics
+        are disabled or no servers are running.
         """
         srv = self.server
-        if srv is None or srv.router_ip is None:
+        if srv is None or srv.router_ip is None or srv.prometheus_port is None:
             return None
-        return f"http://{srv.router_ip}:{srv.router_port}"
+        return f"http://{srv.router_ip}:{srv.prometheus_port}/metrics"
 
     def get_metrics_router_addr(self) -> str | None:
         """Public wrapper for remote calls from the driver process."""
@@ -460,7 +458,7 @@ class RolloutManager:
     def dispose(self):
         for monitor in self._health_monitors:
             monitor.stop()
-        # Release inference workers (vLLM / SGLang). debug_rollout_only still hits this path at train.py end.
+        # Release vLLM inference workers. debug_rollout_only still hits this path at train.py end.
         shutdown_refs = []
         for srv in self.servers.values():
             for group in srv.server_groups:
@@ -958,14 +956,14 @@ def _allocate_rollout_engine_addr_and_ports_normal(
 
 def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool = False) -> tuple[str, int]:
     """Start the rollout HTTP gateway (vllm-router)."""
-    if not force_new and args.router_ip is not None:
-        return args.router_ip, args.router_port
+    if not force_new and args.vllm_router_ip is not None:
+        return args.vllm_router_ip, args.vllm_router_port
 
     router_ip = _wrap_ipv6(get_host_info()[1])
     if force_new:
         router_port = find_available_port(random.randint(3000, 4000))
     else:
-        router_port = args.router_port
+        router_port = args.vllm_router_port
         if router_port is None:
             router_port = find_available_port(random.randint(3000, 4000))
 
@@ -992,11 +990,11 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
     if any(f.name == "disable_health_check" for f in dataclasses.fields(type(router_args))):
         router_args.disable_health_check = True
 
-    logger.info("Launch HTTP router (impl=vllm) with args: %s", router_args)
+    logger.info("Launch HTTP router with args: %s", router_args)
 
     process = multiprocessing.get_context("spawn").Process(
         target=run_router,
-        args=(("vllm", router_args),),
+        args=(router_args,),
     )
     process.daemon = True
     process.start()
@@ -1008,7 +1006,7 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
             "MiniLB is only valid with PD disaggregation. See slime.utils.http_utils run_router logs."
         )
     logger.info(f"Router launched at {router_ip}:{router_port}, Prometheus port: {router_args.prometheus_port}")
-    return router_ip, router_port
+    return router_ip, router_port, router_args.prometheus_port
 
 
 def _compute_rollout_offset(args) -> int:
@@ -1030,7 +1028,7 @@ def _compute_megatron_num_gpus(args) -> int:
 def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
     """Start rollout servers: one per model, each with its own router.
 
-    Each model defined in the sglang config gets its own router and set
+    Each model defined in the vLLM config gets its own router and set
     of server groups.  Server groups within a model may have different
     ``num_gpus_per_engine`` (e.g. for PD disaggregation where prefill
     and decode use different TP sizes).
@@ -1040,7 +1038,7 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
     Note: ``init_http_client`` should be called separately before this,
     as the HTTP client is shared across all servers.
     """
-    config = _resolve_sglang_config(args)
+    config = _resolve_vllm_config(args)
 
     servers: dict[str, RolloutServer] = {}
     gpu_offset = 0
@@ -1054,13 +1052,13 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
         model_cfg.resolve(args)
 
         has_pd = model_cfg.has_pd_disaggregation
-        router_ip, router_port = _start_router(args, has_pd_disaggregation=has_pd, force_new=(model_idx > 0))
+        router_ip, router_port, prom_port = _start_router(args, has_pd_disaggregation=has_pd, force_new=(model_idx > 0))
 
         # Write back so downstream readers (vllm_rollout, vllm_engine) see the
         # router we just started (only relevant for first model in multi-model setups).
         if model_idx == 0:
-            args.router_ip = router_ip
-            args.router_port = router_port
+            args.vllm_router_ip = router_ip
+            args.vllm_router_port = router_port
 
         server_groups: list[ServerGroup] = []
         port_cursors: dict[int, int] = {}
@@ -1095,7 +1093,7 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
                 worker_type=group_cfg.worker_type,
                 rank_offset=engine_offset,
                 gpu_offset=gpu_offset,
-                sglang_overrides=overrides,
+                vllm_overrides=overrides,
                 needs_offload=needs_offload,
                 model_path=overrides.get("model_path", args.hf_checkpoint),
                 router_ip=router_ip,
@@ -1157,29 +1155,30 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
             router_port=router_port,
             model_name=model_cfg.name,
             update_weights=model_cfg.update_weights,
+            prometheus_port=prom_port,
         )
 
     # Expose per-model router info for custom rollout functions.
-    args.sglang_model_routers = {name: (srv.router_ip, srv.router_port) for name, srv in servers.items()}
+    args.vllm_model_routers = {name: (srv.router_ip, srv.router_port) for name, srv in servers.items()}
 
     return servers
 
 
-def _resolve_sglang_config(args) -> SglangConfig:
-    """Build a SglangConfig from args, choosing the right source."""
-    if getattr(args, "sglang_config", None) is not None:
-        config = SglangConfig.from_yaml(args.sglang_config)
-        # Validate total GPUs match.
+def _resolve_vllm_config(args) -> VllmConfig:
+    """Build a VllmConfig from args, choosing the right source."""
+    vllm_config_path = getattr(args, "vllm_config", None)
+    if vllm_config_path is not None:
+        config = VllmConfig.from_yaml(vllm_config_path)
         expected = args.rollout_num_gpus
         actual = config.total_num_gpus
-        assert actual == expected, f"sglang_config total GPUs ({actual}) != rollout_num_gpus ({expected})"
+        assert actual == expected, f"vllm_config total GPUs ({actual}) != rollout_num_gpus ({expected})"
         return config
 
     if args.prefill_num_servers is not None:
-        return SglangConfig.from_prefill_num_servers(args)
+        return VllmConfig.from_prefill_num_servers(args)
 
     # Default: single regular group.
-    return SglangConfig(
+    return VllmConfig(
         models=[
             ModelConfig(
                 name="default",

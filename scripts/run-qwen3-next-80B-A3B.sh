@@ -132,7 +132,7 @@ VLLM_ARGS=(
    --vllm-max-num-seqs 256
    --vllm-enable-expert-parallel
    --vllm-cudagraph-capture-sizes 1 2 4 8 $(seq 16 8 128)
-   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3}'
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 )
 
 MISC_ARGS=(

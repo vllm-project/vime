@@ -63,7 +63,7 @@ Here's a quick explanation of how FP8 training is currently implemented in slime
 
 2. Training: During training, weights and activations are quantized online to nvfp8 format, and cuBLAS FP8 GEMM is called for various GEMM computations in forward and backward passes.
 
-3. Weight updates: During RL weight updates, Megatron first dequantizes FP8 weights to bf16 format, then slime quantizes these bf16 weights to fp8 format and sends them to sglang. (This additional dequantization and quantization is not elegant, but we haven't modified the interface yet for framework compatibility.)
+3. Weight updates: During RL weight updates, Megatron first dequantizes FP8 weights to bf16 format, then slime quantizes these bf16 weights to fp8 format and sends them to vLLM. (This additional dequantization and quantization is not elegant, but we haven't modified the interface yet for framework compatibility.)
 
 4. Save checkpoint: Similar to weight updates, if checkpoints need to be saved from the training engine, they will also be dequantized back to bf16 and saved to `torch_dist` format checkpoints.
 

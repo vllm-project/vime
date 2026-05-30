@@ -14,22 +14,6 @@ from typing import Any
 from slime.utils.types import Sample
 
 TRACE_VERSION = 1
-SGLANG_TRACE_META_KEYS = (
-    "prompt_tokens",
-    "completion_tokens",
-    "cached_tokens",
-    "pd_prefill_bootstrap_queue_duration",
-    "pd_prefill_forward_duration",
-    "pd_prefill_transfer_queue_duration",
-    "pd_prefill_retry_count",
-    "pd_decode_prealloc_duration",
-    "pd_decode_transfer_duration",
-    "pd_decode_forward_duration",
-    "pd_bootstrap_duration",
-    "pd_alloc_waiting_duration",
-    "pd_transfer_speed_gb_s",
-    "pd_transfer_total_mb",
-)
 
 logger = logging.getLogger(__name__)
 _TRACE_STACK: contextvars.ContextVar[tuple[tuple[str, str], ...]] = contextvars.ContextVar(
@@ -121,9 +105,22 @@ def _new_span_id() -> str:
     return uuid.uuid4().hex
 
 
-def build_sglang_meta_trace_attrs(meta: dict[str, Any]) -> dict[str, Any]:
-    attrs = {key: meta[key] for key in SGLANG_TRACE_META_KEYS if key in meta and meta[key] is not None}
-    attrs["finish_reason"] = meta["finish_reason"]["type"]
+def build_vllm_meta_trace_attrs(output: dict[str, Any]) -> dict[str, Any]:
+    """Trace-span attributes from a vLLM ``/inference/v1/generate`` response.
+
+    vLLM exposes far less per-request meta than SGLang's ``meta_info`` (no
+    PD-disaggregation timing): only the finish reason and token usage are
+    available on the response. Richer request timing lives in vLLM's own OTLP
+    traces (``gen_ai.latency.*``, enabled via ``--otlp-traces-endpoint``).
+    """
+    attrs: dict[str, Any] = {}
+    choices = output.get("choices") or []
+    if choices and choices[0].get("finish_reason") is not None:
+        attrs["finish_reason"] = choices[0]["finish_reason"]
+    usage = output.get("usage") or {}
+    for key in ("prompt_tokens", "completion_tokens", "cached_tokens"):
+        if usage.get(key) is not None:
+            attrs[key] = usage[key]
     return attrs
 
 

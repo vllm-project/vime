@@ -55,7 +55,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 "--rollout-num-gpus-per-engine",
                 type=int,
                 default=1,
-                help="Number of GPUs per inference engine, just like the tp_size in sglang.",
+                help="Number of GPUs per inference engine, just like the tp_size in vllm.",
             )
             parser.add_argument(
                 "--num-gpus-per-node",
@@ -134,7 +134,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 "--megatron-to-hf-mode",
                 choices=["raw", "bridge"],
                 default="raw",
-                help="The method to convert megatron weights to hugging face weights for SGLang.",
+                help="The method to convert megatron weights to hugging face weights for vLLM.",
             )
             parser.add_argument(
                 "--custom-model-provider-path",
@@ -211,8 +211,8 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=(
                     "The huggingface checkpoint of the trained model. "
-                    "This is used to initialize sglang and also provide the tokenizer. "
-                    "Note that, we will always update the parameters in sglang with that of megatron before training, "
+                    "This is used to initialize vLLM and also provide the tokenizer. "
+                    "Note that, we will always update the parameters in vLLM with that of megatron before training, "
                     "so you only need to provide a huggingface checkpoint that has the same architecture as the model you want to train. "
                     "It doesn't necessary need to contain the most up-to-date parameters."
                 ),
@@ -278,7 +278,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=(
                     "The maximum length of the response for the inference engine during rollout. "
-                    "It is basically `max_tokens` in sglang."
+                    "It is basically `max_tokens` in vllm."
                 ),
             )
             parser.add_argument(
@@ -448,7 +448,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 "--rollout-external",
                 action="store_true",
                 default=False,
-                help="Use external SGLang instances instead of launching them inside the framework.",
+                help="Use external vLLM instances instead of launching them inside the framework.",
             )
             parser.add_argument(
                 "--rollout-external-engine-addrs",
@@ -985,11 +985,11 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--opd-type",
                 type=str,
-                choices=["sglang", "megatron"],
+                choices=["vllm", "megatron"],
                 default=None,
                 help=(
                     "Type of on-policy distillation. "
-                    "'sglang': Teacher log-probs are obtained from external SGLang server during rollout. "
+                    "'vllm': Teacher log-probs are obtained from external vLLM server during rollout. "
                     "'megatron': Teacher model is loaded via --opd-teacher-load and forwarded during training."
                 ),
             )
@@ -1011,12 +1011,23 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--opd-teacher-ckpt-step", type=int, default=None, help="The checkpoint step for OPD teacher model."
             )
+            parser.add_argument(
+                "--opd-teacher-model",
+                type=str,
+                default=None,
+                help=(
+                    "Served model name of the OPD teacher for --opd-type=vllm. Sent as the `model` field to "
+                    "the teacher's /inference/v1/generate endpoint. Optional: if unset, the field is omitted "
+                    "(single-model teacher servers use their loaded model). Never defaults to the student "
+                    "hf_checkpoint, which would mis-name a teacher!=student server."
+                ),
+            )
             return parser
 
         def add_router_arguments(parser):
             # vllm-router's full CLI surface (~30 knobs: policy, cache_threshold,
             # retries, health-check, …) under `--router-*` prefix (collision-safe).
-            # exclude_host_port=True because vime owns `--router-ip / --router-port`
+            # exclude_host_port=True because vime owns `--vllm-router-ip / --vllm-router-port`
             # (defined in slime/backends/vllm_utils/arguments.py:add_vllm_router_arguments).
             RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
             return parser
@@ -1601,7 +1612,7 @@ def slime_validate_args(args):
     # Validate on-policy distillation (OPD) arguments
     if args.use_opd:
         if args.opd_type is None:
-            raise ValueError("--opd-type must be specified when --use-opd is enabled. Choose 'sglang' or 'megatron'.")
+            raise ValueError("--opd-type must be specified when --use-opd is enabled. Choose 'vllm' or 'megatron'.")
 
         if args.opd_type == "megatron":
             if args.opd_teacher_load is None:
@@ -1619,11 +1630,11 @@ def slime_validate_args(args):
                     "please make sure it is a valid megatron checkpoint directory."
                 )
 
-        elif args.opd_type == "sglang":
+        elif args.opd_type == "vllm":
             if args.opd_teacher_load is not None:
                 raise ValueError(
-                    "--opd-teacher-load should not be set when --opd-type=sglang. "
-                    "In sglang mode, teacher log-probs are obtained from external server during rollout."
+                    "--opd-teacher-load should not be set when --opd-type=vllm. "
+                    "In vllm mode, teacher log-probs are obtained from external server during rollout."
                 )
     else:
         # If OPD is not enabled, opd_teacher_load should not be set
@@ -1702,7 +1713,7 @@ def slime_validate_args(args):
     if args.load_debug_rollout_data is not None:
         logger.info(
             f"load_debug_rollout_data {args.load_debug_rollout_data} is set, "
-            "will not instantiate sglang servers and will only run the training process."
+            "will not instantiate vLLM servers and will only run the training process."
         )
         args.debug_train_only = True
 
