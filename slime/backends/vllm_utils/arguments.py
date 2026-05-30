@@ -279,10 +279,10 @@ def add_vllm_arguments(parser):
     parser.add_argument = old_parser_add_argument
     parser.add_argument_group = old_parser_add_argument_group
 
-    # NOTE: we deliberately do NOT call ``parser.set_defaults(vllm_gpu_memory_utilization=...)``
-    # here, because argparse.set_defaults also mutates ``action.default`` — which would
-    # then make ``_forward_vllm_cli_args`` think the user accepted the vllm-side default
-    # and skip forwarding. vime-preferred defaults (e.g. gpu_memory_utilization=0.55,
+    # NOTE: we deliberately do NOT call ``parser.set_defaults`` for vllm flags here, because
+    # argparse.set_defaults also mutates ``action.default`` — which would make
+    # ``_forward_vllm_cli_args`` think the user accepted the vllm-side default and skip
+    # forwarding. vime-preferred defaults that genuinely differ from vllm (e.g.
     # weight_transfer_config based on colocate) are applied explicitly in
     # ``vllm_engine.launch_server_process``.
 

@@ -494,11 +494,9 @@ def build_vllm_cmd_and_env(server_args: dict[str, Any]) -> tuple[list[str], dict
     if getattr(args, "use_rollout_routing_replay", False):
         cmd += ["--enable-return-routed-experts"]
 
-    if _user_overrode(args, "vllm_gpu_memory_utilization"):
-        gpu_mem = args.vllm_gpu_memory_utilization
-    else:
-        gpu_mem = 0.55
-    cmd += ["--gpu-memory-utilization", str(gpu_mem)]
+    # gpu_memory_utilization: no vime-forced default. In colocate, training and rollout do not
+    # occupy the GPU simultaneously (sleep/offload cycles), so vLLM's own default is fine. A user
+    # value passed via --vllm-gpu-memory-utilization is auto-forwarded by _forward_vllm_cli_args.
 
     # 2) logprobs_mode: vllm's raw_logprobs are pre-temperature, while Megatron
     #    replay compares against rollout-temperature-scaled logprobs.
@@ -651,8 +649,10 @@ class VLLMEngine(RayActor):
         self._topology = self._server_args["topology"]
         self.node_rank = self._topology.node_rank
 
-        self.router_ip = router_ip if router_ip is not None else self.args.vllm_router_ip
-        self.router_port = router_port if router_port is not None else self.args.vllm_router_port
+        # rollout always passes the resolved router (engine.init(router_ip=self.router_ip, ...))
+        # and _start_router always returns a real address, so no fallback to args is needed.
+        self.router_ip = router_ip
+        self.router_port = router_port
         self.server_host = self._server_args["host"]
         self.server_port = port
 
