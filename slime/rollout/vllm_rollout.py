@@ -333,7 +333,7 @@ def _build_inference_sampling_params(sampling_params: dict[str, Any]) -> dict[st
         "logprobs": 1,
     }
     tk = sampling_params.get("top_k")
-    if tk is not None and tk > 0:
+    if tk is not None and (tk > 0 or tk == -1):
         sp["top_k"] = tk
     if sampling_params.get("stop"):
         sp["stop"] = sampling_params["stop"]
