@@ -157,6 +157,11 @@ def _vllm_meta_from_generate_choice(args: Namespace, choice: dict, usage: dict |
     if usage:
         meta["prompt_tokens"] = usage.get("prompt_tokens", 0)
         meta["completion_tokens"] = usage.get("completion_tokens", 0)
+        # vLLM reports the prefix-cache hit count nested under prompt_tokens_details
+        # (only populated when the server runs with --enable-prompt-tokens-details).
+        # Surface it so Sample.PrefixCacheInfo.add can populate prefix_cache_hit_rate;
+        # without this the numerator is pinned to 0 and the metric always reads 0.
+        meta["cached_tokens"] = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
     return meta
 
 

@@ -338,6 +338,11 @@ def launch_server_process(
         cmd += ["--max-model-len", str(args.rollout_max_context_len)]
     if getattr(args, "use_rollout_routing_replay", False):
         cmd += ["--enable-return-routed-experts"]
+    # Prefix-cache accounting: vLLM only emits usage.prompt_tokens_details.cached_tokens
+    # (the numerator behind rollout/prefix_cache_hit_rate) when the OpenAI frontend is
+    # started with this flag. It lives on FrontendArgs, not AsyncEngineArgs, so it is NOT
+    # reachable via --vllm-* auto-forwarding and must be set explicitly here.
+    cmd += ["--enable-prompt-tokens-details"]
 
     # vime-preferred defaults — must be explicitly forwarded because the vllm-side
     # default would otherwise apply (the generic forwarder skips values that equal
