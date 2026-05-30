@@ -12,7 +12,8 @@ permissions:
 jobs:
   run-pre-commit:
     name: Run pre-commit
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -38,4 +39,3 @@ jobs:
 
       - name: Run pre-commit on all files
         run: pre-commit run --all-files --show-diff-on-failure --color=always
-

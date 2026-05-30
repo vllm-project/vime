@@ -91,7 +91,7 @@ on:
   #   branches: [main]
   pull_request:
     branches: [main]
-    types: [synchronize, labeled]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   workflow_dispatch:
     inputs:
       infinite_run:
@@ -108,7 +108,8 @@ jobs:
 
   pre-commit:
     name: Run pre-commit (gate)
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6

@@ -46,9 +46,7 @@ def prepare():
 
 
 def execute():
-    config_file = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yaml", prefix="vllm_mixed_offload_ft_", delete=False
-    )
+    config_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", prefix="vllm_mixed_offload_ft_", delete=False)
     config_file.write(VLLM_CONFIG_YAML)
     config_file.flush()
     config_path = config_file.name
