@@ -211,7 +211,7 @@ def test_add_vllm_router_arguments_registers_vllm_prefix(args_mod):
     flags = {s for a in parser._actions for s in a.option_strings}
     assert "--vllm-router-ip" in flags
     assert "--vllm-router-port" in flags
-    assert "--vllm-router-request-timeout-secs" in flags
+    assert "--router-request-timeout-secs" in flags
 
 
 @pytest.mark.unit
@@ -221,7 +221,7 @@ def test_add_vllm_router_arguments_dests(args_mod):
     dests = {a.dest for a in parser._actions if a.option_strings}
     assert "vllm_router_ip" in dests
     assert "vllm_router_port" in dests
-    assert "vllm_router_request_timeout_secs" in dests
+    assert "router_request_timeout_secs" in dests
 
 
 @pytest.mark.unit
@@ -241,21 +241,22 @@ def test_add_vllm_router_arguments_parses_real_values(args_mod):
     parser = argparse.ArgumentParser(add_help=False)
     args_mod.add_vllm_router_arguments(parser)
     parsed, _ = parser.parse_known_args(
-        ["--vllm-router-ip", "10.0.0.1", "--vllm-router-port", "8000", "--vllm-router-request-timeout-secs", "30"]
+        ["--vllm-router-ip", "10.0.0.1", "--vllm-router-port", "8000", "--router-request-timeout-secs", "30"]
     )
     assert parsed.vllm_router_ip == "10.0.0.1"
     assert parsed.vllm_router_port == 8000
-    assert parsed.vllm_router_request_timeout_secs == 30
+    assert parsed.router_request_timeout_secs == 30
 
 
 @pytest.mark.unit
 def test_orchestration_dests_use_vllm_prefix(args_mod):
     assert "vllm_router_ip" in args_mod._VIME_ORCHESTRATION_DESTS
     assert "vllm_router_port" in args_mod._VIME_ORCHESTRATION_DESTS
-    assert "vllm_router_request_timeout_secs" in args_mod._VIME_ORCHESTRATION_DESTS
+    assert "router_request_timeout_secs" in args_mod._VIME_ORCHESTRATION_DESTS
     assert "vllm_weight_transfer_timeout_sec" in args_mod._VIME_ORCHESTRATION_DESTS
     assert "router_ip" not in args_mod._VIME_ORCHESTRATION_DESTS
     assert "router_port" not in args_mod._VIME_ORCHESTRATION_DESTS
+    assert "vllm_router_request_timeout_secs" not in args_mod._VIME_ORCHESTRATION_DESTS
 
 
 @pytest.mark.unit

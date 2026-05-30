@@ -45,7 +45,7 @@ Vime 继承 slime 的广泛模型支持，包括：
 Vime 的参数分为三类：
 
 1. **Megatron 参数**：Vime 会读取 Megatron 中的全部参数，可通过传入如 `--tensor-model-parallel-size 2` 的方式配置 Megatron；
-2. **vLLM 参数**：vLLM server 与 engine 相关选项以 `--vllm-` 为前缀（例如 `--vllm-gpu-memory-utilization`）。路由相关选项分两类前缀：vllm-router 自身的选项以 `--router-` 传入（例如 `--router-policy round_robin`），Vime 侧用于告诉 Vime *router 在哪里* 的编排参数则以 `--vllm-router-` 为前缀（`--vllm-router-ip`、`--vllm-router-port`、`--vllm-router-request-timeout-secs`）。完整参数见 [slime/backends/vllm_utils/arguments.py](slime/backends/vllm_utils/arguments.py)。
+2. **vLLM 参数**：vLLM server 与 engine 相关选项以 `--vllm-` 为前缀（例如 `--vllm-gpu-memory-utilization`）。路由相关选项分两类前缀：vllm-router 自身的选项以 `--router-` 传入（例如 `--router-policy round_robin`、`--router-request-timeout-secs`），Vime 侧用于告诉 Vime *router 在哪里* 的编排参数则以 `--vllm-router-` 为前缀（`--vllm-router-ip`、`--vllm-router-port`）。完整参数见 [slime/backends/vllm_utils/arguments.py](slime/backends/vllm_utils/arguments.py)。
 3. **框架参数**：与 slime/Vime 编排相关的开关（rollout GPU、数据路径、RL 算法等），见 [slime/utils/arguments.py](slime/utils/arguments.py)。
 
 `--rollout-num-gpus-per-engine` 对应每个 vLLM engine 的 tensor parallel size。默认 rollout 入口为 `slime.rollout.vllm_rollout.generate_rollout`。

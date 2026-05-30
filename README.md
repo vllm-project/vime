@@ -45,7 +45,7 @@ We also provide examples for some use cases not covered in the quick start guide
 Arguments in Vime are divided into three categories:
 
 1. **Megatron arguments**: Vime reads all arguments in Megatron. You can configure Megatron by passing arguments like `--tensor-model-parallel-size 2`.
-2. **vLLM arguments**: vLLM server and engine options are exposed with a `--vllm-` prefix (for example, `--vllm-gpu-memory-utilization`). Router options live under two prefixes: vllm-router's native options are passed with `--router-` (for example, `--router-policy round_robin`), while Vime-side orchestration knobs that tell Vime *where* the router lives use `--vllm-router-` (`--vllm-router-ip`, `--vllm-router-port`, `--vllm-router-request-timeout-secs`). See [slime/backends/vllm_utils/arguments.py](slime/backends/vllm_utils/arguments.py) for the full surface.
+2. **vLLM arguments**: vLLM server and engine options are exposed with a `--vllm-` prefix (for example, `--vllm-gpu-memory-utilization`). Router options live under two prefixes: vllm-router's native options are passed with `--router-` (for example, `--router-policy round_robin`, `--router-request-timeout-secs`), while Vime-side orchestration knobs that tell Vime *where* the router lives use `--vllm-router-` (`--vllm-router-ip`, `--vllm-router-port`). See [slime/backends/vllm_utils/arguments.py](slime/backends/vllm_utils/arguments.py) for the full surface.
 3. **Framework-specific arguments**: Shared slime/Vime orchestration flags (rollout GPUs, data paths, RL algorithms, etc.). Please refer to [slime/utils/arguments.py](slime/utils/arguments.py).
 
 `--rollout-num-gpus-per-engine` sets the tensor parallel size of each vLLM engine. The default rollout entry is `slime.rollout.vllm_rollout.generate_rollout`.

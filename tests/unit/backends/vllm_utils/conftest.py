@@ -12,8 +12,8 @@ def vllm_args() -> SimpleNamespace:
     return SimpleNamespace(
         rollout_external=True,
         hf_checkpoint="/tmp/model",
-        router_ip=None,
-        router_port=None,
+        vllm_router_ip=None,
+        vllm_router_port=None,
         vllm_weight_transfer_timeout_sec=900.0,
         num_gpus_per_node=8,
         rollout_num_gpus_per_engine=4,

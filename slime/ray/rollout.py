@@ -975,7 +975,7 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
     router_args.port = router_port
     router_args.prometheus_port = find_available_port(random.randint(4000, 5000))
     router_args.log_level = "warning"
-    router_args.request_timeout_secs = args.vllm_router_request_timeout_secs
+    router_args.request_timeout_secs = args.router_request_timeout_secs
 
     if has_pd_disaggregation:
         if hasattr(router_args, "vllm_pd_disaggregation"):

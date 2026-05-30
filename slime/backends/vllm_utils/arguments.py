@@ -119,8 +119,14 @@ def add_vllm_router_arguments(parser):
         default=None,
         help="Port of the vllm router.",
     )
+    # Bare ``--router-request-timeout-secs`` (dest ``router_request_timeout_secs``):
+    # this is a genuine vllm-router knob (a RouterArgs field), so it shares the
+    # ``--router-*`` namespace with policy / cache_threshold / retries / … rather
+    # than vime's ``--vllm-router-*`` endpoint flags. Only --vllm-router-ip and
+    # --vllm-router-port keep the vllm_ prefix (RouterArgs excludes host/port from
+    # its CLI via exclude_host_port=True, so vime owns those two outright).
     parser.add_argument(
-        "--vllm-router-request-timeout-secs",
+        "--router-request-timeout-secs",
         type=int,
         default=14400,
         help="Timeout (seconds) for HTTP requests vime makes to the vllm router.",
@@ -352,7 +358,8 @@ _VIME_ORCHESTRATION_DESTS = frozenset(
     {
         "vllm_router_ip",
         "vllm_router_port",
-        "vllm_router_request_timeout_secs",
+        # bare dest: shares the --router-* namespace with the other vllm-router knobs.
+        "router_request_timeout_secs",
         # vllm-router routing policy: consumed by RouterArgs.from_cli_args when
         # launching the router; never a `vllm serve` flag.
         "router_policy",
