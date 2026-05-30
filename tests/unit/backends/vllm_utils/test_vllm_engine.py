@@ -159,9 +159,9 @@ def test_start_weight_update_posts_four_phase_endpoint(vllm_engine, monkeypatch)
 
     def fake_post(endpoint: str, payload: dict, timeout: float):
         calls.append((endpoint, payload, timeout))
-        return _MockResponse(json_data={"ok": True})
+        return {"ok": True}
 
-    monkeypatch.setattr(vllm_engine, "_post_json", fake_post)
+    monkeypatch.setattr(vllm_engine, "_make_request", fake_post)
 
     result = vllm_engine.start_weight_update(is_checkpoint_format=True)
 
@@ -178,9 +178,9 @@ def test_finish_weight_update_posts_empty_body(vllm_engine, monkeypatch):
 
     def fake_post(endpoint: str, payload: dict, timeout: float):
         calls.append((endpoint, payload, timeout))
-        return _MockResponse(json_data={"done": True})
+        return {"done": True}
 
-    monkeypatch.setattr(vllm_engine, "_post_json", fake_post)
+    monkeypatch.setattr(vllm_engine, "_make_request", fake_post)
 
     result = vllm_engine.finish_weight_update()
 
@@ -295,9 +295,9 @@ def test_post_vllm_update_weights_http_wraps_update_info(vllm_engine, monkeypatc
 
     def fake_post(endpoint: str, payload: dict, timeout: float):
         seen.append((endpoint, payload, timeout))
-        return _MockResponse(json_data={"status": "ok"})
+        return {"status": "ok"}
 
-    monkeypatch.setattr(vllm_engine, "_post_json", fake_post)
+    monkeypatch.setattr(vllm_engine, "_make_request", fake_post)
 
     result = vllm_engine._post_vllm_update_weights_http({"names": ["w"], "packed": False})
 
@@ -325,9 +325,9 @@ def test_start_weight_update_uses_config_timeout(vllm_engine, monkeypatch):
 
     def fake_post(endpoint: str, payload: dict, timeout: float):
         calls.append((endpoint, payload, timeout))
-        return _MockResponse(json_data={"ok": True})
+        return {"ok": True}
 
-    monkeypatch.setattr(vllm_engine, "_post_json", fake_post)
+    monkeypatch.setattr(vllm_engine, "_make_request", fake_post)
 
     vllm_engine.start_weight_update()
     assert calls[0][2] == 123.5
@@ -340,9 +340,9 @@ def test_init_weights_update_group_uses_config_timeout(vllm_engine, monkeypatch)
 
     def fake_post(endpoint: str, payload: dict, timeout: float):
         calls.append((endpoint, payload, timeout))
-        return _MockResponse(json_data={"initialized": True})
+        return {"initialized": True}
 
-    monkeypatch.setattr(vllm_engine, "_post_json", fake_post)
+    monkeypatch.setattr(vllm_engine, "_make_request", fake_post)
 
     vllm_engine.init_weights_update_group(
         "127.0.0.1",
@@ -461,9 +461,9 @@ def test_init_weights_update_group_retries_then_succeeds(vllm_engine, monkeypatc
         attempts["n"] += 1
         if attempts["n"] < 2:
             raise requests.ConnectionError("transient")
-        return _MockResponse(json_data={"initialized": True})
+        return {"initialized": True}
 
-    monkeypatch.setattr(vllm_engine, "_post_json", fake_post)
+    monkeypatch.setattr(vllm_engine, "_make_request", fake_post)
     monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
 
     result = vllm_engine.init_weights_update_group(
@@ -483,7 +483,7 @@ def test_init_weights_update_group_retries_then_succeeds(vllm_engine, monkeypatc
 def test_init_weights_update_group_raises_after_three_failures(vllm_engine, monkeypatch):
     monkeypatch.setattr(
         vllm_engine,
-        "_post_json",
+        "_make_request",
         lambda *a, **k: (_ for _ in ()).throw(requests.ConnectionError("down")),
     )
     monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
@@ -583,19 +583,15 @@ def test_resolve_parallel_sizes_rejects_dp_gt_1(vllm_args):
 
 
 @pytest.mark.unit
-def test_response_json_tolerates_none():
-    # _post_json short-circuits to None on headless workers; _response_json must propagate None.
-    assert mod._response_json(None) is None
-
-
-@pytest.mark.unit
-def test_post_json_short_circuits_on_headless(vllm_engine, monkeypatch):
+def test_make_request_short_circuits_on_headless(vllm_engine, monkeypatch):
+    # _make_request is the single control-plane POST choke point; on a headless worker
+    # (node_rank>0) it must no-op to None without issuing any HTTP request.
     def _boom(*a, **k):
         raise AssertionError("control-plane HTTP must not be called on a headless worker")
 
     monkeypatch.setattr(mod.requests, "post", _boom)
     vllm_engine.node_rank = 1
-    assert vllm_engine._post_json("whatever", {}, timeout=1) is None
+    assert vllm_engine._make_request("whatever", {}, timeout=1) is None
 
 
 @pytest.mark.unit
