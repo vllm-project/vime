@@ -317,9 +317,9 @@ def test_build_inference_sampling_params_maps_rollout_fields():
 
 
 @pytest.mark.unit
-def test_build_inference_sampling_params_omits_non_positive_top_k():
+def test_build_inference_sampling_params_forwards_disabled_top_k():
     sp = mod._build_inference_sampling_params({"max_new_tokens": 8, "temperature": 0.0, "top_p": 1.0, "top_k": -1})
-    assert "top_k" not in sp
+    assert sp["top_k"] == -1
 
 
 @pytest.mark.unit
