@@ -347,4 +347,3 @@ def test_init_weights_update_group_raises_after_three_failures(vllm_engine, monk
             group_name="g",
             backend="nccl",
         )
-
