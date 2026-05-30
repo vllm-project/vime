@@ -101,7 +101,7 @@ def test_append_distributed_flags_only_when_multi_node(vllm_args):
         tensor_parallel_size=4,
         pipeline_parallel_size=1,
     )
-    mod._append_vllm_distributed_launch_flags(cmd, single, ("10.0.0.1", 15000), vllm_args)
+    mod.append_vllm_distributed_launch_flags(cmd, single, ("10.0.0.1", 15000), vllm_args)
     assert cmd == ["vllm", "serve"]
 
     cmd_multi: list[str] = ["vllm", "serve"]
@@ -112,7 +112,7 @@ def test_append_distributed_flags_only_when_multi_node(vllm_args):
         tensor_parallel_size=8,
         pipeline_parallel_size=2,
     )
-    mod._append_vllm_distributed_launch_flags(cmd_multi, multi, ("10.0.0.2", 16000), vllm_args)
+    mod.append_vllm_distributed_launch_flags(cmd_multi, multi, ("10.0.0.2", 16000), vllm_args)
     assert "--nnodes" in cmd_multi
     assert "--node-rank" in cmd_multi
     assert "1" in cmd_multi
@@ -392,16 +392,16 @@ def test_http_base_ipv6_host(vllm_engine):
 @pytest.mark.unit
 def test_redact_cmd_for_log_masks_hf_token():
     cmd = ["vllm", "serve", "model", "--hf-token", "secret-token", "--port", "8000"]
-    logged = mod._redact_cmd_for_log(cmd)
+    logged = mod.redact_cmd_for_log(cmd)
     assert "secret-token" not in logged
     assert "***" in logged
 
 
 @pytest.mark.unit
 def test_serialize_for_cli_primitives():
-    assert mod._serialize_for_cli(42) == "42"
-    assert mod._serialize_for_cli(True) == "True"
-    assert mod._serialize_for_cli({"backend": "nccl"}) == json.dumps({"backend": "nccl"})
+    assert mod.serialize_for_cli(42) == "42"
+    assert mod.serialize_for_cli(True) == "True"
+    assert mod.serialize_for_cli({"backend": "nccl"}) == json.dumps({"backend": "nccl"})
 
 
 @pytest.mark.unit
@@ -410,7 +410,7 @@ def test_serialize_for_cli_dataclass():
     class _Cfg:
         backend: str = "nccl"
 
-    out = mod._serialize_for_cli(_Cfg())
+    out = mod.serialize_for_cli(_Cfg())
     assert json.loads(out) == {"backend": "nccl"}
 
 

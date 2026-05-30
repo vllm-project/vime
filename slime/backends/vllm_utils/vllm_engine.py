@@ -50,8 +50,6 @@ class VllmEngineTopology:
     local_num_gpus: int
     tensor_parallel_size: int
     pipeline_parallel_size: int
-    master_host: str | None = None
-    master_port: int | None = None
 
     @property
     def headless(self) -> bool:
@@ -210,9 +208,6 @@ def append_vllm_distributed_launch_flags(
         cmd.append("--headless")
 
 
-_append_vllm_distributed_launch_flags = append_vllm_distributed_launch_flags
-
-
 def _user_overrode(args, dest: str) -> bool:
     user_provided: set[str] = getattr(args, "_vllm_user_provided", set())
     if dest in user_provided:
@@ -318,9 +313,6 @@ def redact_cmd_for_log(cmd: list[str]) -> str:
     return " ".join(parts)
 
 
-_redact_cmd_for_log = redact_cmd_for_log
-
-
 def build_vllm_subprocess_env(server_args: dict[str, Any]) -> dict[str, str]:
     """Child-process environment for ``vllm serve``."""
     args = server_args["args"]
@@ -373,9 +365,6 @@ def serialize_for_cli(value) -> str | None:
             logger.debug("JSON serialization failed for %r: %s", type(value).__name__, exc)
             return None
     return None
-
-
-_serialize_for_cli = serialize_for_cli
 
 
 def _serialize_weight_transfer_config(value) -> str:
@@ -731,8 +720,7 @@ class VLLMEngine(RayActor):
         check stays strict for reported fields without false-failing on unreported ones.
         """
         response = requests.get(f"{self._http_base()}/server_info", params={"config_format": "json"}, timeout=30)
-        response.raise_for_status()
-        body = response.json()
+        body = _response_json(response)
         parallel_cfg = body.get("vllm_config", {}).get("parallel_config", {})
         if not parallel_cfg:
             raise RuntimeError(f"External vLLM /server_info missing vllm_config.parallel_config: {body}")
