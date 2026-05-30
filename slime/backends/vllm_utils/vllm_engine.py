@@ -773,18 +773,26 @@ class VLLMEngine(RayActor):
         url = f"{self._http_base()}/{endpoint.lstrip('/')}"
         return requests.post(url, json=payload, timeout=timeout)
 
+    def _make_request(self, endpoint: str, payload: dict | None = None, *, timeout: float) -> dict | None:
+        """Control-plane POST returning parsed JSON (SGLang-style ``_make_request``).
+
+        Combines the central guard (``_post_json`` short-circuits a headless worker to None) with
+        JSON parsing (``_response_json``), so control-plane callers are one-liners and a headless
+        worker (node_rank>0) cleanly no-ops to None.
+        """
+        return _response_json(self._post_json(endpoint, payload or {}, timeout))
+
     def _post_vllm_update_weights_http(self, update_info: dict) -> dict:
         """POST ``/update_weights`` with ``{"update_info": ...}`` (vLLM RLHF control plane).
 
         Caller must invoke ``start_weight_update`` / ``finish_weight_update`` around a batch of
         ``/update_weights`` calls (see ``UpdateWeightFromTensor`` / ``UpdateWeightFromDistributed``).
         """
-        response = self._post_json(
+        return self._make_request(
             "update_weights",
             {"update_info": update_info},
             timeout=self._weight_transfer_http_timeout(),
         )
-        return _response_json(response)
 
     def health_generate(self, timeout: float = 5.0) -> bool:
         """Return True if ``GET /health`` succeeds."""
@@ -943,8 +951,7 @@ class VLLMEngine(RayActor):
         last_error = None
         for attempt in range(1, 4):
             try:
-                response = self._post_json("init_weight_transfer_engine", payload, timeout=init_timeout_s)
-                return _response_json(response)
+                return self._make_request("init_weight_transfer_engine", payload, timeout=init_timeout_s)
             except Exception as e:
                 last_error = e
                 if attempt < 3:
@@ -954,12 +961,11 @@ class VLLMEngine(RayActor):
 
     def start_weight_update(self, is_checkpoint_format: bool = False) -> dict:
         """``POST /start_weight_update`` — signals vLLM to enter IPC weight-update mode."""
-        response = self._post_json(
+        return self._make_request(
             "start_weight_update",
             {"is_checkpoint_format": is_checkpoint_format},
             timeout=self._weight_transfer_http_timeout(),
         )
-        return _response_json(response)
 
     def finish_weight_update(self) -> dict:
         """``POST /finish_weight_update`` — signals vLLM to exit IPC weight-update mode.
@@ -968,8 +974,7 @@ class VLLMEngine(RayActor):
         ``update_weights_from_tensor`` (the IPC data-carrying RPC), matching slime's
         single-RPC version-with-data semantics.
         """
-        response = self._post_json("finish_weight_update", {}, timeout=self._weight_transfer_http_timeout())
-        return _response_json(response)
+        return self._make_request("finish_weight_update", {}, timeout=self._weight_transfer_http_timeout())
 
     def check_weights(self, action: str):
         """No vLLM ``weights_checker`` route; return a placeholder dict."""
@@ -995,8 +1000,7 @@ class VLLMEngine(RayActor):
         last_error = None
         for attempt in range(1, 4):
             try:
-                response = self._post_json("init_weight_transfer_engine", payload, timeout=init_timeout_s)
-                return _response_json(response)
+                return self._make_request("init_weight_transfer_engine", payload, timeout=init_timeout_s)
             except Exception as e:
                 last_error = e
                 if attempt < 3:
