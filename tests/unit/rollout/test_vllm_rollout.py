@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from slime.rollout import vllm_rollout as mod
+from slime.utils.eval_config import EvalDatasetConfig
 from slime.utils.types import Sample
 
 
@@ -88,6 +89,15 @@ def _rollout_args(**overrides) -> Namespace:
         vllm_speculative_config=None,
         router_policy=None,
         use_rollout_routing_replay=False,
+        rollout_stop=None,
+        rollout_stop_token_ids=None,
+        rollout_skip_special_tokens=True,
+        apply_chat_template=False,
+        apply_chat_template_kwargs=None,
+        eval_max_prompt_len=None,
+        multimodal_keys=None,
+        eval_reward_key=None,
+        reward_key=None,
     )
     base.update(overrides)
     return Namespace(**base)
@@ -749,6 +759,34 @@ def test_generate_and_rm_group_assigns_session_ids(patch_generate_state, monkeyp
     result = asyncio.run(mod.generate_and_rm_group(_rollout_args(), group, _default_sampling_params()))
     assert all(s.session_id for s in result)
     assert result[0].session_id != result[1].session_id
+
+
+@pytest.mark.unit
+def test_eval_rollout_passk_requests_do_not_share_session_ids(patch_generate_state, monkeypatch):
+    seen_session_ids: list[str | None] = []
+
+    async def fake_generate_and_rm(args, sample, sampling_params, evaluation=False):
+        seen_session_ids.append(sample.session_id)
+        sample.response = "ok"
+        sample.response_length = 1
+        sample.reward = 0.0
+        sample.status = Sample.Status.COMPLETED
+        return sample
+
+    monkeypatch.setattr(mod, "generate_and_rm", fake_generate_and_rm)
+    monkeypatch.setattr(mod, "EVAL_PROMPT_DATASET", {})
+
+    args = _rollout_args()
+    dataset_cfg = EvalDatasetConfig(name="eval", path="/tmp/eval.jsonl", n_samples_per_eval_prompt=2)
+    cache_key = dataset_cfg.cache_key + (args.hf_checkpoint, args.apply_chat_template)
+    mod.EVAL_PROMPT_DATASET[cache_key] = type("DummyDataset", (), {"samples": [Sample(prompt="prompt")]})()
+
+    result = asyncio.run(mod.eval_rollout_single_dataset(args, rollout_id=0, dataset_cfg=dataset_cfg))
+
+    assert len(seen_session_ids) == 2
+    assert None not in seen_session_ids
+    assert len(set(seen_session_ids)) == 2
+    assert result[dataset_cfg.name]["samples"][0].session_id != result[dataset_cfg.name]["samples"][1].session_id
 
 
 @pytest.mark.unit
