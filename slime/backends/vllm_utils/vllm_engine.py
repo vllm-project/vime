@@ -482,6 +482,11 @@ def build_vllm_cmd_and_env(server_args: dict[str, Any]) -> tuple[list[str], dict
 
     if getattr(args, "use_rollout_routing_replay", False):
         cmd += ["--enable-return-routed-experts"]
+    # Prefix-cache accounting: vLLM only emits usage.prompt_tokens_details.cached_tokens
+    # (the numerator behind rollout/prefix_cache_hit_rate) when the OpenAI frontend is
+    # started with this flag. It lives on FrontendArgs, not AsyncEngineArgs, so it is NOT
+    # reachable via --vllm-* auto-forwarding and must be set explicitly here.
+    cmd += ["--enable-prompt-tokens-details"]
 
     # gpu_memory_utilization: no vime-forced default. In colocate, training and rollout do not
     # occupy the GPU simultaneously (sleep/offload cycles), so vLLM's own default is fine. A user
