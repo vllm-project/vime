@@ -907,6 +907,14 @@ async def eval_rollout_single_dataset(
             sample = copy.deepcopy(prompt_sample)
             sample.index = sample_index
             sample_index += 1
+            # Group all samples of one eval prompt under a shared session_id so the
+            # vllm-router consistent_hash policy keeps them on one engine (prefix-cache
+            # reuse) while spreading distinct prompts across engines. Without it, eval
+            # samples have session_id=None, the x-session-id header is never sent, and
+            # consistent_hash degenerates to a single worker for the whole eval. The
+            # rollout path already assigns session_id in generate_and_rm_group; eval
+            # bypassed it by calling generate_and_rm directly.
+            sample.session_id = f"eval-{dataset_cfg.name}-{_i}"
             sample.metadata = dataset_cfg.inject_metadata(getattr(sample, "metadata", None))
             sample.generate_function_path = getattr(dataset_cfg, "custom_generate_function_path", None)
             sampling_params = base_sampling_params
