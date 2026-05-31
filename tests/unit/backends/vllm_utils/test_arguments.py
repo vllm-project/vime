@@ -164,23 +164,33 @@ def test_validate_args_pp1(args_mod):
     args_mod.validate_args(ns)
     assert ns.vllm_pp_size == 1
     assert ns.vllm_dp_size == 1
-    assert ns.vllm_tp_size == 4
+    # validate_args intentionally does NOT set a global ``vllm_tp_size`` anymore: a global TP
+    # (derived from the *global* rollout_num_gpus_per_engine) shadowed the per-engine value and
+    # broke heterogeneous per-group engines (the 300s "3/4 clients joined" rendezvous hang). TP is
+    # now derived per engine in vllm_engine._resolve_vllm_parallel_sizes (covered in
+    # test_vllm_engine.py::test_resolve_parallel_sizes_is_per_engine_not_global).
+    assert not hasattr(ns, "vllm_tp_size")
 
 
 @pytest.mark.unit
-def test_validate_args_pp2_dp2_derives_tp(args_mod):
+def test_validate_args_records_pp_dp_but_no_global_tp(args_mod):
+    # validate_args records pp/dp on the namespace but must not precompute a global TP, even when
+    # pp>1 and dp>1. Per-engine TP = gpus_per_engine // (pp * dp) is resolved at launch time.
     ns = _ns(vllm_pipeline_parallel_size=2, vllm_data_parallel_size=2)
     args_mod.validate_args(ns)
     assert ns.vllm_pp_size == 2
     assert ns.vllm_dp_size == 2
-    assert ns.vllm_tp_size == 2
+    assert not hasattr(ns, "vllm_tp_size")
 
 
 @pytest.mark.unit
-def test_validate_args_pp_indivisible_asserts(args_mod):
+def test_validate_args_no_longer_raises_on_pp_indivisible(args_mod):
+    # The pp-divisibility check moved out of validate_args and into the per-engine resolver
+    # (vllm_engine._resolve_vllm_parallel_sizes / compute_vllm_engine_topology), so validate_args
+    # itself is now agnostic to it. The enforcement is covered in test_vllm_engine.py.
     ns = _ns(vllm_pipeline_parallel_size=3, rollout_num_gpus_per_engine=4)
-    with pytest.raises(AssertionError, match="divisible"):
-        args_mod.validate_args(ns)
+    args_mod.validate_args(ns)  # must not raise
+    assert ns.vllm_pp_size == 3
 
 
 @pytest.mark.unit
