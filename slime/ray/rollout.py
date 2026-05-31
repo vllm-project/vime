@@ -982,10 +982,11 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
             router_args.vllm_pd_disaggregation = True
         if hasattr(router_args, "disable_circuit_breaker"):
             router_args.disable_circuit_breaker = True
-
-    # MiniLB is PD-only in vllm-router; non-PD rollout needs the Rust Router (omit SLIME_VLLM_ROUTER_USE_RUST).
-    if has_pd_disaggregation and os.environ.get("SLIME_VLLM_ROUTER_USE_RUST", "") != "1":
-        router_args.mini_lb = True
+        # PD uses the full Rust router: it accepts dynamic /workers registration (engines register
+        # after the router is up), matching slime's launch-router-then-register flow. vllm-router's
+        # MiniLB is a debug-only load balancer that requires STATIC prefill/decode URLs at
+        # construction, which slime never provides, so it can never work here. MiniLB stays off
+        # (RouterArgs defaults mini_lb=False); the old SLIME_VLLM_ROUTER_USE_RUST gate is removed.
 
     if any(f.name == "disable_health_check" for f in dataclasses.fields(type(router_args))):
         router_args.disable_health_check = True
@@ -1002,8 +1003,8 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
     if not process.is_alive():
         raise RuntimeError(
             f"Router subprocess exited (exitcode={process.exitcode}). "
-            "For vllm-router non-PD mode, install the Rust router (pip wheel with Router); "
-            "MiniLB is only valid with PD disaggregation. See slime.utils.http_utils run_router logs."
+            "Ensure the vllm-router (Rust) wheel is installed; both PD and non-PD rollout use it. "
+            "See slime.utils.http_utils run_router logs."
         )
     logger.info(f"Router launched at {router_ip}:{router_port}, Prometheus port: {router_args.prometheus_port}")
     return router_ip, router_port, router_args.prometheus_port
