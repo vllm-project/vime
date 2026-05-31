@@ -538,9 +538,17 @@ def _wait_worker_process_alive(process: multiprocessing.Process, timeout_s: floa
     raise RuntimeError(f"vLLM worker process exited unexpectedly with code {process.exitcode}")
 
 
-def _wait_server_healthy(base_url: str, process: multiprocessing.Process | None, timeout_s: float = 300.0) -> None:
-    """Wait until the vLLM server responds on ``GET /health``."""
-    start = time.time()
+def _wait_server_healthy(base_url: str, process: multiprocessing.Process | None) -> None:
+    """Wait until the vLLM server responds on ``GET /health`` (no time limit, SGLang-style).
+
+    Loops until /health returns 200, or — for a managed subprocess — until it dies (fail fast via
+    ``process.is_alive()``). There is no overall deadline, so a slow-but-healthy startup (a large
+    MoE / DP engine loading + compiling + capturing CUDA graphs across replicas) is never
+    spuriously timed out. The per-probe ``timeout=3`` bounds each individual request so a single
+    stuck socket cannot wedge the loop. In external mode (``process is None``) there is no liveness
+    signal, so a permanently unreachable URL loops indefinitely by design (the external engine is
+    caller-managed). Mirrors slime's SGLang backend _wait_server_healthy.
+    """
     while True:
         try:
             response = requests.get(f"{base_url}/health", timeout=3)
@@ -551,8 +559,6 @@ def _wait_server_healthy(base_url: str, process: multiprocessing.Process | None,
 
         if process is not None and not process.is_alive():
             raise RuntimeError(f"vLLM server exited unexpectedly with code {process.exitcode}")
-        if time.time() - start > timeout_s:
-            raise TimeoutError(f"Timeout waiting for vLLM server healthy: {base_url}")
         time.sleep(2)
 
 
