@@ -133,7 +133,7 @@ def _execute_case(case: VLLMGenerateCase):
     )
 
     try:
-        _wait_server_healthy(f"http://127.0.0.1:{server_port}", process, timeout_s=case.timeout_s)
+        _wait_server_healthy(f"http://127.0.0.1:{server_port}", process)
 
         rollout_args = Namespace(
             ci_test=False,
