@@ -1,0 +1,274 @@
+from __future__ import annotations
+
+import importlib
+import importlib.util
+import json
+import logging
+import sys
+import uuid
+from pathlib import Path
+from typing import Any
+
+from vime.rollout.vllm_rollout import (
+    GenerateState,
+    _apply_vllm_routed_experts,
+    _build_inference_sampling_params,
+    _coerce_flat_int_token_ids,
+    _inference_generate_tokens_and_logprobs,
+    _mm_render_response_to_generate_body,
+)
+from vime.utils.http_utils import post
+from vime.utils.types import Sample
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_ENV_MODULE = "examples.tau_bench.env_tau"
+
+TOOL_INSTRUCTION = (
+    " At each turn, you are allowed to call one or no function to assist "
+    "with task execution using <tools></tools> XML tags.\n"
+    "YOU MUST EXECUTE TOOLS TO MAKE ANY MODIFICATIONS OR CANCELLATIONS. "
+    "Each tool call leads to a message returned by the system.\n"
+    "NEVER confirm execution to the user without seeing confirmation "
+    "from the tool system.\n"
+)
+
+
+def _load_env_module(env_path: str | None):
+    target = env_path or DEFAULT_ENV_MODULE
+    module_path = Path(target)
+    if module_path.suffix == ".py" and module_path.exists():
+        spec = importlib.util.spec_from_file_location(f"rollout_env_{module_path.stem}", module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Cannot import environment module from {module_path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+    return importlib.import_module(target)
+
+
+def _reformulate_tool_call(text: str) -> str:
+    return text.replace(
+        "You may call one or more functions to assist with the user query.",
+        TOOL_INSTRUCTION,
+    )
+
+
+def _messages_for_render(messages: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for msg in messages:
+        out.append({"role": msg["role"], "content": msg.get("content", "")})
+    return out
+
+
+async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
+    """
+    Custom multi-turn rollout for tau-bench tool-use environments.
+
+    This follows the vime multi-turn pattern from geo3k_vlm_multi_turn/rollout.py
+    with PR #120 bug fixes:
+    - Proper token budget tracking using response_length instead of raw token count
+    - Appending EOS token after stop strings in multi-turn
+    - Prefix stability validation between render turns
+    - Correct loss_mask calculation (1 for assistant tokens, 0 for env/tool tokens)
+    """
+    assert not args.partial_rollout, "Partial rollout is not supported for tau-bench interactions."
+
+    if args.max_turns is None:
+        raise ValueError("max_turns must be set via --custom-config-path in the custom config file.")
+
+    state = GenerateState(args)
+    base_url = f"http://{args.vllm_router_ip}:{args.vllm_router_port}"
+
+    env_module = _load_env_module(args.rollout_interaction_env_path)
+    sample.metadata = sample.metadata or {}
+
+    headers = None
+    if getattr(args, "router_policy", None) == "consistent_hash":
+        sample.session_id = sample.session_id or str(uuid.uuid4())
+        headers = {"x-session-id": sample.session_id}
+
+    build_env = env_module.build_env
+    if not callable(build_env):
+        raise ValueError("Environment module must expose a callable `build_env(sample, args)`.")
+    try:
+        env = build_env(sample=sample, args=args)
+    except TypeError:
+        env = build_env(sample, args)
+
+    initial_obs = env.reset()
+    wiki = initial_obs.get("wiki", "")
+
+    messages: list[dict] = [
+        {"role": "system", "content": wiki},
+        {"role": "user", "content": initial_obs.get("obs_str", "")},
+    ]
+
+    response_tokens: list[int] = []
+    sample.loss_mask = sample.loss_mask or []
+    sample.rollout_log_probs = sample.rollout_log_probs or []
+    sample.tokens = list(sample.tokens) if sample.tokens else []
+
+    sampling_params = sampling_params.copy()
+    inference_sampling_params = _build_inference_sampling_params(sampling_params)
+    max_response_budget = sampling_params.get("max_new_tokens")
+
+    def remaining_budget() -> int | None:
+        return None if max_response_budget is None else max_response_budget - sample.response_length
+
+    async def render() -> dict:
+        render_messages = _messages_for_render(messages)
+        payload = {"model": args.hf_checkpoint, "messages": render_messages}
+        render_data = await post(f"{base_url}/v1/chat/completions/render", payload, headers=headers)
+        body = _mm_render_response_to_generate_body(render_data, args.hf_checkpoint)
+        rendered_text = body.get("text", "")
+        if rendered_text:
+            body["text"] = _reformulate_tool_call(rendered_text)
+        return body
+
+    def append_response_window(
+        token_ids: list[int],
+        loss_mask: list[int],
+        log_probs: list[float] | None = None,
+    ) -> None:
+        if not token_ids:
+            return
+        if len(loss_mask) != len(token_ids):
+            raise ValueError(f"loss_mask length {len(loss_mask)} != token_ids length {len(token_ids)}")
+        sample.tokens.extend(token_ids)
+        sample.loss_mask.extend(loss_mask)
+        sample.rollout_log_probs.extend(log_probs if log_probs is not None else [0.0] * len(token_ids))
+        sample.response_length += len(token_ids)
+
+    def sampling_params_for_turn() -> dict | None:
+        params = dict(inference_sampling_params)
+        max_tokens = remaining_budget()
+        if max_tokens is None:
+            return params
+        if max_tokens <= 0:
+            return None
+        params["max_tokens"] = max_tokens
+        return params
+
+    try:
+        latest_features = None
+        pending_obs_offset: int | None = None
+        rendered_body = await render()
+        prompt_ids = _coerce_flat_int_token_ids(rendered_body.get("token_ids"))
+        if not sample.tokens:
+            sample.tokens = list(prompt_ids)
+        if args.rollout_max_context_len is not None:
+            max_response_budget = max(0, args.rollout_max_context_len - len(sample.tokens))
+
+        for turn_idx in range(args.max_turns):
+            input_ids = _coerce_flat_int_token_ids(rendered_body.get("token_ids"))
+            latest_features = rendered_body.get("features")
+
+            if pending_obs_offset is not None:
+                obs_tokens = input_ids[pending_obs_offset:]
+                remaining = remaining_budget()
+                if remaining is not None and len(obs_tokens) > remaining:
+                    append_response_window(obs_tokens[: max(remaining, 0)], [0] * max(remaining, 0))
+                    sample.status = Sample.Status.TRUNCATED
+                    break
+                append_response_window(obs_tokens, [0] * len(obs_tokens))
+                pending_obs_offset = None
+
+            current_sampling_params = sampling_params_for_turn()
+            if current_sampling_params is None:
+                sample.status = Sample.Status.TRUNCATED
+                break
+
+            body = dict(rendered_body)
+            body["sampling_params"] = current_sampling_params
+            output = await post(f"{base_url}/inference/v1/generate", body, headers=headers)
+            choice = output["choices"][0]
+            finish_reason = choice.get("finish_reason") or "stop"
+            new_tokens, new_logprobs = _inference_generate_tokens_and_logprobs(choice)
+
+            if not new_tokens:
+                if finish_reason in ("abort", "cancelled"):
+                    sample.status = Sample.Status.ABORTED
+                    break
+
+            response_text = state.tokenizer.decode(new_tokens, skip_special_tokens=False) if new_tokens else ""
+            train_tokens = list(new_tokens)
+            train_logprobs = list(new_logprobs)
+            train_loss_mask = [1] * len(train_tokens)
+
+            stop = current_sampling_params.get("stop")
+            eos_token_id = getattr(state.tokenizer, "eos_token_id", None)
+            append_stop_eos = (
+                stop
+                and eos_token_id is not None
+                and getattr(args, "append_eos_token_after_stop_str_in_multi_turn", True)
+            )
+            if append_stop_eos:
+                stop_strings = (stop,) if isinstance(stop, str) else tuple(stop)
+                already_has_eos = bool(train_tokens and train_tokens[-1] == eos_token_id)
+                if stop_strings and response_text.endswith(stop_strings) and not already_has_eos:
+                    if getattr(args, "use_rollout_routing_replay", False):
+                        raise RuntimeError(
+                            "Routing replay is not supported when appending an artificial EOS after a stop string, "
+                            "because vLLM does not return routed experts for that extra token."
+                        )
+                    train_tokens.append(int(eos_token_id))
+                    train_logprobs.append(0.0)
+                    train_loss_mask.append(0)
+
+            response_tokens.extend(new_tokens)
+            append_response_window(train_tokens, train_loss_mask, train_logprobs)
+            _apply_vllm_routed_experts(args, sample, choice)
+
+            messages.append({"role": "assistant", "content": response_text})
+
+            if finish_reason == "length":
+                sample.status = Sample.Status.TRUNCATED
+                break
+            if finish_reason in ("abort", "cancelled"):
+                sample.status = Sample.Status.ABORTED
+                break
+
+            observation, done, step_info = env.step(response_text)
+
+            if done:
+                sample.reward = observation.get("reward", 0.0)
+                sample.status = Sample.Status.COMPLETED
+                break
+
+            next_user_message = env.format_observation(observation)
+            messages.append(next_user_message)
+
+            if turn_idx + 1 >= args.max_turns:
+                sample.status = Sample.Status.TRUNCATED
+                break
+
+            pending_obs_offset = len(input_ids) + len(train_tokens)
+            rendered_body = await render()
+            latest_features = rendered_body.get("features")
+            rendered_ids = _coerce_flat_int_token_ids(rendered_body.get("token_ids"))
+            is_prefix_stable = rendered_ids[:pending_obs_offset] == sample.tokens[:pending_obs_offset]
+            sample.metadata["multiturn_render"] = {
+                "prefix_stable": is_prefix_stable,
+                "prefix_len": pending_obs_offset,
+                "sample_len": len(sample.tokens),
+                "rendered_len": len(rendered_ids),
+                "turn": turn_idx + 1,
+            }
+            if getattr(args, "strict_multiturn_render_token_match", False) and not is_prefix_stable:
+                raise RuntimeError(
+                    "Full conversation render is not prefix-stable with the generated token stream: "
+                    f"{sample.metadata['multiturn_render']}"
+                )
+
+        sample.response = state.tokenizer.decode(response_tokens, skip_special_tokens=False)
+        sample.response_length = len(sample.loss_mask)
+        if sample.status == Sample.Status.PENDING:
+            sample.status = Sample.Status.COMPLETED
+        return sample
+    finally:
+        try:
+            env.close()
+        except Exception:
+            pass

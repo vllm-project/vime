@@ -1,0 +1,8 @@
+max_turns: 30
+rollout_interaction_env_path: examples.tau_bench.env_tau
+custom_rm_path: examples.tau_bench.rm_tau.batched_tau_bench_rm
+tau_env: retail
+tau_user_model: openai/local-qwen3-4b
+tau_user_model_provider: openai
+tau_task_split: train
+tau_user_strategy: llm
