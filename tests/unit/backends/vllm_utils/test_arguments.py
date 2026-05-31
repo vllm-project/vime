@@ -266,6 +266,14 @@ def test_add_vllm_router_arguments_parses_real_values(args_mod):
 
 
 @pytest.mark.unit
+def test_add_vllm_router_arguments_defaults_to_consistent_hash(args_mod):
+    parser = argparse.ArgumentParser(add_help=False)
+    args_mod.add_vllm_router_arguments(parser)
+    parsed, _ = parser.parse_known_args([])
+    assert parsed.router_policy == "consistent_hash"
+
+
+@pytest.mark.unit
 def test_orchestration_dests_use_vllm_prefix(args_mod):
     assert "vllm_router_ip" in args_mod._VIME_ORCHESTRATION_DESTS
     assert "vllm_router_port" in args_mod._VIME_ORCHESTRATION_DESTS

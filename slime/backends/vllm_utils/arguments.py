@@ -146,11 +146,11 @@ def add_vllm_router_arguments(parser):
     parser.add_argument(
         "--vllm-router-policy",
         type=str,
-        default="cache_aware",
+        default="consistent_hash",
         dest="router_policy",
         choices=["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash"],
         help=(
-            "vllm-router load-balancing policy. Use 'consistent_hash' to enable "
+            "vllm-router load-balancing policy. Defaults to 'consistent_hash' for "
             "session-affinity routing replay (routes a sample's requests to the same "
             "engine via the x-session-id header)."
         ),
