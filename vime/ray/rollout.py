@@ -31,6 +31,7 @@ from vime.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from vime.utils.types import Sample
 
 from ..utils.metric_utils import has_repetition
+from .rollout_validation import validate_server_group_gpu_indices
 from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -91,6 +92,16 @@ class ServerGroup:
         num_gpu_per_engine = min(self.num_gpus_per_engine, self.args.num_gpus_per_node)
 
         pg, reordered_bundle_indices, reordered_gpu_ids = self.pg
+        validate_server_group_gpu_indices(
+            worker_type=self.worker_type,
+            gpu_offset=self.gpu_offset,
+            num_gpus_per_engine=self.num_gpus_per_engine,
+            num_gpu_per_engine=num_gpu_per_engine,
+            num_engines=len(self.all_engines),
+            num_available_gpus=len(reordered_gpu_ids),
+            rollout_num_gpus=self.args.rollout_num_gpus,
+            rollout_num_gpus_per_engine=self.args.rollout_num_gpus_per_engine,
+        )
 
         RolloutRayActor = ray.remote(VLLMEngine)
 
