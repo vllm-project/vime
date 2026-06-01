@@ -248,6 +248,44 @@ jobs:
 <% endif %>
 <% endfor %>
 
+  e2e-test-unit:
+    name: Unit & utils tests (pytest, in-image)
+    needs: pre-commit
+    # Always-on regression gate (like e2e-test-plugin-contracts): runs on every
+    # PR synchronize/label and on manual dispatch, no run-ci-* label required.
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: self-hosted
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Execute
+        shell: bash
+        run: |
+          # Run inside the CI image: it ships megatron + torch, which the
+          # tests/unit/backends/megatron_utils/update_weight tests need at
+          # import time. CPU/mock only -> no --gpus / no GPU lock.
+          docker run --rm \
+            --network host \
+            --ipc=host \
+            --shm-size=16g \
+            -e http_proxy \
+            -e https_proxy \
+            -e HTTP_PROXY \
+            -e HTTPS_PROXY \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            -w "$GITHUB_WORKSPACE" \
+            inferactinc/public:vime-vllm-cu129-latest \
+            bash -lc '
+              set -euo pipefail
+              pip install -e . --no-deps --break-system-packages
+              pip install -q pytest --break-system-packages
+              python -m pytest tests/unit tests/utils
+            '
+
   e2e-test-changed-detect:
     needs: pre-commit
     if: (github.event_name == 'workflow_dispatch') || (github.event.pull_request && contains(github.event.pull_request.labels.*.name, 'run-ci-changed'))
