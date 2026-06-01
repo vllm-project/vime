@@ -826,7 +826,7 @@ class VLLMEngine(RayActor):
             self.flush_cache()
 
         update_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
-        response = self._post_json(
+        response = self._make_request(
             "collective_rpc",
             {"method": "update_weights_chunk", "kwargs": {"update_info": payload}},
             timeout=update_timeout_s,
@@ -869,7 +869,7 @@ class VLLMEngine(RayActor):
                 cloudpickle.dumps(payload.pop("ipc_handles"))
             ).decode("utf-8")
         update_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
-        response = self._post_json(
+        response = self._make_request(
             "collective_rpc",
             {"method": "update_weights_chunk", "kwargs": {"update_info": payload}},
             timeout=update_timeout_s,
