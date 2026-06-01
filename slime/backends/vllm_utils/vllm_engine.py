@@ -825,10 +825,60 @@ class VLLMEngine(RayActor):
         if flush_cache:
             self.flush_cache()
 
-        response = self._post_vllm_update_weights_http(payload)
+        update_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
+        response = self._post_json(
+            "collective_rpc",
+            {"method": "update_weights_chunk", "kwargs": {"update_info": payload}},
+            timeout=update_timeout_s,
+        )
+        response.raise_for_status()
         if weight_version is not None:
             self._weight_version = str(weight_version)
-        return response
+        try:
+            return response.json()
+        except Exception:
+            return {"ok": True, "raw": response.text}
+
+    def update_weights_chunk(self, update_info: dict) -> dict:
+        """POST ``/update_weights`` with a single named-tensor chunk.
+
+        Mirrors the SkyRL ``RemoteInferenceClient.update_weights_chunk`` API.
+        Must be called between :meth:`start_weight_update` and
+        :meth:`finish_weight_update`.
+
+        Unlike :meth:`update_weights`, ``update_info`` is the *inner* payload
+        dict (``names``, ``dtype_names``, ``shapes``, and one of
+        ``ipc_handles`` / ``ipc_handles_pickled`` for IPC, or ``packed`` for
+        NCCL) — **not** wrapped in ``{"update_info": ...}``.
+
+        If ``ipc_handles`` are present (raw CUDA callables produced by
+        ``reduce_tensor``), they are serialised with cloudpickle + base64 so
+        vLLM can deserialise them when
+        ``VLLM_ALLOW_INSECURE_SERIALIZATION=1`` is set.
+        """
+        if self.node_rank != 0:
+            return {"ok": True, "skipped": True}
+
+        import base64
+
+        import cloudpickle
+
+        payload = dict(update_info)
+        if payload.get("ipc_handles") is not None:
+            payload["ipc_handles_pickled"] = base64.b64encode(
+                cloudpickle.dumps(payload.pop("ipc_handles"))
+            ).decode("utf-8")
+        update_timeout_s = float(os.environ.get("SLIME_VLLM_WEIGHT_TRANSFER_HTTP_TIMEOUT_SEC", "900"))
+        response = self._post_json(
+            "collective_rpc",
+            {"method": "update_weights_chunk", "kwargs": {"update_info": payload}},
+            timeout=update_timeout_s,
+        )
+        response.raise_for_status()
+        try:
+            return response.json()
+        except Exception:
+            return {"ok": True, "raw": response.text}
 
     def flush_cache(self):
         """Clear prefix cache via ``POST /reset_prefix_cache``."""
