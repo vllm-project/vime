@@ -9,8 +9,12 @@ import ray
 import torch
 import torch.distributed as dist
 from megatron.core import mpu
-from torch_memory_saver import torch_memory_saver
 from transformers import AutoConfig, AutoTokenizer
+
+try:  # pragma: no cover - depends on the runtime preload environment.
+    from torch_memory_saver import torch_memory_saver  # type: ignore
+except Exception:  # noqa: BLE001 - the native hook may be absent in vLLM runs.
+    torch_memory_saver = None  # type: ignore[assignment]
 
 from slime.ray.train_actor import TrainRayActor
 from slime.utils import train_dump_utils
@@ -77,9 +81,12 @@ class MegatronTrainRayActor(TrainRayActor):
         dist.barrier(group=get_gloo_group())
 
         if args.offload_train:
-            if (x := args.train_memory_margin_bytes) > 0:
-                logger.info(f"Set torch_memory_saver.memory_margin_bytes to {x}")
-                torch_memory_saver.memory_margin_bytes = x
+            if self._uses_torch_memory_saver():
+                if (x := args.train_memory_margin_bytes) > 0:
+                    logger.info(f"Set torch_memory_saver.memory_margin_bytes to {x}")
+                    torch_memory_saver.memory_margin_bytes = x
+            else:
+                logger.info("offload_train enabled without active torch_memory_saver; using CPU tensor offload.")
 
         self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id = initialize_model_and_optimizer(
             args, role
@@ -156,6 +163,80 @@ class MegatronTrainRayActor(TrainRayActor):
 
         return start_rollout_id
 
+    def _uses_torch_memory_saver(self) -> bool:
+        if not self.args.offload_train:
+            return False
+        if torch_memory_saver is None:
+            return False
+        return getattr(torch_memory_saver, "_impl", None) is not None
+
+    @torch.no_grad()
+    def _move_optimizer_state_to_device(self, device: str | torch.device) -> None:
+        if self.optimizer is None:
+            return
+
+        def _walk(opt) -> None:
+            inner = getattr(opt, "chained_optimizers", None)
+            if inner:
+                for sub in inner:
+                    _walk(sub)
+                return
+
+            state = getattr(opt, "state", None)
+            if not state:
+                return
+            for key, value in list(state.items()):
+                if isinstance(value, torch.Tensor):
+                    state[key] = value.to(device, non_blocking=True)
+                elif isinstance(value, dict):
+                    for sub_key, sub_value in value.items():
+                        if isinstance(sub_value, torch.Tensor):
+                            value[sub_key] = sub_value.to(device, non_blocking=True)
+
+        _walk(self.optimizer)
+        torch.cuda.synchronize()
+
+    @torch.no_grad()
+    def _move_module_tensors_to_device(self, device: str | torch.device) -> None:
+        if self.model is None:
+            return
+
+        def _move_tensor_attr(owner, attr: str) -> None:
+            t = getattr(owner, attr, None)
+            if isinstance(t, torch.Tensor):
+                t.data = t.data.to(device, non_blocking=True)
+
+        for module in self.model:
+            for bucket_attr in ("buffers", "expert_parallel_buffers"):
+                bucket_list = getattr(module, bucket_attr, None)
+                if isinstance(bucket_list, (list, tuple)):
+                    for buf in bucket_list:
+                        for tensor_attr in ("param_data", "grad_data"):
+                            _move_tensor_attr(buf, tensor_attr)
+
+            for p in module.parameters(recurse=True):
+                p.data = p.data.to(device, non_blocking=True)
+                if p.grad is not None:
+                    p.grad.data = p.grad.data.to(device, non_blocking=True)
+                _move_tensor_attr(p, "main_grad")
+
+            # Megatron DDP can shadow module.buffers with ParamAndGradBuffer lists.
+            for b in torch.nn.Module.buffers(module, recurse=True):
+                b.data = b.data.to(device, non_blocking=True)
+
+    def _cpu_offload_sleep(self) -> None:
+        self._move_module_tensors_to_device("cpu")
+        if getattr(self, "optimizer", None) is not None:
+            self._move_optimizer_state_to_device("cpu")
+        torch.cuda.synchronize()
+
+    def _cpu_offload_wake_up(self) -> None:
+        device = torch.device("cuda", torch.cuda.current_device())
+        self._move_module_tensors_to_device(device)
+        if getattr(self, "optimizer", None) is not None:
+            self._move_optimizer_state_to_device(device)
+        torch.cuda.synchronize()
+
     @timer
     def sleep(self) -> None:
         assert self.args.offload_train
@@ -171,7 +252,11 @@ class MegatronTrainRayActor(TrainRayActor):
             self.weight_updater.disconnect_rollout_engines()
         destroy_process_groups()
 
-        torch_memory_saver.pause()
+        if self._uses_torch_memory_saver():
+            torch_memory_saver.pause()
+        else:
+            self._cpu_offload_sleep()
+            clear_memory()
 
         print_memory("after offload model")
 
@@ -180,7 +265,10 @@ class MegatronTrainRayActor(TrainRayActor):
         assert self.args.offload_train
         print_memory("before wake_up model")
 
-        torch_memory_saver.resume()
+        if self._uses_torch_memory_saver():
+            torch_memory_saver.resume()
+        else:
+            self._cpu_offload_wake_up()
 
         clear_memory()
         reload_process_groups()
@@ -591,7 +679,9 @@ class MegatronTrainRayActor(TrainRayActor):
             if dist.get_rank() == 0:
                 ray.get(self.rollout_manager.clear_updatable_num_new_engines.remote())
 
-        with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
+        weight_update_ctx = torch_memory_saver.disable() if self._uses_torch_memory_saver() else nullcontext()
+
+        with weight_update_ctx:
             print_memory("before update_weights")
             self.weight_updater.update_weights()
             print_memory("after update_weights")
