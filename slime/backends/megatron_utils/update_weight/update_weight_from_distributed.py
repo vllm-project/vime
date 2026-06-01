@@ -21,6 +21,7 @@ from slime.utils.distributed_utils import get_gloo_group
 
 from ..megatron_to_hf import convert_to_hf
 from .common import all_gather_param, named_params_and_buffers
+from .hf_weight_iterator_base import HfWeightIteratorBase
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +60,21 @@ class UpdateWeightFromDistributed:
         """
         self.args = args
         self.model = model
+        self.weights_getter = weights_getter
         self.model_name = model_name
         self.quantization_config = quantization_config
         self.weight_version = 0
         self._model_update_groups = None
+        self._hf_weight_iterator = (
+            HfWeightIteratorBase.create(
+                args=args,
+                model=model,
+                model_name=model_name,
+                quantization_config=quantization_config,
+            )
+            if args.megatron_to_hf_mode == "bridge"
+            else None
+        )
 
     def connect_rollout_engines(
         self,
@@ -147,6 +159,10 @@ class UpdateWeightFromDistributed:
         dist.barrier(group=get_gloo_group())
 
     def _sync_weights_to_rollout_engines(self) -> None:
+        if self._hf_weight_iterator is not None:
+            self._sync_bridge_weights_to_rollout_engines()
+            return
+
         use_vllm_packed = self._use_vllm_packed()
         if use_vllm_packed and self._is_pp_src_rank:
             logger.info("Using vLLM packed weight sync (bucketed; metadata + trainer_send_weights per bucket)")
@@ -206,6 +222,38 @@ class UpdateWeightFromDistributed:
 
             if named_tensors:
                 self._update_expert_bucket_weights_from_distributed(named_tensors, pbar=pbar)
+
+        if self._is_pp_src_rank:
+            torch.cuda.synchronize()
+
+    def _sync_bridge_weights_to_rollout_engines(self) -> None:
+        """
+        Export HF weights through Megatron-Bridge, then send each exported chunk
+        over the same NCCL non-colocate path used by the raw converter.
+        """
+        use_vllm_packed = self._use_vllm_packed()
+        if self._is_pp_src_rank:
+            logger.info("Using Megatron-Bridge HF weight export for non-colocate vLLM weight sync")
+            pbar = tqdm(
+                desc=f"[{self._group_name}] Update weights (Megatron-Bridge"
+                f"{', vLLM packed' if use_vllm_packed else ''})",
+                total=0,
+            )
+        else:
+            pbar = None
+
+        megatron_local_weights = self.weights_getter()
+        for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(megatron_local_weights):
+            if self._is_pp_src_rank:
+                hf_named_tensors = list(hf_named_tensors)
+                if use_vllm_packed:
+                    self._update_weights_vllm_packed(hf_named_tensors)
+                    if pbar is not None:
+                        pbar.update(1)
+                else:
+                    self._update_bucket_weights_from_distributed(hf_named_tensors, pbar=pbar)
+
+        dist.barrier(group=get_gloo_group())
 
         if self._is_pp_src_rank:
             torch.cuda.synchronize()

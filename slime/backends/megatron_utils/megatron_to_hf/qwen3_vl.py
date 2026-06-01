@@ -11,8 +11,53 @@ def convert_qwen3vl_to_hf(args, name, param):
         name = name.replace("module.module.module.", "module.module.", 1)
 
     if name.startswith("module.module.vision_model."):
-        hf_name = "model.visual." + name[len("module.module.vision_model.") :]
-        return [(hf_name, param)]
+        vision_name = name[len("module.module.vision_model.") :]
+
+        match = re.match(r"decoder\.layers\.(\d+)\.(.+)", vision_name)
+        if match:
+            layer_idx, rest = match.groups()
+            rest = rest.replace("self_attention.linear_proj.", "attn.proj.", 1)
+            rest = rest.replace("self_attention.linear_qkv.", "attn.qkv.", 1)
+            rest = rest.replace("attn.qkv.layer_norm_", "norm1.", 1)
+            rest = rest.replace("mlp.linear_fc1.layer_norm_", "norm2.", 1)
+            if rest in {
+                "attn.proj.weight",
+                "attn.proj.bias",
+                "attn.qkv.weight",
+                "attn.qkv.bias",
+                "norm1.weight",
+                "norm1.bias",
+                "norm2.weight",
+                "norm2.bias",
+                "mlp.linear_fc1.weight",
+                "mlp.linear_fc1.bias",
+                "mlp.linear_fc2.weight",
+                "mlp.linear_fc2.bias",
+            }:
+                return [(f"model.visual.blocks.{layer_idx}.{rest}", param)]
+
+        match = re.match(r"decoder\.deepstack_merger_list\.(\d+)\.(.+)", vision_name)
+        if match:
+            layer_idx, rest = match.groups()
+            rest = rest.replace("patch_norm.", "norm.", 1)
+            if rest in {
+                "norm.weight",
+                "norm.bias",
+                "linear_fc1.weight",
+                "linear_fc1.bias",
+                "linear_fc2.weight",
+                "linear_fc2.bias",
+            }:
+                return [(f"model.visual.deepstack_merger_list.{layer_idx}.{rest}", param)]
+
+        if vision_name.startswith("merger.patch_norm."):
+            return [(f"model.visual.{vision_name.replace('patch_norm.', 'norm.', 1)}", param)]
+        if re.match(r"merger\.linear_fc[12]\.(weight|bias)$", vision_name):
+            return [(f"model.visual.{vision_name}", param)]
+        if vision_name == "pos_embed.weight":
+            return [("model.visual.pos_embed.weight", param)]
+        if vision_name.startswith("patch_embed.proj."):
+            return [(f"model.visual.{vision_name}", param)]
 
     if name == "module.module.embedding.word_embeddings.weight":
         return [("model.language_model.embed_tokens.weight", param)]
