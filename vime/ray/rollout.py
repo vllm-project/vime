@@ -30,6 +30,7 @@ from vime.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from vime.utils.types import Sample
 
 from ..utils.metric_utils import has_repetition
+from .rollout_validation import validate_server_group_gpu_indices
 from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -115,6 +116,16 @@ class ServerGroup:
         num_gpu_per_engine = min(self.num_gpus_per_engine, self.args.num_gpus_per_node)
 
         pg, reordered_bundle_indices, reordered_gpu_ids = self.pg
+        validate_server_group_gpu_indices(
+            worker_type=self.worker_type,
+            gpu_offset=self.gpu_offset,
+            num_gpus_per_engine=self.num_gpus_per_engine,
+            num_gpu_per_engine=num_gpu_per_engine,
+            num_engines=len(self.all_engines),
+            num_available_gpus=len(reordered_gpu_ids),
+            rollout_num_gpus=self.args.rollout_num_gpus,
+            rollout_num_gpus_per_engine=self.args.rollout_num_gpus_per_engine,
+        )
 
         from vime.backends.vllm_utils.vllm_engine import VLLMEngine
 
@@ -1053,7 +1064,9 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
         model_cfg.resolve(args)
 
         has_pd = model_cfg.has_pd_disaggregation
-        router_ip, router_port, prom_port = _start_router(args, has_pd_disaggregation=has_pd, force_new=(model_idx > 0))
+        router_ip, router_port, prom_port = _start_router(
+            args, has_pd_disaggregation=has_pd, force_new=(model_idx > 0)
+        )
 
         # Write back so downstream readers (vllm_rollout, vllm_engine) see the
         # router we just started (only relevant for first model in multi-model setups).
