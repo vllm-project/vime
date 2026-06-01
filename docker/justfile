@@ -21,12 +21,12 @@ _release-raw:
     VERSION="$(cat docker/version.txt | tr -d '\n')"
     IMAGE_TAG=${VERSION}${ARG_TAG_POSTFIX}
 
-    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" $ARG_BUILD_EXTRA_ARGS -t vimerl/vime:$IMAGE_TAG
-    docker push vimerl/vime:$IMAGE_TAG
+    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" $ARG_BUILD_EXTRA_ARGS -t aosheninferact/vime-vllm:$IMAGE_TAG
+    docker push aosheninferact/vime-vllm:$IMAGE_TAG
 
     if [ -z "${ARG_TAG_POSTFIX}" ]; then
-        docker tag vimerl/vime:$IMAGE_TAG vimerl/vime:latest
-        docker push vimerl/vime:latest
+        docker tag aosheninferact/vime-vllm:$IMAGE_TAG aosheninferact/vime-vllm:latest
+        docker push aosheninferact/vime-vllm:latest
     fi
 
 debug:
@@ -37,8 +37,8 @@ debug:
     VERSION="$(cat docker/version.txt | tr -d '\n')"
     IMAGE_TAG=${VERSION}
 
-    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t vimerl/vime-test:$IMAGE_TAG
-    docker push vimerl/vime-test:$IMAGE_TAG
+    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t aosheninferact/vime-vllm-test:$IMAGE_TAG
+    docker push aosheninferact/vime-vllm-test:$IMAGE_TAG
 
-    docker tag vimerl/vime-test:$IMAGE_TAG vimerl/vime-test:latest
-    docker push vimerl/vime-test:latest
+    docker tag aosheninferact/vime-vllm-test:$IMAGE_TAG aosheninferact/vime-vllm-test:latest
+    docker push aosheninferact/vime-vllm-test:latest
