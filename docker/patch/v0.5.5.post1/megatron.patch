@@ -411,7 +411,7 @@ index 235b6f6af..0f4862e43 100644
          else:
              return torch.topk(scores, k=topk, dim=1)
  
-+    from slime.utils.routing_replay import get_routing_replay_compute_topk
++    from vime.utils.routing_replay import get_routing_replay_compute_topk
 +    compute_topk = get_routing_replay_compute_topk(compute_topk)
 +
      if score_function == "softmax":
@@ -425,7 +425,7 @@ index 6b20b8622..f91b01f90 100644
              self.local_tokens_per_expert = None
              self.expert_bias = None
  
-+        from slime.utils.routing_replay import register_routing_replay
++        from vime.utils.routing_replay import register_routing_replay
 +        register_routing_replay(self)
 +
      def _maintain_float32_expert_bias(self):

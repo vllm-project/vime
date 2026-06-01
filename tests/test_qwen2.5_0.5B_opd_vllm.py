@@ -3,7 +3,7 @@ import subprocess
 import time
 import urllib.request
 
-import slime.utils.external_utils.command_utils as U
+import vime.utils.external_utils.command_utils as U
 
 TIGHT_DEVICE_MEMORY = U.get_bool_env_var("SLIME_TEST_TIGHT_DEVICE_MEMORY", "1")
 
@@ -127,8 +127,8 @@ def execute():
         )
 
         rm_args = (
-            "--custom-rm-path slime.rollout.on_policy_distillation.reward_func "
-            "--custom-reward-post-process-path slime.rollout.on_policy_distillation.post_process_rewards "
+            "--custom-rm-path vime.rollout.on_policy_distillation.reward_func "
+            "--custom-reward-post-process-path vime.rollout.on_policy_distillation.post_process_rewards "
             f"--rm-url http://{TEACHER_HOST}:{TEACHER_PORT}/v1/completions "
         )
 

@@ -1,4 +1,4 @@
-"""Unit tests for slime/backends/megatron_utils/update_weight/update_weight_from_distributed.py."""
+"""Unit tests for vime/backends/megatron_utils/update_weight/update_weight_from_distributed.py."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import torch
 
 @pytest.fixture(scope="module")
 def upw():
-    return importlib.import_module("slime.backends.megatron_utils.update_weight.update_weight_from_distributed")
+    return importlib.import_module("vime.backends.megatron_utils.update_weight.update_weight_from_distributed")
 
 
 @dataclass

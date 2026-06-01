@@ -99,7 +99,7 @@ OPTIMIZER_ARGS=(
 
 WANDB_ARGS=(
    # --use-wandb
-   # --wandb-project slime-dev
+   # --wandb-project vime-dev
    # --wandb-group mimo-7B-rl-test
    # --wandb-key ${WANDB_API_KEY}
 )

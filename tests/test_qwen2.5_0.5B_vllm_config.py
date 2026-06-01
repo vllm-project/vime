@@ -1,7 +1,7 @@
 import os
 import tempfile
 
-import slime.utils.external_utils.command_utils as U
+import vime.utils.external_utils.command_utils as U
 
 TIGHT_DEVICE_MEMORY = U.get_bool_env_var("SLIME_TEST_TIGHT_DEVICE_MEMORY", "1")
 
@@ -56,7 +56,7 @@ def execute():
         "--rollout-max-response-len 1024 "
         "--rollout-temperature 0.8 "
         "--over-sampling-batch-size 16 "
-        "--dynamic-sampling-filter-path slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std "
+        "--dynamic-sampling-filter-path vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std "
         "--global-batch-size 32 "
     )
 

@@ -29,8 +29,8 @@ source "${SCRIPT_DIR}/../models/qwen3-235B-A22B.sh"
 CKPT_ARGS=(
    --hf-checkpoint /root/Qwen3-235B-A22B-INT4/
    --ref-load /root/Qwen3-235B-A22B_torch_dist/
-   --load /root/Qwen3-235B-A22B-slime/ 
-   --save /root/Qwen3-235B-A22B-slime/ 
+   --load /root/Qwen3-235B-A22B-vime/ 
+   --save /root/Qwen3-235B-A22B-vime/ 
    --save-interval 20
 )
 
@@ -106,7 +106,7 @@ OPTIMIZER_ARGS=(
 
 WANDB_ARGS=(
    # --use-wandb
-   # --wandb-project slime-dev
+   # --wandb-project vime-dev
    # --wandb-group qwen3-235B-A22B-test
    # --wandb-key ${WANDB_KEY}
 )

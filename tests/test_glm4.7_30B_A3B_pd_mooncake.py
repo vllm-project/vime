@@ -5,7 +5,7 @@ import tempfile
 
 import yaml
 
-import slime.utils.external_utils.command_utils as U
+import vime.utils.external_utils.command_utils as U
 
 
 MODEL_REPO = "zai-org/GLM-4.7-Flash"
