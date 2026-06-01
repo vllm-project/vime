@@ -831,13 +831,9 @@ class VLLMEngine(RayActor):
             {"method": "update_weights_chunk", "kwargs": {"update_info": payload}},
             timeout=update_timeout_s,
         )
-        response.raise_for_status()
         if weight_version is not None:
             self._weight_version = str(weight_version)
-        try:
-            return response.json()
-        except Exception:
-            return {"ok": True, "raw": response.text}
+        return response
 
     def update_weights_chunk(self, update_info: dict) -> dict:
         """POST ``/update_weights`` with a single named-tensor chunk.
@@ -874,11 +870,7 @@ class VLLMEngine(RayActor):
             {"method": "update_weights_chunk", "kwargs": {"update_info": payload}},
             timeout=update_timeout_s,
         )
-        response.raise_for_status()
-        try:
-            return response.json()
-        except Exception:
-            return {"ok": True, "raw": response.text}
+        return response
 
     def flush_cache(self):
         """Clear prefix cache via ``POST /reset_prefix_cache``."""
