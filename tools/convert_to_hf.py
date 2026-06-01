@@ -3,9 +3,9 @@ import torch.distributed as dist
 from megatron.core import mpu
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-import slime.backends.megatron_utils as megatron_utils
-from slime.backends.megatron_utils import update_weight_utils
-from slime.utils.arguments import parse_args
+import vime.backends.megatron_utils as megatron_utils
+from vime.backends.megatron_utils import update_weight_utils
+from vime.utils.arguments import parse_args
 
 
 def add_checkpoint_args(parser):

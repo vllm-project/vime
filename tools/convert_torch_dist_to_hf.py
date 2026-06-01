@@ -13,7 +13,7 @@ import torch.distributed.checkpoint as dist_cp
 from transformers import AutoConfig
 from typing_extensions import override
 
-from slime.backends.megatron_utils.megatron_to_hf import convert_to_hf, remove_padding
+from vime.backends.megatron_utils.megatron_to_hf import convert_to_hf, remove_padding
 
 
 class UnpicklerWrapper(pickle.Unpickler):

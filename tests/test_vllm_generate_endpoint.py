@@ -12,11 +12,11 @@ import socket
 from argparse import Namespace
 from dataclasses import dataclass
 
-import slime.utils.external_utils.command_utils as U
-from slime.backends.vllm_utils.vllm_engine import _wait_server_healthy, launch_server_process
-from slime.rollout import vllm_rollout
-from slime.utils import http_utils
-from slime.utils.types import Sample
+import vime.utils.external_utils.command_utils as U
+from vime.backends.vllm_utils.vllm_engine import _wait_server_healthy, launch_server_process
+from vime.rollout import vllm_rollout
+from vime.utils import http_utils
+from vime.utils.types import Sample
 
 
 @dataclass(frozen=True)

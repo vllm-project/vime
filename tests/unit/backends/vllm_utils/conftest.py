@@ -29,7 +29,7 @@ def vllm_args() -> SimpleNamespace:
 
 @pytest.fixture
 def vllm_engine(vllm_args):
-    from slime.backends.vllm_utils.vllm_engine import VLLMEngine
+    from vime.backends.vllm_utils.vllm_engine import VLLMEngine
 
     engine = VLLMEngine(vllm_args, rank=0)
     engine.server_host = "127.0.0.1"

@@ -82,7 +82,7 @@ RUN NVCC_APPEND_FLAGS="--threads 4" \
 RUN git clone https://github.com/NVIDIA/Megatron-LM.git --recursive && \
     cd Megatron-LM && git checkout ${MEGATRON_COMMIT}
 
-# Pinned to d64a639 (older than slime upstream's a193d9d); the newer commit
+# Pinned to d64a639 (older than vime upstream's a193d9d); the newer commit
 # requires TMS_CUDA_MAJOR env var to build a multi-CUDA wheel.
 RUN pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@d64a639 --no-cache-dir --force-reinstall
 RUN pip install git+https://github.com/radixark/Megatron-Bridge.git@bridge --no-deps --no-build-isolation
@@ -129,12 +129,12 @@ RUN cd Megatron-LM && \
 # ====================================== Install main package ============================================
 
 ARG VIME_COMMIT=main
-RUN git clone https://github.com/vllm-project/vime.git /root/slime && \
-    cd /root/slime && \
+RUN git clone https://github.com/vllm-project/vime.git /root/vime && \
+    cd /root/vime && \
     git checkout ${VIME_COMMIT} && \
     pip install -e . --no-deps
 
-RUN cd /root/slime/slime/backends/megatron_utils/kernels/int4_qat && \
+RUN cd /root/vime/vime/backends/megatron_utils/kernels/int4_qat && \
     pip install . --no-build-isolation
 
 # ====================================== Build-time smoke ============================================
@@ -142,8 +142,8 @@ RUN cd /root/slime/slime/backends/megatron_utils/kernels/int4_qat && \
 # Fail-fast import smoke + flashinfer version pin check. Catches ABI / version
 # regressions at build time instead of first GPU run.
 RUN python3 -c "\
-import vllm, slime, flashinfer; \
-from slime.backends.vllm_utils.vllm_engine import VLLMEngine; \
+import vllm, vime, flashinfer; \
+from vime.backends.vllm_utils.vllm_engine import VLLMEngine; \
 print('vllm', vllm.__version__); \
 print('flashinfer', flashinfer.__version__); \
 print('VLLMEngine import ok')"

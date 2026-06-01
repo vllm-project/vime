@@ -1,4 +1,4 @@
-"""Unit tests for ``slime.rollout.vllm_rollout`` helpers and mocked async paths."""
+"""Unit tests for ``vime.rollout.vllm_rollout`` helpers and mocked async paths."""
 
 from __future__ import annotations
 
@@ -13,9 +13,9 @@ from unittest.mock import AsyncMock
 import numpy as np
 import pytest
 
-from slime.rollout import vllm_rollout as mod
-from slime.utils.eval_config import EvalDatasetConfig
-from slime.utils.types import Sample
+from vime.rollout import vllm_rollout as mod
+from vime.utils.eval_config import EvalDatasetConfig
+from vime.utils.types import Sample
 
 
 class _FakeTokenizer:

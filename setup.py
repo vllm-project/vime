@@ -30,10 +30,10 @@ class bdist_wheel(_bdist_wheel):
 
 # Setup configuration
 setup(
-    author="slime Team",
-    name="slime",
+    author="vime Team",
+    name="vime",
     version="0.2.4",
-    packages=find_packages(include=["slime*", "slime_plugins*"]),
+    packages=find_packages(include=["vime*", "vime_plugins*"]),
     include_package_data=True,
     install_requires=_fetch_requirements("requirements.txt"),
     extras_require={},

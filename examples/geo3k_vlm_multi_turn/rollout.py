@@ -9,15 +9,15 @@ from typing import Any
 import torch
 
 # When executed as a module: python -m examples.vlm_multi_turn.rollout
-from slime.rollout.vllm_rollout import (
+from vime.rollout.vllm_rollout import (
     GenerateState,
     _build_inference_sampling_params,
     _inference_generate_tokens_and_logprobs,
     _mm_render_response_to_generate_body,
 )
-from slime.utils.http_utils import post
-from slime.utils.processing_utils import encode_image_for_rollout_engine
-from slime.utils.types import Sample
+from vime.utils.http_utils import post
+from vime.utils.processing_utils import encode_image_for_rollout_engine
+from vime.utils.types import Sample
 
 DEFAULT_ENV_MODULE = "examples.vlm_multi_turn.env_geo3k"
 
