@@ -56,8 +56,8 @@ vime 使用 GitHub Actions 进行 CI。测试通过 **PR label** 触发——给
 这是验证 Megatron 后端改动的主要 label，覆盖：
 
 - Dense 模型：GLM4-9B、Qwen3-4B（PPO）
-- MoE 模型：Qwen3-30B-A3B（DeepEP + FP8）、Qwen3.6-35B-A3B PD + Mooncake、Moonlight-16B-A3B
-- 特殊场景：Qwen2.5-0.5B debug rollout-then-train、MTP 训练与 bridge 映射
+- MoE 模型：Qwen3-30B-A3B（DeepEP）、Qwen3.6-35B-A3B PD + Mooncake、Moonlight-16B-A3B
+- 特殊场景：MiMo-7B MTP、Qwen2.5-0.5B debug rollout-then-train
 
 所有测试使用 8 张 GPU。如果你正在修改 Megatron 训练逻辑、loss 计算或 checkpoint 转换，应该使用这个 label。
 

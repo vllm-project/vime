@@ -71,25 +71,6 @@ bash scripts/run-qwen3-30B-A3B.sh
    如果要在 attention 上做 DP 同时在 expert 上做 EP，可以加 `--vllm-data-parallel-size N`
    配合 `--vllm-enable-expert-parallel`。
 
-### bf16 训练 fp8 推理
-
-vime 还支持 bf16 训练，fp8 推理。对于 Qwen3-30B-A3B 模型，只需要下载如下模型：
-
-```bash
-hf download Qwen/Qwen3-30B-A3B-FP8 --local-dir /root/Qwen3-30B-A3B-FP8
-```
-
-并将 `--hf-checkpoint` 替换为：
-
-```bash
-#--hf-checkpoint /root/Qwen3-30B-A3B
---hf-checkpoint /root/Qwen3-30B-A3B-FP8
-```
-
-即可触发 fp8 训练。目前我们会将 bf16 权重直接 cast 为 fp8，后续会逐渐添加对精度影响更小的量化方案。
-
-⚠️  训练的 megatron checkpoint 还需要是最开始用 bf16 的 huggingface 转换的。
-
 ### 多机支持
 
 对于多机环境，需要进行如下的几点修改：

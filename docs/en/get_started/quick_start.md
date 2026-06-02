@@ -386,28 +386,6 @@ That is, take out the first `num_samples` prompts corresponding to `num_samples 
 > 💡 **Tip**:
 > The `sample.metadata` of each partial rollout sample stores the rollout id of the first generation, which can be used for data filtering.
 
-### bf16 Training fp8 Inference
-
-vime directly supports bf16 training and fp8 inference. For Qwen3-4B model, you only need to download the following model:
-
-```bash
-hf download Qwen/Qwen3-4B-FP8 --local-dir /root/Qwen3-4B-FP8
-```
-
-And replace `--hf-checkpoint` with:
-
-```bash
-   # Used to load tokenizer and other information, actually won't use model weight parameters from hf path
-   --hf-checkpoint /root/Qwen3-4B-FP8
-
-   # The megatron checkpoint still needs to be the dist weights converted from bf16 huggingface at the beginning, not modified because of FP8 rollout.
-   --ref-load /root/Qwen3-4B_torch_dist
-```
-
-This will trigger fp8 inference. Currently, we will directly cast bf16 weights to fp8, and we will gradually add quantization schemes with less impact on accuracy in the future.
-
-⚠️ The training megatron checkpoint still needs to be the one converted from bf16 huggingface at the beginning.
-
 ## Multiturn Adaptation
 
 The vime framework is highly extensible and supports complex Agent scenarios (such as multi-turn interaction and tool calling). Its core mechanism is to rewrite the default data generation (Rollout) and reward calculation (Reward) logic through custom functions.

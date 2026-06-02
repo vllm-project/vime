@@ -390,29 +390,6 @@ def pop_first(args, rollout_id, buffer: list[list[Sample]], num_samples: int) ->
 
 
 
-### bf16 训练 fp8 推理
-
-vime 直接支持 bf16 训练，fp8 推理。对于 Qwen3-4B 模型，只需要下载如下模型：
-
-```bash
-hf download Qwen/Qwen3-4B-FP8 --local-dir /root/Qwen3-4B-FP8
-```
-
-并将 `--hf-checkpoint` 替换为：
-
-```bash
-   # 用于加载 tokenizer 等其他信息，实际上不会使用 hf 路径中的模型权重参数
-   --hf-checkpoint /root/Qwen3-4B-FP8
-
-   #  megatron checkpoint 还需要是最开始用 bf16 的 huggingface 转换的 dist 权重，不因为 FP8 rollout 而去做修改。
-   --ref-load /root/Qwen3-4B_torch_dist
-```
-
-即可触发 fp8 推理。目前我们会将 bf16 权重直接 cast 为 fp8，后续会逐渐添加对精度影响更小的量化方案。
-
-⚠️  训练的 megatron checkpoint 还需要是最开始用 bf16 的 huggingface 转换的。
-
-
 ## Multiturn 适配
 
 vime 框架高度可扩展，支持复杂的 Agent 场景（如多轮交互与工具调用）。其核心机制是通过自定义函数，重写默认的数据生成 (Rollout) 与奖励计算 (Reward) 逻辑。

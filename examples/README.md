@@ -8,7 +8,6 @@ These examples provide concrete examples to leverage vime in your own RL workflo
 - **[fully_async](./fully_async)**: Demonstrates fully asynchronous rollout generation for higher efficiency.
 - **[geo3k_vlm](./geo3k_vlm)**: Training VLMs on a single-turn reasoning task using GRPO on the GEO3K dataset.
 - **[geo3k_vlm_multi_turn](./geo3k_vlm_multi_turn)**: VLM multi-turn training on Geo3k dataset.
-- **[low_precision](./low_precision)**: Examples of FP8 training and inference for improved throughput and stability.
 - **[multi_agent](./multi_agent)**: Example of running multi-agent RL with `vime`.
 - **[reproducibility](./reproducibility)**: Guides on achieving bitwise experiment reproduction using deterministic modes.
 - **[train_infer_mismatch_helper](./train_infer_mismatch_helper)**: Algorithmic methods for rollout correction (e.g., TIS, MIS).

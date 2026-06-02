@@ -56,8 +56,8 @@ Since this includes every test, it consumes significant GPU time — use it spar
 This is the primary label for validating Megatron-backend changes. It covers:
 
 - Dense models: GLM4-9B, Qwen3-4B (PPO)
-- MoE models: Qwen3-30B-A3B (with DeepEP + FP8), Qwen3.6-35B-A3B PD + Mooncake, Moonlight-16B-A3B
-- Specialized: Qwen2.5-0.5B debug rollout-then-train, MTP training and bridge mapping
+- MoE models: Qwen3-30B-A3B (with DeepEP), Qwen3.6-35B-A3B PD + Mooncake, Moonlight-16B-A3B
+- Specialized: MiMo-7B MTP, Qwen2.5-0.5B debug rollout-then-train
 
 All tests use 8 GPUs. If you are modifying Megatron training logic, loss computation, or checkpoint conversion, this is the label to use.
 
