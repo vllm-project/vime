@@ -1,5 +1,5 @@
 name: Question / Help
-description: Ask a question about using Vime. Please check the docs and FAQ first.
+description: Ask a question about using vime. Please check the docs and FAQ first.
 title: "[Question] "
 labels: ["question"]
 body:
@@ -8,7 +8,7 @@ body:
       value: |
         Thank you for reaching out!
 
-        > **Note:** Vime's open-source collaboration is currently focused on **bug fixes** and **general-purpose RL optimizations**.
+        > **Note:** vime's open-source collaboration is currently focused on **bug fixes** and **general-purpose RL optimizations**.
         > Feature requests are outside our current scope — please see [CONTRIBUTING.md](https://github.com/vllm-project/vime/blob/main/CONTRIBUTING.md) for details.
 
         Before asking, please make sure you have checked:
@@ -46,7 +46,7 @@ body:
       label: Environment (if relevant)
       description: If your question is related to setup or runtime behavior, please provide your environment details.
       value: |
-        - Vime version:
+        - vime version:
         - Python version:
         - PyTorch version:
         - CUDA version:
