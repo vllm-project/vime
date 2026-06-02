@@ -1,87 +1,434 @@
-# Contributing to slime
+# Contributing to vime
 
-[中文版](#开源协作范围说明)
+[中文版](#贡献指南)
 
-Thank you for your interest in contributing to slime! We deeply appreciate every contribution from the community. To keep the project healthy and sustainable, please read this document carefully before submitting issues or pull requests.
+Thank you for your interest in contributing to vime! This document describes our project principles, collaboration guidelines, and the development workflow.
 
-## Collaboration Scope
+## Table of Contents
 
-slime is the RL training infrastructure behind [GLM-4.5 through GLM-5.1](https://z.ai) and a large number of internal experiments at Z.ai. We open-sourced slime because we believe the training scenarios used internally cover the majority of cutting-edge RL algorithm requirements, and we hope to provide the community with a correct and efficient large-scale RL training infrastructure.
+- [About vime](#about-vime)
+- [Project Principles](#project-principles)
+- [How Can I Contribute?](#how-can-i-contribute)
+- [Development Setup](#development-setup)
+- [Development Workflow](#development-workflow)
+- [Code Style](#code-style)
+- [Pull Requests & Code Reviews](#pull-requests--code-reviews)
+- [Reporting Bugs](#reporting-bugs)
+- [Requesting Features](#requesting-features)
+- [License](#license)
 
-Our goal for open-source collaboration is focused on **bug fixes** and **general-purpose large-scale RL optimizations**. We have had several successful collaborations with the community in this area, including:
+## About vime
 
-- Speculative decoding in RL ([docs](https://thudm.github.io/slime/en/advanced/speculative_decoding.html))
-- Low-precision training: fp8 rollout + bf16/fp8 training, int4 rollout + int4 QAT training ([docs](https://thudm.github.io/slime/en/advanced/low_precision_training.html))
-- Deterministic training ([docs](https://thudm.github.io/slime/en/advanced/reproducibility.html))
+**vime** is a reinforcement learning (RL) post-training framework built on [**vLLM**](https://github.com/vllm-project/vllm) and [**Megatron-LM**](https://github.com/NVIDIA/Megatron-LM) as its core backends. It is derived from [slime](https://github.com/THUDM/slime).
 
-### What We Welcome
+## Project Principles
 
-| Category | Examples |
-|----------|----------|
-| **Bug reports** | Crashes, incorrect results, documentation errors |
-| **Bug fixes** | PRs that fix existing issues with tests or clear reproduction |
-| **General RL optimizations** | Performance improvements with clear benchmarks that can be verified through CI or standard training runs |
+We aim to keep vime **lightweight**, **stable**, and **easy to maintain**:
 
-### What's Currently Outside Our Scope
+- **Lightweight** — Focus on the RL training loop and rollout integration; avoid turning the repo into a monolithic application framework.
+- **Stable** — Prefer changes that are testable, reviewable, and safe for production-scale training runs.
+- **Concise code** — Match existing patterns; avoid unnecessary abstraction or large refactors without clear benefit.
+- **Hardware support** — vime targets **GPU** (CUDA) and **NPU** (e.g., Ascend). To keep the codebase concise, GPU- and NPU-related changes are currently maintained on **separate branches** instead of folding both paths into heavy abstractions on one branch.
 
-| Category | Reason |
-|----------|--------|
-| **Large-scale code refactoring** | This would add considerable overhead to syncing between the internal and open-source versions, particularly in coordinating with internal algorithm teams. |
-| **Design / abstraction proposals** | e.g., universal data standards, eval standards, tool base classes. Standard-setting involves non-technical factors; slime intentionally avoids such content to keep things flexible for both the community and internal teams. |
-| **Features that cannot be clearly verified** | Correctness is critically important for a training framework. If a feature cannot be verified through CI or routine internal training, it becomes difficult for us to ensure timely fixes, which could affect the project's long-term reliability. |
-| **Features independent of the RL framework** | e.g., full algorithm reproduction pipelines. While these lower the barrier to entry, they are difficult to include in routine verification. slime aims to be lightweight — more like Flask than Django. We recommend building such pipelines in separate repositories; we are happy to reference them in the README. |
-| **Major modifications to Megatron** | We do not plan to maintain a Megatron fork through slime. The goal is to switch Megatron versions relatively painlessly; Megatron performance optimization and feature completion are not primary objectives. |
+## How Can I Contribute?
 
-### Why This Policy?
+We welcome all kinds of contributions. Please note:
 
-slime's design and development roadmap must first align with Z.ai's internal requirements — the RL infrastructure design is tightly coupled with post-training plans, and publishing the full post-training R&D roadmap is not within the open-source scope of slime. This focused scope is what we believe is necessary to maintain slime as a long-term, trustworthy project.
+- **New features or capabilities** — **Open an Issue first** to discuss the problem, design, scope, and verification plan before starting a large PR.
+- **Bug reports and bug fixes** — Welcome. For both Issues and PRs, include **complete information to reproduce** the problem (see [Reporting Bugs](#reporting-bugs)).
+- **Performance improvements** — Welcome when you can show benchmarks or tests that CI or standard training runs can validate.
+- **Documentation and examples** — Guides, training scripts, and typo fixes are welcome; update English and Chinese user-facing docs when applicable.
+- **Tests and CI** — Unit tests, integration tests, and workflow improvements are appreciated.
 
-We understand this may slow down slime's pace of feature development. We are actively expanding the slime team through hiring to help with this — if you're interested, feel free to reach out directly.
+## Development Setup
 
-Thank you for your understanding and patience. We truly appreciate the effort community contributors put in, and we're sorry if this policy causes any inconvenience.
+```bash
+# Clone the repository
+git clone https://github.com/vllm-project/vime.git
+cd vime
+
+# Install dependencies (adjust for your CUDA / NPU environment)
+pip install -r requirements.txt
+
+# Install pre-commit hooks
+pip install pre-commit
+pre-commit install
+```
+
+For environment details (Docker, vLLM versions), see [docs/en/get_started/quick_start.md](docs/en/get_started/quick_start.md) and [docker/README.md](docker/README.md).
+
+## Development Workflow
+
+### 1. Create a Branch
+
+```bash
+# Feature (after Issue discussion)
+git checkout -b feature/your-feature-name
+
+# Bug fix
+git checkout -b fix/your-bug-fix
+
+# Documentation
+git checkout -b docs/your-doc-change
+```
+
+### 2. Make Changes
+
+- Follow existing code patterns in the repository
+- Keep changes scoped; prefer extending vLLM/Megatron integration points over duplicating logic
+- Add or update tests when behavior changes
+- Update documentation if user-facing behavior changes (EN + ZH when applicable)
+
+### 3. Validate
+
+```bash
+# Run pre-commit checks (lint + format)
+pre-commit run --all-files --show-diff-on-failure --color=always
+
+# Run relevant tests (examples)
+pytest tests/
+```
+
+### 4. Submit a Pull Request
+
+Push your branch and open a PR against `main`. Link related issues (e.g., `Fixes #123`). Use `git commit -s` so each commit includes `Signed-off-by:` (see [Pull Requests & Code Reviews](#pull-requests--code-reviews)).
+
+## Code Style
+
+- **Formatter / linter**: [Ruff](https://docs.astral.sh/ruff/) and [isort](https://pycqa.github.io/isort/) via [pre-commit](https://pre-commit.com/) (see [.pre-commit-config.yaml](.pre-commit-config.yaml))
+- **Imports**: No wildcard imports (`from x import *`)
+- **Logging**: Use project logging utilities; avoid ad-hoc `print()` in library code
+- **Megatron / vLLM boundaries**: Keep Megatron training logic and vLLM rollout logic in their respective backend modules; avoid cross-cutting refactors that blur module responsibilities
+
+## Pull Requests & Code Reviews
+
+vime follows the [vLLM contributing guidelines](https://docs.vllm.ai/en/latest/contributing/) for PR titles, commit sign-off, and AI-assisted contributions.
+
+### DCO and Signed-off-by
+
+When contributing changes, you must agree to the [Developer Certificate of Origin (DCO)](https://github.com/vllm-project/vllm/blob/main/DCO). Each commit must include a `Signed-off-by:` line.
+
+Use `-s` with `git commit` to add it automatically:
+
+```bash
+git commit -s -m "[Rollout] your message"
+```
+
+You can also enable automatic sign-off in your IDE (e.g., VS Code: `Git: Always Sign Off` / `git.alwaysSignOff`).
+
+### AI Assisted Contributions
+
+vime adopts the same requirements as [vLLM: AI Assisted Contributions](https://docs.vllm.ai/en/latest/contributing/#ai-assisted-contributions).
+
+Before making an AI assisted contribution, you must:
+
+1. **Be involved**: Do not submit "pure agent" PRs. The human submitter is responsible for reviewing all changed lines, validating behavior end-to-end, and running relevant tests.
+2. **Ensure significance**: Avoid one-off "busywork" PRs (single typo, isolated style cleanup, one mutable default fix, etc.). Bundle mechanical cleanups into a clear, systematic scope.
+
+When AI tools provide non-trivial assistance in generating or modifying code, you must:
+
+1. **Review thoroughly**: You remain responsible for all code you submit. Review and understand AI-generated code with the same care as code you write manually.
+2. **Disclose in PR**: Always mention when a pull request includes AI-generated code. Add a note in the PR description.
+3. **Mark commits**: Add attribution using commit trailers such as `Co-authored-by:` (other projects use `Assisted-by:` or `Generated-by:`). For example:
+
+```
+Your commit message here
+
+Co-authored-by: GitHub Copilot
+Co-authored-by: Claude
+Co-authored-by: gemini-code-assist
+Signed-off-by: Your Name <your.email@example.com>
+```
+
+AI-assisted code must meet all quality standards: proper testing, documentation, adherence to style guides, and thorough review. Attribution helps reviewers evaluate contributions in context and maintains legal clarity for the project.
+
+### PR Title and Classification
+
+Prefix the **PR title** with one of the following (aligned with [vLLM PR classification](https://docs.vllm.ai/en/latest/contributing/#pr-title-and-classification)):
+
+- `[Bugfix]` — Bug fixes
+- `[CI/Build]` — CI or build improvements
+- `[Doc]` — Documentation fixes and improvements
+- `[Training]` — Megatron training loop, weight sync, or trainer-side logic
+- `[Rollout]` — vLLM rollout, router, or inference integration
+- `[Core]` — Framework orchestration (data buffer, Ray actors, shared arguments)
+- `[Example]` — Training scripts and examples under `examples/` or `scripts/`
+- `[Hardware][Vendor]` — Hardware-specific changes (e.g., `[Hardware][Ascend]` for NPU)
+- `[Misc]` — Changes that do not fit the above; use sparingly
+
+If a PR spans multiple areas, include all relevant prefixes (e.g., `[Bugfix][Rollout]`).
+
+### Before Submitting
+
+- [ ] `pre-commit run --all-files` passes
+- [ ] Relevant tests pass (`pytest tests/` or the CI job your change affects)
+- [ ] Documentation updated if behavior or flags changed
+- [ ] PR title uses the correct prefix; commits include `Signed-off-by:`
+- [ ] For **new features**: linked Issue with maintainer agreement on scope
+- [ ] If AI-assisted: disclosed in the PR description and attributed in commits when applicable
+
+### Code Quality
+
+- Pass all linter checks (`pre-commit`)
+- Add or update tests when behavior changes
+- Update `docs/` (EN + ZH when user-facing) for behavior or CLI changes
+- Keep PRs focused; for large architectural changes (>500 LOC excluding tests/config), **open an Issue first** to discuss design
+
+### Review Process
+
+1. **Automated CI** — Pre-commit and PR tests run on GitHub Actions
+2. **Code review** — Maintainers review for correctness, scope, and maintainability
+3. **Feedback** — Address review comments and re-request review when ready
+4. **Merge** — Maintainer merges after approval
+
+### Tips for a Good PR
+
+- Describe **what**, **why**, and **how**
+- For training or rollout changes, note GPU/NPU target, vLLM version, and how you verified
+- For bug fixes, include logs and minimal repro commands
+
+## Reporting Bugs
+
+Use the [Bug Report template](.github/ISSUE_TEMPLATE/bug_report.yml) when available, or open an issue with **complete** reproduction details. Issues without enough information may be closed. Please include:
+
+- **Environment** — OS, Python, PyTorch, CUDA or NPU stack (e.g., CANN / `torch_npu`), GPU/NPU model and count, vLLM and Megatron versions
+- **Steps to reproduce** — Minimal commands or script; note whether the issue is in training, rollout, or both
+- **Expected vs actual behavior**
+- **Logs** — Full traceback and relevant Ray / vLLM / Megatron output
+- **Configuration** — Launch script, CLI args, or config snippets (redact secrets)
+- **Hardware mode** — GPU or NPU; colocate vs disaggregated if relevant
+
+Before submitting:
+
+- [ ] Read [docs/en/get_started/qa.md](docs/en/get_started/qa.md) and [README.md](README.md)
+- [ ] Search [existing issues](https://github.com/vllm-project/vime/issues) for duplicates
+- [ ] Reproduce on the latest `main` when possible
+
+## Requesting Features
+
+**Please open an Issue before implementing non-trivial features.** This helps us align on:
+
+- Problem statement and use case
+- Fit with vime's lightweight, vLLM-centric roadmap
+- Verification plan (CI, unit test, or documented training run)
+- Impact on GPU and NPU code paths
+
+In the Issue, briefly cover the problem, proposed approach (which module: training / rollout / buffer), alternatives you considered, and how you plan to verify correctness and performance.
+
+Large features that cannot be verified in CI or routine tests are harder to maintain long-term and may be deferred.
+
+## License
+
+By contributing to vime, you agree that your contributions will be licensed under the [Apache License 2.0](LICENSE).
 
 ---
 
-## 开源协作范围说明
+## 贡献指南
 
-感谢你对 slime 的关注和支持！社区的每一份贡献我们都非常珍视。为了保证项目的长期健康发展，请在提交 issue 或 PR 之前仔细阅读以下内容。
+感谢你对vime的关注与支持！本文档说明项目理念、协作方式与开发流程。
 
-### 背景
+## 目录
 
-slime 承担了智谱内部的大量实验，包括 GLM 4.5 至 5 的全部 RL 流程，以及大量的日常实验。我们开源的初衷是相信智谱内部的训练场景覆盖了大多数前沿算法需求，希望能够为社区提供一套**正确且高效**的大规模 RL 训练 Infra，同时也希望在此基础上和社区进行 Infra 性能优化上的共建。
+- [关于vime](#关于vime)
+- [项目理念](#项目理念)
+- [如何参与贡献](#如何参与贡献)
+- [开发环境](#开发环境)
+- [开发流程](#开发流程)
+- [代码风格](#代码风格)
+- [Pull Request与代码审查](#pull-request与代码审查)
+- [报告Bug](#报告bug)
+- [功能建议](#功能建议)
+- [许可证](#许可证)
 
-在我们的已知范围内，目前只有极少的前沿大模型团队愿意公开如此核心且完整的 Infra 组件——这背后是公司对开源社区的极大热情。相应的，从维护者的角度，我们会充分利用这个开明的政策，让智谱内部使用的 slime 与开源版本同步，保持核心竞争力；同时，我们也希望在开源协作的过程中尽量不影响内部的研发节奏。因此，slime 的设计与开发 roadmap 需要优先参考智谱内部的需求，暂时无法完全在开源社区内进行讨论。
+## 关于vime
 
-### 协作范围
+**vime**是以[**vLLM**](https://github.com/vllm-project/vllm)与[**Megatron-LM**](https://github.com/NVIDIA/Megatron-LM)为核心后端的RL后训练框架，源自[slime](https://github.com/THUDM/slime)。
 
-我们将开源协作的范围限制在 **bug fix** 和一些**通用的大规模 RL 优化**上。在这方面我们也和社区达成了多次成功的合作，例如：
+## 项目理念
 
-- RL 中的投机采样（[文档](https://thudm.github.io/slime/en/advanced/speculative_decoding.html)）
-- 低精度训练：fp8 rollout + bf16/fp8 training，int4 rollout + int4 QAT training（[文档](https://thudm.github.io/slime/en/advanced/low_precision_training.html)）
-- 确定性训练（[文档](https://thudm.github.io/slime/en/advanced/reproducibility.html)）
+我们希望vime保持**轻量**、**稳定**、**代码简洁**：
 
-### 我们欢迎的
+- **轻量** — 聚焦RL训练主链路与rollout集成，避免演化成臃肿的一体化应用框架。
+- **稳定** — 优先合入可测试、可评审、对大规模训练安全的代码变更。
+- **代码简洁** — 遵循现有模式；无明确收益时避免过度抽象或大范围重构。
+- **硬件支持** — vime支持**GPU**（CUDA）与**NPU**（如Ascend）。为保证代码简洁，当前通过**独立的分支**分别承载GPU与NPU相关改动，而非在单分支中用大量抽象同时兼容。
 
-| 类别 | 说明 |
-|------|------|
-| **Bug 报告** | 崩溃、结果错误、文档错误等 |
-| **Bug 修复** | 带有测试或清晰复现步骤的修复 PR |
-| **通用 RL 优化** | 有明确 benchmark 且可通过 CI 或常规训练验证的性能优化 |
+## 如何参与贡献
 
-### 暂时不在协作范围内的
+欢迎各类贡献，请注意：
 
-| 类别 | 原因 |
-|------|------|
-| **较大范围的代码重构** | 会给内外部版本同步带来较多额外工作，尤其是在与内部算法团队的沟通协调上。 |
-| **带有项目规划建议的标准或抽象** | 例如引入某种通用数据标准、eval 标准、工具构建基类等。标准的设立在大多数团队中会涉及到非技术因素，slime 的设计中故意避开了类似的内容，一方面不希望将智谱内部的管理偏好投射给社区，另一方面也便于内部不同方向的团队进行合适的选型。 |
-| **无法进行明确验证的功能** | 训练框架的正确性至关重要。如果一个功能不能通过 CI 或智谱内部常规训练进行验证，我们就难以及时发现和修复问题，这对项目的长期可靠性会带来不小的风险。 |
-| **与 RL 框架较为独立的功能** | 例如整套算法复现流程。这类内容较难纳入日常验证流程，不太容易持续保证正确性。slime 是一个相对轻量的框架，更像是 Flask 而非 Django。建议在独立的 repo 中搭建，我们也非常愿意在 README 中引用所有使用了 slime 的项目链接。 |
-| **对 Megatron 的大幅度改动** | 目前我们没有计划通过 slime 维护一套 Megatron fork。slime 的目标是能够相对无痛地切换 Megatron 版本，Megatron 的性能优化和功能补全不在主要目标中。 |
+- **新功能或特性** — **请先开Issue讨论**问题背景、方案、范围与验证方式，再开始较大的PR。
+- **Bug报告与Bug修复** — 欢迎。无论提Issue还是PR，都请提供**完整、可复现**的信息（见[报告Bug](#报告bug)）。
+- **性能优化** — 欢迎，需能通过benchmark或CI/常规训练流程验证。
+- **文档与示例** — 指南、训练脚本、勘误等均可；用户可见文档建议在适用时中英同步更新。
+- **测试与CI** — 单测、集成测试与工作流改进均欢迎。
 
-### 为什么需要这样的策略？
+## 开发环境
 
-RL Infra 的设计与后训练的规划有很强的绑定关系，公开整个后训练的研发规划并不包含在 slime 框架的开源目标内。这种较为聚焦的策略是我们认为将 slime 这个项目更长久地维护下去的必要手段。
+```bash
+git clone https://github.com/vllm-project/vime.git
+cd vime
 
-暂时无法纳入上述 feature 也许会减慢 slime 的功能迭代速度，我们会通过招聘的方式逐渐扩展 slime 团队来改善这一点——对此有兴趣的朋友欢迎直接私信联系~
+pip install -r requirements.txt
 
-感谢大家的理解与支持，如果这一策略给您带来了不便，我们深表歉意。
+pip install pre-commit
+pre-commit install
+```
+
+环境与Docker、vLLM版本说明见[docs/zh/get_started/quick_start.md](docs/zh/get_started/quick_start.md)与[docker/README.md](docker/README.md)。
+
+## 开发流程
+
+### 1. 创建分支
+
+```bash
+git checkout -b feature/your-feature-name   # 功能（Issue讨论后）
+git checkout -b fix/your-bug-fix            # Bug修复
+git checkout -b docs/your-doc-change        # 文档
+```
+
+### 2. 修改代码
+
+- 遵循仓库内现有代码风格与组织方式
+- 优先扩展vLLM/Megatron集成点，避免重复实现
+- 行为变更请补充测试
+- 用户可见变更请更新文档（适用时中英同步）
+
+### 3. 本地验证
+
+```bash
+pre-commit run --all-files --show-diff-on-failure --color=always
+pytest tests/
+```
+
+### 4. 提交Pull Request
+
+推送到你的分支，向`main`发起PR，并关联Issue（如`Fixes #123`）。提交时使用`git commit -s`添加`Signed-off-by:`（见[Pull Request与代码审查](#pull-request与代码审查)）。
+
+## 代码风格
+
+- **格式化/静态检查**：通过[.pre-commit-config.yaml](.pre-commit-config.yaml)运行Ruff、isort等
+- **禁止**通配符导入（`from x import *`）
+- **日志**：使用项目内日志工具，库代码中避免随意`print()`
+- **模块边界**：Megatron训练与vLLM rollout逻辑保持在各自backend模块，避免模糊职责的大范围重构
+
+## Pull Request与代码审查
+
+vime在PR标题、提交签署与AI辅助贡献方面对齐[vLLM贡献指南](https://docs.vllm.ai/en/latest/contributing/)。
+
+### DCO与Signed-off-by
+
+贡献代码即表示你同意[Developer Certificate of Origin (DCO)](https://github.com/vllm-project/vllm/blob/main/DCO)。每个commit须包含`Signed-off-by:`行。
+
+使用`git commit -s`可自动添加：
+
+```bash
+git commit -s -m "[Rollout] your message"
+```
+
+也可在IDE中开启自动sign-off（如VS Code：`Git: Always Sign Off` / `git.alwaysSignOff`）。
+
+### AI辅助贡献
+
+与[vLLM：AI Assisted Contributions](https://docs.vllm.ai/en/latest/contributing/#ai-assisted-contributions)要求一致。
+
+在借助AI提交贡献前，你必须：
+
+1. **Be involved（亲自参与）**：不要提交「纯Agent」PR。人类提交者须审查全部变更行、端到端验证行为，并运行相关测试。
+2. **Ensure significance（确保有意义）**：避免琐碎的、无实质内容的PR（单独改typo、孤立格式清理、单个mutable default修复等）。机械性清理应合并为有明确、成体系的范围。
+
+当AI工具在生成或修改代码时提供了实质性协助，你必须：
+
+1. **Review thoroughly（充分审查）**：你对所提交的全部代码负责。须以与手写代码同等的认真程度阅读并理解AI生成代码。
+2. **Disclose in PR（在PR中披露）**：若PR包含AI生成代码，务必在PR描述中说明。
+3. **Mark commits（标注commit）**：使用`Co-authored-by:`等commit trailer标注来源（其他项目亦使用`Assisted-by:`、`Generated-by:`）。示例：
+
+```
+Your commit message here
+
+Co-authored-by: GitHub Copilot
+Co-authored-by: Claude
+Co-authored-by: gemini-code-assist
+Signed-off-by: Your Name <your.email@example.com>
+```
+
+AI辅助代码须满足全部质量标准：充分测试、完善文档、遵守风格规范，并经充分人工审查。标注有助于审查者结合上下文评估贡献，并保证项目在法律层面的清晰性。
+
+### PR标题与分类
+
+**PR标题**须使用下列前缀之一（与[vLLM PR分类](https://docs.vllm.ai/en/latest/contributing/#pr-title-and-classification)一致，并按vime模块做了细化）：
+
+- `[Bugfix]` — Bug修复
+- `[CI/Build]` — CI或构建相关
+- `[Doc]` — 文档修复与改进
+- `[Training]` — Megatron训练、权重同步等训练侧逻辑
+- `[Rollout]` — vLLM rollout、router或推理集成
+- `[Core]` — 框架编排（data buffer、Ray actor、公共参数等）
+- `[Example]` — `examples/`、`scripts/`下的训练脚本与示例
+- `[Hardware][Vendor]` — 硬件相关（如NPU：`[Hardware][Ascend]`）
+- `[Misc]` — 其他；请尽量少用
+
+若PR跨多个模块，可组合前缀（如`[Bugfix][Rollout]`）。
+
+### 提交前检查
+
+- [ ] `pre-commit run --all-files`通过
+- [ ] 相关测试通过
+- [ ] 行为或参数变更已更新文档
+- [ ] PR标题前缀正确；commit含`Signed-off-by:`
+- [ ] **新功能**已关联并经维护者认可的Issue
+- [ ] 若使用AI：已在PR描述中说明，并在commit中按需标注
+
+### 代码质量
+
+- 通过`pre-commit`等静态检查
+- 行为变更须补充或更新测试
+- 用户可见变更须更新`docs/`（适用时中英同步）
+- PR保持聚焦；较大架构改动（除测试/配置外超过约500行）须**先开Issue**讨论方案
+
+### 审查流程
+
+1. CI自动运行pre-commit与PR测试
+2. 维护者审查正确性、范围与可维护性
+3. 根据反馈修改并在就绪后请求再次审查
+4. 通过后由维护者合并
+
+### 优质PR建议
+
+- 写清**做了什么**、**为什么**、**怎么验证**
+- 训练或rollout相关改动请注明GPU/NPU、vLLM版本与验证方式
+- Bug修复请附日志与最小复现命令
+
+## 报告Bug
+
+请使用[Bug Report模板](.github/ISSUE_TEMPLATE/bug_report.yml)，或在Issue中提供**完整**复现信息。信息不足、无法复现的Issue可能会被关闭，请包含：
+
+- **环境** — 操作系统、Python、PyTorch、CUDA或NPU栈（如CANN / `torch_npu`）、GPU/NPU型号与数量、vLLM与Megatron版本
+- **复现步骤** — 最小命令或脚本；说明属于训练、rollout或两者
+- **期望与实际行为**
+- **日志** — 完整traceback及Ray / vLLM / Megatron相关输出
+- **配置** — 启动脚本、CLI参数或配置片段（请脱敏）
+- **硬件模式** — GPU或NPU；是否colocate等
+
+提交前请确认：
+
+- [ ] 已阅读[docs/zh/get_started/qa.md](docs/zh/get_started/qa.md)与[README_zh.md](README_zh.md)
+- [ ] 已搜索[已有Issue](https://github.com/vllm-project/vime/issues)避免重复
+- [ ] 尽可能在最新`main`上复现
+
+## 功能建议
+
+**重大或复杂的新功能请先开Issue讨论**，便于对齐：
+
+- 问题背景与使用场景
+- 是否符合vime轻量、以vLLM为中心的方向
+- 验证方式（CI、单测或文档化训练流程）
+- 对GPU/NPU路径的影响
+
+Issue中建议简要说明：问题背景、方案概要（影响training / rollout / buffer哪一块）、备选方案，以及如何验证正确性与性能。
+
+难以在CI或常规流程中持续验证的大功能，长期维护成本较高，可能会延后合入。
+
+## 许可证
+
+向vime贡献即表示你同意将贡献置于[Apache License 2.0](LICENSE)下授权。

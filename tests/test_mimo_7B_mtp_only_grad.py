@@ -10,7 +10,7 @@ to only the MTP layers when the main model loss is zero (due to truncation).
 
 import os
 
-import slime.utils.external_utils.command_utils as U
+import vime.utils.external_utils.command_utils as U
 
 
 MODEL_NAME = "MiMo-7B-RL"
@@ -92,7 +92,7 @@ def execute():
         "--rollout-num-gpus 8 "
         "--vllm-gpu-memory-utilization 0.8 "
         "--vllm-max-cudagraph-capture-size 8 "
-        "--vllm-speculative-config '{\"method\":\"mtp\",\"num_speculative_tokens\":2}' "
+        '--vllm-speculative-config \'{"method":"mtp","num_speculative_tokens":2}\' '
     )
 
     # Enable MTP training with loss scaling

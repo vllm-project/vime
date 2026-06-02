@@ -46,9 +46,29 @@ RUN pip install git+https://github.com/ISEEKYAN/mbridge.git@89eb10887887bc74853f
 RUN pip install flash-linear-attention==0.4.1
 RUN pip install tilelang -f https://tile-ai.github.io/whl/nightly/cu128/
 
-# TE does not have wheel on cuda 13 yet, thus need to install from source
+# cublas + (cu13) cuda dev headers. The arm64 (sbsa) vllm/vllm-openai base ships
+# the cublas runtime .so but not the dev header (cublas_v2.h) / unversioned .so
+# symlink that the x86 base has; TE needs the header and its CMake only creates
+# the CUDA::cublas target when both exist. The dev pkg must match the toolkit
+# CUDA major. For cu13 the top apt block's -12-9 dev set is the wrong major, so
+# also install the -13-0 nvrtc/nvtx/etc. headers TE's nvcc build needs. Placed
+# after the slow flash-attn layers so their cache is preserved; before TE.
+RUN apt-get update && \
+    if [ "${ENABLE_CUDA_13}" = "1" ]; then \
+      apt-get install -y libcublas-dev-13-0 \
+        cuda-nvrtc-dev-13-0 cuda-nvtx-13-0 cuda-nvml-dev-13-0 cuda-profiler-api-13-0 \
+        libcusparse-dev-13-0 libcusolver-dev-13-0 libcufft-dev-13-0 libcurand-dev-13-0; \
+    else apt-get install -y libcublas-dev-12-9; fi && \
+    rm -rf /var/lib/apt/lists/*
+
+# TE does not have wheel on cuda 13 yet, thus need to install from source.
+# TE is built with --no-build-isolation, so its build deps must be pre-installed;
+# install the set TE's release_v2.10 CI uses (wheel packaging ninja pybind11).
+# nvidia-mathdx is left unpinned (as in TE CI): 26.6.0 is x86-only, arm64 (sbsa)
+# max is 25.6.0, and TE release_v2.10 does not pin or reference it (it links plain
+# CUDA::cublas), so the resolver picking the per-arch latest is safe.
 RUN if [ "${ENABLE_CUDA_13}" = "1" ]; then \
-      pip install nvidia-mathdx==26.6.0 && \
+      pip install nvidia-mathdx pybind11 ninja wheel packaging && \
       pip -v install --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.10; \
     else \
       pip -v install --no-build-isolation "transformer_engine[pytorch]==2.10.0"; \
@@ -62,7 +82,7 @@ RUN NVCC_APPEND_FLAGS="--threads 4" \
 RUN git clone https://github.com/NVIDIA/Megatron-LM.git --recursive && \
     cd Megatron-LM && git checkout ${MEGATRON_COMMIT}
 
-# Pinned to d64a639 (older than slime upstream's a193d9d); the newer commit
+# Pinned to d64a639 (older than vime upstream's a193d9d); the newer commit
 # requires TMS_CUDA_MAJOR env var to build a multi-CUDA wheel.
 RUN pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@d64a639 --no-cache-dir --force-reinstall
 RUN pip install git+https://github.com/radixark/Megatron-Bridge.git@bridge --no-deps --no-build-isolation
@@ -109,12 +129,12 @@ RUN cd Megatron-LM && \
 # ====================================== Install main package ============================================
 
 ARG VIME_COMMIT=main
-RUN git clone https://github.com/vllm-project/vime.git /root/slime && \
-    cd /root/slime && \
+RUN git clone https://github.com/vllm-project/vime.git /root/vime && \
+    cd /root/vime && \
     git checkout ${VIME_COMMIT} && \
     pip install -e . --no-deps
 
-RUN cd /root/slime/slime/backends/megatron_utils/kernels/int4_qat && \
+RUN cd /root/vime/vime/backends/megatron_utils/kernels/int4_qat && \
     pip install . --no-build-isolation
 
 # ====================================== Build-time smoke ============================================
@@ -122,8 +142,8 @@ RUN cd /root/slime/slime/backends/megatron_utils/kernels/int4_qat && \
 # Fail-fast import smoke + flashinfer version pin check. Catches ABI / version
 # regressions at build time instead of first GPU run.
 RUN python3 -c "\
-import vllm, slime, flashinfer; \
-from slime.backends.vllm_utils.vllm_engine import VLLMEngine; \
+import vllm, vime, flashinfer; \
+from vime.backends.vllm_utils.vllm_engine import VLLMEngine; \
 print('vllm', vllm.__version__); \
 print('flashinfer', flashinfer.__version__); \
 print('VLLMEngine import ok')"

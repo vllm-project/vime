@@ -12,7 +12,7 @@ LOG_FILE="/tmp/vllm_teacher_$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 6).
 
 ## Launch the teacher model server in the background.
 ## OPD teacher uses /v1/completions with echo=True + prompt_logprobs=1 set
-## per-request (see slime/rollout/on_policy_distillation.py reward_func).
+## per-request (see vime/rollout/on_policy_distillation.py reward_func).
 ## prompt_logprobs is a per-request SamplingParams field in vLLM; no
 ## server-side flag gates it. --max-logprobs defaults to 20, which is
 ## plenty for prompt_logprobs=1.
@@ -48,7 +48,7 @@ else
 fi
 echo "HAS_NVLINK: $HAS_NVLINK (detected $NVLINK_COUNT NVLink references)"
 
-source "/root/slime/scripts/models/qwen3-8B.sh"
+source "/root/vime/scripts/models/qwen3-8B.sh"
 
 
 CKPT_ARGS=(
@@ -75,8 +75,8 @@ ROLLOUT_ARGS=(
 )
 
 RM_ARGS=(
-   --custom-rm-path slime.rollout.on_policy_distillation.reward_func
-   --custom-reward-post-process-path slime.rollout.on_policy_distillation.post_process_rewards
+   --custom-rm-path vime.rollout.on_policy_distillation.reward_func
+   --custom-reward-post-process-path vime.rollout.on_policy_distillation.post_process_rewards
    --rm-url http://$TEACHER_IP:$TEACHER_PORT/v1/completions
 )
 
@@ -127,7 +127,7 @@ OPTIMIZER_ARGS=(
 
 WANDB_ARGS=(
    #--use-wandb
-   # --wandb-project slime-dev
+   # --wandb-project vime-dev
    # --wandb-group qwen3-8B-test
    # --wandb-key ${WANDB_KEY}
 )

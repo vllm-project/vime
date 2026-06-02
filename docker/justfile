@@ -21,12 +21,12 @@ _release-raw:
     VERSION="$(cat docker/version.txt | tr -d '\n')"
     IMAGE_TAG=${VERSION}${ARG_TAG_POSTFIX}
 
-    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" $ARG_BUILD_EXTRA_ARGS -t slimerl/slime:$IMAGE_TAG
-    docker push slimerl/slime:$IMAGE_TAG
+    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" $ARG_BUILD_EXTRA_ARGS -t aosheninferact/vime-vllm:$IMAGE_TAG
+    docker push aosheninferact/vime-vllm:$IMAGE_TAG
 
     if [ -z "${ARG_TAG_POSTFIX}" ]; then
-        docker tag slimerl/slime:$IMAGE_TAG slimerl/slime:latest
-        docker push slimerl/slime:latest
+        docker tag aosheninferact/vime-vllm:$IMAGE_TAG aosheninferact/vime-vllm:latest
+        docker push aosheninferact/vime-vllm:latest
     fi
 
 debug:
@@ -37,8 +37,8 @@ debug:
     VERSION="$(cat docker/version.txt | tr -d '\n')"
     IMAGE_TAG=${VERSION}
 
-    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t slimerl/slime-test:$IMAGE_TAG
-    docker push slimerl/slime-test:$IMAGE_TAG
+    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t aosheninferact/vime-vllm-test:$IMAGE_TAG
+    docker push aosheninferact/vime-vllm-test:$IMAGE_TAG
 
-    docker tag slimerl/slime-test:$IMAGE_TAG slimerl/slime-test:latest
-    docker push slimerl/slime-test:latest
+    docker tag aosheninferact/vime-vllm-test:$IMAGE_TAG aosheninferact/vime-vllm-test:latest
+    docker push aosheninferact/vime-vllm-test:latest

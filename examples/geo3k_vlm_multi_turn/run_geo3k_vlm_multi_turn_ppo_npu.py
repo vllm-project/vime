@@ -1,7 +1,7 @@
 import os
 import tempfile
 
-from slime.utils.external_utils.command_utils import execute_train_npu
+from vime.utils.external_utils.command_utils import execute_train_npu
 
 MODEL_NAME = os.environ.get("SLIME_SCRIPT_MODEL_NAME", "Qwen3-VL-2B-Instruct")
 assert MODEL_NAME in {
@@ -46,7 +46,7 @@ megatron:
     wandb_args = (
         (
             "--use-wandb "
-            "--wandb-project slime-dev "
+            "--wandb-project vime-dev "
             "--wandb-group geo3k_vlm_multi_turn "
             f"--wandb-key '{wandb_api_key}' "
         )

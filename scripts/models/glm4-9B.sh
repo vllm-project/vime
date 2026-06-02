@@ -1,5 +1,5 @@
 MODEL_ARGS=(
-   --spec "slime_plugins.models.glm4" "get_glm_spec"
+   --spec "vime_plugins.models.glm4" "get_glm_spec"
    --swiglu
    --num-layers 40
    --hidden-size 4096

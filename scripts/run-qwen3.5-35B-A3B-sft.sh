@@ -47,7 +47,7 @@ CKPT_ARGS=(
 )
 
 SFT_ARGS=(
-   --rollout-function-path slime.rollout.sft_rollout.generate_rollout
+   --rollout-function-path vime.rollout.sft_rollout.generate_rollout
    --prompt-data ${BASE_FOLDER}/openhermes2_5.parquet
    --input-key messages
    --rollout-shuffle
@@ -97,7 +97,7 @@ OPTIMIZER_ARGS=(
 
 WANDB_ARGS=(
    # --use-wandb
-   # --wandb-project slime-dev
+   # --wandb-project vime-dev
    # --wandb-group qwen3.5-35B-sft
 )
 

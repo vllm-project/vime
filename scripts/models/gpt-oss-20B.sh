@@ -8,7 +8,7 @@
 NLAYERS=24
 
 MODEL_ARGS=(
-    --spec "slime_plugins.models.gpt_oss" "get_gpt_oss_spec"
+    --spec "vime_plugins.models.gpt_oss" "get_gpt_oss_spec"
     --num-layers ${NLAYERS}
     --hidden-size 2880
     --ffn-hidden-size 2880
