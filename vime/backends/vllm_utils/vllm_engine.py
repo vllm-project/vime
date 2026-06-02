@@ -137,8 +137,7 @@ def _resolve_vllm_parallel_sizes(args, *, gpus_per_engine: int) -> tuple[int, in
         )
     if gpus_per_engine % pp != 0:
         raise ValueError(
-            f"num_gpus_per_engine ({gpus_per_engine}) must be divisible by "
-            f"vllm_pipeline_parallel_size ({pp})"
+            f"num_gpus_per_engine ({gpus_per_engine}) must be divisible by " f"vllm_pipeline_parallel_size ({pp})"
         )
     tp = gpus_per_engine // pp
     return tp, pp

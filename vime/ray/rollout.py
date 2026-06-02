@@ -1053,7 +1053,9 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
         model_cfg.resolve(args)
 
         has_pd = model_cfg.has_pd_disaggregation
-        router_ip, router_port, prom_port = _start_router(args, has_pd_disaggregation=has_pd, force_new=(model_idx > 0))
+        router_ip, router_port, prom_port = _start_router(
+            args, has_pd_disaggregation=has_pd, force_new=(model_idx > 0)
+        )
 
         # Write back so downstream readers (vllm_rollout, vllm_engine) see the
         # router we just started (only relevant for first model in multi-model setups).

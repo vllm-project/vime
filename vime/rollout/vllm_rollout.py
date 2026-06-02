@@ -538,9 +538,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
             "token_ids": token_ids,
             "sampling_params": inference_sampling_params,
         }
-        with trace_span(
-            sample, "vllm_inference_generate", attrs={"max_new_tokens": params["max_new_tokens"]}
-        ) as span:
+        with trace_span(sample, "vllm_inference_generate", attrs={"max_new_tokens": params["max_new_tokens"]}) as span:
             output = await post(url, payload, headers=headers)
             # Enrich the span with response meta (finish reason + token usage), mirroring
             # SGLang's build_sglang_meta_trace_attrs. trace_span yields the raw target when
