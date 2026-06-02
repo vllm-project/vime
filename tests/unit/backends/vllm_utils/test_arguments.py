@@ -362,6 +362,18 @@ def test_parse_args_tp_default_with_pp(args_mod, monkeypatch):
 
 
 @pytest.mark.unit
+def test_parse_args_tp_default_with_dp(args_mod, monkeypatch):
+    monkeypatch.setattr(args_mod, "add_vllm_arguments", lambda p: p)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["train.py", "--rollout-num-gpus-per-engine", "8", "--vllm-data-parallel-size", "2"],
+    )
+    ns = args_mod.vllm_parse_args()
+    assert ns.vllm_tensor_parallel_size == 4
+
+
+@pytest.mark.unit
 def test_parse_args_records_user_provided(args_mod, monkeypatch):
     def stub(parser):
         parser.add_argument("--vllm-foo", dest="vllm_foo", type=int, default=0)

@@ -319,8 +319,8 @@ def validate_args(args):
     # NOTE: TP is intentionally NOT precomputed here. A global ``vllm_tp_size`` derived from the
     # *global* rollout_num_gpus_per_engine would shadow the per-engine value and break
     # heterogeneous per-group engines (different num_gpus_per_engine). TP is resolved per engine
-    # in ``vllm_engine._resolve_vllm_parallel_sizes`` (tp = gpus_per_engine // pp), mirroring
-    # upstream slime's sglang_engine. (pp divisibility is validated there, per engine.)
+    # in ``vllm_engine._resolve_vllm_parallel_sizes`` (tp = gpus_per_engine // (pp * dp)).
+    # Divisibility is validated there, per engine.
 
     if getattr(args, "vllm_router_ip", None):
         args.vllm_router_ip = _wrap_ipv6(args.vllm_router_ip)
@@ -342,9 +342,11 @@ def vllm_parse_args():
     temp_parser = argparse.ArgumentParser(add_help=False)
     temp_parser.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
     temp_parser.add_argument("--vllm-pipeline-parallel-size", type=int, default=1)
+    temp_parser.add_argument("--vllm-data-parallel-size", type=int, default=1)
     temp_args, _ = temp_parser.parse_known_args()
     pp_size = temp_args.vllm_pipeline_parallel_size
-    vllm_tp_size = temp_args.rollout_num_gpus_per_engine // pp_size
+    dp_size = temp_args.vllm_data_parallel_size
+    vllm_tp_size = temp_args.rollout_num_gpus_per_engine // (pp_size * dp_size)
     parser.set_defaults(vllm_tensor_parallel_size=vllm_tp_size)
 
     args, _ = parser.parse_known_args()

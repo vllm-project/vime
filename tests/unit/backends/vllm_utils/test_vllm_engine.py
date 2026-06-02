@@ -150,6 +150,19 @@ def test_build_vllm_subprocess_env_colocate(vllm_args, monkeypatch):
 
 
 @pytest.mark.unit
+def test_build_vllm_subprocess_env_extends_dp_ready_timeout(vllm_args, monkeypatch):
+    monkeypatch.delenv("VLLM_ENGINE_READY_TIMEOUT_S", raising=False)
+    env = mod.build_vllm_subprocess_env(
+        {
+            "args": vllm_args,
+            "visible_devices": "0,1,2,3,4,5,6,7",
+            "dp_size": 2,
+        }
+    )
+    assert env["VLLM_ENGINE_READY_TIMEOUT_S"] == "1800"
+
+
+@pytest.mark.unit
 def test_get_base_gpu_id_colocate(vllm_args):
     vllm_args.colocate = True
     vllm_args.num_gpus_per_node = 8
@@ -449,6 +462,7 @@ def test_resume_memory_occupation_wake_tags_query(vllm_engine, monkeypatch):
 
     assert len(seen) == 1
     assert seen[0][1] == [("tags", "weights")]
+    assert seen[0][2] == vllm_args.vllm_weight_transfer_timeout_sec
 
 
 @pytest.mark.unit
@@ -578,12 +592,54 @@ def test_compute_topology_heterogeneous_per_group_tp(vllm_args):
 
 
 @pytest.mark.unit
-def test_resolve_parallel_sizes_rejects_dp_gt_1(vllm_args):
+def test_resolve_parallel_sizes_accounts_for_dp(vllm_args):
     vllm_args.vllm_pipeline_parallel_size = 1
     vllm_args.vllm_data_parallel_size = 2
     vllm_args.vllm_dp_size = 2
-    with pytest.raises(NotImplementedError, match="data parallelism"):
-        mod._resolve_vllm_parallel_sizes(vllm_args, gpus_per_engine=4)
+    assert mod._resolve_vllm_parallel_sizes(vllm_args, gpus_per_engine=8) == (4, 1)
+
+
+@pytest.mark.unit
+def test_resolve_parallel_sizes_rejects_non_divisible_dp(vllm_args):
+    vllm_args.vllm_pipeline_parallel_size = 1
+    vllm_args.vllm_data_parallel_size = 2
+    vllm_args.vllm_dp_size = 2
+    with pytest.raises(ValueError, match="vllm_data_parallel_size"):
+        mod._resolve_vllm_parallel_sizes(vllm_args, gpus_per_engine=6)
+
+
+@pytest.mark.unit
+def test_build_vllm_cmd_uses_conservative_defaults_for_dp_sleep(vllm_args):
+    vllm_args.vllm_enable_sleep_mode = True
+    vllm_args.vllm_data_parallel_size = 2
+    vllm_args.vllm_dp_size = 2
+    topology = mod.VllmEngineTopology(
+        nnodes=1,
+        node_rank=0,
+        local_num_gpus=8,
+        tensor_parallel_size=4,
+        pipeline_parallel_size=1,
+    )
+    cmd, _env = mod.build_vllm_cmd_and_env(
+        {
+            "args": vllm_args,
+            "topology": topology,
+            "visible_devices": "0,1,2,3,4,5,6,7",
+            "host": "127.0.0.1",
+            "port": 15000,
+            "model_path": "/tmp/model",
+            "tp_size": 4,
+            "pp_size": 1,
+            "dp_size": 2,
+            "seed": 1234,
+            "master_addr": None,
+            "master_port": None,
+        }
+    )
+
+    assert "--no-async-scheduling" in cmd
+    assert "--enforce-eager" in cmd
+    assert cmd[cmd.index("--distributed-timeout-seconds") + 1] == "1800"
 
 
 @pytest.mark.unit

@@ -129,18 +129,13 @@ def _resolve_vllm_parallel_sizes(args, *, gpus_per_engine: int) -> tuple[int, in
     # desyncing the weight-transfer rendezvous (the 300s "3/4 clients joined" hang).
     pp = _get_vllm_pp_size(args)
     dp = _get_vllm_dp_size(args)
-    if dp != 1:
-        raise NotImplementedError(
-            "vLLM data parallelism (vllm_data_parallel_size>1) is not wired in this base: TP is "
-            "computed as gpus_per_engine // pp (no DP term) and --data-parallel-size is not "
-            "forwarded. DP/EP support lands in a follow-up PR."
-        )
-    if gpus_per_engine % pp != 0:
+    denom = pp * dp
+    if gpus_per_engine % denom != 0:
         raise ValueError(
             f"num_gpus_per_engine ({gpus_per_engine}) must be divisible by "
-            f"vllm_pipeline_parallel_size ({pp})"
+            f"vllm_pipeline_parallel_size ({pp}) * vllm_data_parallel_size ({dp})"
         )
-    tp = gpus_per_engine // pp
+    tp = gpus_per_engine // denom
     return tp, pp
 
 
@@ -419,6 +414,8 @@ def build_vllm_subprocess_env(server_args: dict[str, Any]) -> dict[str, str]:
     env.setdefault("NCCL_CUMEM_ENABLE", "0")
     env["CUDA_VISIBLE_DEVICES"] = server_args["visible_devices"]
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")
+    if int(server_args.get("dp_size", 1) or 1) > 1:
+        env.setdefault("VLLM_ENGINE_READY_TIMEOUT_S", "1800")
     if getattr(args, "colocate", False):
         import vime
 
@@ -479,6 +476,23 @@ def build_vllm_cmd_and_env(server_args: dict[str, Any]) -> tuple[list[str], dict
         and getattr(args, "vllm_max_model_len", None) is None
     ):
         cmd += ["--max-model-len", str(args.rollout_max_context_len)]
+
+    if (
+        server_args["dp_size"] > 1
+        and getattr(args, "vllm_enable_sleep_mode", False)
+        and not _user_overrode(args, "vllm_async_scheduling")
+    ):
+        cmd += ["--no-async-scheduling"]
+
+    if server_args["dp_size"] > 1 and getattr(args, "vllm_enable_sleep_mode", False):
+        # DP engines in colocated sleep/offload mode have been flaky in vLLM's
+        # CUDA graph/async scheduler startup path for large MoE checkpoints.
+        # Keep the default conservative, while still letting explicit user
+        # --vllm-* overrides flow through unchanged.
+        if not _user_overrode(args, "vllm_enforce_eager"):
+            cmd += ["--enforce-eager"]
+        if not _user_overrode(args, "vllm_distributed_timeout_seconds"):
+            cmd += ["--distributed-timeout-seconds", "1800"]
 
     if getattr(args, "use_rollout_routing_replay", False):
         cmd += ["--enable-return-routed-experts"]
@@ -920,7 +934,7 @@ class VLLMEngine(RayActor):
         response = requests.post(
             f"{self._http_base()}/sleep",
             params={"level": level},
-            timeout=30,
+            timeout=self._weight_transfer_http_timeout(),
         )
         return _response_json(response)
 
@@ -937,7 +951,7 @@ class VLLMEngine(RayActor):
         response = requests.post(
             f"{self._http_base()}/wake_up",
             params=wake_params,
-            timeout=30,
+            timeout=self._weight_transfer_http_timeout(),
         )
         return _response_json(response)
 
