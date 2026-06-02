@@ -121,7 +121,7 @@ def _get_vllm_dp_size(args) -> int:
 
 
 def _resolve_vllm_parallel_sizes(args, *, gpus_per_engine: int) -> tuple[int, int]:
-    # Derive TP per-engine from THIS engine's GPU count (matches upstream vime's
+    # Derive TP per-engine from THIS engine's GPU count (matches upstream slime's
     # sglang_engine: tp = _gpus_per_engine // pp). Deliberately does NOT consult a global
     # ``args.vllm_tp_size``: validate_args used to set that from the *global*
     # rollout_num_gpus_per_engine, which shadowed this per-engine value and made a

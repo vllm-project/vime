@@ -49,4 +49,4 @@ PYTHONPATH=/root/Megatron-LM/ python \
 bash script/run-qwen2.5-0.5B-reproducibility.sh
 ```
 
-这个 PR 中记录了 wandb 的截图 [pull#370](https://github.com/vllm-project/vime/pull/370)。
+这个 PR 中记录了 wandb 的截图 [pull#370](https://github.com/THUDM/slime/pull/370)。

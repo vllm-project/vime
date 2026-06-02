@@ -83,9 +83,9 @@ RUN NVCC_APPEND_FLAGS="--threads 4" \
 RUN git clone https://github.com/NVIDIA/Megatron-LM.git --recursive && \
     cd Megatron-LM && git checkout ${MEGATRON_COMMIT}
 
-# torch_memory_saver pinned to a193d9dd (upstream vime #1916). The newer commit
+# torch_memory_saver pinned to a193d9dd (upstream slime #1916). The newer commit
 # ships a multi-CUDA wheel and requires TMS_CUDA_MAJOR at build time; default it
-# to the running torch's CUDA major (vime #1924).
+# to the running torch's CUDA major (slime #1924).
 RUN TMS_CUDA_MAJOR="${TMS_CUDA_MAJOR:-$(python -c 'import torch; print(torch.version.cuda.split(".")[0])')}" && \
     export TMS_CUDA_MAJOR && \
     pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@a193d9dd1b877d33c64a41cfb3db9f867df2d926 --no-cache-dir --force-reinstall
