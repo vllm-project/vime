@@ -1,7 +1,7 @@
 import os
 import tempfile
 
-import slime.utils.external_utils.command_utils as U
+import vime.utils.external_utils.command_utils as U
 
 
 ENABLE_EVAL = bool(int(os.environ.get("SLIME_TEST_ENABLE_EVAL", "1")))

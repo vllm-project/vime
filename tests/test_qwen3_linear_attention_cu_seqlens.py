@@ -112,7 +112,7 @@ def make_config() -> SimpleNamespace:
 
 def load_module(module_name: str):
     install_megatron_stubs()
-    sys.modules.pop("slime_plugins.models.hf_attention", None)
+    sys.modules.pop("vime_plugins.models.hf_attention", None)
     sys.modules.pop(module_name, None)
     return importlib.import_module(module_name)
 
@@ -121,8 +121,8 @@ def load_module(module_name: str):
 @pytest.mark.parametrize(
     ("module_name", "class_name"),
     [
-        ("slime_plugins.models.qwen3_5", "Qwen3_5GatedDeltaNet"),
-        ("slime_plugins.models.qwen3_next", "Qwen3NextGatedDeltaNet"),
+        ("vime_plugins.models.qwen3_5", "Qwen3_5GatedDeltaNet"),
+        ("vime_plugins.models.qwen3_next", "Qwen3NextGatedDeltaNet"),
     ],
 )
 def test_linear_attention_forwards_cu_seqlens_to_chunk_kernel(monkeypatch, module_name: str, class_name: str):

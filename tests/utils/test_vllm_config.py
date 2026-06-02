@@ -16,7 +16,7 @@ def _write_yaml(data: dict) -> str:
 class TestVllmConfigUpdateWeights:
     def test_update_weights_defaults_to_none(self):
         """Models without explicit update_weights parse as None (resolved to True/False at runtime by VllmConfig.resolve based on hf_checkpoint match)."""
-        from slime.backends.vllm_utils.vllm_config import VllmConfig
+        from vime.backends.vllm_utils.vllm_config import VllmConfig
 
         path = _write_yaml(
             {
@@ -34,7 +34,7 @@ class TestVllmConfigUpdateWeights:
 
     def test_update_weights_explicit_false(self):
         """Models with update_weights: false should be parsed correctly."""
-        from slime.backends.vllm_utils.vllm_config import VllmConfig
+        from vime.backends.vllm_utils.vllm_config import VllmConfig
 
         path = _write_yaml(
             {
@@ -63,7 +63,7 @@ class TestVllmConfigUpdateWeights:
 
     def test_multi_model_total_gpus(self):
         """total_num_gpus should sum across all models."""
-        from slime.backends.vllm_utils.vllm_config import VllmConfig
+        from vime.backends.vllm_utils.vllm_config import VllmConfig
 
         path = _write_yaml(
             {
@@ -89,7 +89,7 @@ class TestGetModelUrl:
         """get_model_url should return the correct URL for a named model."""
         from argparse import Namespace
 
-        from slime.rollout.vllm_rollout import get_model_url
+        from vime.rollout.vllm_rollout import get_model_url
 
         args = Namespace(
             vllm_router_ip="10.0.0.1",
@@ -107,7 +107,7 @@ class TestGetModelUrl:
         """get_model_url should fall back to default router if model not found."""
         from argparse import Namespace
 
-        from slime.rollout.vllm_rollout import get_model_url
+        from vime.rollout.vllm_rollout import get_model_url
 
         args = Namespace(
             vllm_router_ip="10.0.0.1",
@@ -120,7 +120,7 @@ class TestGetModelUrl:
         """get_model_url should work when model_routers is not set."""
         from argparse import Namespace
 
-        from slime.rollout.vllm_rollout import get_model_url
+        from vime.rollout.vllm_rollout import get_model_url
 
         args = Namespace(
             vllm_router_ip="10.0.0.1",

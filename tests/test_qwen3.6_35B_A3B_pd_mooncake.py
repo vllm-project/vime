@@ -1,7 +1,7 @@
 import os
 import tempfile
 
-import slime.utils.external_utils.command_utils as U
+import vime.utils.external_utils.command_utils as U
 
 
 MODEL_NAME = "Qwen3.6-35B-A3B"
@@ -99,7 +99,7 @@ def execute():
         "--vllm-enable-expert-parallel "
         "--vllm-max-num-seqs 512 "
         "--vllm-cudagraph-capture-sizes 1 2 4 8 16 24 32 "
-        "--vllm-speculative-config '{\"method\":\"mtp\",\"num_speculative_tokens\":3}' "
+        '--vllm-speculative-config \'{"method":"mtp","num_speculative_tokens":3}\' '
         "--prefill-num-servers 1 "
     )
 

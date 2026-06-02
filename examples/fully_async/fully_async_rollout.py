@@ -4,9 +4,9 @@ import queue
 import threading
 import time
 
-from slime.rollout.vllm_rollout import GenerateState, generate_and_rm_group
-from slime.utils.async_utils import run
-from slime.utils.types import Sample
+from vime.rollout.vllm_rollout import GenerateState, generate_and_rm_group
+from vime.utils.async_utils import run
+from vime.utils.types import Sample
 
 # Global worker manager
 _global_worker = None

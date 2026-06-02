@@ -570,7 +570,7 @@ index 75825cd37..445b3fb84 100644
                  scores, topk, num_groups, group_topk, _compute_topk
              )
  
-+    from slime.utils.routing_replay import get_routing_replay_compute_topk
++    from vime.utils.routing_replay import get_routing_replay_compute_topk
 +    compute_topk = get_routing_replay_compute_topk(compute_topk)
 +
      if score_function == "softmax":
@@ -584,7 +584,7 @@ index a2f3e90bd..b6f732561 100644
          if self.config.moe_enable_routing_replay:
              self.router_replay = RouterReplay()
  
-+        from slime.utils.routing_replay import register_routing_replay
++        from vime.utils.routing_replay import register_routing_replay
 +        register_routing_replay(self)
 +
      def _maintain_float32_expert_bias(self):

@@ -118,7 +118,7 @@ OPTIMIZER_ARGS=(
 
 WANDB_ARGS=(
    # --use-wandb
-   # --wandb-project slime-dev
+   # --wandb-project vime-dev
    # --wandb-group qwen3-next-80B-A3B-32k
    # --wandb-key ${WANDB_KEY}
 )
