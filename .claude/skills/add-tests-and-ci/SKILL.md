@@ -1,11 +1,11 @@
 ---
 name: add-tests-and-ci
-description: Guide for adding or updating slime tests and CI wiring. Use when tasks require new test cases, CI registration, test matrix updates, or workflow template changes.
+description: Guide for adding or updating vime tests and CI wiring. Use when tasks require new test cases, CI registration, test matrix updates, or workflow template changes.
 ---
 
 # Add Tests and CI
 
-Add reliable tests and integrate them with slime CI flow.
+Add reliable tests and integrate them with vime CI flow.
 
 ## When to Use
 

@@ -7,7 +7,7 @@
 可以用如下方法把 huggingface checkpoint 转化为 torch_dist 格式：
 
 ```bash
-cd slime/
+cd vime/
 pip install -e . --no-deps
 source scripts/models/qwen3-30B-A3B.sh
 PYTHONPATH=/root/Megatron-LM/ torchrun --nproc-per-node 8 \
@@ -22,13 +22,13 @@ PYTHONPATH=/root/Megatron-LM/ torchrun --nproc-per-node 8 \
 执行训练：
 
 ```bash
-cd /root/slime
+cd /root/vime
 bash scripts/run-qwen3-30B-A3B.sh
 ```
 
 ### 参数简介
 
-这里我们简单介绍一下脚本 [run-qwen3-30B-A3B.sh](https://github.com/THUDM/slime/blob/main/scripts/run-qwen3-30B-A3B.sh) 中与 MoE 相关的部分。
+这里我们简单介绍一下脚本 [run-qwen3-30B-A3B.sh](https://github.com/vllm-project/vime/blob/main/scripts/run-qwen3-30B-A3B.sh) 中与 MoE 相关的部分。
 
 1. 为了支持在 8xH800 环境中运行 Qwen3-30B-A3B，我们需要开启 megatron 的 CPU Adam 以节省显存，对应配置为：
 
@@ -73,7 +73,7 @@ bash scripts/run-qwen3-30B-A3B.sh
 
 ### bf16 训练 fp8 推理
 
-slime 还支持 bf16 训练，fp8 推理。对于 Qwen3-30B-A3B 模型，只需要下载如下模型：
+vime 还支持 bf16 训练，fp8 推理。对于 Qwen3-30B-A3B 模型，只需要下载如下模型：
 
 ```bash
 hf download Qwen/Qwen3-30B-A3B-FP8 --local-dir /root/Qwen3-30B-A3B-FP8

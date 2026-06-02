@@ -14,14 +14,14 @@ pip install git+https://github.com/coding-famer/Megatron-Bridge-vime.git@qwen35 
 # Configuration
 TRAIN_BACKEND="megatron"
 MODEL_NAME="Qwen3_5-35B-A3B"
-DATASET_NAME=${SLIME_SCRIPT_DATASET_NAME:-"chenhegu/geo3k_imgurl"}
-NUM_GPUS=${SLIME_SCRIPT_NUM_GPUS:-8}
+DATASET_NAME=${VIME_SCRIPT_DATASET_NAME:-"chenhegu/geo3k_imgurl"}
+NUM_GPUS=${VIME_SCRIPT_NUM_GPUS:-8}
 DATASET_LOCAL_NAME=$(basename "$DATASET_NAME")
 
 MODEL_NAME_LOWER=$(echo "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')
 
 # External Ray flag
-if [ -z "$SLIME_SCRIPT_EXTERNAL_RAY" ] || [ "$SLIME_SCRIPT_EXTERNAL_RAY" = "0" ]; then
+if [ -z "$VIME_SCRIPT_EXTERNAL_RAY" ] || [ "$VIME_SCRIPT_EXTERNAL_RAY" = "0" ]; then
    USE_EXTERNAL_RAY=0
 else
    USE_EXTERNAL_RAY=1
@@ -169,8 +169,8 @@ BACKEND_ARGS=(
    --micro-batch-size 1
 )
 
-SLIME_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." &>/dev/null && pwd)"
-source "${SLIME_DIR}/scripts/models/qwen3.5-35B-A3B.sh"
+VIME_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." &>/dev/null && pwd)"
+source "${VIME_DIR}/scripts/models/qwen3.5-35B-A3B.sh"
 
 # Start Ray if not using external Ray
 if [ "$USE_EXTERNAL_RAY" = "0" ]; then

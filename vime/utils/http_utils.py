@@ -11,7 +11,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-SLIME_HOST_IP_ENV = "SLIME_HOST_IP"
+VIME_HOST_IP_ENV = "VIME_HOST_IP"
 
 
 def find_available_port(base_port: int):
@@ -42,7 +42,7 @@ def is_port_available(port):
 def get_host_info():
     hostname = socket.gethostname()
 
-    if env_overwrite_local_ip := os.getenv(SLIME_HOST_IP_ENV, None):
+    if env_overwrite_local_ip := os.getenv(VIME_HOST_IP_ENV, None):
         return hostname, env_overwrite_local_ip
 
     def _is_loopback(ip):
@@ -83,7 +83,7 @@ def get_host_info():
 
         return None
 
-    prefer_ipv6 = os.getenv("SLIME_PREFER_IPV6", "0").lower() in ("1", "true", "yes", "on")
+    prefer_ipv6 = os.getenv("VIME_PREFER_IPV6", "0").lower() in ("1", "true", "yes", "on")
     local_ip = None
     final_fallback = "127.0.0.1"
 

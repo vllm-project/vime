@@ -1,5 +1,5 @@
 name: Question / Help
-description: Ask a question about using slime. Please check the docs and FAQ first.
+description: Ask a question about using Vime. Please check the docs and FAQ first.
 title: "[Question] "
 labels: ["question"]
 body:
@@ -8,16 +8,16 @@ body:
       value: |
         Thank you for reaching out!
 
-        > **Note:** slime's open-source collaboration is currently focused on **bug fixes** and **general-purpose RL optimizations**.
-        > Feature requests are outside our current scope — please see [CONTRIBUTING.md](https://github.com/THUDM/slime/blob/main/CONTRIBUTING.md) for details.
+        > **Note:** Vime's open-source collaboration is currently focused on **bug fixes** and **general-purpose RL optimizations**.
+        > Feature requests are outside our current scope — please see [CONTRIBUTING.md](https://github.com/vllm-project/vime/blob/main/CONTRIBUTING.md) for details.
 
         Before asking, please make sure you have checked:
-        - [Quick Start Guide](https://thudm.github.io/slime/en/get_started/quick_start.html)
-        - [Usage Guide](https://thudm.github.io/slime/en/get_started/usage.html)
-        - [FAQ](https://thudm.github.io/slime/en/get_started/qa.html)
-        - [Examples](https://github.com/THUDM/slime/tree/main/examples)
+        - [Quick Start Guide](https://vllm-project.github.io/vime/en/get_started/quick_start.html)
+        - [Usage Guide](https://vllm-project.github.io/vime/en/get_started/usage.html)
+        - [FAQ](https://vllm-project.github.io/vime/en/get_started/qa.html)
+        - [Examples](https://github.com/vllm-project/vime/tree/main/examples)
 
-        Many common questions are already covered in the documentation above. If your question is about general usage or open-ended discussion, consider using [GitHub Discussions](https://github.com/THUDM/slime/discussions) instead.
+        Many common questions are already covered in the documentation above. If your question is about general usage or open-ended discussion, consider using [GitHub Discussions](https://github.com/vllm-project/vime/discussions) instead.
 
   - type: textarea
     id: question
@@ -46,7 +46,7 @@ body:
       label: Environment (if relevant)
       description: If your question is related to setup or runtime behavior, please provide your environment details.
       value: |
-        - slime version:
+        - Vime version:
         - Python version:
         - PyTorch version:
         - CUDA version:
@@ -64,9 +64,9 @@ body:
     attributes:
       label: Pre-submission Checklist
       options:
-        - label: I have read the [CONTRIBUTING.md](https://github.com/THUDM/slime/blob/main/CONTRIBUTING.md) and understand the collaboration scope.
+        - label: I have read the [CONTRIBUTING.md](https://github.com/vllm-project/vime/blob/main/CONTRIBUTING.md) and understand the collaboration scope.
           required: true
-        - label: I have read the [documentation](https://thudm.github.io/slime/) and [FAQ](https://thudm.github.io/slime/en/get_started/qa.html) and my question is not answered there.
+        - label: I have read the [documentation](https://vllm-project.github.io/vime/) and [FAQ](https://vllm-project.github.io/vime/en/get_started/qa.html) and my question is not answered there.
           required: true
-        - label: I have searched for [existing issues](https://github.com/THUDM/slime/issues) and my question has not been asked before.
+        - label: I have searched for [existing issues](https://github.com/vllm-project/vime/issues) and my question has not been asked before.
           required: true

@@ -2,12 +2,12 @@
 
 ## Overview
 
-Rollout Buffer is an independent component for asynchronous agent trajectory generation, with the main function of using the LLM OpenAI Server launched by slime training to generate agent trajectories.
+Rollout Buffer is an independent component for asynchronous agent trajectory generation, with the main function of using the LLM OpenAI Server launched by vime training to generate agent trajectories.
 
 ### Workflow
 
 ```
-slime Training Process ←─── HTTP API ───→ Rollout Buffer
+vime Training Process ←─── HTTP API ───→ Rollout Buffer
         ↓                                      ↓
    LLM Server ←─────── HTTP Requests ─────── Agent Framework
         ↓                                      ↓
@@ -36,13 +36,13 @@ generator/
 
 Each Generator file must define `TASK_TYPE` and `run_rollout()`.
 
-In addition, Rollout Buffer also provides some customizable functions to meet special needs of different tasks. If no custom implementation is provided, the system will use default implementations (located in `slime_plugins/rollout_buffer/default_func.py`).
+In addition, Rollout Buffer also provides some customizable functions to meet special needs of different tasks. If no custom implementation is provided, the system will use default implementations (located in `vime_plugins/rollout_buffer/default_func.py`).
 
 ### Example Script
 
 First, you need to follow [Example: Qwen3-4B Model](../../docs/en/models/qwen3-4B.md) to configure the environment, download data and convert model checkpoints. And then run the following scripts:
 ```bash
-cd slime_plugins/rollout_buffer
+cd vime_plugins/rollout_buffer
 bash rollout_buffer_example.sh
 
 # In a different terminal

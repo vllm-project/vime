@@ -1,5 +1,5 @@
 """
-This file is not for slime framework itself, but as an optional utility to easily launch slime jobs and tests.
+This file is not for vime framework itself, but as an optional utility to easily launch vime jobs and tests.
 """
 
 import datetime
@@ -104,7 +104,7 @@ def execute_train(
         extra_env_vars = {}
     if config is None:
         config = ExecuteTrainConfig()
-    external_ray = get_bool_env_var("SLIME_SCRIPT_EXTERNAL_RAY")
+    external_ray = get_bool_env_var("VIME_SCRIPT_EXTERNAL_RAY")
     master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
 
     exec_command(
@@ -120,10 +120,10 @@ def execute_train(
         "sleep 3; "
         f"{'' if external_ray else 'ray stop --force; '}"
         f"{'' if external_ray else 'pkill -9 ray; '}"
-        "pkill -9 slime; "
+        "pkill -9 vime; "
         "sleep 3; "
         f"{'' if external_ray else 'pkill -9 ray; '}"
-        "pkill -9 slime; "
+        "pkill -9 vime; "
         "pkill -9 redis; "
         "true; "
     )
@@ -163,7 +163,7 @@ def execute_train(
         }
     )
 
-    if get_bool_env_var("SLIME_SCRIPT_ENABLE_RAY_SUBMIT", "1"):
+    if get_bool_env_var("VIME_SCRIPT_ENABLE_RAY_SUBMIT", "1"):
         cmd_megatron_model_source = (
             f'source "{repo_base_dir}/scripts/models/{megatron_model_type}.sh" && '
             if megatron_model_type is not None
@@ -212,7 +212,7 @@ def get_default_wandb_args(test_file: str, run_name_prefix: str | None = None, r
     wandb_key = os.environ.get("WANDB_API_KEY")
     return (
         "--use-wandb "
-        f"--wandb-project slime-{test_name} "
+        f"--wandb-project vime-{test_name} "
         f"--wandb-group {wandb_run_name} "
         f"--wandb-key '{wandb_key}' "
         "--disable-wandb-random-suffix "
@@ -243,11 +243,11 @@ def get_bool_env_var(name: str, default: str = "false") -> bool:
 
 
 def get_env_enable_infinite_run():
-    return get_bool_env_var("SLIME_TEST_ENABLE_INFINITE_RUN", "false")
+    return get_bool_env_var("VIME_TEST_ENABLE_INFINITE_RUN", "false")
 
 
 def save_to_temp_file(text: str, ext: str):
-    path = Path(f"/tmp/slime_temp_file_{time.time()}_{random.randrange(0, 10000000)}.{ext}")
+    path = Path(f"/tmp/vime_temp_file_{time.time()}_{random.randrange(0, 10000000)}.{ext}")
     path.write_text(text)
     print(f"Write the following content to {path=}: {text=}")
     return str(path)

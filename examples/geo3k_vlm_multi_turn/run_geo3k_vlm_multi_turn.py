@@ -3,7 +3,7 @@ import os
 import vime.utils.misc as U
 from vime.utils.external_utils.command_utils import execute_train
 
-MODEL_NAME = os.environ.get("SLIME_SCRIPT_MODEL_NAME", "Qwen3-VL-2B-Instruct")
+MODEL_NAME = os.environ.get("VIME_SCRIPT_MODEL_NAME", "Qwen3-VL-2B-Instruct")
 assert MODEL_NAME in {
     "Qwen3-VL-2B-Instruct",
     "Qwen3-VL-4B-Instruct",
@@ -13,8 +13,8 @@ assert MODEL_NAME in {
     "Qwen3-VL-8B-Thinking",
 }
 
-NUM_GPUS = int(os.environ.get("SLIME_SCRIPT_NUM_GPUS", "4"))
-EXTERNAL_RAY = int(os.environ.get("SLIME_SCRIPT_EXTERNAL_RAY", "0"))
+NUM_GPUS = int(os.environ.get("VIME_SCRIPT_NUM_GPUS", "4"))
+EXTERNAL_RAY = int(os.environ.get("VIME_SCRIPT_EXTERNAL_RAY", "0"))
 
 DATASET_NAME = "VeraIsHere/geo3k_imgurl_processed"
 DATA_ROOT = "/root/datasets/geo3k_imgurl_processed"

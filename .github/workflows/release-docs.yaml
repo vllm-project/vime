@@ -17,7 +17,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    if: github.repository == 'THUDM/slime'
+    if: github.repository == 'vllm-project/vime'
     permissions:
       contents: write
     steps:

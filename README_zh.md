@@ -2,12 +2,12 @@
 
 [English](./README.md) · [代码仓库](https://github.com/vllm-project/vime)
 
-**Vime** 是基于 [slime](https://github.com/THUDM/slime) 的 RL scaling 用 LLM post-training 框架。在保留 slime 训练栈与数据生成设计的同时，默认以 [**vLLM**](https://github.com/vllm-project/vllm)（配合 [vllm-router](https://github.com/vllm-project/router)）作为 rollout 后端，替代 SGLang。Vime 提供两大核心能力：
+**Vime** 是面向 RL scaling 的 LLM post-training 框架。它保留高吞吐训练栈与灵活的数据生成设计，同时默认以 [**vLLM**](https://github.com/vllm-project/vllm)（配合 [vllm-router](https://github.com/vllm-project/router)）作为 rollout 后端，替代 SGLang。Vime 提供两大核心能力：
 
 1. **高性能训练**：通过连接 Megatron 与 vLLM，支持各种模式的高效训练；
 2. **灵活的数据生成**：通过自定义数据生成接口以及 server based engine，实现任意的训练数据生成流程。
 
-Vime 继承 slime 的广泛模型支持，包括：
+Vime 支持广泛的模型系列，包括：
 
 - Qwen 系列（Qwen3.6、Qwen3.5、Qwen3Next、Qwen3MoE、Qwen3、Qwen2.5）；
 - DeepSeek V3 系列（DeepSeek V3、V3.1、DeepSeek R1）；
@@ -19,7 +19,7 @@ Vime 继承 slime 的广泛模型支持，包括：
 - [快速开始](#快速开始)
 - [参数说明](#参数说明)
 - [开发指南](#开发指南)
-- [slime doc](#slime-doc)
+- [Vime 文档](#vime-文档)
 - [常见 Q&A 与致谢](#常见-qa-与致谢)
 
 ## 架构总览
@@ -45,10 +45,10 @@ Vime 继承 slime 的广泛模型支持，包括：
 Vime 的参数分为三类：
 
 1. **Megatron 参数**：Vime 会读取 Megatron 中的全部参数，可通过传入如 `--tensor-model-parallel-size 2` 的方式配置 Megatron；
-2. **vLLM 参数**：vLLM server 与 engine 相关选项以 `--vllm-` 为前缀（例如 `--vllm-gpu-memory-utilization`）。路由相关选项分两类前缀：vllm-router 自身的选项以 `--router-` 传入（例如 `--router-policy round_robin`、`--router-request-timeout-secs`），Vime 侧用于告诉 Vime *router 在哪里* 的编排参数则以 `--vllm-router-` 为前缀（`--vllm-router-ip`、`--vllm-router-port`）。完整参数见 [slime/backends/vllm_utils/arguments.py](slime/backends/vllm_utils/arguments.py)。
-3. **框架参数**：与 slime/Vime 编排相关的开关（rollout GPU、数据路径、RL 算法等），见 [slime/utils/arguments.py](slime/utils/arguments.py)。
+2. **vLLM 参数**：vLLM server 与 engine 相关选项以 `--vllm-` 为前缀（例如 `--vllm-gpu-memory-utilization`）。路由相关选项分两类前缀：vllm-router 自身的选项以 `--router-` 传入（例如 `--router-policy round_robin`、`--router-request-timeout-secs`），Vime 侧用于告诉 Vime *router 在哪里* 的编排参数则以 `--vllm-router-` 为前缀（`--vllm-router-ip`、`--vllm-router-port`）。完整参数见 [vime/backends/vllm_utils/arguments.py](vime/backends/vllm_utils/arguments.py)。
+3. **框架参数**：与 Vime 编排相关的开关（rollout GPU、数据路径、RL 算法等），见 [vime/utils/arguments.py](vime/utils/arguments.py)。
 
-`--rollout-num-gpus-per-engine` 对应每个 vLLM engine 的 tensor parallel size。默认 rollout 入口为 `slime.rollout.vllm_rollout.generate_rollout`。
+`--rollout-num-gpus-per-engine` 对应每个 vLLM engine 的 tensor parallel size。默认 rollout 入口为 `vime.rollout.vllm_rollout.generate_rollout`。
 
 完整使用说明请查阅 [使用文档](docs/zh/get_started/usage.md)。
 
@@ -68,14 +68,14 @@ Vime 的参数分为三类：
 
 - 调试技巧请参考 [debug 指南](docs/zh/developer_guide/debug.md)
 
-## slime doc
+## Vime 文档
 
-Vime 由 slime 衍生而来。以下上游资源与本仓库文档仍沿用 slime 命名，可作为共享概念（Megatron 集成、定制化、高级主题）的参考：
+以下资源覆盖 Vime 使用方式、Megatron 集成、定制化与高级主题：
 
-[![Documentation](https://img.shields.io/badge/slime_文档-latest-brightgreen.svg?style=flat)](https://thudm.github.io/slime/)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/THUDM/slime)
+[![Documentation](https://img.shields.io/badge/vime_文档-latest-brightgreen.svg?style=flat)](https://vllm-project.github.io/vime/)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/vllm-project/vime)
 
-- 上游仓库：[THUDM/slime](https://github.com/THUDM/slime)
+- 代码仓库：[vllm-project/vime](https://github.com/vllm-project/vime)
 - 本仓库英文文档：[docs/en/](docs/en/)
 - 本仓库中文文档：[docs/zh/](docs/zh/)
 
@@ -92,7 +92,7 @@ Vime 由 slime 衍生而来。以下上游资源与本仓库文档仍沿用 slim
   title        = {Vime: An LLM post-training framework with vLLM for RL Scaling},
   year         = {2026},
   howpublished = {\url{https://github.com/vllm-project/vime}},
-  note         = {Based on slime. GitHub repository.},
+  note         = {GitHub repository.},
   urldate      = {2026-05-25}
 }
 ```

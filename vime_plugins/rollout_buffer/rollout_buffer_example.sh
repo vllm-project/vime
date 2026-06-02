@@ -45,7 +45,7 @@ CKPT_ARGS=(
    --hf-checkpoint /root/DeepSeek-R1-Distill-Qwen-7B
    --ref-load /root/DeepSeek-R1-Distill-Qwen-7B_torch_dist
    --save-interval 100
-   --save /root/DeepSeek-R1-Distill-Qwen-7B_slime
+   --save /root/DeepSeek-R1-Distill-Qwen-7B_vime
 )
 
 ROLLOUT_ARGS=(

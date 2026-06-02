@@ -1,10 +1,10 @@
 # Multi-Agent RL
 
-This directory provides an example of running multi-agent reinforcement learning (RL) with slime.
+This directory provides an example of running multi-agent reinforcement learning (RL) with vime.
 
 ## Environment Setup
 
-The environment setup is identical to the standard RL setup used in slime.
+The environment setup is identical to the standard RL setup used in vime.
 
 ## Running the Script
 
@@ -22,7 +22,7 @@ MULTI_AGENT_CONFIGS = {
 To start a run, execute:
 
 ```bash
-cd slime/
+cd vime/
 bash examples/multi_agent/run-qwen3-30B-A3B-multi-agent.sh
 ```
 

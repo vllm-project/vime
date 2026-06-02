@@ -12,7 +12,7 @@ First set up model & environment following the Qwen3-4B example.
 
 ## Quick Start
 ```bash
-cd slime
+cd vime
 bash examples/fully_async/run-qwen3-4b-fully_async.sh
 ```
 You should see log lines like:

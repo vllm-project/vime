@@ -17,11 +17,11 @@ TRACE_VERSION = 1
 
 logger = logging.getLogger(__name__)
 _TRACE_STACK: contextvars.ContextVar[tuple[tuple[str, str], ...]] = contextvars.ContextVar(
-    "slime_trace_stack",
+    "vime_trace_stack",
     default=(),
 )
 _TRACE_HANDLE_STACK: contextvars.ContextVar[tuple[tuple[TraceHandle, ...], ...]] = contextvars.ContextVar(
-    "slime_trace_handle_stack",
+    "vime_trace_handle_stack",
     default=(),
 )
 _TRACE_AUTO_INFER_WARNED: set[str] = set()

@@ -1,13 +1,13 @@
 # CI（持续集成）
 
-slime 使用 GitHub Actions 进行 CI。测试通过 **PR label** 触发——给 PR 添加特定 label 即可运行对应的测试套件。
+vime 使用 GitHub Actions 进行 CI。测试通过 **PR label** 触发——给 PR 添加特定 label 即可运行对应的测试套件。
 
 ## 工作原理
 
 工作流定义在 `.github/workflows/pr-test.yml`（由 `pr-test.yml.j2` 自动生成）。每个 CI 任务会：
 
 1. 在自托管 GPU runner 上通过 `docker run` 运行；大多数测试使用 `inferactinc/public:vime-vllm-cu129-latest`，镜像验证使用 `inferactinc/public:vime-vllm-cu129-latest`。
-2. 通过 `pip install -e . --no-deps` 安装 slime。
+2. 通过 `pip install -e . --no-deps` 安装 vime。
 3. 通过 `tests/ci/gpu_lock_exec.py --count <num_gpus>` 获取所需数量的 GPU。
 4. 执行测试文件：`python <test_path>.py` 或 `python tests/<test_file>.py`。如果测试位于 `tests/plugin_contracts/` 这样的子目录，CI 也会自动处理。
 
@@ -57,7 +57,7 @@ slime 使用 GitHub Actions 进行 CI。测试通过 **PR label** 触发——�
 
 - Dense 模型：GLM4-9B、Qwen3-4B（PPO）
 - MoE 模型：Qwen3-30B-A3B（DeepEP + FP8）、Qwen3.6-35B-A3B PD + Mooncake、Moonlight-16B-A3B
-- 特殊场景：Qwen2.5-0.5B debug rollout-then-train、OPD（vLLM teacher 模式）
+- 特殊场景：Qwen2.5-0.5B debug rollout-then-train、OPD（vLLM teacher 模式）、MTP 训练与 bridge 映射
 
 所有测试使用 8 张 GPU。如果你正在修改 Megatron 训练逻辑、loss 计算或 checkpoint 转换，应该使用这个 label。
 
@@ -67,7 +67,7 @@ slime 使用 GitHub Actions 进行 CI。测试通过 **PR label** 触发——�
 
 ```python
 import os
-import slime.utils.external_utils.command_utils as U
+import vime.utils.external_utils.command_utils as U
 
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"

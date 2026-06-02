@@ -4,8 +4,8 @@ import tempfile
 import vime.utils.external_utils.command_utils as U
 
 
-ENABLE_EVAL = bool(int(os.environ.get("SLIME_TEST_ENABLE_EVAL", "1")))
-TIGHT_HOST_MEMORY = bool(int(os.environ.get("SLIME_TEST_TIGHT_HOST_MEMORY", "1")))
+ENABLE_EVAL = bool(int(os.environ.get("VIME_TEST_ENABLE_EVAL", "1")))
+TIGHT_HOST_MEMORY = bool(int(os.environ.get("VIME_TEST_TIGHT_HOST_MEMORY", "1")))
 
 MODEL_NAME = "Qwen3-4B"
 MODEL_TYPE = "qwen3-4B"

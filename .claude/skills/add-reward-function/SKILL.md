@@ -1,11 +1,11 @@
 ---
 name: add-reward-function
-description: Guide for adding a custom reward function in slime and wiring it through --custom-rm-path (and optional reward post-processing). Use when user wants new reward logic, remote/service reward integration, or task-specific reward shaping.
+description: Guide for adding a custom reward function in vime and wiring it through --custom-rm-path (and optional reward post-processing). Use when user wants new reward logic, remote/service reward integration, or task-specific reward shaping.
 ---
 
 # Add Reward Function
 
-Implement custom reward logic and connect it to slime rollout/training safely.
+Implement custom reward logic and connect it to vime rollout/training safely.
 
 ## When to Use
 
@@ -24,11 +24,11 @@ Pick one of these:
 - Single-sample mode (`--group-rm` disabled): custom function gets one `Sample`
 - Group/batch mode (`--group-rm` enabled): custom function gets `list[Sample]`
 
-`slime.rollout.rm_hub.__init__.py` calls your function via `--custom-rm-path`.
+`vime.rollout.rm_hub.__init__.py` calls your function via `--custom-rm-path`.
 
 ### Step 2: Create Reward Module
 
-Create `slime/rollout/rm_hub/<your_rm>.py`.
+Create `vime/rollout/rm_hub/<your_rm>.py`.
 
 Supported signatures:
 
@@ -66,14 +66,14 @@ Wire with:
 --custom-reward-post-process-path <module>.post_process_rewards
 ```
 
-This hook is consumed in `slime/ray/rollout.py`.
+This hook is consumed in `vime/ray/rollout.py`.
 
 ### Step 5: Wire and Validate
 
 Use:
 
 ```bash
---custom-rm-path slime.rollout.rm_hub.<your_rm>.custom_rm
+--custom-rm-path vime.rollout.rm_hub.<your_rm>.custom_rm
 ```
 
 ## Common Mistakes
@@ -85,6 +85,6 @@ Use:
 
 ## Reference Locations
 
-- Reward dispatch: `slime/rollout/rm_hub/__init__.py`
-- Reward post-process hook: `slime/ray/rollout.py`
+- Reward dispatch: `vime/rollout/rm_hub/__init__.py`
+- Reward post-process hook: `vime/ray/rollout.py`
 - Customization docs: `docs/en/get_started/customization.md`

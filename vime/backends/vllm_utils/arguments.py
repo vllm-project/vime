@@ -320,7 +320,7 @@ def validate_args(args):
     # *global* rollout_num_gpus_per_engine would shadow the per-engine value and break
     # heterogeneous per-group engines (different num_gpus_per_engine). TP is resolved per engine
     # in ``vllm_engine._resolve_vllm_parallel_sizes`` (tp = gpus_per_engine // pp), mirroring
-    # upstream slime's sglang_engine. (pp divisibility is validated there, per engine.)
+    # upstream vime's sglang_engine. (pp divisibility is validated there, per engine.)
 
     if getattr(args, "vllm_router_ip", None):
         args.vllm_router_ip = _wrap_ipv6(args.vllm_router_ip)

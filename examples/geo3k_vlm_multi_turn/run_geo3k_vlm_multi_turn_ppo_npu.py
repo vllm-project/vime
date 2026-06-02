@@ -3,7 +3,7 @@ import tempfile
 
 from vime.utils.external_utils.command_utils import execute_train_npu
 
-MODEL_NAME = os.environ.get("SLIME_SCRIPT_MODEL_NAME", "Qwen3-VL-2B-Instruct")
+MODEL_NAME = os.environ.get("VIME_SCRIPT_MODEL_NAME", "Qwen3-VL-2B-Instruct")
 assert MODEL_NAME in {
     "Qwen3-VL-2B-Instruct",
     "Qwen3-VL-4B-Instruct",
@@ -13,8 +13,8 @@ assert MODEL_NAME in {
     "Qwen3-VL-8B-Thinking",
 }
 
-EXTERNAL_RAY = int(os.environ.get("SLIME_SCRIPT_EXTERNAL_RAY", "0"))
-TRAIN_BACKEND = os.environ.get("SLIME_SCRIPT_TRAIN_BACKEND", "fsdp").lower()
+EXTERNAL_RAY = int(os.environ.get("VIME_SCRIPT_EXTERNAL_RAY", "0"))
+TRAIN_BACKEND = os.environ.get("VIME_SCRIPT_TRAIN_BACKEND", "fsdp").lower()
 assert TRAIN_BACKEND in {"fsdp", "megatron"}
 
 DATASET_NAME = "VeraIsHere/geo3k_imgurl_processed"

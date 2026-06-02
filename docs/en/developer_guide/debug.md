@@ -2,7 +2,7 @@
 
 ## Aligning Precision
 
-During the development of slime, it is often necessary to check if the model's precision is correct. This can be verified in the following ways:
+During the development of vime, it is often necessary to check if the model's precision is correct. This can be verified in the following ways:
 
 1.  **First Training Step**
     1.  Check if the generated `rollout` is coherent. If not, there are two possible reasons:
@@ -27,20 +27,20 @@ During the development of slime, it is often necessary to check if the model's p
 
 ## Separate Debugging for Training and Inference
 
-slime supports debugging the training and inference parts separately, which allows for the following:
+vime supports debugging the training and inference parts separately, which allows for the following:
 
 * When tuning/debugging the inference part, you can start the task with only a few GPUs.
 * When tuning/debugging the training part, you can ensure the model input is fixed, removing the randomness of rollouts.
 
-Specifically, slime currently provides the following parameters for separate debugging:
+Specifically, vime currently provides the following parameters for separate debugging:
 
 1.  `--debug-rollout-only`
 
-    When enabled, slime will not load Megatron and will only initialize vLLM. You can use this method to debug the inference part.
+    When enabled, vime will not load Megatron and will only initialize vLLM. You can use this method to debug the inference part.
 
 2.  `--debug-train-only`
 
-    When enabled, slime will not load vLLM and will only initialize Megatron. You can use this method to debug the training part.
+    When enabled, vime will not load vLLM and will only initialize Megatron. You can use this method to debug the training part.
 
 3.  `--save-debug-rollout-data /your/saved/debug/data_{rollout_id}.pt`
 
@@ -52,7 +52,7 @@ Specifically, slime currently provides the following parameters for separate deb
 
 ## INT4 / Compressed-Tensors Quantization Checkpoint Issues
 
-When using INT4-quantized models (e.g., `compressed-tensors` with `W4A16`), the checkpoint's `config.json` contains a `quantization_config.ignore` list that specifies which parameters should **not** be quantized. During online weight updates (Megatron → vLLM), slime also reads this ignore list to decide which parameters to INT4-quantize. An incorrect ignore list can cause silent errors:
+When using INT4-quantized models (e.g., `compressed-tensors` with `W4A16`), the checkpoint's `config.json` contains a `quantization_config.ignore` list that specifies which parameters should **not** be quantized. During online weight updates (Megatron → vLLM), vime also reads this ignore list to decide which parameters to INT4-quantize. An incorrect ignore list can cause silent errors:
 
 1. **MoE router weights (`mlp.gate.weight`) become all zeros**
 

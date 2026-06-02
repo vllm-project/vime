@@ -8,7 +8,7 @@ The environment setup, model download, data, and checkpoint conversion are the s
 To convert huggingface checkpoint to torch_dist, please try:
 
 ```bash
-cd slime/
+cd vime/
 pip install -e . --no-deps
 source scripts/models/qwen3-30B-A3B.sh
 PYTHONPATH=/root/Megatron-LM/ torchrun --nproc-per-node 8 \
@@ -23,13 +23,13 @@ PYTHONPATH=/root/Megatron-LM/ torchrun --nproc-per-node 8 \
 Execute the training script:
 
 ```bash
-cd /root/slime
+cd /root/vime
 bash scripts/run-qwen3-30B-A3B.sh
 ```
 
 ### Parameter Introduction
 
-Here, we will briefly introduce the MoE-related parts in the [run-qwen3-30B-A3B.sh](https://github.com/THUDM/slime/blob/main/scripts/run-qwen3-30B-A3B.sh) script.
+Here, we will briefly introduce the MoE-related parts in the [run-qwen3-30B-A3B.sh](https://github.com/vllm-project/vime/blob/main/scripts/run-qwen3-30B-A3B.sh) script.
 
 1.  To support running Qwen3-30B-A3B in an 8xH800 environment, we need to enable Megatron's CPU Adam to save GPU memory. The corresponding configuration is:
 
@@ -74,7 +74,7 @@ Here, we will briefly introduce the MoE-related parts in the [run-qwen3-30B-A3B.
 
 ### BF16 Training with FP8 Inference
 
-slime also supports BF16 training with FP8 inference. For the Qwen3-30B-A3B model, you just need to download the following model:
+vime also supports BF16 training with FP8 inference. For the Qwen3-30B-A3B model, you just need to download the following model:
 
 ```bash
 hf download Qwen/Qwen3-30B-A3B-FP8 --local-dir /root/Qwen3-30B-A3B-FP8

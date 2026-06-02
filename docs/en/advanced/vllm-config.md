@@ -1,12 +1,12 @@
 # vLLM Config: Advanced Engine Deployment
 
-`--vllm-config` is a YAML-based configuration system for fine-grained control over vLLM engine deployment in slime. It enables **multi-model serving**, **Prefill-Decode (PD) disaggregation**, **heterogeneous server groups**, and can even serve as a **standalone vLLM launcher** for complex inference topologies.
+`--vllm-config` is a YAML-based configuration system for fine-grained control over vLLM engine deployment in vime. It enables **multi-model serving**, **Prefill-Decode (PD) disaggregation**, **heterogeneous server groups**, and can even serve as a **standalone vLLM launcher** for complex inference topologies.
 
 ---
 
 ## Architecture Overview
 
-In the default setup (without `--vllm-config`), slime deploys a single model behind a single router with uniform server groups:
+In the default setup (without `--vllm-config`), vime deploys a single model behind a single router with uniform server groups:
 
 ![architecture overview](../../../imgs/arch.png)
 
@@ -170,8 +170,8 @@ python train.py \
 **Accessing models in custom rollout functions:**
 
 ```python
-from slime.rollout.vllm_rollout import get_model_url
-from slime.utils.http_utils import post
+from vime.rollout.vllm_rollout import get_model_url
+from vime.utils.http_utils import post
 
 async def my_generate(args, sample, sampling_params):
     # Route to the actor model (default)
@@ -257,25 +257,25 @@ Overrides take **highest priority**, overriding both the base `--vllm-*` CLI arg
 
 ### 7. Standalone vLLM Launcher
 
-While `--vllm-config` is designed for slime's training pipeline, it also works as a powerful launcher for pure inference scenarios using the `--rollout-external` pattern or by configuring slime to focus solely on serving.
+While `--vllm-config` is designed for vime's training pipeline, it also works as a powerful launcher for pure inference scenarios using the `--rollout-external` pattern or by configuring vime to focus solely on serving.
 
 **Using external engines with a pre-launched topology:**
 
-For complex production deployments, you may want to pre-launch vLLM engines independently and connect them to slime:
+For complex production deployments, you may want to pre-launch vLLM engines independently and connect them to vime:
 
 ```bash
 # Step 1: Launch vLLM engines externally
 vllm serve /path/to/model --port 10090 ...
 vllm serve /path/to/model --port 10091 ...
 
-# Step 2: Connect slime to external engines
+# Step 2: Connect vime to external engines
 python train.py \
   --rollout-external \
   --rollout-external-engine-addrs host1:10090 host2:10091 \
   ...
 ```
 
-> **Note:** `--vllm-config` and `--rollout-external` are mutually exclusive. Use `--vllm-config` when you want slime to manage the full engine lifecycle; use `--rollout-external` when engines are pre-deployed.
+> **Note:** `--vllm-config` and `--rollout-external` are mutually exclusive. Use `--vllm-config` when you want vime to manage the full engine lifecycle; use `--rollout-external` when engines are pre-deployed.
 
 ---
 
@@ -297,7 +297,7 @@ You can configure the routing policy:
 
 For multi-turn dialogues and agentic workloads, session affinity ensures that all requests belonging to the same conversation are routed to the same backend worker. This significantly improves prefix cache hit rates because the worker already has the conversation history cached.
 
-slime automatically assigns each sample a unique `session_id` (stored in `sample.session_id`). When the router policy is `consistent_hash`, this ID is passed as the `x-session-id` header, and vllm-router uses it to deterministically route all turns of the same session to the same worker.
+vime automatically assigns each sample a unique `session_id` (stored in `sample.session_id`). When the router policy is `consistent_hash`, this ID is passed as the `x-session-id` header, and vllm-router uses it to deterministically route all turns of the same session to the same worker.
 
 ```bash
 --router-policy consistent_hash
@@ -306,7 +306,7 @@ slime automatically assigns each sample a unique `session_id` (stored in `sample
 **How it works:**
 
 1. Each sample is assigned a unique `session_id` via UUID
-2. On each request, slime passes `x-session-id: <session_id>` in the HTTP header
+2. On each request, vime passes `x-session-id: <session_id>` in the HTTP header
 3. vllm-router's consistent-hash policy maps this key to a specific worker
 4. Subsequent turns reuse the same `session_id`, ensuring they hit the same worker
 
@@ -314,7 +314,7 @@ slime automatically assigns each sample a unique `session_id` (stored in `sample
 
 ## Resolution Rules
 
-When the config is loaded, slime applies the following resolution cascade:
+When the config is loaded, vime applies the following resolution cascade:
 
 1. **GPU per engine fallback:** Group `num_gpus_per_engine` → Model `num_gpus_per_engine` → `args.rollout_num_gpus_per_engine`
 2. **Model path fallback:** Group `overrides.model_path` → Model `model_path` → `args.hf_checkpoint`
@@ -392,8 +392,8 @@ python train.py \
 **Custom rollout function (`my_agent/rollout.py`):**
 
 ```python
-from slime.rollout.vllm_rollout import get_model_url
-from slime.utils.http_utils import post
+from vime.rollout.vllm_rollout import get_model_url
+from vime.utils.http_utils import post
 
 async def generate_with_models(args, sample, sampling_params):
     """Generate using actor, score with reward model, compare with reference."""
@@ -442,11 +442,11 @@ No. All server groups within a model must share the same `model_path`. This is v
 
 ### Q: How do I access the router address for a specific model at runtime?
 
-Use `get_model_url(args, "model_name", "/endpoint")` from `slime.rollout.vllm_rollout`. It reads from `args.vllm_model_routers`, which is a dict `{ model_name: (ip, port) }` populated automatically.
+Use `get_model_url(args, "model_name", "/endpoint")` from `vime.rollout.vllm_rollout`. It reads from `args.vllm_model_routers`, which is a dict `{ model_name: (ip, port) }` populated automatically.
 
 ### Q: Can I use `--vllm-config` without training (inference only)?
 
-While `--vllm-config` is designed for slime's training loop, you can effectively use it for inference-only scenarios by configuring a rollout-only run. For fully standalone vLLM serving, consider using vLLM's native `vllm serve` directly or the `--rollout-external` mode for connecting to pre-deployed engines.
+While `--vllm-config` is designed for vime's training loop, you can effectively use it for inference-only scenarios by configuring a rollout-only run. For fully standalone vLLM serving, consider using vLLM's native `vllm serve` directly or the `--rollout-external` mode for connecting to pre-deployed engines.
 
 ### Q: What is the relationship between `--vllm-config` and `--prefill-num-servers`?
 

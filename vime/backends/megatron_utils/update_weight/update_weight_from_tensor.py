@@ -351,7 +351,7 @@ class UpdateWeightFromTensor:
         # ── 5. Signal colocated engines to exit weight-update mode ───────────
         # State-machine bookend only; ``_weight_version`` is recorded inside
         # ``update_weights_from_tensor`` (step 4) when the data RPC succeeds —
-        # matches slime's single-RPC version-with-data semantics.
+        # matches vime's single-RPC version-with-data semantics.
         if self._ipc_engine_coordinator:
             ray.get(self._ipc_engine.finish_weight_update.remote())
         dist.barrier(group=get_gloo_group())
@@ -443,16 +443,16 @@ class _VLLMHijack:
     def hijack() -> None:
         from vllm.distributed.weight_transfer.ipc_engine import IPCWeightTransferEngine
 
-        if getattr(IPCWeightTransferEngine, "_slime_receive_patched", False):
+        if getattr(IPCWeightTransferEngine, "_vime_receive_patched", False):
             return
 
         _orig = IPCWeightTransferEngine.receive_weights
 
-        def _slime_receive_weights(self, update_info, load_weights, _orig=_orig):
+        def _vime_receive_weights(self, update_info, load_weights, _orig=_orig):
             _orig(self, update_info, load_weights)
 
-        IPCWeightTransferEngine.receive_weights = _slime_receive_weights
-        IPCWeightTransferEngine._slime_receive_patched = True  # type: ignore[attr-defined]
+        IPCWeightTransferEngine.receive_weights = _vime_receive_weights
+        IPCWeightTransferEngine._vime_receive_patched = True  # type: ignore[attr-defined]
 
 
 class vLLMColocateWorkerExtension:

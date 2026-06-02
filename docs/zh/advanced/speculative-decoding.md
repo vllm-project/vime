@@ -4,7 +4,7 @@
 
 ## 使用投机采样加速推理
 
-vLLM 把投机采样的所有配置收敛到一个 JSON（`SpeculativeConfig`），slime 通过
+vLLM 把投机采样的所有配置收敛到一个 JSON（`SpeculativeConfig`），vime 通过
 `--vllm-speculative-config` 透传。对于有 MTP 层的模型（例如 GLM-4.7、DeepSeek-V3/R1），传入：
 
 ```bash
@@ -31,7 +31,7 @@ draft TP 等）请参考 vLLM 的 speculative decoding [文档](https://docs.vll
 
 随着 RL 流程的进行，draft model 和 target model 的采样概率差异逐渐增大，能通过验证的 draft token 逐渐减少，spec 甚至可能造成负收益。
 
-目前，slime 支持了在 RL 流程中在线训练 MTP 层，随着训练的进行同步更新 draft model，稳定提高了采样速度，相关原理可参见 [blog](https://www.notion.so/jiajunli-guapisolo/Power-Up-Speculative-Decoding-In-Reinforcement-Learning-2a92d24a293b802d9c73dbae429e581e)。使用方法如下：
+目前，vime 支持了在 RL 流程中在线训练 MTP 层，随着训练的进行同步更新 draft model，稳定提高了采样速度，相关原理可参见 [blog](https://www.notion.so/jiajunli-guapisolo/Power-Up-Speculative-Decoding-In-Reinforcement-Learning-2a92d24a293b802d9c73dbae429e581e)。使用方法如下：
 
 ```bash
 --mtp-num-layers 1

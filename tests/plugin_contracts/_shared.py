@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-ENV_PREFIX = "SLIME_CONTRACT_"
+ENV_PREFIX = "VIME_CONTRACT_"
 
 
 def install_paths() -> None:
@@ -56,7 +56,7 @@ def run_contract_test_for_file(
     extra_args: Sequence[tuple[str, dict]] = (),
     extra_setup=None,
 ) -> None:
-    """Parse ``--xxx-path`` CLI arguments, store as ``SLIME_CONTRACT_XXX_PATH``
+    """Parse ``--xxx-path`` CLI arguments, store as ``VIME_CONTRACT_XXX_PATH``
     env vars, then call pytest on *file*.
 
     Args:

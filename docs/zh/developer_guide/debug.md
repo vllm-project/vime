@@ -2,7 +2,7 @@
 
 ## 对齐精度
 
-在开发 slime 的过程中，经常会需要检查模型的精度是否正确，可以通过以下方式检查：
+在开发 vime 的过程中，经常会需要检查模型的精度是否正确，可以通过以下方式检查：
 
 1. 训练第一步
    1. rollout 的生成是否是人话，如果不是，有以下 2 种可能：
@@ -25,20 +25,20 @@
 
 ## 训练推理单独 debug
 
-slime 支持将训练部分和推理部分分开进行调试，从而实现：
+vime 支持将训练部分和推理部分分开进行调试，从而实现：
 
 - 在调优/debug 推理部分时，只用少量卡就可以启动任务；
 - 在调优/debug 训练部分时，可以保证模型输入固定，去除 rollout 的随机性。
 
-具体来说，目前 slime 提供了如下的参数来进行分离调试：
+具体来说，目前 vime 提供了如下的参数来进行分离调试：
 
 1. `--debug-rollout-only`
 
-   开启后，slime 将不会加载 megatron，只初始化 vllm ，可以用这个方法来进行推理部分的调试。
+   开启后，vime 将不会加载 megatron，只初始化 vllm ，可以用这个方法来进行推理部分的调试。
 
 1. `--debug-train-only`
 
-   开启后，slime 将不会加载 vllm，只初始化 megatron ，可以用这个方法来进行训练部分的调试。
+   开启后，vime 将不会加载 vllm，只初始化 megatron ，可以用这个方法来进行训练部分的调试。
 
 2. `--save-debug-rollout-data /your/saved/debug/data_{rollout_id}.pt`
 
@@ -50,7 +50,7 @@ slime 支持将训练部分和推理部分分开进行调试，从而实现：
 
 ## INT4 / Compressed-Tensors 量化 Checkpoint 问题
 
-使用 INT4 量化模型（如 `compressed-tensors` 的 `W4A16`）时，checkpoint 的 `config.json` 中有一个 `quantization_config.ignore` 列表，指定哪些参数**不**做量化。在线权重更新（Megatron → vLLM）时，slime 也会读取这个 ignore list 来决定哪些参数需要 INT4 量化。ignore list 不正确会导致静默错误：
+使用 INT4 量化模型（如 `compressed-tensors` 的 `W4A16`）时，checkpoint 的 `config.json` 中有一个 `quantization_config.ignore` 列表，指定哪些参数**不**做量化。在线权重更新（Megatron → vLLM）时，vime 也会读取这个 ignore list 来决定哪些参数需要 INT4 量化。ignore list 不正确会导致静默错误：
 
 1. **MoE 路由权重（`mlp.gate.weight`）变成全零**
 

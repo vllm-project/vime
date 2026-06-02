@@ -39,13 +39,13 @@
 
    可以用 `--num-steps-per-rollout` 来决定每一个 rollout 跑多少步。这相当于是把 `global_batch_size` 设置成 `rollout_batch_size * n_samples_per_prompt // num_steps_per_rollout`。
 
-1. **slime 是否进行了 data packing / varlen 处理？**
+1. **vime 是否进行了 data packing / varlen 处理？**
 
-   data packing 是指在训练过程中，将长短不一的 sample 拼接到一起，从而提升训练的利用率。slime 默认会进行这样的操作。
+   data packing 是指在训练过程中，将长短不一的 sample 拼接到一起，从而提升训练的利用率。vime 默认会进行这样的操作。
 
 1. **vLLM 部分出现 `Max retries exceeded with url: /health (Caused by NewConnectionError)` 的问题怎么办？**
 
-   slime 通过 `GET /health` 探测 vLLM engine 是否就绪;这个错误意味着 readiness 探测从未连通。最常见的原因是单机内多个 vLLM 引擎导致的端口冲突。一个临时的缓解方案是尽可能减少单机内的 vLLM 引擎数量，例如设置 tp=8。
+   vime 通过 `GET /health` 探测 vLLM engine 是否就绪;这个错误意味着 readiness 探测从未连通。最常见的原因是单机内多个 vLLM 引擎导致的端口冲突。一个临时的缓解方案是尽可能减少单机内的 vLLM 引擎数量，例如设置 tp=8。
 
 1. **grad norm 好高，训练训崩了怎么办？**
 

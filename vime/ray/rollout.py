@@ -115,7 +115,7 @@ class ServerGroup:
             env_vars = {name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST} | {
                 key: os.environ.get(key, default_val)
                 for key, default_val in {
-                    "SLIME_ENABLE_PROFILING": "true",
+                    "VIME_ENABLE_PROFILING": "true",
                 }.items()
             }
             rollout_engine = RolloutRayActor.options(

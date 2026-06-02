@@ -28,14 +28,14 @@ The reward model is the default math RM.
 ```bash
 # 1) Set environment variable
 export WANDB_API_KEY=...
-export SLIME_SCRIPT_MODEL_NAME=Qwen3-VL-2B-Instruct
-export SLIME_SCRIPT_NUM_GPUS=4
+export VIME_SCRIPT_MODEL_NAME=Qwen3-VL-2B-Instruct
+export VIME_SCRIPT_NUM_GPUS=4
 
 # 2) Download the dataset
 hf download --repo-type dataset VeraIsHere/geo3k_imgurl_processed --local-dir /root/datasets/geo3k_imgurl_processed
 
 # 3) Run the script:
-cd /root/slime
+cd /root/vime
 python examples/geo3k_vlm_multi_turn/run_geo3k_vlm_multi_turn.py
 ```
 

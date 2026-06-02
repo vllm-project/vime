@@ -39,13 +39,13 @@
 
     You can use `--num-steps-per-rollout` to determine how many steps to run per rollout. This is equivalent to setting the `global_batch_size` to `rollout_batch_size * n_samples_per_prompt // num_steps_per_rollout`.
 
-7.  **Does slime perform data packing / variable-length (varlen) processing?**
+7.  **Does vime perform data packing / variable-length (varlen) processing?**
 
-    Yes. Data packing refers to the process of concatenating samples of varying lengths during training to improve GPU utilization. slime performs this operation by default.
+    Yes. Data packing refers to the process of concatenating samples of varying lengths during training to improve GPU utilization. vime performs this operation by default.
 
 8.  **What should I do if the vLLM component shows a `Max retries exceeded with url: /health (Caused by NewConnectionError)` error?**
 
-    slime probes `GET /health` to wait for each vLLM engine to come up; this error means the readiness probe never connected. The most common cause is port conflicts when multiple vLLM engines share a single machine. A temporary workaround is to minimize the number of vLLM engines per machine, for example, by setting `tp=8`.
+    vime probes `GET /health` to wait for each vLLM engine to come up; this error means the readiness probe never connected. The most common cause is port conflicts when multiple vLLM engines share a single machine. A temporary workaround is to minimize the number of vLLM engines per machine, for example, by setting `tp=8`.
 
 9.  **My gradient norm is very high and the training crashes. What should I do?**
 

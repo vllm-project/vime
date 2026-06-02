@@ -70,7 +70,7 @@ def _is_moe_config(hf_config):
 
 
 def validate_args(args):
-    """Run megatron's own validate_args plus slime-specific megatron validations."""
+    """Run megatron's own validate_args plus vime-specific megatron validations."""
 
     _megatron_validate_args(args)
 

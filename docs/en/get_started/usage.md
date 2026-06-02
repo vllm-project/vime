@@ -1,9 +1,9 @@
 # Usage Guide
 
 
-## Introduction to slime Parameters
+## Introduction to vime Parameters
 
-When using slime, parameters are primarily passed for the following purposes:
+When using vime, parameters are primarily passed for the following purposes:
 
 1.  To allocate a portion of the GPUs in the cluster for training and another portion for inference.
 2.  To load Megatron for the training portion.
@@ -27,11 +27,11 @@ For co-located training and inference, you also need to configure:
 
   - `--colocate`: Enables co-located training and inference. When enabled, it ignores `--rollout-num-gpus` and makes the number of GPUs for training and inference equal.
 
-Additionally, slime supports Prefill and Decode disaggregation (PD Disaggregation). You can set the number of servers used for Prefill by setting the `--prefill-num-servers` argument.
+Additionally, vime supports Prefill and Decode disaggregation (PD Disaggregation). You can set the number of servers used for Prefill by setting the `--prefill-num-servers` argument.
 
 ### Choosing Training Backend
 
-slime supports multiple training backends, which can be selected via the `--train-backend` parameter:
+vime supports multiple training backends, which can be selected via the `--train-backend` parameter:
 
 - `megatron` (default): Uses Megatron-LM as the training backend, supporting efficient training of large-scale models.
 
@@ -45,7 +45,7 @@ Generally, we need to perform three preparatory steps:
   - Configure parallelism and other optimizations.
   - Configure the checkpoint to be loaded.
 
-For details on some of Megatron's customizations and the principles behind how slime incorporates Megatron, please see the "How to Use Megatron" section.
+For details on some of Megatron's customizations and the principles behind how vime incorporates Megatron, please see the "How to Use Megatron" section.
 
 #### Configuring Model Parameters
 
@@ -78,8 +78,8 @@ We provide configurations for common models in [scripts/models](../../../scripts
 
 Note:
 
-  - slime will load all parameters of Megatron found in the `PYTHONPATH`, so you can find parameters and their descriptions within the Megatron in your environment.
-  - slime uses data packing (also known as varlen or thd) for training. There is no need to configure `--seq-length` or `--max-positional-embedding`, as these parameters do not affect the maximum context length of the trained model.
+  - vime will load all parameters of Megatron found in the `PYTHONPATH`, so you can find parameters and their descriptions within the Megatron in your environment.
+  - vime uses data packing (also known as varlen or thd) for training. There is no need to configure `--seq-length` or `--max-positional-embedding`, as these parameters do not affect the maximum context length of the trained model.
 
 #### Setting Up Parallelism and Recomputation
 
@@ -124,7 +124,7 @@ In terms of storage structure, a Megatron checkpoint typically looks like this, 
 
 The `latest_checkpointed_iteration.txt` file records the latest training step. When loading a model, you should not directly pass `/ckpt/iter_xxxxxxx`, but rather pass `/ckpt/` and use `--ckpt-step` to select the corresponding training step (if `--ckpt-step` is not used, the step will be read from `latest_checkpointed_iteration.txt`).
 
-When using slime, there are three parameters for loading and saving checkpoints:
+When using vime, there are three parameters for loading and saving checkpoints:
 
   - `--ref-load`: The Megatron checkpoint for the reference model.
   - `--load`: The Megatron checkpoint for the actor. If `--load` is not set, or if the specified directory does not exist or does not contain `latest_checkpointed_iteration.txt`, the actor will be initialized from the `--ref-load` checkpoint.
@@ -142,16 +142,16 @@ Loading vLLM is very simple. You only need:
 
 Note:
 
-  - Before the first training step, slime will synchronize the parameters from Megatron to vLLM. Therefore, the `--hf-checkpoint` does not need to contain the latest training parameters, and you do not need to change the HF checkpoint when resuming training.
+  - Before the first training step, vime will synchronize the parameters from Megatron to vLLM. Therefore, the `--hf-checkpoint` does not need to contain the latest training parameters, and you do not need to change the HF checkpoint when resuming training.
   - By default, vLLM reads the maximum context length from the `config.json` in the Hugging Face checkpoint. You can use the `--vllm-max-model-len` parameter to override this value to support longer inference.
   - During co-located training and inference, although Megatron and vLLM will offload sequentially, they still need to leave some memory for each other. You need to adjust vLLM's total VRAM usage by reducing `--vllm-gpu-memory-utilization`.
-  - slime supports passing through vllm-router parameters by adding a `router` prefix to the original parameter name. For example, vllm-router's `--balance-abs-threshold` parameter should be set as `--router-balance-abs-threshold`. Since vllm-router uses cache-aware routing by default, it may cause uneven request distribution. You can set `--router-balance-abs-threshold 0` to force balanced distribution, but this may affect prefix cache hit rate in multi-turn conversation scenarios.
+  - vime supports passing through vllm-router parameters by adding a `router` prefix to the original parameter name. For example, vllm-router's `--balance-abs-threshold` parameter should be set as `--router-balance-abs-threshold`. Since vllm-router uses cache-aware routing by default, it may cause uneven request distribution. You can set `--router-balance-abs-threshold 0` to force balanced distribution, but this may affect prefix cache hit rate in multi-turn conversation scenarios.
 
-For details on some of vLLM's customizations and the principles behind how slime incorporates vLLM, please see the "How to Use vLLM" section.
+For details on some of vLLM's customizations and the principles behind how vime incorporates vLLM, please see the "How to Use vLLM" section.
 
 ### Data Format
 
-Currently, slime only supports loading files in `.jsonl` format, where each line of the file is a JSON object. An example of a single data entry (expanded) is as follows:
+Currently, vime only supports loading files in `.jsonl` format, where each line of the file is a JSON object. An example of a single data entry (expanded) is as follows:
 
 ```json
 {
@@ -174,8 +174,8 @@ This corresponds to the following configuration:
   --apply-chat-template
 ```
 
-Please note that the `step_loss_mask` (default=1) here is for SFT phase. If it is set to 0, the turn will not contibute to the final loss; if it is set to 1, slime will use the normal `loss_mask`.
-Additionally, we provide a `metadata_key`, which defaults to `"metadata"`. When read, slime will load the metadata from the data, which can be helpful for custom data generation or creating custom reward models.
+Please note that the `step_loss_mask` (default=1) here is for SFT phase. If it is set to 0, the turn will not contibute to the final loss; if it is set to 1, vime will use the normal `loss_mask`.
+Additionally, we provide a `metadata_key`, which defaults to `"metadata"`. When read, vime will load the metadata from the data, which can be helpful for custom data generation or creating custom reward models.
 
 ### Hyperparameters for RL Training
 
@@ -186,7 +186,7 @@ Additionally, we provide a `metadata_key`, which defaults to `"metadata"`. When 
     - `ppo` ([https://arxiv.org/abs/1707.06347](https://arxiv.org/abs/1707.06347))
 
   Note: On-policy distillation (OPD) is now orthogonal to the advantage estimator. Use `--use-opd` and `--opd-kl-coef` to enable OPD on top of any estimator.
-- `--calculate-per-token-loss`: By default, slime calculates loss on a per-sample basis, i.e., `mean(sum(sample_i) / len(sample_i))`. Enable this flag to calculate loss on a per-token basis, i.e., `sum(sum(sample_i)) / sum(len(sample_i))`.
+- `--calculate-per-token-loss`: By default, vime calculates loss on a per-sample basis, i.e., `mean(sum(sample_i) / len(sample_i))`. Enable this flag to calculate loss on a per-token basis, i.e., `sum(sum(sample_i)) / sum(len(sample_i))`.
 - `--use-tis`: Enable this setting to use TIS (Truncated Importance Sampling) (https://fengyao.notion.site/off-policy-rl).
 
 #### GRPO Algorithm
@@ -275,9 +275,9 @@ megatron:
 
 ## Custom Rollout Function
 
-slime supports customizing data generation (rollout) to various degrees.
+vime supports customizing data generation (rollout) to various degrees.
 
-  - By default, it uses the `generate_rollout` function from [slime/rollout/vllm_rollout.py](https://github.com/vllm-project/vime/blob/main/slime/rollout/vllm_rollout.py) for data generation. This file implements an asynchronous (asyncio) data generation flow based on vLLM and supports features like dynamic sampling and partial rollout.
+  - By default, it uses the `generate_rollout` function from [vime/rollout/vllm_rollout.py](https://github.com/vllm-project/vime/blob/main/vime/rollout/vllm_rollout.py) for data generation. This file implements an asynchronous (asyncio) data generation flow based on vLLM and supports features like dynamic sampling and partial rollout.
 
   - You can completely replace the default `generate_rollout` by using the `--rollout-function-path` parameter. You just need to ensure that the function signature passed via `--rollout-function-path` is as follows:
 
@@ -299,15 +299,15 @@ slime supports customizing data generation (rollout) to various degrees.
 
     Where:
 
-      - `args`: The complete arguments used for the slime run.
+      - `args`: The complete arguments used for the vime run.
 
       - `rollout_id`: The ID of the current data generation round, used to ensure data order when resuming training.
 
-      - `data_source`: A globally unique data source in slime, which can be used to get initial prompts, data IDs, and store partially generated samples for later use.
+      - `data_source`: A globally unique data source in vime, which can be used to get initial prompts, data IDs, and store partially generated samples for later use.
 
       - `evaluation`: A boolean indicating if the rollout is for evaluation. You can configure a separate evaluation function using `--eval-function-path`.
 
-      - The returned `Sample` type is defined in [slime/utils/types.py](https://github.com/THUDM/slime/blob/main/slime/utils/types.py). When implementing, you need to ensure the following fields are correctly set:
+      - The returned `Sample` type is defined in [vime/utils/types.py](https://github.com/vllm-project/vime/blob/main/vime/utils/types.py). When implementing, you need to ensure the following fields are correctly set:
 
           - `tokens`: The tokens for the prompt + response.
           - `response_length`: The total length of the response. For multi-turn tasks, this is the length of the tokens remaining after the first-turn prompt.
@@ -352,36 +352,36 @@ slime supports customizing data generation (rollout) to various degrees.
         return sample
     ```
 
-    For a more complete version, please refer to [slime/rollout/vllm_rollout.py](https://github.com/vllm-project/vime/blob/main/slime/rollout/vllm_rollout.py).
+    For a more complete version, please refer to [vime/rollout/vllm_rollout.py](https://github.com/vllm-project/vime/blob/main/vime/rollout/vllm_rollout.py).
 
   - Sometimes, you may also need to support a custom reward model. This can be configured by setting `--custom-rm-path`.
 
 ## How to Use vLLM
 
-slime runs vLLM in server mode and talks to it over HTTP.
+vime runs vLLM in server mode and talks to it over HTTP.
 
 ### Parameter Configuration
 
-slime incorporates almost all vLLM parameters by forwarding vLLM's `EngineArgs` CLI flags. When setting a vLLM parameter, you need to add the `--vllm-` prefix. For example:
+vime incorporates almost all vLLM parameters by forwarding vLLM's `EngineArgs` CLI flags. When setting a vLLM parameter, you need to add the `--vllm-` prefix. For example:
 
   - In co-located training and inference, you often need to limit GPU memory utilization. Pass it as `--vllm-gpu-memory-utilization`.
-  - During training, if you want vLLM to infer beyond the maximum context length specified in the Hugging Face checkpoint's `config.json`, you need to use `--max-model-len`, which becomes `--vllm-max-model-len` in slime.
+  - During training, if you want vLLM to infer beyond the maximum context length specified in the Hugging Face checkpoint's `config.json`, you need to use `--max-model-len`, which becomes `--vllm-max-model-len` in vime.
   - For multi-node large EP inference, you might need `--enable-expert-parallel`, `--data-parallel-size`, etc. These can be passed as `--vllm-enable-expert-parallel` and `--vllm-data-parallel-size` respectively.
 
-Some parameters related to slime's resource scheduling are configured by slime itself, for example:
+Some parameters related to vime's resource scheduling are configured by vime itself, for example:
 
-  - `--tensor-parallel-size` in slime is set using `--rollout-num-gpus-per-engine`.
-  - `--model` in slime is set using `--hf-checkpoint`.
+  - `--tensor-parallel-size` in vime is set using `--rollout-num-gpus-per-engine`.
+  - `--model` in vime is set using `--hf-checkpoint`.
 
-The way vLLM parameters are integrated into slime can be found in [slime/backends/vllm_utils/arguments.py](https://github.com/vllm-project/vime/blob/main/slime/backends/vllm_utils/arguments.py).
+The way vLLM parameters are integrated into vime can be found in [vime/backends/vllm_utils/arguments.py](https://github.com/vllm-project/vime/blob/main/vime/backends/vllm_utils/arguments.py).
 
 ### How to Use the Router
 
-slime uses [vllm-router](https://github.com/vllm-project/router) to manage the vLLM engines during the training process. You can configure the address of the router using `--vllm-router-ip` and `--vllm-router-port`. If not configured, a router will be started by default within the cluster.
+vime uses [vllm-router](https://github.com/vllm-project/router) to manage the vLLM engines during the training process. You can configure the address of the router using `--vllm-router-ip` and `--vllm-router-port`. If not configured, a router will be started by default within the cluster.
 
 After starting, all vLLM engines will register with the router. When actually generating data, you only need to send HTTP requests to the router, which will perform load balancing and forward the requests to the engines.
 
-When you configure an external router using `--vllm-router-ip` and `--vllm-router-port`, slime will not start an internal router. Instead, it will register all its engines with this external router. You can then use this external router's address to implement more complex data generation workflows. Note that the router supports OpenAI-compatible APIs.
+When you configure an external router using `--vllm-router-ip` and `--vllm-router-port`, vime will not start an internal router. Instead, it will register all its engines with this external router. You can then use this external router's address to implement more complex data generation workflows. Note that the router supports OpenAI-compatible APIs.
 
 ### Advanced Engine Configuration (--vllm-config)
 
@@ -406,7 +406,7 @@ vllm:
         num_gpus_per_engine: 2
 ```
 
-Each model gets its own router. The per-model router info is accessible via `args.vllm_model_routers` (a dict mapping model name to `(ip, port)` tuples). Custom rollout functions can use `get_model_url(args, "ref")` from `slime.rollout.vllm_rollout` to route requests to a specific model.
+Each model gets its own router. The per-model router info is accessible via `args.vllm_model_routers` (a dict mapping model name to `(ip, port)` tuples). Custom rollout functions can use `get_model_url(args, "ref")` from `vime.rollout.vllm_rollout` to route requests to a specific model.
 
 **Server group features:**
 - `worker_type`: `regular`, `prefill`, `decode`, or `placeholder` (reserves GPU slots without creating engines)
@@ -415,11 +415,11 @@ Each model gets its own router. The per-model router info is accessible via `arg
 
 ## How to Use Megatron
 
-slime supports different and lightly modified versions of Megatron by reusing common functions from the `megatron.training` directory, such as `parse_args`, `save_checkpoint`, and `load_checkpoint`. Therefore, when using it, you must ensure that Megatron is accessible in the `PYTHONPATH`, for example, by adding `export PYTHONPATH=/root/Megatron-LM` at runtime.
+vime supports different and lightly modified versions of Megatron by reusing common functions from the `megatron.training` directory, such as `parse_args`, `save_checkpoint`, and `load_checkpoint`. Therefore, when using it, you must ensure that Megatron is accessible in the `PYTHONPATH`, for example, by adding `export PYTHONPATH=/root/Megatron-LM` at runtime.
 
 ### Parameter Configuration
 
-slime directly imports all parameters of the Megatron in the current environment by using `from megatron.training.arguments import parse_args`. If the version of Megatron you are using has parameters defined outside of `parse_args`, you can configure them by passing them in, similar to how it's done in [train.py](https://github.com/THUDM/slime/blob/main/train.py), for example:
+vime directly imports all parameters of the Megatron in the current environment by using `from megatron.training.arguments import parse_args`. If the version of Megatron you are using has parameters defined outside of `parse_args`, you can configure them by passing them in, similar to how it's done in [train.py](https://github.com/vllm-project/vime/blob/main/train.py), for example:
 
 ```python
 if __name__ == "__main__":

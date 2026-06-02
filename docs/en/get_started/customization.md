@@ -1,6 +1,6 @@
 # Customization Guide
 
-slime provides extensive customization capabilities through function path arguments. These allow you to inject custom logic at various stages of the training and rollout pipeline without modifying the core codebase.
+vime provides extensive customization capabilities through function path arguments. These allow you to inject custom logic at various stages of the training and rollout pipeline without modifying the core codebase.
 
 ## Overview of Customization Interfaces
 
@@ -33,7 +33,7 @@ Below is a summary of all available customization interfaces and their purposes.
 
 ### 1. Rollout Function (`--rollout-function-path`)
 
-**Default**: `slime.rollout.vllm_rollout.generate_rollout`
+**Default**: `vime.rollout.vllm_rollout.generate_rollout`
 
 **Purpose**: Override the entire rollout generation logic.
 
@@ -127,7 +127,7 @@ class DynamicFilterOutput:
 - Implementing curriculum learning strategies
 - Quality-based sample selection
 
-**Example**: `slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std`
+**Example**: `vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std`
 
 ---
 
@@ -329,11 +329,11 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics) -> bool
 
 ### 15. Data Source (`--data-source-path`)
 
-**Default**: `slime.rollout.data_source.RolloutDataSourceWithBuffer`
+**Default**: `vime.rollout.data_source.RolloutDataSourceWithBuffer`
 
 **Purpose**: Override the data source for rollout prompts.
 
-**Base Class**: `slime.rollout.data_source.DataSource`
+**Base Class**: `vime.rollout.data_source.DataSource`
 
 **Required Methods**:
 ```python
@@ -406,11 +406,11 @@ Stabilize MoE RL training by recording and replaying expert routing decisions to
 | Argument | Description |
 | --- | --- |
 | `--use-routing-replay` | Forward-backward routing consistency in training. ([arXiv:2507.18071](https://arxiv.org/abs/2507.18071)) |
-| `--use-rollout-routing-replay` | R3: Replay routing from rollout during training. Supported by slime's default `vllm_rollout` path. ([arXiv:2510.11370](https://arxiv.org/abs/2510.11370)) |
+| `--use-rollout-routing-replay` | R3: Replay routing from rollout during training. Supported by vime's default `vllm_rollout` path. ([arXiv:2510.11370](https://arxiv.org/abs/2510.11370)) |
 
 ## Testing Custom Function Paths
 
-slime also provides CPU-only contract tests for customization interfaces. These tests resolve components through import-path strings, so they can validate both built-in hooks and user-defined implementations passed through the same CLI arguments used by training.
+vime also provides CPU-only contract tests for customization interfaces. These tests resolve components through import-path strings, so they can validate both built-in hooks and user-defined implementations passed through the same CLI arguments used by training.
 
 The tests live under `tests/plugin_contracts/` and are grouped by hook shape:
 
@@ -437,7 +437,7 @@ Each test file can also be executed directly with `python tests/plugin_contracts
 
 A dedicated `run-ci-plugin-contracts` CI label is also available. Adding it to a PR triggers all four contract test files in parallel (no GPU required).
 
-For user-defined implementations, you can either export environment variables such as `SLIME_CONTRACT_ROLLOUT_FUNCTION_PATH` and `SLIME_CONTRACT_CUSTOM_RM_PATH`, or pass overrides directly when running a test file, for example:
+For user-defined implementations, you can either export environment variables such as `VIME_CONTRACT_ROLLOUT_FUNCTION_PATH` and `VIME_CONTRACT_CUSTOM_RM_PATH`, or pass overrides directly when running a test file, for example:
 
 ```bash
 python tests/plugin_contracts/test_plugin_rollout_contracts.py \

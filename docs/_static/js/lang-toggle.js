@@ -1,6 +1,6 @@
 // Inject a language toggle button into the topbar (sphinx-book-theme compatible)
 (function(){
-  const STORAGE_KEY = 'slime-doc-lang';
+  const STORAGE_KEY = 'vime-doc-lang';
   // Default language EN has no URL prefix; Chinese uses '/zh/' inserted after optional repo root.
   function detectCurrent(){
     const { zhIndex } = analyzePath();
@@ -11,15 +11,15 @@
    * Analyze current pathname to figure out repo root + language segment pattern.
    * Supports patterns:
    *  /en/…                (language as first segment)
-   *  /slime/en/…          (GitHub Pages project site repo root, language second)
-   *  /slime/ (no lang yet) -> insert /slime/zh/
+   *  /vime/en/…          (GitHub Pages project site repo root, language second)
+   *  /vime/ (no lang yet) -> insert /vime/zh/
    *  / (no lang) -> insert /zh/
    */
   function analyzePath(){
     const rawParts = window.location.pathname.split('/').filter(Boolean);
     const parts = rawParts.slice();
     let repoRoot = null;
-    if(parts.length > 0 && (window.location.host.endsWith('github.io') || parts[0] === 'slime')){
+    if(parts.length > 0 && (window.location.host.endsWith('github.io') || parts[0] === 'vime')){
       repoRoot = parts[0];
     }
     let zhIndex = -1;

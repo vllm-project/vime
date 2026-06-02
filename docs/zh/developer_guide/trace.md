@@ -1,6 +1,6 @@
 # Trace 可视化
 
-slime 可以为每条 rollout sample 挂上轻量级执行 trace。它会记录生成、奖励模型等 span 事件，并且可以在保存下来的 rollout debug dump 中离线查看。
+vime 可以为每条 rollout sample 挂上轻量级执行 trace。它会记录生成、奖励模型等 span 事件，并且可以在保存下来的 rollout debug dump 中离线查看。
 
 ![trace 时间线查看器](../../_static/image/trace.png)
 
@@ -41,7 +41,7 @@ python tools/trace_timeline_viewer.py /path/to/debug/rollout_0.pt
 
 ## 给自定义代码打点
 
-在自定义 rollout 或 reward 逻辑中，可以直接复用 `slime.utils.trace_utils` 里的工具：
+在自定义 rollout 或 reward 逻辑中，可以直接复用 `vime.utils.trace_utils` 里的工具：
 
 - `trace_span(target, name, attrs=...)`：记录一段持续时间。
 - `trace_event(target, name, attrs=...)`：记录一个瞬时事件。
@@ -54,10 +54,10 @@ python tools/trace_timeline_viewer.py /path/to/debug/rollout_0.pt
 
 如果整个函数调用都应该对应一个 span，就用 `trace_function(...)`。它本质上会先解析 trace target，然后在函数调用外层自动套一层 `trace_span(...)`，因此同步函数和异步函数都能直接用。
 
-slime 主 rollout 流程里就是这样用的。例如 `generate_and_rm(...)` 按 sample 打点，而 `generate_and_rm_group(...)` 按 group 打点：
+vime 主 rollout 流程里就是这样用的。例如 `generate_and_rm(...)` 按 sample 打点，而 `generate_and_rm_group(...)` 按 group 打点：
 
 ```python
-from slime.utils.trace_utils import trace_function
+from vime.utils.trace_utils import trace_function
 
 
 @trace_function("generate_and_rm", target="sample")
@@ -104,7 +104,7 @@ async def custom_rollout_batch(samples, **kwargs):
 如果想在某个 HTTP 调用周围记录每轮的 attrs，可以直接套一层 `trace_span`：
 
 ```python
-from slime.utils.trace_utils import trace_span
+from vime.utils.trace_utils import trace_span
 
 with trace_span(sample, "vllm_generate", attrs={"max_tokens": params["max_new_tokens"]}):
     output = await post(url, payload)

@@ -1,6 +1,6 @@
 # Reproducibility
 
-Reproducibility is a bedrock of scientific progress. By combining vLLM's [batch-invariant deterministic inference](https://vllm.ai/blog/2025-11-10-bitwise-consistent-train-inference) with Megatron-LM's deterministic mode, slime supports bitwise experiment reproduction.
+Reproducibility is a bedrock of scientific progress. By combining vLLM's [batch-invariant deterministic inference](https://vllm.ai/blog/2025-11-10-bitwise-consistent-train-inference) with Megatron-LM's deterministic mode, vime supports bitwise experiment reproduction.
 
 To enable deterministic training, you need to first uninstall the flash attention 3 in the docker with `pip uninstall flash_attn_3 -y` and set:
 ```bash
@@ -33,7 +33,7 @@ hf download --repo-type dataset zhuzilin/gsm8k --local-dir /root/gsm8k
 hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir /root/Qwen2.5-0.5B-Instruct
 
 # convert ckpt
-cd slime/
+cd vime/
 source scripts/models/qwen2.5-0.5B.sh
 PYTHONPATH=/root/Megatron-LM/ python \
    tools/convert_hf_to_torch_dist.py \
@@ -48,4 +48,4 @@ And to run training,
 bash script/run-qwen2.5-0.5B-reproducibility.sh
 ```
 
-For screen shots of the wandb, please refer to [pull#370](https://github.com/THUDM/slime/pull/370).
+For screen shots of the wandb, please refer to [pull#370](https://github.com/vllm-project/vime/pull/370).
