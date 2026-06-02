@@ -30,20 +30,23 @@ class Geo3kEnv(BaseInteractionEnv):
 
     The model is expected to emit a <tool_call>{...}</tool_call> payload that includes
     an `answer` argument. We run the math reward checker against the ground truth and
-    return the score as the next observation. The episode ends immediately after each
-    step; responses are provided but no further turns are taken.
+    return feedback for wrong answers. The episode ends when the answer is correct,
+    when max_turns is reached, or when the response has no valid tool call; in the
+    last case we still try to score a boxed/text answer, matching SkyRL's env.
     """
 
     def __init__(self, *, ground_truth: str | None = None, max_turns: int | None = None):
         self.ground_truth = str(ground_truth) if ground_truth is not None else None
         self.tool_calls: list[dict[str, Any]] = []
         self.last_tool_score: float | None = None
+        self.correct = False
         self.turn = 0
         self.max_turns = max_turns
 
     def reset(self):
         self.tool_calls.clear()
         self.last_tool_score = None
+        self.correct = False
         self.turn = 0
         # No initial observation is needed; the question lives in the prompt.
         observation: dict[str, Any] = {}
@@ -186,10 +189,17 @@ class Geo3kEnv(BaseInteractionEnv):
         info: dict[str, Any] = {"tool_call": deepcopy(tool_call)}
 
         if not tool_call:
+            answer_text = self._extract_answer_from_text(response_text)
+            score = self._score_answer(answer_text) if answer_text else 0.0
+            self.last_tool_score = score
+            self.correct = score == 1.0
             info["tool_executed"] = False
+            info["answer"] = answer_text
+            info["score"] = score
             obs = {
-                "obs_str": "No tool call detected; ending the episode.",
+                "obs_str": "No valid tool call detected; ending the episode.",
                 "role": "tool",
+                "tool_score": score,
             }
             return obs, True, info
 
@@ -224,6 +234,7 @@ class Geo3kEnv(BaseInteractionEnv):
 
         score = self._score_answer(parsed_answer)
         self.last_tool_score = score
+        self.correct = score == 1.0
         tool_record = {"name": name, "answer": parsed_answer, "score": score}
         self.tool_calls.append(tool_record)
         info.update(tool_record)
@@ -235,7 +246,7 @@ class Geo3kEnv(BaseInteractionEnv):
             "tool_score": score,
         }
 
-        return obs, is_final_turn, info
+        return obs, self.correct or is_final_turn, info
 
     def _parse_tool_payload(self, raw_json: str) -> dict[str, Any] | None:
         """Parse tool payload strictly as JSON. Malformed payloads are rejected."""

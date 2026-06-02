@@ -2,16 +2,21 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import json
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
 import torch
+from PIL import Image
 
 # When executed as a module: python -m examples.vlm_multi_turn.rollout
 from vime.rollout.vllm_rollout import (
     GenerateState,
+    _apply_vllm_routed_experts,
     _build_inference_sampling_params,
+    _coerce_flat_int_token_ids,
     _inference_generate_tokens_and_logprobs,
     _mm_render_response_to_generate_body,
 )
@@ -19,7 +24,7 @@ from vime.utils.http_utils import post
 from vime.utils.processing_utils import encode_image_for_rollout_engine
 from vime.utils.types import Sample
 
-DEFAULT_ENV_MODULE = "examples.vlm_multi_turn.env_geo3k"
+DEFAULT_ENV_MODULE = "examples.geo3k_vlm_multi_turn.env_geo3k"
 
 
 def _load_env_module(env_path: str | None):
@@ -37,38 +42,41 @@ def _load_env_module(env_path: str | None):
     return importlib.import_module(target)
 
 
-def _build_env(env_module, sample: Sample, args: Any):
-    """Instantiate the interaction environment using the provided module."""
-    build_fn = env_module.build_env
-    if not callable(build_fn):
-        raise ValueError("Environment module must expose a callable `build_env(sample, args)`.")
-    try:
-        return build_fn(sample=sample, args=args)
-    except TypeError:
-        return build_fn(sample, args)
+def _image_to_render_url(image: Any) -> str:
+    """Convert a dataset/processor image object to the image_url payload accepted by vLLM render."""
+    if isinstance(image, str):
+        if image.startswith("data:"):
+            # Some prepared Geo3K rows use data:image/None; vLLM expects a concrete media type.
+            return image.replace("data:image/None;", "data:image/png;", 1)
+        if image.startswith(("http://", "https://")):
+            return image
+        image_path = Path(image).expanduser()
+        if image_path.exists():
+            with Image.open(image_path) as loaded_image:
+                return encode_image_for_rollout_engine(loaded_image)
+        raise ValueError(f"Unsupported image string for vLLM render: {image!r}")
+    return encode_image_for_rollout_engine(image)
 
 
-def _content_to_render_format(content: list[dict]) -> list[dict]:
-    """Convert env-style message content (image objects) to render-route format (image_url data URLs)."""
-    out: list[dict] = []
-    for part in content:
-        ptype = part.get("type")
-        if ptype == "image" and part.get("image") is not None:
-            data_url = encode_image_for_rollout_engine(part["image"])
-            out.append({"type": "image_url", "image_url": {"url": data_url}})
-        else:
-            out.append(part)
-    return out
+def _build_initial_messages(sample: Sample) -> list[dict]:
+    """Build the initial conversation from the dataset prompt.
 
+    The preferred path mirrors SkyRL: keep the untemplated conversation as the source of truth
+    and let vLLM render/chat-template it on every turn. If an old pre-rendered string prompt is
+    supplied, fall back to pairing it with sample.multimodal_inputs while removing literal
+    <image> placeholders to avoid double image tokens.
+    """
+    if isinstance(sample.prompt, list):
+        return [dict(message) for message in sample.prompt]
 
-def _build_initial_user_message(sample: Sample) -> dict:
-    """Build the initial user message from sample.prompt + sample.multimodal_inputs.images."""
     content: list[dict] = []
     images = (sample.multimodal_inputs or {}).get("images") or []
     for image in images:
         content.append({"type": "image", "image": image})
-    content.append({"type": "text", "text": sample.prompt})
-    return {"role": "user", "content": content}
+    # Backward-compatible fallback for old runs that pass a raw text prompt containing <image>.
+    text_prompt = str(sample.prompt).replace("<image>", "").lstrip()
+    content.append({"type": "text", "text": text_prompt})
+    return [{"role": "user", "content": content}]
 
 
 def _messages_for_render(messages: list[dict]) -> list[dict]:
@@ -76,63 +84,54 @@ def _messages_for_render(messages: list[dict]) -> list[dict]:
     out: list[dict] = []
     for msg in messages:
         content = msg.get("content")
-        if isinstance(content, list):
-            out.append({"role": msg["role"], "content": _content_to_render_format(content)})
-        else:
+        if not isinstance(content, list):
             out.append(msg)
+            continue
+
+        rendered_content: list[dict] = []
+        for part in content:
+            if part.get("type") == "image" and part.get("image") is not None:
+                rendered_content.append(
+                    {"type": "image_url", "image_url": {"url": _image_to_render_url(part["image"])}}
+                )
+            else:
+                rendered_content.append(part)
+        out.append({"role": msg["role"], "content": rendered_content})
     return out
 
 
-def _processor_features_from_message(processor, tokenizer, message: dict) -> dict | None:
-    """Run the HF processor on a single user message containing images, returning train-side multimodal inputs."""
-    if processor is None:
+def _multimodal_train_inputs_from_features(features: Any) -> dict | None:
+    """Decode the latest vLLM render features into train-side multimodal tensors."""
+    if not features:
         return None
-    content = message.get("content")
-    if not isinstance(content, list):
+    if isinstance(features, str):
+        try:
+            features = json.loads(features)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(features, dict):
+        return None
+    kwargs_data = features.get("kwargs_data")
+    if not isinstance(kwargs_data, dict):
+        return None
+    if "image" not in kwargs_data:
         return None
 
-    from qwen_vl_utils import process_vision_info
+    from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item as vllm_decode
 
-    images, videos = process_vision_info([message])
-    if not images and not videos:
-        return None
-    # We only need processor-side features here; tokens are produced by the render route.
-    formatted_prompt = tokenizer.apply_chat_template([message], tokenize=False, add_generation_prompt=False)
-    processor_output = processor(text=formatted_prompt, images=images, videos=videos)
-    return {k: v for k, v in processor_output.items() if k not in ("input_ids", "attention_mask")} or None
-
-
-def _merge_multimodal_train_inputs(chunks: list[dict | None]) -> dict | None:
-    """Concatenate per-turn processor outputs along dim 0 for torch tensor fields."""
-    if not chunks:
-        return None
-    values_by_key: dict[str, list] = {}
-    for chunk in chunks:
-        if not chunk:
-            continue
-        for key, val in chunk.items():
-            if val is None:
+    parts_by_key: dict[str, list[torch.Tensor]] = {}
+    for encoded in kwargs_data["image"]:
+        item = vllm_decode(encoded)
+        for key, value in item.get_data().items():
+            if not isinstance(value, torch.Tensor):
                 continue
-            values_by_key.setdefault(key, []).append(val)
-    merged: dict = {}
-    for key, values in values_by_key.items():
-        if all(isinstance(v, torch.Tensor) for v in values):
-            merged[key] = torch.cat(values, dim=0)
-    return merged
+            if key == "image_grid_thw" and value.dim() == 1:
+                value = value.reshape(1, -1)
+            parts_by_key.setdefault(key, []).append(value)
 
-
-async def _render_and_generate(
-    args,
-    base_url: str,
-    messages: list[dict],
-    sampling_params: dict,
-) -> dict:
-    """Render messages to engine-prompt body, then call /inference/v1/generate."""
-    render_payload = {"model": args.hf_checkpoint, "messages": _messages_for_render(messages)}
-    render_data = await post(f"{base_url}/v1/chat/completions/render", render_payload)
-    body = _mm_render_response_to_generate_body(render_data, args.hf_checkpoint)
-    body["sampling_params"] = sampling_params
-    return await post(f"{base_url}/inference/v1/generate", body)
+    return {
+        key: torch.cat(values, dim=0) if len(values) > 1 else values[0] for key, values in parts_by_key.items()
+    } or None
 
 
 async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
@@ -146,38 +145,95 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
 
     env_module = _load_env_module(args.rollout_interaction_env_path)
     sample.metadata = sample.metadata or {}
-    env = _build_env(env_module, sample, args)
+    headers = None
+    if getattr(args, "router_policy", None) == "consistent_hash":
+        sample.session_id = sample.session_id or str(uuid.uuid4())
+        headers = {"x-session-id": sample.session_id}
 
-    messages: list[dict] = [_build_initial_user_message(sample)]
+    build_env = env_module.build_env
+    if not callable(build_env):
+        raise ValueError("Environment module must expose a callable `build_env(sample, args)`.")
+    try:
+        env = build_env(sample=sample, args=args)
+    except TypeError:
+        env = build_env(sample, args)
+
+    messages = _build_initial_messages(sample)
     response_tokens: list[int] = []
     sample.loss_mask = sample.loss_mask or []
     sample.rollout_log_probs = sample.rollout_log_probs or []
     sample.tokens = list(sample.tokens) if sample.tokens else []
-    multimodal_train_inputs_buffer: list[dict | None] = []
-
-    initial_train_feats = _processor_features_from_message(state.processor, state.tokenizer, messages[0])
-    if initial_train_feats:
-        multimodal_train_inputs_buffer.append(initial_train_feats)
 
     sampling_params = sampling_params.copy()
     inference_sampling_params = _build_inference_sampling_params(sampling_params)
 
-    budget = None
-    if args.rollout_max_context_len is not None:
-        budget = args.rollout_max_context_len - len(sample.tokens)
-    elif sampling_params.get("max_new_tokens") is not None:
-        budget = sampling_params["max_new_tokens"] - len(sample.tokens)
+    max_response_budget = sampling_params.get("max_new_tokens")
+
+    def remaining_budget() -> int | None:
+        return None if max_response_budget is None else max_response_budget - sample.response_length
+
+    async def render() -> dict:
+        payload = {"model": args.hf_checkpoint, "messages": _messages_for_render(messages)}
+        render_data = await post(f"{base_url}/v1/chat/completions/render", payload, headers=headers)
+        return _mm_render_response_to_generate_body(render_data, args.hf_checkpoint)
+
+    def append_response_window(
+        token_ids: list[int],
+        loss_mask: list[int],
+        log_probs: list[float] | None = None,
+    ) -> None:
+        if not token_ids:
+            return
+        if len(loss_mask) != len(token_ids):
+            raise ValueError(f"loss_mask length {len(loss_mask)} != token_ids length {len(token_ids)}")
+        sample.tokens.extend(token_ids)
+        sample.loss_mask.extend(loss_mask)
+        sample.rollout_log_probs.extend(log_probs if log_probs is not None else [0.0] * len(token_ids))
+        sample.response_length += len(token_ids)
+
+    def sampling_params_for_turn() -> dict | None:
+        params = dict(inference_sampling_params)
+        max_tokens = remaining_budget()
+        if max_tokens is None:
+            return params
+        if max_tokens <= 0:
+            return None
+        params["max_tokens"] = max_tokens
+        return params
 
     try:
         env.reset()
+        latest_features = None
+        pending_obs_offset: int | None = None
+        rendered_body = await render()
+        prompt_ids = _coerce_flat_int_token_ids(rendered_body.get("token_ids"))
+        if not sample.tokens:
+            sample.tokens = list(prompt_ids)
+        if args.rollout_max_context_len is not None:
+            max_response_budget = max(0, args.rollout_max_context_len - len(sample.tokens))
+
         for turn_idx in range(args.max_turns):
-            if budget is not None and budget <= 0:
+            input_ids = _coerce_flat_int_token_ids(rendered_body.get("token_ids"))
+            latest_features = rendered_body.get("features")
+
+            if pending_obs_offset is not None:
+                obs_tokens = input_ids[pending_obs_offset:]
+                remaining = remaining_budget()
+                if remaining is not None and len(obs_tokens) > remaining:
+                    append_response_window(obs_tokens[: max(remaining, 0)], [0] * max(remaining, 0))
+                    sample.status = Sample.Status.TRUNCATED
+                    break
+                append_response_window(obs_tokens, [0] * len(obs_tokens))
+                pending_obs_offset = None
+
+            current_sampling_params = sampling_params_for_turn()
+            if current_sampling_params is None:
                 sample.status = Sample.Status.TRUNCATED
                 break
-            if budget is not None:
-                inference_sampling_params["max_tokens"] = budget
 
-            output = await _render_and_generate(args, base_url, messages, inference_sampling_params)
+            body = dict(rendered_body)
+            body["sampling_params"] = current_sampling_params
+            output = await post(f"{base_url}/inference/v1/generate", body, headers=headers)
             choice = output["choices"][0]
             finish_reason = choice.get("finish_reason") or "stop"
             new_tokens, new_logprobs = _inference_generate_tokens_and_logprobs(choice)
@@ -188,13 +244,32 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
                     break
 
             response_text = state.tokenizer.decode(new_tokens, skip_special_tokens=False) if new_tokens else ""
-            sample.tokens.extend(new_tokens)
+            train_tokens = list(new_tokens)
+            train_logprobs = list(new_logprobs)
+            train_loss_mask = [1] * len(train_tokens)
+            stop = current_sampling_params.get("stop")
+            eos_token_id = getattr(state.tokenizer, "eos_token_id", None)
+            append_stop_eos = (
+                stop
+                and eos_token_id is not None
+                and getattr(args, "append_eos_token_after_stop_str_in_multi_turn", True)
+            )
+            if append_stop_eos:
+                stop_strings = (stop,) if isinstance(stop, str) else tuple(stop)
+                already_has_eos = bool(train_tokens and train_tokens[-1] == eos_token_id)
+                if stop_strings and response_text.endswith(stop_strings) and not already_has_eos:
+                    if getattr(args, "use_rollout_routing_replay", False):
+                        raise RuntimeError(
+                            "Routing replay is not supported when appending an artificial EOS after a stop string, "
+                            "because vLLM does not return routed experts for that extra token."
+                        )
+                    train_tokens.append(int(eos_token_id))
+                    train_logprobs.append(0.0)
+                    train_loss_mask.append(0)
+
             response_tokens.extend(new_tokens)
-            sample.loss_mask.extend([1] * len(new_tokens))
-            sample.rollout_log_probs.extend(new_logprobs)
-            sample.response_length = len(response_tokens)
-            if budget is not None:
-                budget -= len(new_tokens)
+            append_response_window(train_tokens, train_loss_mask, train_logprobs)
+            _apply_vllm_routed_experts(args, sample, choice)
 
             messages.append({"role": "assistant", "content": response_text})
 
@@ -210,21 +285,33 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
                 sample.status = Sample.Status.COMPLETED
                 break
 
-            next_user_message = env.format_observation(observation)
-            messages.append(next_user_message)
-
-            obs_train_feats = _processor_features_from_message(state.processor, state.tokenizer, next_user_message)
-            if obs_train_feats:
-                multimodal_train_inputs_buffer.append(obs_train_feats)
-
             if turn_idx + 1 >= args.max_turns:
-                sample.status = Sample.Status.COMPLETED
+                sample.status = Sample.Status.TRUNCATED
                 break
 
-        sample.multimodal_train_inputs = _merge_multimodal_train_inputs(multimodal_train_inputs_buffer)
+            next_user_message = env.format_observation(observation)
+            messages.append(next_user_message)
+            pending_obs_offset = len(input_ids) + len(train_tokens)
+            rendered_body = await render()
+            latest_features = rendered_body.get("features")
+            rendered_ids = _coerce_flat_int_token_ids(rendered_body.get("token_ids"))
+            is_prefix_stable = rendered_ids[:pending_obs_offset] == sample.tokens[:pending_obs_offset]
+            sample.metadata["multiturn_render"] = {
+                "prefix_stable": is_prefix_stable,
+                "prefix_len": pending_obs_offset,
+                "sample_len": len(sample.tokens),
+                "rendered_len": len(rendered_ids),
+            }
+            if getattr(args, "strict_multiturn_render_token_match", False) and not is_prefix_stable:
+                raise RuntimeError(
+                    "Full conversation render is not prefix-stable with the generated token stream: "
+                    f"{sample.metadata['multiturn_render']}"
+                )
+
+        sample.multimodal_train_inputs = _multimodal_train_inputs_from_features(latest_features)
         sample.response = state.tokenizer.decode(response_tokens, skip_special_tokens=False)
-        sample.response_length = len(response_tokens)
-        if sample.status is None:
+        sample.response_length = len(sample.loss_mask)
+        if sample.status == Sample.Status.PENDING:
             sample.status = Sample.Status.COMPLETED
         return sample
     finally:
