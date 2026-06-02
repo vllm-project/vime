@@ -134,6 +134,30 @@ def _multimodal_train_inputs_from_features(features: Any) -> dict | None:
     } or None
 
 
+def _validate_multimodal_train_inputs(sample: Sample, tokenizer: Any, processor: Any, mm_inputs: dict | None) -> None:
+    image_token_id = tokenizer.convert_tokens_to_ids("<|image_pad|>")
+    if image_token_id is None:
+        raise RuntimeError("Tokenizer does not define <|image_pad|>.")
+
+    image_tokens = sample.tokens.count(int(image_token_id))
+    if image_tokens == 0:
+        return
+
+    grid = None if not mm_inputs else mm_inputs.get("image_grid_thw")
+    if grid is None:
+        raise RuntimeError(f"Found {image_tokens} image tokens, but multimodal render features are missing.")
+
+    grid = grid.reshape(-1, 3)
+    image_processor = getattr(processor, "image_processor", processor)
+    merge_size = int(getattr(image_processor, "merge_size", 1) or 1)
+    expected = int((grid.prod(dim=1) // (merge_size * merge_size)).sum().item())
+    if image_tokens != expected:
+        raise RuntimeError(
+            "Image token count does not match multimodal render features: "
+            f"image_tokens={image_tokens}, expected_image_tokens={expected}, image_grid_thw={grid.tolist()}"
+        )
+
+
 async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
     """Custom multi-turn rollout that interacts with a pluggable environment via the vLLM render route."""
     assert not args.partial_rollout, "Partial rollout is not supported for interaction rollouts."
@@ -308,7 +332,9 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
                     f"{sample.metadata['multiturn_render']}"
                 )
 
-        sample.multimodal_train_inputs = _multimodal_train_inputs_from_features(latest_features)
+        multimodal_train_inputs = _multimodal_train_inputs_from_features(latest_features)
+        _validate_multimodal_train_inputs(sample, state.tokenizer, state.processor, multimodal_train_inputs)
+        sample.multimodal_train_inputs = multimodal_train_inputs
         sample.response = state.tokenizer.decode(response_tokens, skip_special_tokens=False)
         sample.response_length = len(sample.loss_mask)
         if sample.status == Sample.Status.PENDING:
