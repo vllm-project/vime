@@ -10,7 +10,11 @@ import torch
 # When missing, the UE8M0 requantization path falls back to None so callers can
 # skip it gracefully (matches the module docstring contract).
 try:
-    import deep_gemm.utils.layout as _deep_gemm_layout
+    # vLLM vendors deep_gemm at vllm.third_party.deep_gemm (compiled .so + utils/layout
+    # present on x86 and arm64). A bare top-level `import deep_gemm` only resolves against
+    # the SGLang sgl-deep-gemm wheel, which vLLM images do NOT ship -> import silently fails
+    # and the UE8M0 requant path goes dead. Import the vendored namespace directly.
+    import vllm.third_party.deep_gemm.utils.layout as _deep_gemm_layout
     from vllm.utils.deep_gemm import get_tma_aligned_size as _get_tma_aligned_size
 
     _HAS_DEEP_GEMM = True
