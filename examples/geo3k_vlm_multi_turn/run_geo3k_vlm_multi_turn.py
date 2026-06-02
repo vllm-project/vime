@@ -97,11 +97,13 @@ def execute():
     cudagraph_sizes = " ".join(map(str, [1, 2, 4, 8] + list(range(16, 257, 8))))
     vllm_args = (
         "--rollout-num-gpus-per-engine 1 "
-        "--vllm-router-policy round_robin "
+        "--vllm-router-policy consistent_hash "
         "--vllm-max-model-len 32768 "
         "--vllm-gpu-memory-utilization 0.9 "
         "--vllm-generation-config vllm "
         f"--vllm-cudagraph-capture-sizes {cudagraph_sizes} "
+        # vLLM 0.22.0 needs eager mode for Qwen3-VL logprob parity. This can be
+        # disabled after vLLM includes https://github.com/vllm-project/vllm/pull/43617.
         "--vllm-enforce-eager "
         "--vllm-logprobs-mode processed_logprobs "
     )
