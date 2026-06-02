@@ -59,6 +59,11 @@
         {'test_file': 'plugin_contracts/test_plugin_runtime_hook_contracts.py', 'num_gpus': 0},
         {'test_file': 'plugin_contracts/test_plugin_path_loading_contracts.py', 'num_gpus': 0},
         {'test_file': 'plugin_contracts/test_plugin_generate_contracts.py', 'num_gpus': 0},
+        {'test_file': 'test_rm_deepscaler.py', 'num_gpus': 0},
+        {'test_file': 'test_rm_f1.py', 'num_gpus': 0},
+        {'test_file': 'test_rm_gpqa.py', 'num_gpus': 0},
+        {'test_file': 'test_rm_math.py', 'num_gpus': 0},
+        {'test_file': 'test_rm_math_dapo.py', 'num_gpus': 0},
       ],
     },
 
@@ -85,9 +90,13 @@
 name: PR Test
 
 on:
-  # Do not run CI on push to reduce CI time
-  # push:
-  #   branches: [main]
+  # Push to main triggers ONLY the cpu jobs (cheap GitHub-hosted runner) — see
+  # the per-job `if:` below, which adds `push` only for cpu configs. GPU jobs
+  # stay PR/label-gated so push events never burn the self-hosted fleet. This
+  # catches PR-pair regressions where two PRs pass individually but main breaks
+  # after both land.
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
     types: [synchronize, labeled]
@@ -128,7 +137,11 @@ jobs:
   << job_name >>:
     needs: pre-commit
 <% if config.get('always') %>
+<% if config.get('cpu') %>
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+<% else %>
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+<% endif %>
 <% else %>
     if: (github.event_name == 'workflow_dispatch') || (github.event.pull_request && contains(github.event.pull_request.labels.*.name, '<< config.label >>'))
 <% endif %>

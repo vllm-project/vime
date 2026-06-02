@@ -5,9 +5,13 @@
 name: PR Test
 
 on:
-  # Do not run CI on push to reduce CI time
-  # push:
-  #   branches: [main]
+  # Push to main triggers ONLY the cpu jobs (cheap GitHub-hosted runner) — see
+  # the per-job `if:` below, which adds `push` only for cpu configs. GPU jobs
+  # stay PR/label-gated so push events never burn the self-hosted fleet. This
+  # catches PR-pair regressions where two PRs pass individually but main breaks
+  # after both land.
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
     types: [synchronize, labeled]
@@ -468,7 +472,9 @@ jobs:
   e2e-test-plugin-contracts:
     needs: pre-commit
 
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+
 
 
     runs-on: ubuntu-latest
@@ -476,7 +482,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        info: [{"num_gpus": 0, "test_file": "test_megatron_argument_validation.py"}, {"num_gpus": 0, "test_file": "plugin_contracts/test_plugin_rollout_contracts.py"}, {"num_gpus": 0, "test_file": "plugin_contracts/test_plugin_runtime_hook_contracts.py"}, {"num_gpus": 0, "test_file": "plugin_contracts/test_plugin_path_loading_contracts.py"}, {"num_gpus": 0, "test_file": "plugin_contracts/test_plugin_generate_contracts.py"}]
+        info: [{"num_gpus": 0, "test_file": "test_megatron_argument_validation.py"}, {"num_gpus": 0, "test_file": "plugin_contracts/test_plugin_rollout_contracts.py"}, {"num_gpus": 0, "test_file": "plugin_contracts/test_plugin_runtime_hook_contracts.py"}, {"num_gpus": 0, "test_file": "plugin_contracts/test_plugin_path_loading_contracts.py"}, {"num_gpus": 0, "test_file": "plugin_contracts/test_plugin_generate_contracts.py"}, {"num_gpus": 0, "test_file": "test_rm_deepscaler.py"}, {"num_gpus": 0, "test_file": "test_rm_f1.py"}, {"num_gpus": 0, "test_file": "test_rm_gpqa.py"}, {"num_gpus": 0, "test_file": "test_rm_math.py"}, {"num_gpus": 0, "test_file": "test_rm_math_dapo.py"}]
     defaults:
       run:
         working-directory: ${{ github.workspace }}
