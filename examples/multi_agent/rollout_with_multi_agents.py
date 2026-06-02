@@ -2,8 +2,8 @@ import random
 
 from transformers import AutoTokenizer
 
-from slime.utils.misc import load_function
-from slime.utils.types import Sample
+from vime.utils.misc import load_function
+from vime.utils.types import Sample
 
 MULTI_AGENT_CONFIGS = {
     "custom_multi_agent_function_path": "examples.multi_agent.agent_system.run_agent_system",

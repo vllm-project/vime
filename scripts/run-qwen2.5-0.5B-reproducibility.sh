@@ -83,7 +83,7 @@ WANDB_ARGS=(
    --use-wandb
    --wandb-host https://wandb.ai/
    --wandb-team glm-zero
-   --wandb-project slime-dev
+   --wandb-project vime-dev
    --wandb-group qwen2.5-0.5B-gsm8k-deterministic
 )
 

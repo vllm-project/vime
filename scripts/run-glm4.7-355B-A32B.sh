@@ -47,7 +47,7 @@ ROLLOUT_ARGS=(
    --rollout-temperature 1
 
    --over-sampling-batch-size 256
-   --dynamic-sampling-filter-path slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
+   --dynamic-sampling-filter-path vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
 
    --num-steps-per-rollout 4
    --balance-data
@@ -106,7 +106,7 @@ OPTIMIZER_ARGS=(
 
 WANDB_ARGS=(
    # --use-wandb
-   # --wandb-project slime-dev
+   # --wandb-project vime-dev
    # --wandb-group glm4.7-355B
 )
 

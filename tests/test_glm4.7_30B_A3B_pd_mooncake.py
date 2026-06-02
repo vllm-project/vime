@@ -5,7 +5,7 @@ import tempfile
 
 import yaml
 
-import slime.utils.external_utils.command_utils as U
+import vime.utils.external_utils.command_utils as U
 
 
 MODEL_REPO = "zai-org/GLM-4.7-Flash"
@@ -113,8 +113,8 @@ def execute():
         "--vllm-gpu-memory-utilization 0.45 "
         "--vllm-max-num-seqs 16 "
         "--vllm-max-cudagraph-capture-size 8 "
-        "--vllm-speculative-config '{\"method\":\"mtp\",\"num_speculative_tokens\":3}' "
-        "--vllm-router-request-timeout-secs 1200 "
+        '--vllm-speculative-config \'{"method":"mtp","num_speculative_tokens":3}\' '
+        "--router-request-timeout-secs 1200 "
         f"--vllm-config {vllm_config} "
     )
     misc_args = (

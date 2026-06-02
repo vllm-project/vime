@@ -12,9 +12,9 @@ except Exception:  # pragma: no cover - optional dependency
     orjson = None
 from examples.geo3k_vlm_multi_turn.base_env import BaseInteractionEnv
 
-from slime.rollout.rm_hub import grade_answer_verl
-from slime.rollout.rm_hub.math_utils import extract_answer as extract_boxed_answer
-from slime.utils.types import Sample
+from vime.rollout.rm_hub import grade_answer_verl
+from vime.rollout.rm_hub.math_utils import extract_answer as extract_boxed_answer
+from vime.utils.types import Sample
 
 logger = logging.getLogger(__name__)
 

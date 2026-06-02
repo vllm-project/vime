@@ -1,4 +1,4 @@
-from slime.utils.mask_utils import MultiTurnLossMaskGenerator
+from vime.utils.mask_utils import MultiTurnLossMaskGenerator
 
 
 class FakeQwen35Tokenizer:

@@ -12,11 +12,11 @@ import socket
 from argparse import Namespace
 from dataclasses import dataclass
 
-import slime.utils.external_utils.command_utils as U
-from slime.backends.vllm_utils.vllm_engine import _wait_server_healthy, launch_server_process
-from slime.rollout import vllm_rollout
-from slime.utils import http_utils
-from slime.utils.types import Sample
+import vime.utils.external_utils.command_utils as U
+from vime.backends.vllm_utils.vllm_engine import _wait_server_healthy, launch_server_process
+from vime.rollout import vllm_rollout
+from vime.utils import http_utils
+from vime.utils.types import Sample
 
 
 @dataclass(frozen=True)
@@ -133,7 +133,7 @@ def _execute_case(case: VLLMGenerateCase):
     )
 
     try:
-        _wait_server_healthy(f"http://127.0.0.1:{server_port}", process, timeout_s=case.timeout_s)
+        _wait_server_healthy(f"http://127.0.0.1:{server_port}", process)
 
         rollout_args = Namespace(
             ci_test=False,

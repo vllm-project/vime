@@ -42,12 +42,12 @@ if [ "$USE_EXTERNAL_RAY" = "0" ]; then
    ray stop --force
    pkill -9 ray
 fi
-pkill -9 slime
+pkill -9 vime
 sleep 3
 if [ "$USE_EXTERNAL_RAY" = "0" ]; then
    pkill -9 ray
 fi
-pkill -9 slime
+pkill -9 vime
 pkill -9 redis
 
 set -ex
@@ -79,7 +79,7 @@ CKPT_ARGS=(
 )
 
 SFT_ARGS=(
-   --rollout-function-path slime.rollout.sft_rollout.generate_rollout
+   --rollout-function-path vime.rollout.sft_rollout.generate_rollout
    --prompt-data /root/datasets/${DATASET_LOCAL_NAME}/train_formatted.parquet
    --input-key messages
    --rollout-shuffle
@@ -111,7 +111,7 @@ OPTIMIZER_ARGS=(
 if [ -n "$WANDB_API_KEY" ]; then
     WANDB_ARGS=(
         --use-wandb
-        --wandb-project slime-geo3k-vlm-sft
+        --wandb-project vime-geo3k-vlm-sft
         --wandb-group ${MODEL_NAME_LOWER}-${TRAIN_BACKEND}
         --wandb-key ${WANDB_API_KEY}
         --disable-wandb-random-suffix

@@ -2,7 +2,7 @@ import types
 
 import pytest
 
-from slime.utils.megatron_bridge_utils import patch_auto_bridge_hf_config, patch_hf_config_for_megatron_bridge
+from vime.utils.megatron_bridge_utils import patch_auto_bridge_hf_config, patch_hf_config_for_megatron_bridge
 
 
 @pytest.mark.unit
