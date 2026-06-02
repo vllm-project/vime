@@ -12,6 +12,7 @@ import torch
 try:
     import deep_gemm.utils.layout as _deep_gemm_layout
     from vllm.utils.deep_gemm import get_tma_aligned_size as _get_tma_aligned_size
+
     _HAS_DEEP_GEMM = True
 except ImportError:
     _deep_gemm_layout = None
