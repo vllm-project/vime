@@ -295,7 +295,6 @@ dict: {
     "rollout_routed_experts": list,       # 路由专家（用于 MoE）
     "metadata": list,                     # 训练元数据
     "multimodal_train_inputs": list,      # 多模态张量（用于 VLM）
-    "teacher_log_probs": list,            # 教师 log 概率（用于蒸馏）
 }
 ```
 

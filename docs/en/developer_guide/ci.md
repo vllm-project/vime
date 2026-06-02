@@ -20,7 +20,7 @@ Add a label to your PR to trigger the corresponding test suite:
 | Label | Job | Description |
 |---|---|---|
 | `run-ci-short` | `e2e-test-short` | Lightweight smoke tests with Qwen2.5-0.5B (4 GPUs). Fast feedback loop. |
-| `run-ci-megatron` | `e2e-test-megatron` | Core Megatron training tests covering dense, MoE, PPO, OPD, etc. |
+| `run-ci-megatron` | `e2e-test-megatron` | Core Megatron training tests covering dense, MoE, PPO, MTP, etc. |
 | `run-ci-precision` | `e2e-test-precision` | Numerical precision validation (parallel check). |
 | `run-ci-ckpt` | `e2e-test-ckpt` | Checkpoint save/load correctness (sync and async-save). |
 | `run-ci-image` | `e2e-test-image` | Full test suite run on `inferactinc/public:vime-vllm-cu129-latest` image (for image validation). |
@@ -40,7 +40,7 @@ This is the most useful label for development. When you add a new test file or m
 
 This means you don't need to manually register your new test in the workflow — just make sure your test file has a top-level `NUM_GPUS = <N>` constant and `run-ci-changed` will pick it up.
 
-**Example**: If your PR adds `tests/test_qwen3_8B_opd_vllm.py` with `NUM_GPUS = 8`, adding the `run-ci-changed` label will automatically run that test on 8 GPUs.
+**Example**: If your PR adds `tests/test_mimo_7B_mtp_only_grad.py` with `NUM_GPUS = 8`, adding the `run-ci-changed` label will automatically run that test on 8 GPUs.
 
 ### `run-ci-image` — Full Suite on Test Image
 
@@ -57,7 +57,7 @@ This is the primary label for validating Megatron-backend changes. It covers:
 
 - Dense models: GLM4-9B, Qwen3-4B (PPO)
 - MoE models: Qwen3-30B-A3B (with DeepEP + FP8), Qwen3.6-35B-A3B PD + Mooncake, Moonlight-16B-A3B
-- Specialized: Qwen2.5-0.5B debug rollout-then-train, OPD with vLLM teacher, MTP training and bridge mapping
+- Specialized: Qwen2.5-0.5B debug rollout-then-train, MTP training and bridge mapping
 
 All tests use 8 GPUs. If you are modifying Megatron training logic, loss computation, or checkpoint conversion, this is the label to use.
 

@@ -20,7 +20,7 @@ vime 使用 GitHub Actions 进行 CI。测试通过 **PR label** 触发——给
 | Label | Job | 说明 |
 |---|---|---|
 | `run-ci-short` | `e2e-test-short` | Qwen2.5-0.5B 轻量级冒烟测试（4 GPU），用于快速反馈。 |
-| `run-ci-megatron` | `e2e-test-megatron` | 核心 Megatron 训练测试，覆盖 Dense、MoE、PPO、OPD 等。 |
+| `run-ci-megatron` | `e2e-test-megatron` | 核心 Megatron 训练测试，覆盖 Dense、MoE、PPO、MTP 等。 |
 | `run-ci-precision` | `e2e-test-precision` | 数值精度校验（并行一致性检查）。 |
 | `run-ci-ckpt` | `e2e-test-ckpt` | Checkpoint 保存/加载正确性（同步和异步保存）。 |
 | `run-ci-image` | `e2e-test-image` | 在 `inferactinc/public:vime-vllm-cu129-latest` 镜像上运行**全部**测试（用于镜像验证）。 |
@@ -40,7 +40,7 @@ vime 使用 GitHub Actions 进行 CI。测试通过 **PR label** 触发——给
 
 这意味着你不需要手动在 workflow 中注册新测试——只需确保测试文件顶部有 `NUM_GPUS = <N>` 常量，`run-ci-changed` 就会自动识别并运行。
 
-**示例**：如果你的 PR 新增了 `tests/test_qwen3_8B_opd_vllm.py`（其中 `NUM_GPUS = 8`），添加 `run-ci-changed` label 后会自动在 8 张 GPU 上运行该测试。
+**示例**：如果你的 PR 新增了 `tests/test_mimo_7B_mtp_only_grad.py`（其中 `NUM_GPUS = 8`），添加 `run-ci-changed` label 后会自动在 8 张 GPU 上运行该测试。
 
 ### `run-ci-image` — 在测试镜像上运行全部测试
 
@@ -57,7 +57,7 @@ vime 使用 GitHub Actions 进行 CI。测试通过 **PR label** 触发——给
 
 - Dense 模型：GLM4-9B、Qwen3-4B（PPO）
 - MoE 模型：Qwen3-30B-A3B（DeepEP + FP8）、Qwen3.6-35B-A3B PD + Mooncake、Moonlight-16B-A3B
-- 特殊场景：Qwen2.5-0.5B debug rollout-then-train、OPD（vLLM teacher 模式）、MTP 训练与 bridge 映射
+- 特殊场景：Qwen2.5-0.5B debug rollout-then-train、MTP 训练与 bridge 映射
 
 所有测试使用 8 张 GPU。如果你正在修改 Megatron 训练逻辑、loss 计算或 checkpoint 转换，应该使用这个 label。
 

@@ -295,7 +295,6 @@ dict: {
     "rollout_routed_experts": list,       # Routed experts (for MoE)
     "metadata": list,                     # Train metadata
     "multimodal_train_inputs": list,      # Multimodal tensors (for VLM)
-    "teacher_log_probs": list,            # Teacher log probs (for distillation)
 }
 ```
 
