@@ -1,6 +1,6 @@
 """Ray actor and launch helpers for vLLM OpenAI HTTP rollout.
 
-Per-Ray-actor ``server_args`` dict is built via :func:`compute_server_args`,
+Per-Ray-actor ``server_args`` dict is built via :func:`_compute_server_args`,
 then :func:`build_vllm_cmd_and_env` turns it into ``vllm serve`` CLI + subprocess env.
 :class:`VLLMEngine` manages the runtime HTTP control plane.
 User-facing vLLM knobs remain on ``train.py`` as ``--vllm-*`` (see ``arguments.py``).
@@ -241,62 +241,6 @@ def _apply_vllm_overrides(args, server_args: dict[str, Any], vllm_overrides: dic
         logger.debug("vllm_overrides: unrecognized key %s (rank=%s)", key, rank)
 
 
-def compute_server_args(
-    args,
-    rank,
-    dist_init_addr,
-    host,
-    port,
-    *,
-    worker_type: str = "regular",
-    base_gpu_id: int | None = None,
-    model_path: str | None = None,
-    vllm_overrides: dict | None = None,
-    num_gpus_per_engine: int | None = None,
-) -> dict[str, Any]:
-    """Build per-actor launch config for ``launch_server_process``."""
-    gpus_per_engine = num_gpus_per_engine or args.rollout_num_gpus_per_engine
-    if gpus_per_engine > args.num_gpus_per_node and gpus_per_engine % args.num_gpus_per_node != 0:
-        raise ValueError(
-            "vLLM multi-node rollout requires rollout_num_gpus_per_engine to be divisible by "
-            f"num_gpus_per_node, got rollout_num_gpus_per_engine={gpus_per_engine} "
-            f"num_gpus_per_node={args.num_gpus_per_node}."
-        )
-
-    topology = compute_vllm_engine_topology(args, rank, num_gpus_per_engine=gpus_per_engine)
-    base = base_gpu_id if base_gpu_id is not None else get_base_gpu_id(args, rank)
-    base = _to_local_gpu_id(base)
-
-    master_addr: str | None = None
-    master_port: int | None = None
-    if topology.multi_node:
-        if not dist_init_addr:
-            raise ValueError("dist_init_addr is required when launching a multi-node vLLM engine")
-        master_addr, master_port = parse_dist_init_addr(dist_init_addr)
-
-    server_args = {
-        "args": args,
-        "rank": rank,
-        "worker_type": worker_type,
-        "model_path": model_path or args.hf_checkpoint,
-        "host": _format_v6_uri(host),
-        "port": port,
-        "master_addr": master_addr,
-        "master_port": master_port,
-        "dist_init_addr": dist_init_addr,
-        "nnodes": topology.nnodes,
-        "node_rank": topology.node_rank,
-        "topology": topology,
-        "visible_devices": ",".join(str(base + i) for i in range(topology.local_num_gpus)),
-        "tp_size": topology.tensor_parallel_size,
-        "pp_size": topology.pipeline_parallel_size,
-        "dp_size": _get_vllm_dp_size(args),
-        "seed": getattr(args, "seed", 1234) + rank,
-    }
-    _apply_vllm_overrides(args, server_args, vllm_overrides, rank)
-    return server_args
-
-
 class _RobustJsonEncoder:
     @staticmethod
     def default(obj):
@@ -532,6 +476,24 @@ def _exec_vllm_cmd(cmd: list[str], env: dict[str, str]) -> None:
     os.execvpe(cmd[0], cmd, env)
 
 
+def _normalize_vllm_wake_tags(tags: list[str] | None) -> list[str] | None:
+    if not tags:
+        return tags
+    normalized = [t for t in tags if t in _VLLM_WAKE_TAGS]
+    dropped = set(tags) - set(normalized)
+    if dropped:
+        logger.debug("vLLM wake_up: dropped tags not supported by vLLM: %s", sorted(dropped))
+    return normalized or None
+
+
+def launch_server_process(server_args: dict) -> multiprocessing.Process:
+    """Spawn ``vllm serve`` from a :func:`_compute_server_args` dict."""
+    cmd, env = build_vllm_cmd_and_env(server_args)
+    p = _spawn_ctx.Process(target=_exec_vllm_cmd, args=(cmd, env))
+    p.start()
+    return p
+
+
 def _wait_worker_process_alive(process: multiprocessing.Process, timeout_s: float = 300.0) -> None:
     """Non-head nodes have no HTTP health endpoint; ensure the subprocess stays up."""
     start = time.time()
@@ -564,26 +526,6 @@ def _wait_server_healthy(base_url: str, process: multiprocessing.Process | None)
         if process is not None and not process.is_alive():
             raise RuntimeError(f"vLLM server exited unexpectedly with code {process.exitcode}")
         time.sleep(2)
-
-
-def launch_server_process(server_args: dict) -> multiprocessing.Process:
-    """Spawn ``vllm serve`` from a :func:`compute_server_args` dict."""
-    cmd, env = build_vllm_cmd_and_env(server_args)
-    p = _spawn_ctx.Process(target=_exec_vllm_cmd, args=(cmd, env))
-    p.start()
-    return p
-
-
-def _normalize_vllm_wake_tags(tags: list[str] | None) -> list[str] | None:
-    if not tags:
-        return tags
-    normalized = [t for t in tags if t in _VLLM_WAKE_TAGS]
-    dropped = set(tags) - set(normalized)
-    if dropped:
-        logger.debug("vLLM wake_up: dropped tags not supported by vLLM: %s", sorted(dropped))
-    return normalized or None
-
-
 class VLLMEngine(RayActor):
     """Ray actor for vLLM OpenAI HTTP rollout (connect or spawn local ``vllm serve``)."""
 
@@ -593,7 +535,6 @@ class VLLMEngine(RayActor):
         rank: int,
         worker_type: str = "regular",
         base_gpu_id: int | None = None,
-        model_path: str | None = None,
         vllm_overrides: dict | None = None,
         num_gpus_per_engine: int | None = None,
     ):
@@ -601,7 +542,6 @@ class VLLMEngine(RayActor):
         self.rank = rank
         self.worker_type = worker_type
         self.base_gpu_id = base_gpu_id
-        self.model_path = model_path or args.hf_checkpoint
         self.vllm_overrides = vllm_overrides or {}
         self.num_gpus_per_engine = num_gpus_per_engine
         self.process: multiprocessing.Process | None = None
@@ -633,7 +573,7 @@ class VLLMEngine(RayActor):
         gpus_per_engine = self.num_gpus_per_engine or self.args.rollout_num_gpus_per_engine
         host = host or get_host_info()[1]
 
-        self._server_args = compute_server_args(
+        self._server_args = _compute_server_args(
             self.args,
             self.rank,
             dist_init_addr,
@@ -641,7 +581,6 @@ class VLLMEngine(RayActor):
             port,
             worker_type=self.worker_type,
             base_gpu_id=self.base_gpu_id,
-            model_path=self.model_path,
             vllm_overrides=self.vllm_overrides,
             num_gpus_per_engine=gpus_per_engine,
         )
@@ -1132,3 +1071,58 @@ class VLLMEngine(RayActor):
             return
         logger.info("Simulating crash on vLLM engine %s:%s...", self.server_host, self.server_port)
         self.shutdown()
+
+
+def _compute_server_args(
+    args,
+    rank,
+    dist_init_addr,
+    host,
+    port,
+    *,
+    worker_type: str = "regular",
+    base_gpu_id: int | None = None,
+    vllm_overrides: dict | None = None,
+    num_gpus_per_engine: int | None = None,
+) -> dict[str, Any]:
+    """Build per-actor launch config for ``launch_server_process``."""
+    gpus_per_engine = num_gpus_per_engine or args.rollout_num_gpus_per_engine
+    if gpus_per_engine > args.num_gpus_per_node and gpus_per_engine % args.num_gpus_per_node != 0:
+        raise ValueError(
+            "vLLM multi-node rollout requires rollout_num_gpus_per_engine to be divisible by "
+            f"num_gpus_per_node, got rollout_num_gpus_per_engine={gpus_per_engine} "
+            f"num_gpus_per_node={args.num_gpus_per_node}."
+        )
+
+    topology = compute_vllm_engine_topology(args, rank, num_gpus_per_engine=gpus_per_engine)
+    base = base_gpu_id if base_gpu_id is not None else get_base_gpu_id(args, rank)
+    base = _to_local_gpu_id(base)
+
+    master_addr: str | None = None
+    master_port: int | None = None
+    if topology.multi_node:
+        if not dist_init_addr:
+            raise ValueError("dist_init_addr is required when launching a multi-node vLLM engine")
+        master_addr, master_port = parse_dist_init_addr(dist_init_addr)
+
+    server_args = {
+        "args": args,
+        "rank": rank,
+        "worker_type": worker_type,
+        "model_path": args.hf_checkpoint,
+        "host": _format_v6_uri(host),
+        "port": port,
+        "master_addr": master_addr,
+        "master_port": master_port,
+        "dist_init_addr": dist_init_addr,
+        "nnodes": topology.nnodes,
+        "node_rank": topology.node_rank,
+        "topology": topology,
+        "visible_devices": ",".join(str(base + i) for i in range(topology.local_num_gpus)),
+        "tp_size": topology.tensor_parallel_size,
+        "pp_size": topology.pipeline_parallel_size,
+        "dp_size": _get_vllm_dp_size(args),
+        "seed": getattr(args, "seed", 1234) + rank,
+    }
+    _apply_vllm_overrides(args, server_args, vllm_overrides, rank)
+    return server_args

@@ -6,7 +6,6 @@ import socket
 import time
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
 
 import ray
 import torch
@@ -339,6 +338,7 @@ class UpdateWeightFromDistributed:
         """
         Lock → broadcast → clear → unlock → pbar++. Lock prevents NCCL deadlock.
         """
+        # lock the rollout engines to prevent dead lock on broadcast.
         while not ray.get(self.rollout_engine_lock.acquire.remote()):
             time.sleep(0.1)
 
@@ -363,7 +363,7 @@ def connect_rollout_engines_from_distributed(
     group_name: str,
     rollout_engines: Sequence[ActorHandle],
     engine_gpu_counts: Sequence[int] | None = None,
-) -> Any:
+) -> dist.ProcessGroup:
     """
     Create NCCL group: training rank 0 + all engine GPUs. Blocks until joined.
 
@@ -426,19 +426,20 @@ def connect_rollout_engines_from_distributed(
 def disconnect_rollout_engines_from_distributed(
     args: Namespace,
     group_name: str,
-    model_update_groups: Any,
+    model_update_groups: dist.ProcessGroup,
     rollout_engines: Sequence[ActorHandle],
 ) -> None:
     """
     Destroy NCCL on training and engines.
     """
     refs = [engine.destroy_weights_update_group.remote(group_name) for engine in rollout_engines]
+    dist.destroy_process_group(model_update_groups)
     ray.get(refs)
 
 
 def update_weights_from_distributed(
     group_name: str,
-    group: Any,
+    group: dist.ProcessGroup,
     weight_version: int,
     rollout_engines: Sequence[ActorHandle],
     converted_named_tensors: Sequence[tuple[str, torch.Tensor]],
@@ -451,16 +452,17 @@ def update_weights_from_distributed(
     The *group* is a vLLM ``PyNcclCommunicator`` from ``trainer_init``
     in the Megatron trainer process.
     """
-    kwargs: dict[str, Any] = {
-        "names": [name for name, _ in converted_named_tensors],
-        "dtypes": [param.dtype for _, param in converted_named_tensors],
-        "shapes": [param.shape for _, param in converted_named_tensors],
-        "group_name": group_name,
-        "weight_version": str(weight_version),
-        "packed": packed,
-    }
-
-    refs = [engine.update_weights_from_distributed.remote(**kwargs) for engine in rollout_engines]
+    refs = [
+        engine.update_weights_from_distributed.remote(
+            names=[name for name, _ in converted_named_tensors],
+            dtypes=[param.dtype for _, param in converted_named_tensors],
+            shapes=[param.shape for _, param in converted_named_tensors],
+            group_name=group_name,
+            weight_version=str(weight_version),
+            packed=packed,
+        )
+        for engine in rollout_engines
+    ]
 
     named_gpu_iter = (
         (name, (param.data if hasattr(param, "data") else param).contiguous())

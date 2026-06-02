@@ -1,24 +1,4 @@
-"""Deployment configuration dataclasses for the vLLM rollout engine.
-
-YAML format::
-
-    vllm:
-      - name: actor
-        model_path: /path/to/actor
-        update_weights: true
-        num_gpus_per_engine: 2
-        server_groups:
-          - worker_type: prefill
-            num_gpus: 4
-          - worker_type: decode
-            num_gpus: 8
-      - name: ref
-        model_path: /path/to/ref
-        update_weights: false
-        server_groups:
-          - worker_type: regular
-            num_gpus: 4
-"""
+"""Configuration dataclasses for vLLM engine deployment."""
 
 import dataclasses
 import logging
@@ -43,7 +23,9 @@ class ServerGroupConfig:
         num_gpus: Total number of GPUs for this group.
         num_gpus_per_engine: GPUs per engine for this group.  Overrides the
                              model-level or global ``--rollout-num-gpus-per-engine``.
-        overrides: Optional dict of vLLM engine argument field overrides.
+        overrides: Optional dict of vLLM ``ServerArgs`` field overrides.
+                   These are applied on top of the base CLI ``--vllm-*``
+                   arguments in ``_compute_server_args``.
     """
 
     worker_type: str
@@ -90,9 +72,11 @@ class ModelConfig:
         for g in self.server_groups:
             if g.num_gpus_per_engine is None:
                 g.num_gpus_per_engine = default_gpus_per_engine
+            # Inject model_path into overrides so _compute_server_args picks it up.
             if "model_path" not in g.overrides:
                 g.overrides["model_path"] = default_model_path
 
+        # Validate: all server groups within a model must share the same model_path.
         if self.server_groups:
             model_paths = {g.overrides["model_path"] for g in self.server_groups}
             assert len(model_paths) == 1, (
@@ -103,6 +87,7 @@ class ModelConfig:
         else:
             effective_model_path = default_model_path
 
+        # Auto-infer update_weights when not explicitly set.
         if self.update_weights is None:
             if effective_model_path != args.hf_checkpoint:
                 logger.warning(
@@ -131,10 +116,40 @@ class ModelConfig:
 class VllmConfig:
     """Configuration for vLLM rollout engine deployment.
 
-    Loaded from ``--vllm-config`` YAML file.  Supports multi-model
-    serving, PD disaggregation, and heterogeneous server groups.
+    Loaded from ``--vllm-config`` YAML file.
 
-    See module docstring for the YAML format.
+    **Config format**::
+
+        vllm:
+          - name: actor
+            model_path: /path/to/actor
+            update_weights: true          # receives training weight updates (default)
+            num_gpus_per_engine: 2
+            server_groups:
+              - worker_type: prefill
+                num_gpus: 4
+                num_gpus_per_engine: 2
+              - worker_type: decode
+                num_gpus: 8
+                num_gpus_per_engine: 4
+          - name: ref
+            model_path: /path/to/ref
+            update_weights: false          # frozen, no weight updates
+            server_groups:
+              - worker_type: regular
+                num_gpus: 4
+
+    Each model gets its own router.  ``placeholder`` groups reserve GPU
+    slots without creating engines.  ``overrides`` are ``ServerArgs``
+    field names applied on top of the base ``--vllm-*`` CLI args.
+
+    Set ``update_weights: false`` for frozen models (reference, reward,
+    etc.) that should not receive weight updates from training.
+
+    .. note::
+
+       ``engine_groups`` is accepted as a backward-compatible alias for
+       ``server_groups`` in the YAML config.
     """
 
     models: list[ModelConfig]
@@ -144,11 +159,10 @@ class VllmConfig:
         with open(path) as f:
             data = yaml.safe_load(f)
 
-        if "vllm" not in data:
-            raise ValueError(
-                f"vllm config must have a 'vllm' key, got {list(data.keys())}. "
-                "Wrap your server_groups inside a model entry under 'vllm'."
-            )
+        assert "vllm" in data, (
+            f"vllm config must have a 'vllm' key, got {list(data.keys())}. "
+            f"Wrap your server_groups inside a model entry under 'vllm'."
+        )
         models = []
         for m in data["vllm"]:
             # Accept both "server_groups" and legacy "engine_groups".
