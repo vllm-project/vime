@@ -26,24 +26,18 @@ slime is the RL-framework behind GLM-4.7, GLM-4.6 and GLM-4.5. Apart from models
    :caption: Dense
 
    examples/qwen3-4B.md
-   examples/glm4-9B.md
 
 .. toctree::
    :maxdepth: 1
    :caption: MoE
 
-   examples/glm4.7-30B-A3B.md
    examples/qwen3-30B-A3B.md
-   examples/glm4.7-355B-A32B.md
-   examples/deepseek-r1.md
 
 .. toctree::
    :maxdepth: 1
    :caption: Advanced Features
 
-   advanced/on-policy-distillation.md
    advanced/speculative-decoding.md
-   advanced/low-precision.md
    advanced/reproducibility.md
    advanced/fault-tolerance.md
    advanced/pd-disaggregation.md
@@ -55,7 +49,6 @@ slime is the RL-framework behind GLM-4.7, GLM-4.6 and GLM-4.5. Apart from models
    :maxdepth: 1
    :caption: Other Usage
 
-   examples/qwen3-4b-base-openhermes.md
    _examples_synced/search-r1/README.md
    _examples_synced/fully_async/README.md
    _examples_synced/retool/README.md
@@ -69,4 +62,3 @@ slime is the RL-framework behind GLM-4.7, GLM-4.6 and GLM-4.5. Apart from models
    developer_guide/debug.md
    developer_guide/trace.md
    developer_guide/profiling.md
-

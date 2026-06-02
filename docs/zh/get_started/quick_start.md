@@ -52,7 +52,7 @@ pip install -e . --no-deps
 
 ```bash
 # 下载模型权重 (GLM-Z1-9B)
-hf download zai-org/GLM-Z1-9B-0414 --local-dir /root/GLM-Z1-9B-0414
+hf download zai-org/Qwen3-4B --local-dir /root/Qwen3-4B
 
 # 下载训练数据集 (dapo-math-17k)
 hf download --repo-type dataset zhuzilin/dapo-math-17k \
@@ -69,11 +69,11 @@ hf download --repo-type dataset zhuzilin/aime-2024 \
 
 当使用 Megatron 作为训练后端时，需要先将 Hugging Face 格式的模型权重转换为 Megatron `torch_dist` 格式。
 
-首先，加载目标模型的配置文件。`slime/scripts/models` 目录下包含了支持模型的配置文件。需要 `source` 对应模型的脚本，将配置参数加载到当前环境中。此处我们以 GLM4-9B 模型为例子，对于 Qwen3-4B、Qwen3.5、Qwen3.6、GLM-4.7-Flash、Qwen3-30B-A3B，是类似的。
+首先，加载目标模型的配置文件。`slime/scripts/models` 目录下包含了支持模型的配置文件。需要 `source` 对应模型的脚本，将配置参数加载到当前环境中。此处我们以 Qwen3-4B 模型为例子。
 
 ```bash
 cd /root/slime
-source scripts/models/glm4-9B.sh
+source scripts/models/qwen3-4B.sh
 ```
 
 接下来，运行转换脚本。请注意以下参数：
@@ -83,12 +83,11 @@ source scripts/models/glm4-9B.sh
 ```bash
 PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
     ${MODEL_ARGS[@]} \
-    --hf-checkpoint /root/GLM-Z1-9B-0414 \
-    --save /root/GLM-Z1-9B-0414_torch_dist
+    --hf-checkpoint /root/Qwen3-4B \
+    --save /root/Qwen3-4B_torch_dist
 ```
 
 对于更大的模型，可以使用 `torchrun` 来启动转换脚本，从而使用多张 GPU 甚至多机进行权重转换。
-注意：kimi-k2模型权重转换时，需打开模型路径中的config.json，将"model_type": "kimi_k2"修改为"model_type": "deepseek_v3"。
 
 ### Megatron 格式 转换为 Hugging Face 格式
 
@@ -97,8 +96,8 @@ PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
 ```bash
 PYTHONPATH=/root/Megatron-LM python tools/convert_torch_dist_to_hf.py \
   --input-dir /path/to/torch_dist_ckpt/iter_xxx/ \
-  --output-dir /root/GLM-Z1-9B-0414-iter_xxx \
-  --origin-hf-dir /root/GLM-Z1-9B-0414
+  --output-dir /root/Qwen3-4B-iter_xxx \
+  --origin-hf-dir /root/Qwen3-4B
 ```
 
 由于 Megatron 会对 embedding 做 padding，可能会出现转换出来的权重的 embedding 形状不匹配的问题。这时需要在转换时设置 `--vocab-size`。
@@ -109,24 +108,24 @@ PYTHONPATH=/root/Megatron-LM python tools/convert_torch_dist_to_hf.py \
 
 ```bash
 cd /root/slime
-bash scripts/run-glm4-9B.sh
+bash scripts/run-qwen3-4B.sh
 ```
 
-我们还是以 run-glm4-9B.sh 脚本为例，简单分析主要参数的作用。
+我们还是以 run-qwen3-4B.sh 脚本为例，简单分析主要参数的作用。
 
 ### MODEL_ARGS: 模型配置参数
 
 ```bash
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-source "${SCRIPT_DIR}/models/glm4-9B.sh"
+source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 ```
 
-此部分通过 `source` 命令从 `scripts/models/glm4-9B.sh` 文件中加载模型配置。这些配置均为 Megatron 所需的超参数。由于 Megatron 无法直接从检查点（checkpoint）中读取模型配置，因此需要手动指定。我们在 `scripts/models/` 目录下提供了一些常用模型的配置示例。
+此部分通过 `source` 命令从 `scripts/models/qwen3-4B.sh` 文件中加载模型配置。这些配置均为 Megatron 所需的超参数。由于 Megatron 无法直接从检查点（checkpoint）中读取模型配置，因此需要手动指定。我们在 `scripts/models/` 目录下提供了一些常用模型的配置示例。
 
 > ⚠️ **注意**：
 > 请务必检查模型配置文件中的参数（如 `--rotary-base`）是否与您当前使用的模型完全匹配。同一模型结构的不同版本可能使用不同的配置值。如果需要修改，您可以在 `source` 之后直接覆盖，例如：
 > ```bash
-> source "${SCRIPT_DIR}/models/glm4-9B.sh"
+> source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 > MODEL_ARGS+=(--rotary-base 10000)
 > ```
 
@@ -135,13 +134,13 @@ source "${SCRIPT_DIR}/models/glm4-9B.sh"
 ```bash
 CKPT_ARGS=(
    # 用于加载 tokenizer 等其他信息，实际上不会使用 hf 路径中的模型权重参数
-   --hf-checkpoint /root/GLM-Z1-9B-0414
+   --hf-checkpoint /root/Qwen3-4B
    # 参考模型 (Reference Model) 的 Megatron 格式检查点
-   --ref-load /root/GLM-Z1-9B-0414_torch_dist
+   --ref-load /root/Qwen3-4B_torch_dist
    # Actor 模型的加载路径。若为空或不存在有效的checkpoint，则从 --ref-load 加载
-   --load /root/GLM-Z1-9B-0414_slime/
+   --load /root/Qwen3-4B_slime/
    # 训练过程中模型的保存路径
-   --save /root/GLM-Z1-9B-0414_slime/
+   --save /root/Qwen3-4B_slime/
    # 模型保存间隔（步数）
    --save-interval 20
 )
@@ -574,8 +573,6 @@ ray job submit --address="http://127.0.0.1:8265" \
    --...（其他 Megatron/vLLM/slime 参数）
 ```
 
-slime 针对大规模混合专家（MoE）模型的分布式训练进行了深度优化。我们提供了一些端到端的训练案例以供参考：
+slime 针对大规模混合专家（MoE）模型的分布式训练进行了深度优化。我们提供了一个端到端的训练案例以供参考：
 
-- [示例：8xH100 训练 GLM-4.7-Flash](../examples/glm4.7-30B-A3B.md)
-- [示例：64xH100 训练 GLM-4.7](../examples/glm4.7-355B-A32B.md)
-- [示例：128xH100 训练 DeepSeek-R1](../examples/deepseek-r1.md)
+- [示例：8xH100 训练 Qwen3-30B-A3B](../examples/qwen3-30B-A3B.md)
