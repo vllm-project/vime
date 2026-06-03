@@ -5,7 +5,6 @@ import multiprocessing
 import os
 import random
 import time
-from argparse import Namespace
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +12,10 @@ import numpy as np
 import ray
 import torch
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+
 from vime.backends.vllm_utils.vllm_config import ModelConfig, ServerGroupConfig, VllmConfig
 from vime.backends.vllm_utils.vllm_engine import VLLMEngine
+
 # Memory-type tag strings shared with the vLLM engine's sleep/wake_up API.
 GPU_MEMORY_TYPE_KV_CACHE = "kv_cache"
 GPU_MEMORY_TYPE_WEIGHTS = "weights"
@@ -919,9 +920,9 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
         if router_port is None:
             router_port = find_available_port(random.randint(3000, 4000))
 
-    from vime.utils.http_utils import run_router
-
     from vllm_router.router_args import RouterArgs
+
+    from vime.utils.http_utils import run_router
 
     router_args = RouterArgs.from_cli_args(args, use_router_prefix=True)
 
