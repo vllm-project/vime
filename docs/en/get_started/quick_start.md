@@ -53,7 +53,7 @@ You can download required models and datasets from platforms like Hugging Face, 
 
 ```bash
 # Download model weights (GLM-Z1-9B)
-hf download zai-org/GLM-Z1-9B-0414 --local-dir /root/GLM-Z1-9B-0414
+hf download zai-org/Qwen3-4B --local-dir /root/Qwen3-4B
 
 # Download training dataset (dapo-math-17k)
 hf download --repo-type dataset zhuzilin/dapo-math-17k \
@@ -70,11 +70,11 @@ hf download --repo-type dataset zhuzilin/aime-2024 \
 
 When using Megatron as the training backend, you need to first convert Hugging Face format model weights to Megatron `torch_dist` format.
 
-First, load the configuration file of the target model. The `slime/scripts/models` directory contains configuration files for supported models. You need to `source` the corresponding model script to load the configuration parameters into the current environment. Here we use GLM4-9B model as an example, and it's similar for Qwen3-4B, Qwen3.5, Qwen3.6, GLM-4.7-Flash, Qwen3-30B-A3B, etc.
+First, load the configuration file of the target model. The `slime/scripts/models` directory contains configuration files for supported models. You need to `source` the corresponding model script to load the configuration parameters into the current environment. Here we use Qwen3-4B model as an example.
 
 ```bash
 cd /root/slime
-source scripts/models/glm4-9B.sh
+source scripts/models/qwen3-4B.sh
 ```
 
 Next, run the conversion script. Please note the following parameters:
@@ -84,12 +84,11 @@ Next, run the conversion script. Please note the following parameters:
 ```bash
 PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
     ${MODEL_ARGS[@]} \
-    --hf-checkpoint /root/GLM-Z1-9B-0414 \
-    --save /root/GLM-Z1-9B-0414_torch_dist
+    --hf-checkpoint /root/Qwen3-4B \
+    --save /root/Qwen3-4B_torch_dist
 ```
 
 For larger models, you can use `torchrun` to start the conversion script to convert with multi-gpus or even multi-nodes.
-Note: When converting the kimi-k2 model weights, you need to open config.json in the model path and change "model_type": "kimi_k2" to "model_type": "deepseek_v3".
 
 ### Convert from Megatron Format to Hugging Face Format
 
@@ -98,8 +97,8 @@ You can use the following script to convert the saved Megatron checkpoints back 
 ```bash
 PYTHONPATH=/root/Megatron-LM python tools/convert_torch_dist_to_hf.py \
   --input-dir /path/to/torch_dist_ckpt/iter_xxx/ \
-  --output-dir /root/GLM-Z1-9B-0414-iter_xxx \
-  --origin-hf-dir /root/GLM-Z1-9B-0414
+  --output-dir /root/Qwen3-4B-iter_xxx \
+  --origin-hf-dir /root/Qwen3-4B
 ```
 
 Note that as Megatron will do padding to embedding for better performance, it may happen that the converted embedding is not correct. In that case, please manually set `--vocab-size` during convertion.
@@ -110,24 +109,24 @@ After completing the above preparation work, you can run the training script.
 
 ```bash
 cd /root/slime
-bash scripts/run-glm4-9B.sh
+bash scripts/run-qwen3-4B.sh
 ```
 
-We still use the run-glm4-9B.sh script as an example to briefly analyze the main parameters.
+We still use the run-qwen3-4B.sh script as an example to briefly analyze the main parameters.
 
 ### MODEL_ARGS: Model Configuration Parameters
 
 ```bash
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-source "${SCRIPT_DIR}/models/glm4-9B.sh"
+source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 ```
 
-This part loads model configuration from the `scripts/models/glm4-9B.sh` file through the `source` command. These configurations are all hyperparameters required by Megatron. Since Megatron cannot directly read model configuration from checkpoints, it needs to be manually specified. We provide configuration examples for some commonly used models in the `scripts/models/` directory.
+This part loads model configuration from the `scripts/models/qwen3-4B.sh` file through the `source` command. These configurations are all hyperparameters required by Megatron. Since Megatron cannot directly read model configuration from checkpoints, it needs to be manually specified. We provide configuration examples for some commonly used models in the `scripts/models/` directory.
 
 > ⚠️ **Note**:
 > Please make sure to check whether the parameters in the model configuration file (such as `--rotary-base`) completely match the model you are currently using. Different versions of the same model structure may use different configuration values. If you need to modify, you can directly override after `source`, for example:
 > ```bash
-> source "${SCRIPT_DIR}/models/glm4-9B.sh"
+> source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 > MODEL_ARGS+=(--rotary-base 10000)
 > ```
 
@@ -136,14 +135,14 @@ This part loads model configuration from the `scripts/models/glm4-9B.sh` file th
 ```bash
 CKPT_ARGS=(
    # To load tokenizer and other information, won't actually use model weight parameters from hf path
-   --hf-checkpoint /root/GLM-Z1-9B-0414
+   --hf-checkpoint /root/Qwen3-4B
    # Reference Model's Megatron format checkpoint
-   --ref-load /root/GLM-Z1-9B-0414_torch_dist
+   --ref-load /root/Qwen3-4B_torch_dist
    # Actor model loading path. Should typically match --save for checkpoint resumption
    # If empty or doesn't contain a valid checkpoint, loads from --ref-load instead
-   --load /root/GLM-Z1-9B-0414_slime/
+   --load /root/Qwen3-4B_slime/
    # Model save path during training
-   --save /root/GLM-Z1-9B-0414_slime/
+   --save /root/Qwen3-4B_slime/
    # Model save interval (steps)
    --save-interval 20
 )
@@ -577,9 +576,6 @@ export NCCL_SOCKET_IFNAME=$(ip -o -4 addr show | awk '$4 ~ /^10\\./ {print $2}')
 export NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=$(ip -o -4 addr show | awk '$4 ~ /^10\./ {print $2}')
 ```
 
-slime has been deeply optimized for distributed training of large-scale Mixture of Experts (MoE) models. We provide some end-to-end training cases for reference:
+slime has been deeply optimized for distributed training of large-scale Mixture of Experts (MoE) models. We provide an end-to-end training case for reference:
 
-- [Example: 8xH100 Training GLM-4.7-Flash](../examples/glm4.7-30B-A3B.md)
-- [Example: 64xH100 Training GLM-4.7](../examples/glm4.7-355B-A32B.md)
-- [Example: 128xH100 Training DeepSeek-R1](../examples/deepseek-r1.md)
-- The scripts such as `scripts/run_qwen3_30b_a3b.py`, `scripts/run_glm45_355b_a32b.py` also support multi-node training, though there are little documentations about it currently.
+- [Example: Qwen3-30B-A3B with 8xH100](../examples/qwen3-30B-A3B.md)

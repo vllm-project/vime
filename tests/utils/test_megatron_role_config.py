@@ -22,7 +22,7 @@ def _base_args(**overrides):
         use_kl_loss=False,
         use_opd=True,
         opd_type="megatron",
-        custom_advantage_function_path="slime.test.adv",
+        custom_advantage_function_path="vime.test.adv",
         untie_embeddings_and_output_weights=False,
         actor_num_nodes=1,
         actor_num_gpus_per_node=1,
@@ -39,7 +39,7 @@ def _base_args(**overrides):
 
 class TestMegatronRoleConfig:
     def test_parse_actor_and_critic_role_overrides(self):
-        from slime.utils.arguments import parse_megatron_role_args
+        from vime.utils.arguments import parse_megatron_role_args
 
         path = _write_yaml(
             {
@@ -71,7 +71,7 @@ class TestMegatronRoleConfig:
         assert critic_args.untie_embeddings_and_output_weights is True
 
     def test_missing_role_inherits_base_args(self):
-        from slime.utils.arguments import parse_megatron_role_args
+        from vime.utils.arguments import parse_megatron_role_args
 
         path = _write_yaml(
             {
@@ -98,7 +98,7 @@ class TestMegatronRoleConfig:
         ],
     )
     def test_requires_top_level_megatron_key(self, config):
-        from slime.utils.arguments import parse_megatron_role_args
+        from vime.utils.arguments import parse_megatron_role_args
 
         path = _write_yaml(config)
         args = _base_args()
@@ -107,7 +107,7 @@ class TestMegatronRoleConfig:
             parse_megatron_role_args(args, path, role="critic")
 
     def test_create_training_models_applies_actor_override_without_critic(self, monkeypatch):
-        from slime.ray import placement_group as placement_group_module
+        from vime.ray import placement_group as placement_group_module
 
         path = _write_yaml(
             {

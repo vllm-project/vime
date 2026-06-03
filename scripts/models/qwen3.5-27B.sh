@@ -1,5 +1,5 @@
 MODEL_ARGS=(
-   --spec "slime_plugins.models.qwen3_5" "get_qwen3_5_spec"
+   --spec "vime_plugins.models.qwen3_5" "get_qwen3_5_spec"
 
    --disable-bias-linear
    --qk-layernorm

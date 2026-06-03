@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-MODULE_PATH = "slime.backends.megatron_utils.update_weight.update_weight_from_tensor"
+MODULE_PATH = "vime.backends.megatron_utils.update_weight.update_weight_from_tensor"
 
 
 def _install_stubs():
@@ -51,26 +51,26 @@ def _install_stubs():
     _dist.barrier = dist_stub.barrier
     _dist.all_gather_object = dist_stub.all_gather_object
 
-    slime_utils = types.ModuleType("slime.utils.distributed_utils")
+    slime_utils = types.ModuleType("vime.utils.distributed_utils")
     slime_utils.get_gloo_group = MagicMock(return_value="gloo")
-    sys.modules.setdefault("slime.utils.distributed_utils", slime_utils)
+    sys.modules.setdefault("vime.utils.distributed_utils", slime_utils)
 
     hf_iter_stub = MagicMock()
     hf_iter_stub.get_hf_weight_chunks.return_value = iter([])
 
-    hf_base_mod = types.ModuleType("slime.backends.megatron_utils.update_weight.hf_weight_iterator_base")
+    hf_base_mod = types.ModuleType("vime.backends.megatron_utils.update_weight.hf_weight_iterator_base")
     hf_base_mod.HfWeightIteratorBase = MagicMock()
     hf_base_mod.HfWeightIteratorBase.create.return_value = hf_iter_stub
 
-    upw_dist_mod = types.ModuleType("slime.backends.megatron_utils.update_weight.update_weight_from_distributed")
+    upw_dist_mod = types.ModuleType("vime.backends.megatron_utils.update_weight.update_weight_from_distributed")
     upw_dist_mod.connect_rollout_engines_from_distributed = MagicMock(return_value="groups")
     upw_dist_mod.disconnect_rollout_engines_from_distributed = MagicMock()
     upw_dist_mod.post_process_weights = MagicMock()
     upw_dist_mod.update_weights_from_distributed = MagicMock(return_value=[])
 
     for key, mod in [
-        ("slime.backends.megatron_utils.update_weight.hf_weight_iterator_base", hf_base_mod),
-        ("slime.backends.megatron_utils.update_weight.update_weight_from_distributed", upw_dist_mod),
+        ("vime.backends.megatron_utils.update_weight.hf_weight_iterator_base", hf_base_mod),
+        ("vime.backends.megatron_utils.update_weight.update_weight_from_distributed", upw_dist_mod),
     ]:
         sys.modules.setdefault(key, mod)
 
@@ -144,7 +144,7 @@ def _make_instance(upw_vllm, args=None):
     obj._distributed_engines = []
     obj._model_update_groups = None
     obj._is_distributed_src_rank = False
-    obj._group_name = "slime"
+    obj._group_name = "vime"
     obj._ipc_initialized = False
     return obj
 
@@ -207,7 +207,7 @@ def test_colocated_lifecycle_uses_vllm_sleep_and_weight_transfer_apis(upw_vllm):
 def test_send_via_ipc_dispatches_update_weights_from_tensor_with_version(upw_vllm):
     """slot_size=1: every HF chunk fires
     ``engine.update_weights_from_tensor.remote(**fields, weight_version=...)``.
-    Mirrors slime's IPC RPC contract — same name, parameterized fields,
+    Mirrors vime's IPC RPC contract — same name, parameterized fields,
     version travels with data (no piggyback onto ``finish_weight_update``)."""
     obj = _make_instance(upw_vllm)
     engine = RecordingVLLMEngine()

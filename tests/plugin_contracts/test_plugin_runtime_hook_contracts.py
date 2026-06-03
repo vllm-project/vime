@@ -24,8 +24,8 @@ install_stubs()
 
 NUM_GPUS = 0
 
-from slime.utils.misc import load_function
-from slime.utils.types import Sample
+from vime.utils.misc import load_function
+from vime.utils.types import Sample
 
 
 def run_contract_test_file() -> None:
@@ -133,7 +133,7 @@ HOOK_CASES = [
         "custom_rollout_log",
         "CUSTOM_ROLLOUT_LOG_FUNCTION_PATH",
         "plugin_contracts.test_plugin_runtime_hook_contracts.reference_custom_rollout_log",
-        "slime/ray/rollout.py",
+        "vime/ray/rollout.py",
         "custom_log_func(rollout_id, args, samples, rollout_extra_metrics, rollout_time)",
         ("rollout_id", "args", "samples", "rollout_extra_metrics", "rollout_time"),
         invoke_custom_rollout_log,
@@ -142,7 +142,7 @@ HOOK_CASES = [
         "custom_eval_rollout_log",
         "CUSTOM_EVAL_ROLLOUT_LOG_FUNCTION_PATH",
         "plugin_contracts.test_plugin_runtime_hook_contracts.reference_custom_eval_rollout_log",
-        "slime/ray/rollout.py",
+        "vime/ray/rollout.py",
         "custom_log_func(rollout_id, args, data, extra_metrics)",
         ("rollout_id", "args", "data", "extra_metrics"),
         invoke_custom_eval_rollout_log,
@@ -151,7 +151,7 @@ HOOK_CASES = [
         "custom_reward_post_process",
         "CUSTOM_REWARD_POST_PROCESS_PATH",
         "plugin_contracts.test_plugin_runtime_hook_contracts.reference_reward_post_process",
-        "slime/ray/rollout.py",
+        "vime/ray/rollout.py",
         "self.custom_reward_post_process_func(self.args, samples)",
         ("args", "samples"),
         invoke_reward_post_process,
@@ -160,7 +160,7 @@ HOOK_CASES = [
         "custom_convert_samples_to_train_data",
         "CUSTOM_CONVERT_SAMPLES_TO_TRAIN_DATA_PATH",
         "plugin_contracts.test_plugin_runtime_hook_contracts.reference_convert_samples_to_train_data",
-        "slime/ray/rollout.py",
+        "vime/ray/rollout.py",
         "self.custom_convert_samples_to_train_data_func(self.args, samples)",
         ("args", "samples"),
         invoke_convert_samples_to_train_data,
@@ -169,7 +169,7 @@ HOOK_CASES = [
         "rollout_data_postprocess",
         "ROLLOUT_DATA_POSTPROCESS_PATH",
         "plugin_contracts.test_plugin_runtime_hook_contracts.reference_rollout_data_postprocess",
-        "slime/backends/megatron_utils/actor.py",
+        "vime/backends/megatron_utils/actor.py",
         "self.rollout_data_postprocess(self.args, rollout_id, rollout_data)",
         ("args", "rollout_id", "rollout_data"),
         invoke_rollout_data_postprocess,

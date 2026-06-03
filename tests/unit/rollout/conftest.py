@@ -1,4 +1,4 @@
-"""Shared stubs for ``slime.rollout.vllm_rollout`` unit tests."""
+"""Shared stubs for ``vime.rollout.vllm_rollout`` unit tests."""
 
 from __future__ import annotations
 
