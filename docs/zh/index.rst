@@ -32,8 +32,6 @@ vime 是 GLM-4.7、GLM-4.6、GLM-4.5 背后的 RL 训练框架。除此之外，
    :caption: MoE
 
    examples/qwen3-30B-A3B.md
-   examples/glm4.7-30B-A3B.md
-   examples/glm4.7-355B-A32B.md
 
 .. toctree::
    :maxdepth: 1
