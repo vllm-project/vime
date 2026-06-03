@@ -2,7 +2,7 @@
 
 [English](./README.md) · [代码仓库](https://github.com/vllm-project/vime)
 
-**Vime** 是面向 RL scaling 的 LLM post-training 框架。它保留高吞吐训练栈与灵活的数据生成设计，同时默认以 [**vLLM**](https://github.com/vllm-project/vllm)（配合 [vllm-router](https://github.com/vllm-project/router)）作为 rollout 后端，替代 SGLang。Vime 提供两大核心能力：
+**Vime** 是基于 [slime](https://github.com/THUDM/slime) 的 RL scaling 用 LLM post-training 框架。在保留 slime 训练栈与数据生成设计的同时，默认以 [**vLLM**](https://github.com/vllm-project/vllm)（配合 [vllm-router](https://github.com/vllm-project/router)）作为 rollout 后端，替代 SGLang。Vime 提供两大核心能力：
 
 1. **高性能训练**：通过连接 Megatron 与 vLLM，支持各种模式的高效训练；
 2. **灵活的数据生成**：通过自定义数据生成接口以及 server based engine，实现任意的训练数据生成流程。
@@ -19,7 +19,7 @@ Vime 支持广泛的模型系列，包括：
 - [快速开始](#快速开始)
 - [参数说明](#参数说明)
 - [开发指南](#开发指南)
-- [Vime 文档](#vime-文档)
+- [slime doc](#slime-doc)
 - [常见 Q&A 与致谢](#常见-qa-与致谢)
 
 ## 架构总览
@@ -68,14 +68,14 @@ Vime 的参数分为三类：
 
 - 调试技巧请参考 [debug 指南](docs/zh/developer_guide/debug.md)
 
-## Vime 文档
+## slime doc
 
-以下资源覆盖 Vime 使用方式、Megatron 集成、定制化与高级主题：
+Vime 由 slime 衍生而来。以下上游资源与本仓库文档仍沿用 slime 命名，可作为共享概念（Megatron 集成、定制化、高级主题）的参考：
 
-[![Documentation](https://img.shields.io/badge/vime_文档-latest-brightgreen.svg?style=flat)](https://vllm-project.github.io/vime/)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/vllm-project/vime)
+[![Documentation](https://img.shields.io/badge/slime_文档-latest-brightgreen.svg?style=flat)](https://thudm.github.io/slime/)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/THUDM/slime)
 
-- 代码仓库：[vllm-project/vime](https://github.com/vllm-project/vime)
+- 上游仓库：[THUDM/slime](https://github.com/THUDM/slime)
 - 本仓库英文文档：[docs/en/](docs/en/)
 - 本仓库中文文档：[docs/zh/](docs/zh/)
 
@@ -92,7 +92,7 @@ Vime 的参数分为三类：
   title        = {Vime: An LLM post-training framework with vLLM for RL Scaling},
   year         = {2026},
   howpublished = {\url{https://github.com/vllm-project/vime}},
-  note         = {GitHub repository.},
+  note         = {Based on slime. GitHub repository.},
   urldate      = {2026-05-25}
 }
 ```
