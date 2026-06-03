@@ -6,12 +6,6 @@ an external vLLM teacher server's ``/inference/v1/generate`` endpoint with
 logprobs out of the response and stores them on each sample for the OPD KL
 penalty.
 
-``/inference/v1/generate`` (vime's disaggregated serve endpoint) is used rather
-than the OpenAI ``/v1/completions`` because it is the only vLLM endpoint that can
-carry rendered **multimodal features** alongside the token ids, so the same code
-path scores both text-only and multimodal (image) OPD teachers. It is also the
-endpoint vime's own rollout uses (``vime.rollout.vllm_rollout.generate``), so the
-multimodal render -> features flow is shared (see ``_mm_render_*`` helpers).
 
 Text request body::
 
