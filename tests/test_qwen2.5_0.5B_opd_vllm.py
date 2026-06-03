@@ -129,7 +129,7 @@ def execute():
         rm_args = (
             "--custom-rm-path vime.rollout.on_policy_distillation.reward_func "
             "--custom-reward-post-process-path vime.rollout.on_policy_distillation.post_process_rewards "
-            f"--rm-url http://{TEACHER_HOST}:{TEACHER_PORT}/v1/completions "
+            f"--rm-url http://{TEACHER_HOST}:{TEACHER_PORT}/inference/v1/generate "
         )
 
         grpo_args = (
