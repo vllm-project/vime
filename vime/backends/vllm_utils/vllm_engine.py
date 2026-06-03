@@ -354,13 +354,44 @@ def redact_cmd_for_log(cmd: list[str]) -> str:
     return " ".join(parts)
 
 
+def _resolve_subprocess_cvd(visible_devices: str) -> str:
+    """Map ``visible_devices`` (LOCAL 0-based indices) to ABSOLUTE physical GPU ids.
+
+    ``compute_server_args`` builds ``visible_devices`` from ``_to_local_gpu_id`` — i.e.
+    indices into the actor's *visible* GPU set, not absolute physical ids.  Rollout
+    actors run with ``RAY_EXPERIMENTAL_NOSET_*`` so Ray does NOT restrict their CVD;
+    they inherit the raylet's ``CUDA_VISIBLE_DEVICES`` (e.g. ``"4,5,6,7"`` when the run
+    was launched that way to avoid an occupied GPU).  Setting the ``vllm serve``
+    subprocess CVD to the raw local indices (``"0,1,2,3"``) makes CUDA read them as
+    ABSOLUTE physical 0-3, desyncing colocate — the Megatron trainer (Ray-placed on the
+    inherited 4-7) and vLLM then sit on different physical GPUs, so the IPC weight
+    handles (keyed by physical GPU UUID) don't match ("IPC handle not found").
+
+    Composing the local indices back through the inherited set recovers the physical
+    ids (``"4,5,6,7"``).  No-op when CVD is unset or already identity 0-based, so the
+    full-machine / 0-based path is unchanged.
+    """
+    inherited = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if not inherited:
+        return visible_devices
+    inh = [x for x in inherited.split(",") if x.strip() != ""]
+    out: list[str] = []
+    for tok in visible_devices.split(","):
+        tok = tok.strip()
+        if tok == "":
+            continue
+        idx = int(tok)
+        out.append(inh[idx] if 0 <= idx < len(inh) else tok)
+    return ",".join(out)
+
+
 def build_vllm_subprocess_env(server_args: dict[str, Any]) -> dict[str, str]:
     """Child-process environment for ``vllm serve``."""
     args = server_args["args"]
     env = os.environ.copy()
     env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
     env.setdefault("NCCL_CUMEM_ENABLE", "0")
-    env["CUDA_VISIBLE_DEVICES"] = server_args["visible_devices"]
+    env["CUDA_VISIBLE_DEVICES"] = _resolve_subprocess_cvd(server_args["visible_devices"])
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")
     if getattr(args, "colocate", False):
         import vime
