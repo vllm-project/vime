@@ -1,6 +1,6 @@
 # 自定义指南
 
-slime 通过函数路径参数提供了广泛的自定义能力。这些参数允许你在训练和推理流程的各个阶段注入自定义逻辑，而无需修改核心代码库。
+vime 通过函数路径参数提供了广泛的自定义能力。这些参数允许你在训练和推理流程的各个阶段注入自定义逻辑，而无需修改核心代码库。
 
 ## 自定义接口概览
 
@@ -29,11 +29,28 @@ slime 通过函数路径参数提供了广泛的自定义能力。这些参数�
 | [`--custom-megatron-before-log-prob-hook-path`](#17-megatron-hook) | log probability 计算前的自定义逻辑。 |
 | [`--custom-megatron-before-train-step-hook-path`](#17-megatron-hook) | 每个训练步骤前的自定义逻辑。 |
 
+## 通过 customization 接口实现 agentic workflow
+
+agentic workflow——multi-turn tool use、sandbox interaction、environment feedback、verifier/test-based reward——是一类重要的训练数据生成 workflow。它们通过 vime 已有的 customization 接口接入，vime 本身并不需要变成一个单独的 agent framework。
+
+绝大多数 agentic 场景下，**建议从 `--custom-generate-function-path` 加 `--custom-rm-path` 开始**，只有在默认 rollout 循环无法满足需求时再去覆盖整个 rollout function。
+
+| 想做的事 | 应使用的接口 |
+| :--- | :--- |
+| 让每条 sample 跑自定义的 agent loop、tool call、RAG、sandbox 执行、browser/terminal 交互或多轮生成，同时复用 vime 默认 rollout loop | [`--custom-generate-function-path`](#2-自定义生成函数---custom-generate-function-path) |
+| 实现 verifier reward、test-based reward、environment 成功判定、rule-based reward 或调用外部 reward 服务 | [`--custom-rm-path`](#3-奖励模型---custom-rm-path) |
+| 替换整个 rollout 编排（只在 per-sample 自定义不够用时使用） | [`--rollout-function-path`](#1-rollout-函数---rollout-function-path) |
+| 控制任务采样、缓冲、回填，或自定义 prompt / task 数据源 | [`--data-source-path`](#15-数据源---data-source-path) |
+| 给 agentic 输出附加自定义 loss mask、metadata，或转换成训练数据 | [`--rollout-data-postprocess-path`](#8-rollout-数据后处理---rollout-data-postprocess-path)、[`--custom-convert-samples-to-train-data-path`](#13-样本转训练数据---custom-convert-samples-to-train-data-path) |
+| 调试长耗时的 custom generation、verifier、tool call 或 sandbox 调用 | [`vime.utils.trace_utils`](../developer_guide/trace.md) 中的 trace 工具 |
+
+这一模式的原生示例：[`examples/multi_agent`](../../../examples/multi_agent/README.md) 中基于 `--rollout-function-path` 的多 agent 模式，以及 [`examples/fully_async`](../../../examples/fully_async/README.md) 中适合 long-tail agentic 场景的 fully-async rollout，两者外层都走 vime 默认的 `vllm_rollout`。
+
 ## 详细接口参考
 
 ### 1. Rollout 函数 (`--rollout-function-path`)
 
-**默认值**: `slime.rollout.vllm_rollout.generate_rollout`
+**默认值**: `vime.rollout.vllm_rollout.generate_rollout`
 
 **用途**: 覆盖整个 rollout 生成逻辑。
 
@@ -127,7 +144,7 @@ class DynamicFilterOutput:
 - 实现课程学习策略
 - 基于质量的样本选择
 
-**示例**: `slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std`
+**示例**: `vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std`
 
 ---
 
@@ -329,11 +346,11 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics) -> bool
 
 ### 15. 数据源 (`--data-source-path`)
 
-**默认值**: `slime.rollout.data_source.RolloutDataSourceWithBuffer`
+**默认值**: `vime.rollout.data_source.RolloutDataSourceWithBuffer`
 
 **用途**: 覆盖 rollout 提示词的数据源。
 
-**基类**: `slime.rollout.data_source.DataSource`
+**基类**: `vime.rollout.data_source.DataSource`
 
 **必需方法**:
 ```python
@@ -408,11 +425,11 @@ def custom_hook(args, rollout_id, step_id, model, optimizer, opt_param_scheduler
 | 参数 | 说明 |
 | --- | --- |
 | `--use-routing-replay` | 训练中前向-反向路由一致性。([arXiv:2507.18071](https://arxiv.org/abs/2507.18071)) |
-| `--use-rollout-routing-replay` | R3：在训练时重放 rollout 阶段的路由。slime 默认的 `vllm_rollout` 路径支持该功能。([arXiv:2510.11370](https://arxiv.org/abs/2510.11370)) |
+| `--use-rollout-routing-replay` | R3：在训练时重放 rollout 阶段的路由。vime 默认的 `vllm_rollout` 路径支持该功能。([arXiv:2510.11370](https://arxiv.org/abs/2510.11370)) |
 
 ## 自定义函数路径的测试
 
-slime 现在也提供了一组 CPU 契约测试，用于校验这些 customization 接口。测试会通过字符串形式的导入路径来动态加载组件，因此既能回归仓库内置 hook，也能验证用户通过和训练时完全相同的 CLI 参数传入的自定义实现。
+vime 现在也提供了一组 CPU 契约测试，用于校验这些 customization 接口。测试会通过字符串形式的导入路径来动态加载组件，因此既能回归仓库内置 hook，也能验证用户通过和训练时完全相同的 CLI 参数传入的自定义实现。
 
 这些测试统一放在 `tests/plugin_contracts/` 目录下，并按 hook 形态归并成少数几个文件：
 

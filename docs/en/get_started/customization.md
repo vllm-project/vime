@@ -1,6 +1,6 @@
 # Customization Guide
 
-slime provides extensive customization capabilities through function path arguments. These allow you to inject custom logic at various stages of the training and rollout pipeline without modifying the core codebase.
+vime provides extensive customization capabilities through function path arguments. These allow you to inject custom logic at various stages of the training and rollout pipeline without modifying the core codebase.
 
 ## Overview of Customization Interfaces
 
@@ -29,11 +29,28 @@ Below is a summary of all available customization interfaces and their purposes.
 | [`--custom-megatron-before-log-prob-hook-path`](#17-megatron-hooks) | Custom logic before log probability computation. |
 | [`--custom-megatron-before-train-step-hook-path`](#17-megatron-hooks) | Custom logic before each training step. |
 
+## Agentic workflows through customization interfaces
+
+Agentic workflows — multi-turn tool use, sandbox interaction, environment feedback, verifier/test-based rewards — are an important class of data generation workflows. They plug into vime through the existing customization interfaces; vime does not require a separate agent framework.
+
+For most agentic use cases, **start with `--custom-generate-function-path` plus `--custom-rm-path`**, and only override the full rollout function when the default rollout loop is insufficient.
+
+| If you need to … | Use |
+| :--- | :--- |
+| Run a custom agent loop, tool calls, RAG, sandbox execution, browser/terminal interaction, or multi-turn generation for each sample, while reusing vime's default rollout loop | [`--custom-generate-function-path`](#2-custom-generate-function---custom-generate-function-path) |
+| Compute verifier rewards, test-based rewards, environment success checks, rule-based rewards, or call an external reward service | [`--custom-rm-path`](#3-reward-model---custom-rm-path) |
+| Replace the entire rollout orchestration (only when per-sample customization is not enough) | [`--rollout-function-path`](#1-rollout-function---rollout-function-path) |
+| Control task sampling, buffering, requeueing, or custom prompt/task sources | [`--data-source-path`](#15-data-source---data-source-path) |
+| Attach custom loss masks, metadata, or convert agentic outputs into training data | [`--rollout-data-postprocess-path`](#8-rollout-data-postprocess---rollout-data-postprocess-path), [`--custom-convert-samples-to-train-data-path`](#13-samples-to-train-data-conversion---custom-convert-samples-to-train-data-path) |
+| Debug long-running custom generation, verifier calls, tool calls, or sandbox steps | trace utilities in [`vime.utils.trace_utils`](../developer_guide/trace.md) |
+
+Native examples of this pattern: [`examples/multi_agent`](../../../examples/multi_agent/README.md) (a `--rollout-function-path`-based multi-agent pattern) and [`examples/fully_async`](../../../examples/fully_async/README.md) (long-tail agentic generation), both keeping vime's default `vllm_rollout` outer loop.
+
 ## Detailed Interface Reference
 
 ### 1. Rollout Function (`--rollout-function-path`)
 
-**Default**: `slime.rollout.vllm_rollout.generate_rollout`
+**Default**: `vime.rollout.vllm_rollout.generate_rollout`
 
 **Purpose**: Override the entire rollout generation logic.
 
@@ -127,7 +144,7 @@ class DynamicFilterOutput:
 - Implementing curriculum learning strategies
 - Quality-based sample selection
 
-**Example**: `slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std`
+**Example**: `vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std`
 
 ---
 
@@ -329,11 +346,11 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics) -> bool
 
 ### 15. Data Source (`--data-source-path`)
 
-**Default**: `slime.rollout.data_source.RolloutDataSourceWithBuffer`
+**Default**: `vime.rollout.data_source.RolloutDataSourceWithBuffer`
 
 **Purpose**: Override the data source for rollout prompts.
 
-**Base Class**: `slime.rollout.data_source.DataSource`
+**Base Class**: `vime.rollout.data_source.DataSource`
 
 **Required Methods**:
 ```python
@@ -406,11 +423,11 @@ Stabilize MoE RL training by recording and replaying expert routing decisions to
 | Argument | Description |
 | --- | --- |
 | `--use-routing-replay` | Forward-backward routing consistency in training. ([arXiv:2507.18071](https://arxiv.org/abs/2507.18071)) |
-| `--use-rollout-routing-replay` | R3: Replay routing from rollout during training. Supported by slime's default `vllm_rollout` path. ([arXiv:2510.11370](https://arxiv.org/abs/2510.11370)) |
+| `--use-rollout-routing-replay` | R3: Replay routing from rollout during training. Supported by vime's default `vllm_rollout` path. ([arXiv:2510.11370](https://arxiv.org/abs/2510.11370)) |
 
 ## Testing Custom Function Paths
 
-slime also provides CPU-only contract tests for customization interfaces. These tests resolve components through import-path strings, so they can validate both built-in hooks and user-defined implementations passed through the same CLI arguments used by training.
+vime also provides CPU-only contract tests for customization interfaces. These tests resolve components through import-path strings, so they can validate both built-in hooks and user-defined implementations passed through the same CLI arguments used by training.
 
 The tests live under `tests/plugin_contracts/` and are grouped by hook shape:
 
