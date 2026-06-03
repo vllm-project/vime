@@ -762,15 +762,15 @@ class VLLMEngine(RayActor):
 
         response = self._make_request(
             "collective_rpc",
-            {"method": "update_weights", "kwargs": {"update_info": payload}},
+            {"method": "update_weights_chunk", "kwargs": {"update_info": payload}},
             timeout=self._weight_transfer_http_timeout(),
         )
         if weight_version is not None:
             self._weight_version = str(weight_version)
         return response
 
-    def update_weights(self, update_info: dict) -> dict:
-        """POST ``/update_weights`` with a single named-tensor chunk.
+    def update_weights_chunk(self, update_info: dict) -> dict:
+        """POST ``/update_weights_chunk`` with a single named-tensor chunk.
 
         Mirrors the SkyRL ``RemoteInferenceClient.update_weights_chunk`` API.
         Must be called between :meth:`start_weight_update` and
@@ -800,7 +800,7 @@ class VLLMEngine(RayActor):
             ).decode("utf-8")
         response = self._make_request(
             "collective_rpc",
-            {"method": "update_weights", "kwargs": {"update_info": payload}},
+            {"method": "update_weights_chunk", "kwargs": {"update_info": payload}},
             timeout=self._weight_transfer_http_timeout(),
         )
         return response

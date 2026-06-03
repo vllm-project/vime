@@ -464,9 +464,9 @@ class vLLMColocateWorkerExtension:
 
     # ── Three-phase weight update protocol ────────────────────────────────────
     # Mirrors SkyRL's NewInferenceWorkerWrap. Callable via /collective_rpc from
-    # VLLMEngine.update_weights / update_weights on the trainer side.
+    # VLLMEngine.update_weights_chunk / update_weights_chunk on the trainer side.
 
-    def update_weights(self, update_info: dict) -> None:
+    def update_weights_chunk(self, update_info: dict) -> None:
         """Receive and load a single chunk of weights via CUDA IPC.
 
         Accepts the ``update_info`` dict produced by
