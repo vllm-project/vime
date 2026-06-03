@@ -32,8 +32,6 @@ vime is the RL-framework behind GLM-4.7, GLM-4.6 and GLM-4.5. Apart from models 
    :caption: MoE
 
    examples/qwen3-30B-A3B.md
-   examples/glm4.7-30B-A3B.md
-   examples/glm4.7-355B-A32B.md
 
 .. toctree::
    :maxdepth: 1
