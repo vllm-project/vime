@@ -21,13 +21,13 @@ install_paths()
 install_stubs(with_transformers=True)
 
 NUM_GPUS = 0
-DEFAULT_ROLLOUT_FUNCTION_PATH = "slime.rollout.vllm_rollout.generate_rollout"
+DEFAULT_ROLLOUT_FUNCTION_PATH = "vime.rollout.vllm_rollout.generate_rollout"
 REFERENCE_ROLLOUT_FUNCTION_PATH = "plugin_contracts.test_plugin_rollout_contracts.valid_rollout_function"
 
-from slime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput, call_rollout_fn
-from slime.rollout.vllm_rollout import generate_rollout as default_generate_rollout
-from slime.utils.misc import load_function
-from slime.utils.types import Sample
+from vime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput, call_rollout_fn
+from vime.rollout.vllm_rollout import generate_rollout as default_generate_rollout
+from vime.utils.misc import load_function
+from vime.utils.types import Sample
 
 
 def run_contract_test_file() -> None:

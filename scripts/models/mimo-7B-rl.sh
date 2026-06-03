@@ -15,5 +15,4 @@ MODEL_ARGS=(
     --vocab-size 151680
     --untie-embeddings-and-output-weights
     --max-position-embeddings 32768
-    --mtp-num-layers 1
 )

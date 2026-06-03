@@ -1,4 +1,4 @@
-﻿"""Unit tests for ``slime.backends.vllm_utils.arguments``."""
+﻿"""Unit tests for ``vime.backends.vllm_utils.arguments``."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pytest
 
 @pytest.fixture(scope="module")
 def args_mod():
-    from slime.backends.vllm_utils import arguments as mod  # noqa: PLC0415
+    from vime.backends.vllm_utils import arguments as mod  # noqa: PLC0415
 
     return mod
 
