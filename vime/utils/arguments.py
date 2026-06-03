@@ -739,6 +739,8 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Path to save the model in HuggingFace format when using Megatron backend. "
                     "The model will be saved to `save_hf.format(rollout_id)`. "
+                    "In raw Megatron-to-HF mode, weights are saved with the same quantization config "
+                    "as `--hf-checkpoint`. "
                 ),
             )
             reset_arg(parser, "--seed", type=int, default=1234)
@@ -1133,6 +1135,21 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
             # --load-debug-rollout-data, --debug-rollout-only, --debug-train-only
             # are parsed early in _pre_parse_mode() and merged later.
             parser.add_argument(
+                "--load-forge-rollout-data",
+                type=str,
+                default=None,
+                help=(
+                    "Path (or {rollout_id} template) to a dumped rollout .pt file replayed by "
+                    "vime.rollout.forge_load.generate_rollout. Mirrors --load-debug-rollout-data's "
+                    "format(rollout_id=...) convention: a path without the placeholder is treated as "
+                    "a literal file and reused across every rollout_id; a path containing {rollout_id} "
+                    "loads a per-rollout file (with eval_<id>.pt for the eval pipeline). Unlike "
+                    "--load-debug-rollout-data, this does NOT force debug_train_only / skip_vllm -- "
+                    "vLLM servers, router, weight_update and the colocate offload/onload dance all "
+                    "stay live, which is the point (memory measurement at long context)."
+                ),
+            )
+            parser.add_argument(
                 "--load-debug-rollout-data-subsample",
                 type=float,
                 default=None,
@@ -1305,18 +1322,6 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                     "Path to the rollout all samples process function that "
                     "can process all samples including filtered ones."
                 ),
-            )
-            parser.add_argument(
-                "--disable-rollout-trim-samples",
-                action="store_true",
-                default=False,
-                help="disable trim samples in rollout buffer when converting samples to train data",
-            )
-            parser.add_argument(
-                "--use-dynamic-global-batch-size",
-                action="store_true",
-                default=False,
-                help="enable dynamic global batch size, disable trim samples in rollout buffer when converting samples to train data",
             )
             return parser
 

@@ -22,12 +22,12 @@ GPU_MEMORY_TYPE_WEIGHTS = "weights"
 GPU_MEMORY_TYPE_CUDA_GRAPH = "cuda_graph"
 from vime.rollout.base_types import call_rollout_fn
 from vime.utils import logging_utils
+from vime.utils.dp_schedule import build_dp_schedule
 from vime.utils.health_monitor import RolloutHealthMonitor
 from vime.utils.http_utils import _wrap_ipv6, find_available_port, get_host_info, init_http_client
 from vime.utils.logging_utils import configure_logger, init_tracking
 from vime.utils.metric_utils import compute_pass_rate, compute_rollout_step, compute_statistics, dict_add_prefix
 from vime.utils.misc import Box, group_by, load_function
-from vime.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from vime.utils.types import Sample
 
 from ..utils.metric_utils import has_repetition
@@ -498,7 +498,7 @@ class RolloutManager:
             # if debug rollout only, we don't convert samples to train data and directly return
             return
         data = self._convert_samples_to_train_data(data)
-        return self._split_train_data_by_dp(data, self.train_parallel_config["dp_size"])
+        return self._split_train_data_by_dp(data)
 
     def eval(self, rollout_id):
         if self.args.debug_train_only:
@@ -593,55 +593,18 @@ class RolloutManager:
             data = call_rollout_fn(self.generate_rollout, self.args, rollout_id, self.data_source, evaluation=False)
             metrics = data.metrics
             data = data.samples
+            # Enforce the group_id contract before flattening: any list[Sample]
+            # encountered in the nested output must have group_id set on every
+            # element. Default rollouts land at depth 1 and skip this validation;
+            # compact / subagent paths that split one rollout into N samples must
+            # set the same group_id on every sibling so the loss reducer counts
+            # the group once instead of N times. Legacy rollout_id is accepted.
+            _validate_group_id_annotated(data)
             # flatten the data if it is a list of lists
             while isinstance(data[0], list):
                 data = list(itertools.chain.from_iterable(data))
 
-            if not self.args.disable_rollout_trim_samples and not self.args.debug_rollout_only:
-                global_batch_size = self.args.global_batch_size
-                if self.args.use_dynamic_global_batch_size:
-                    logger.info(f"Collected {len(data)} samples from rollout to train with dynamic global batch size")
-                    # TODO: this is a temporary solution, we should directly save dynamic_global_batch_size to rollout data
-                    self._dynamic_global_batch_size = self._compute_dynamic_global_batch_size(len(data))
-                    global_batch_size = self._dynamic_global_batch_size
-
-                if len(data) % global_batch_size != 0:
-                    trim_len = (len(data) // global_batch_size) * global_batch_size
-                    if trim_len == 0:
-                        raise ValueError(f"Not enough samples {len(data)} for global_batch_size {global_batch_size}")
-                    origin_data_length = len(data)
-                    data = data[:trim_len]
-                    logger.info(f"trim number of samples from {origin_data_length} to {trim_len}")
-                logger.info(f"Final collected {len(data)} samples from rollout to train")
-
         return data, metrics
-
-    def _compute_dynamic_global_batch_size(self, num_samples: int) -> int:
-        """Calculate dynamic global_batch_size to ensure only one training step.
-
-        Strategy: global_batch_size = num_samples rounded down to a multiple of dp_size
-        This ensures num_steps_per_rollout = num_samples // global_batch_size = 1
-        """
-        dp_size = self.train_parallel_config["dp_size"]
-        original_gbs = self.args.global_batch_size
-
-        # Round down to a multiple of dp_size to ensure only one training step
-        dynamic_gbs = (num_samples // dp_size) * dp_size
-
-        if dynamic_gbs == 0:
-            # Too few samples, use at least dp_size
-            dynamic_gbs = dp_size
-            logger.warning(f"num_samples={num_samples} < dp_size={dp_size}, using dp_size as global_batch_size")
-
-        # Calculate how many samples will be discarded
-        wasted = num_samples - dynamic_gbs
-
-        if dynamic_gbs != original_gbs or wasted > 0:
-            logger.info(
-                f"Dynamic global_batch_size: {original_gbs} -> {dynamic_gbs} (num_samples={num_samples}, dp_size={dp_size}, num_steps=1, wasted={wasted})"
-            )
-
-        return dynamic_gbs
 
     def _save_debug_rollout_data(self, data, rollout_id, evaluation: bool):
         # TODO to be refactored (originally Buffer._set_data)
@@ -701,6 +664,13 @@ class RolloutManager:
         assert len(raw_rewards) == len(samples)
         assert len(rewards) == len(samples)
 
+        # Group id (one per training aggregation unit). Default rollouts emit
+        # one sample per group, so we fall back to the unique sample index.
+        # Compact / subagent paths that emit multiple training samples per
+        # group set ``Sample.group_id`` explicitly so all siblings share a
+        # value; assigning legacy ``Sample.rollout_id`` still forwards here.
+        group_ids = [sample.group_id if sample.group_id is not None else sample.index for sample in samples]
+
         train_data = {
             "tokens": [sample.tokens for sample in samples],
             "response_lengths": [sample.response_length for sample in samples],
@@ -710,6 +680,7 @@ class RolloutManager:
             "raw_reward": raw_rewards,
             "truncated": [1 if sample.status == Sample.Status.TRUNCATED else 0 for sample in samples],
             "sample_indices": [sample.index for sample in samples],
+            "group_ids": group_ids,
         }
 
         # loss mask
@@ -727,6 +698,24 @@ class RolloutManager:
                 sample.loss_mask = [0] * sample.response_length
             loss_masks.append(sample.loss_mask)
         train_data["loss_masks"] = loss_masks
+
+        # Per-group aggregate, precomputed at the step level (where we can
+        # see every sample of every group) and broadcast per-sample so the
+        # per-mb loss reducer uses the correct whole-group denominator even
+        # when a group's samples land in different micro-batches (first-fit
+        # packing can split a group across mbs):
+        #
+        #   ``group_mask_sums[i]`` — sum of loss-mask totals over every
+        #   sample in sample i's group. Used as the reducer's denominator
+        #   so summing partial contributions across mbs yields one
+        #   token-weighted mean per group.
+        group_id_list = train_data["group_ids"]
+        mask_sums_per_sample = [sum(m) for m in loss_masks]
+        group_total_mask: dict[int, int] = {}
+        for group_id, ms in zip(group_id_list, mask_sums_per_sample, strict=True):
+            group_total_mask[group_id] = group_total_mask.get(group_id, 0) + ms
+        group_mask_sums = [group_total_mask[group_id] for group_id in group_id_list]
+        train_data["group_mask_sums"] = group_mask_sums
 
         # Overwrite raw_reward when available. Mixed-source batches may only
         # populate this field for a subset of samples (e.g. SWE but not code).
@@ -761,27 +750,34 @@ class RolloutManager:
     def set_train_parallel_config(self, config: dict):
         self.train_parallel_config = config
 
-    def _split_train_data_by_dp(self, data, dp_size):
-        """Split the train data by data parallel size."""
-        rollout_data = {}
+    def _split_train_data_by_dp(self, data):
+        """Compute the DP/mbs schedule and package each rank's rollout_data
+        into a Ray Box. The schedule itself is computed by
+        :func:`build_dp_schedule` so it stays unit-testable without Ray/vllm.
 
-        if "prompt" in data:
-            rollout_data["prompt"] = data["prompt"]
-
+        Step split is by group id (``samples[i].group_id``, falling back to
+        ``samples[i].index``); each step holds exactly ``args.global_batch_size``
+        groups so the training step count is fixed at
+        ``rollout_batch_size * n_samples_per_prompt // global_batch_size``
+        regardless of how many training samples each group produced.
+        """
+        dp_size = self.train_parallel_config["dp_size"]
         total_lengths = [len(t) for t in data["tokens"]]
         data["total_lengths"] = total_lengths
 
-        if self.args.balance_data:
-            partitions = get_seqlen_balanced_partitions(total_lengths, dp_size, equal_size=True)
-        else:
-            partitions = [range(i, len(total_lengths), dp_size) for i in range(dp_size)]
+        partitions, micro_batch_indices, num_microbatches, global_batch_sizes = build_dp_schedule(
+            self.args,
+            self.train_parallel_config,
+            total_lengths,
+            global_batch_size=self.args.global_batch_size,
+            group_indices=data["group_ids"],
+        )
 
+        # Package per-rank rollout_data
         rollout_data_refs = []
-
-        for i in range(dp_size):
-            rollout_data = {}
-            partition = partitions[i]
-            rollout_data["partition"] = partition
+        for r in range(dp_size):
+            partition = partitions[r]
+            rollout_data = {"partition": partition}
             for key in [
                 "tokens",
                 "multimodal_train_inputs",
@@ -791,6 +787,8 @@ class RolloutManager:
                 "loss_masks",
                 "round_number",
                 "sample_indices",
+                "group_ids",
+                "group_mask_sums",
                 "rollout_log_probs",
                 "rollout_routed_experts",
                 "prompt",
@@ -798,21 +796,52 @@ class RolloutManager:
             ]:
                 if key not in data:
                     continue
-                val = [data[key][j] for j in partition]
-                rollout_data[key] = val
+                rollout_data[key] = [data[key][j] for j in partition]
             # keys that need to be splited at train side
-            for key in [
-                "raw_reward",
-                "total_lengths",
-            ]:
+            for key in ["raw_reward", "total_lengths"]:
                 if key not in data:
                     continue
                 rollout_data[key] = data[key]
-            # Pass dynamic global_batch_size to training side
-            if hasattr(self, "_dynamic_global_batch_size"):
-                rollout_data["dynamic_global_batch_size"] = self._dynamic_global_batch_size
+            rollout_data["global_batch_sizes"] = global_batch_sizes
+            rollout_data["num_microbatches"] = num_microbatches
+            rollout_data["micro_batch_indices"] = micro_batch_indices[r]
             rollout_data_refs.append(Box(ray.put(rollout_data)))
         return rollout_data_refs
+
+
+def _validate_group_id_annotated(node, depth=0):
+    """Walk the rollout function's nested output and validate ``group_id`` only
+    when a compact / subagent pattern is detected.
+
+    "Compact" = the rollout function wraps multiple training samples from one
+    rollout execution into a ``list[Sample]``. In slime's convention the
+    default rollout shape is ``list[list[Sample]]`` (depth-2: prompt × rollout)
+    so its leaf ``list[Sample]`` lands at depth 1 and we skip validation,
+    preserving backward compatibility. A compact rollout adds a third level:
+    ``list[list[list[Sample]]]`` (prompt × rollout × samples-from-one-group),
+    so the leaf ``list[Sample]`` lands at depth ≥ 2. At that point we require
+    every sibling to carry a non-None ``group_id`` (or legacy ``rollout_id``)
+    and to share the same value, so the loss reducer counts the group once
+    instead of N times.
+    """
+    if isinstance(node, Sample):
+        return
+    assert isinstance(node, list), f"unexpected rollout output node type: {type(node).__name__}"
+    if node and isinstance(node[0], Sample):
+        if depth >= 2 and len(node) > 1:
+            group_ids = [s.group_id for s in node]
+            missing = [i for i, group_id in enumerate(group_ids) if group_id is None]
+            assert not missing, (
+                f"Compact rollout returned {len(node)} samples but group_id is unset on "
+                f"positions {missing}. Set Sample.group_id on every sibling so the loss "
+                "reducer can aggregate them as one group instead of N."
+            )
+            assert (
+                len(set(group_ids)) == 1
+            ), f"Sibling samples from one compact rollout must share group_id; got {group_ids}."
+        return
+    for item in node:
+        _validate_group_id_annotated(item, depth + 1)
 
 
 def _allocate_rollout_engine_addr_and_ports_external(args, rollout_engines):
