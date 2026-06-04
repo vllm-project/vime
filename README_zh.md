@@ -82,7 +82,7 @@ Vime 由 slime 衍生而来。以下上游资源与本仓库文档仍沿用 slim
 ## 常见 Q&A 与致谢
 
 - 常见问题请见 [Q&A](docs/zh/get_started/qa.md)
-- 特别感谢 **vLLM** 项目与 **slime** 社区，以及 Vime 所依赖的 Megatron-LM 等开源项目。
+- 特别感谢 **slime** 社区，以及 slime 所依赖的 **SGLang**、**Megatron-LM** 等开源项目。
 
 引用 Vime 请使用：
 

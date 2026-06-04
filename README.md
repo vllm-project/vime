@@ -82,7 +82,7 @@ Vime is derived from slime. The following upstream resources and in-repo guides 
 ## FAQ & Acknowledgements
 
 - For frequently asked questions, please see the [Q&A](docs/en/get_started/qa.md)
-- Special thanks to the **vLLM** project and the **slime** community, as well as Megatron-LM and other open-source projects that Vime builds upon.
+- Special thanks to the **slime** community and the open-source projects that slime depends on, including **SGLang**, **Megatron-LM**, and others that Vime builds upon.
 
 Citation:
 
