@@ -76,8 +76,12 @@
       'extra_pip_deps': 'openai openai-agents anthropic',
       'tests': [
         {'test_file': 'test_agent_trajectory.py', 'num_gpus': 0},
-        {'test_file': 'test_agent_adapters.py', 'num_gpus': 0},
         {'test_file': 'test_agent_sdk_adapters.py', 'num_gpus': 0},
+        # NOTE: test_agent_adapters.py ported but NOT wired yet: 3/14 cases
+        # (uses_sglang_tokens_for_training_segment x2, generate_posts_input_ids_
+        # and_extracts_logprobs) mock sglang's /generate response schema
+        # (meta_info.output_token_logprobs); they need rewriting to vime's
+        # vLLM response format before wiring. 11/14 pass. See OVERNIGHT_REPORT.
       ],
     },
 
