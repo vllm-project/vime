@@ -3,7 +3,7 @@ import tempfile
 
 import vime.utils.external_utils.command_utils as U
 
-TIGHT_DEVICE_MEMORY = U.get_bool_env_var("SLIME_TEST_TIGHT_DEVICE_MEMORY", "1")
+TIGHT_DEVICE_MEMORY = U.get_bool_env_var("VIME_TEST_TIGHT_DEVICE_MEMORY", "1")
 
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"

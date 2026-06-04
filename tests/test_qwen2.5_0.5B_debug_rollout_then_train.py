@@ -13,7 +13,7 @@ import tempfile
 
 import vime.utils.external_utils.command_utils as U
 
-TIGHT_DEVICE_MEMORY = U.get_bool_env_var("SLIME_TEST_TIGHT_DEVICE_MEMORY", "1")
+TIGHT_DEVICE_MEMORY = U.get_bool_env_var("VIME_TEST_TIGHT_DEVICE_MEMORY", "1")
 
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
@@ -132,7 +132,7 @@ def execute_train_only(debug_data_dir: str):
 
 
 def execute():
-    debug_data_dir = tempfile.mkdtemp(prefix="slime_debug_rollout_")
+    debug_data_dir = tempfile.mkdtemp(prefix="vime_debug_rollout_")
     print(f"Using temp dir for rollout data: {debug_data_dir}")
 
     execute_rollout_only(debug_data_dir)

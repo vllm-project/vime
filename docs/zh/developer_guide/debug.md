@@ -2,7 +2,7 @@
 
 ## 对齐精度
 
-在开发 slime 的过程中，经常会需要检查模型的精度是否正确，可以通过以下方式检查：
+在开发 vime 的过程中，经常会需要检查模型的精度是否正确，可以通过以下方式检查：
 
 1. 训练第一步
    1. rollout 的生成是否是人话，如果不是，有以下 2 种可能：
@@ -25,20 +25,20 @@
 
 ## 训练推理单独 debug
 
-slime 支持将训练部分和推理部分分开进行调试，从而实现：
+vime 支持将训练部分和推理部分分开进行调试，从而实现：
 
 - 在调优/debug 推理部分时，只用少量卡就可以启动任务；
 - 在调优/debug 训练部分时，可以保证模型输入固定，去除 rollout 的随机性。
 
-具体来说，目前 slime 提供了如下的参数来进行分离调试：
+具体来说，目前 vime 提供了如下的参数来进行分离调试：
 
 1. `--debug-rollout-only`
 
-   开启后，slime 将不会加载 megatron，只初始化 vllm ，可以用这个方法来进行推理部分的调试。
+   开启后，vime 将不会加载 megatron，只初始化 vllm ，可以用这个方法来进行推理部分的调试。
 
 1. `--debug-train-only`
 
-   开启后，slime 将不会加载 vllm，只初始化 megatron ，可以用这个方法来进行训练部分的调试。
+   开启后，vime 将不会加载 vllm，只初始化 megatron ，可以用这个方法来进行训练部分的调试。
 
 2. `--save-debug-rollout-data /your/saved/debug/data_{rollout_id}.pt`
 
@@ -47,48 +47,6 @@ slime 支持将训练部分和推理部分分开进行调试，从而实现：
 3. `--load-debug-rollout-data /your/saved/debug/data_{rollout_id}.pt`
 
    开启后，会从 `args.load_debug_rollout_data.format(rollout_id=rollout_id)` 来加载数据，并且不会初始化 vllm（自动设置 `debug_train_only=True`）。可以以这种方式来固定训练部分的输入，对训练部分进行调优，例如切换各种并行。
-
-## INT4 / Compressed-Tensors 量化 Checkpoint 问题
-
-使用 INT4 量化模型（如 `compressed-tensors` 的 `W4A16`）时，checkpoint 的 `config.json` 中有一个 `quantization_config.ignore` 列表，指定哪些参数**不**做量化。在线权重更新（Megatron → vLLM）时，slime 也会读取这个 ignore list 来决定哪些参数需要 INT4 量化。ignore list 不正确会导致静默错误：
-
-1. **MoE 路由权重（`mlp.gate.weight`）变成全零**
-
-   MoE 的路由权重（`mlp.gate.weight`，shape `[num_experts, hidden_size]`）是一个普通的 2D weight tensor，但它**不是** Linear 层的权重。如果它不在 ignore list 中，在线量化器会把它 INT4 量化为 `weight_packed`、`weight_scale`、`weight_zero_point` 等。然而 vLLM 不会以量化名称来加载路由权重，因此这些参数在 `load_weights` 时被静默跳过，导致 gate 权重全零。
-
-   **修复方法**：确保 `config.json` 的 ignore list 中包含 `"re:.*mlp\\.gate\\..*"`。
-
-2. **其他非 Linear 的 2D 权重**
-
-   类似问题可能出现在任何不是真正 Linear 层的 2D `.weight` tensor 上，例如 `model.embed_tokens.weight`。务必检查 ignore list 覆盖了所有非 Linear 权重。
-
-   **推荐的 ignore 配置**（以 GLM 系 MoE 模型为例）：
-   ```json
-   "ignore": [
-     "lm_head",
-     "model.embed_tokens.weight",
-     "re:.*self_attn.*",
-     "re:.*mlp\\.shared_experts.*",
-     "re:.*mlp\\.gate_up_proj.*",
-     "re:.*mlp\\.gate_proj.*",
-     "re:.*mlp\\.up_proj.*",
-     "re:.*mlp\\.down_proj.*",
-     "re:.*eh_proj.*",
-     "re:.*mlp\\.gate\\..*"
-   ]
-   ```
-
-3. **safetensors 分片缺失**
-
-   转换工具偶尔可能产出不完整的 checkpoint（例如缺少 `model-00010-of-00093.safetensors`）。转换完成后，务必检查：
-   - `.safetensors` 文件数量是否与预期一致。
-   - `model.safetensors.index.json` 中是否包含所有 layer 的条目。
-   - 抽查关键 layer（如第一个 MoE layer）的 key 数量是否正确。
-
-4. **如何排查**
-
-   - 使用 `--check-weight-update-equal` 验证 Megatron → vLLM 权重同步后的值是否正确。如果某个参数在 vLLM 侧全为零，说明它可能被错误量化或在 checkpoint 中缺失。
-   - 使用 `--debug-rollout-only` 配合少量 GPU，快速测试 vLLM 能否从量化 checkpoint 正常生成文本。
 
 ## Debug vllm illegal memory access (IMA)
 

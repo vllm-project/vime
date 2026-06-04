@@ -1,14 +1,14 @@
 # 快速使用
 
-本文档从搭建环境开始，在一小时内带您快速上手 slime，涵盖环境配置，数据准备，训练启动和关键代码解析和魔改。
+本文档从搭建环境开始，在一小时内带您快速上手 vime，涵盖环境配置，数据准备，训练启动和关键代码解析和魔改。
 
 ## 基础环境搭建
 
-由于 slime 可能会包含针对 vllm/megatron 的临时补丁（patch）。为避免潜在的环境配置问题，强烈建议**用户使用我们提供的最新 Docker 镜像**，它已预置好所有依赖。
+由于 vime 可能会包含针对 vllm/megatron 的临时补丁（patch）。为避免潜在的环境配置问题，强烈建议**用户使用我们提供的最新 Docker 镜像**，它已预置好所有依赖。
 
 ### 硬件支持说明
 
-**slime** 支持多种 NVIDIA GPU 硬件平台：
+**vime** 支持多种 NVIDIA GPU 硬件平台：
 
 - **B200 系列**：完全支持，运行步骤与 H 系列完全相同
 - **H 系列 (H100/H200)**：官方支持，具有完整的 CI 测试保护，运行稳定可靠
@@ -19,7 +19,7 @@
 - B 卡基本功能稳定，可作为开发和测试参考，但暂无 CI 保护
 - 两种硬件平台使用完全相同的安装和启动流程
 
-- 对于不方便使用 docker 的场景，请参考 [build_conda.sh](https://github.com/THUDM/slime/blob/main/build_conda.sh)。
+- 对于不方便使用 docker 的场景，请参考 [build_conda.sh](https://github.com/vllm-project/vime/blob/main/build_conda.sh)。
 
 ### 拉取并启动 Docker 容器
 
@@ -35,13 +35,13 @@ docker run --rm --gpus all --ipc=host --shm-size=16g \
   -it inferactinc/public:vime-vllm-cu129-latest /bin/bash
 ```
 
-### 安装 slime
+### 安装 vime
 
-slime 已经安装在该 Docker 镜像中。如需更新到最新版本，请在 Docker 容器中执行以下命令：
+vime 已经安装在该 Docker 镜像中。如需更新到最新版本，请在 Docker 容器中执行以下命令：
 
 ```bash
 # 路径可根据实际情况调整
-cd /root/slime
+cd /root/vime
 git pull
 pip install -e . --no-deps
 ```
@@ -51,8 +51,8 @@ pip install -e . --no-deps
 可以从 Hugging Face、ModelScope 等平台下载所需的模型和数据集。以下是使用 `huggingface_hub` 下载示例资源的命令：
 
 ```bash
-# 下载模型权重 (GLM-Z1-9B)
-hf download zai-org/GLM-Z1-9B-0414 --local-dir /root/GLM-Z1-9B-0414
+# 下载模型权重 (Qwen3-4B)
+hf download zai-org/Qwen3-4B --local-dir /root/Qwen3-4B
 
 # 下载训练数据集 (dapo-math-17k)
 hf download --repo-type dataset zhuzilin/dapo-math-17k \
@@ -69,11 +69,11 @@ hf download --repo-type dataset zhuzilin/aime-2024 \
 
 当使用 Megatron 作为训练后端时，需要先将 Hugging Face 格式的模型权重转换为 Megatron `torch_dist` 格式。
 
-首先，加载目标模型的配置文件。`slime/scripts/models` 目录下包含了支持模型的配置文件。需要 `source` 对应模型的脚本，将配置参数加载到当前环境中。此处我们以 GLM4-9B 模型为例子，对于 Qwen3-4B、Qwen3.5、Qwen3.6、GLM-4.7-Flash、Qwen3-30B-A3B，是类似的。
+首先，加载目标模型的配置文件。`vime/scripts/models` 目录下包含了支持模型的配置文件。需要 `source` 对应模型的脚本，将配置参数加载到当前环境中。此处我们以 Qwen3-4B 模型为例子。
 
 ```bash
-cd /root/slime
-source scripts/models/glm4-9B.sh
+cd /root/vime
+source scripts/models/qwen3-4B.sh
 ```
 
 接下来，运行转换脚本。请注意以下参数：
@@ -83,12 +83,11 @@ source scripts/models/glm4-9B.sh
 ```bash
 PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
     ${MODEL_ARGS[@]} \
-    --hf-checkpoint /root/GLM-Z1-9B-0414 \
-    --save /root/GLM-Z1-9B-0414_torch_dist
+    --hf-checkpoint /root/Qwen3-4B \
+    --save /root/Qwen3-4B_torch_dist
 ```
 
 对于更大的模型，可以使用 `torchrun` 来启动转换脚本，从而使用多张 GPU 甚至多机进行权重转换。
-注意：kimi-k2模型权重转换时，需打开模型路径中的config.json，将"model_type": "kimi_k2"修改为"model_type": "deepseek_v3"。
 
 ### Megatron 格式 转换为 Hugging Face 格式
 
@@ -97,8 +96,8 @@ PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
 ```bash
 PYTHONPATH=/root/Megatron-LM python tools/convert_torch_dist_to_hf.py \
   --input-dir /path/to/torch_dist_ckpt/iter_xxx/ \
-  --output-dir /root/GLM-Z1-9B-0414-iter_xxx \
-  --origin-hf-dir /root/GLM-Z1-9B-0414
+  --output-dir /root/Qwen3-4B-iter_xxx \
+  --origin-hf-dir /root/Qwen3-4B
 ```
 
 由于 Megatron 会对 embedding 做 padding，可能会出现转换出来的权重的 embedding 形状不匹配的问题。这时需要在转换时设置 `--vocab-size`。
@@ -108,25 +107,25 @@ PYTHONPATH=/root/Megatron-LM python tools/convert_torch_dist_to_hf.py \
 完成上述准备工作后，即可运行训练脚本。
 
 ```bash
-cd /root/slime
-bash scripts/run-glm4-9B.sh
+cd /root/vime
+bash scripts/run-qwen3-4B.sh
 ```
 
-我们还是以 run-glm4-9B.sh 脚本为例，简单分析主要参数的作用。
+我们还是以 run-qwen3-4B.sh 脚本为例，简单分析主要参数的作用。
 
 ### MODEL_ARGS: 模型配置参数
 
 ```bash
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-source "${SCRIPT_DIR}/models/glm4-9B.sh"
+source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 ```
 
-此部分通过 `source` 命令从 `scripts/models/glm4-9B.sh` 文件中加载模型配置。这些配置均为 Megatron 所需的超参数。由于 Megatron 无法直接从检查点（checkpoint）中读取模型配置，因此需要手动指定。我们在 `scripts/models/` 目录下提供了一些常用模型的配置示例。
+此部分通过 `source` 命令从 `scripts/models/qwen3-4B.sh` 文件中加载模型配置。这些配置均为 Megatron 所需的超参数。由于 Megatron 无法直接从检查点（checkpoint）中读取模型配置，因此需要手动指定。我们在 `scripts/models/` 目录下提供了一些常用模型的配置示例。
 
 > ⚠️ **注意**：
 > 请务必检查模型配置文件中的参数（如 `--rotary-base`）是否与您当前使用的模型完全匹配。同一模型结构的不同版本可能使用不同的配置值。如果需要修改，您可以在 `source` 之后直接覆盖，例如：
 > ```bash
-> source "${SCRIPT_DIR}/models/glm4-9B.sh"
+> source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 > MODEL_ARGS+=(--rotary-base 10000)
 > ```
 
@@ -135,13 +134,13 @@ source "${SCRIPT_DIR}/models/glm4-9B.sh"
 ```bash
 CKPT_ARGS=(
    # 用于加载 tokenizer 等其他信息，实际上不会使用 hf 路径中的模型权重参数
-   --hf-checkpoint /root/GLM-Z1-9B-0414
+   --hf-checkpoint /root/Qwen3-4B
    # 参考模型 (Reference Model) 的 Megatron 格式检查点
-   --ref-load /root/GLM-Z1-9B-0414_torch_dist
+   --ref-load /root/Qwen3-4B_torch_dist
    # Actor 模型的加载路径。若为空或不存在有效的checkpoint，则从 --ref-load 加载
-   --load /root/GLM-Z1-9B-0414_slime/
+   --load /root/Qwen3-4B_vime/
    # 训练过程中模型的保存路径
-   --save /root/GLM-Z1-9B-0414_slime/
+   --save /root/Qwen3-4B_vime/
    # 模型保存间隔（步数）
    --save-interval 20
 )
@@ -168,7 +167,7 @@ CKPT_ARGS=(
 在这个过程中，每轮的“产出”与“消耗”必须相等，遵循以下约束：
 **`(rollout-batch-size × n-samples-per-prompt) = (global-batch-size × num-steps-per-rollout)`**
 
-- 在 slime 中，如果设置了 `--num-steps-per-rollout` ，`--global-batch-size` 未设置则会被自动设置，设置了则会被用上述公式校验。
+- 在 vime 中，如果设置了 `--num-steps-per-rollout` ，`--global-batch-size` 未设置则会被自动设置，设置了则会被用上述公式校验。
 
 **训练流程次数控制**
 -   `--num-rollout`: 控制整个 **“采样→训练”** 循环的**总执行轮次**。
@@ -184,7 +183,7 @@ ROLLOUT_ARGS=(
    # 是否在 Rollout 阶段打乱数据
    --rollout-shuffle
 
-   # Reward Model 类型。slime 内置多种类型，也支持通过 --custom-rm-path 自定义
+   # Reward Model 类型。vime 内置多种类型，也支持通过 --custom-rm-path 自定义
    --rm-type deepscaler
 
    # 这五个参数来控制 rollout 与 train 的关系
@@ -224,14 +223,14 @@ EVAL_ARGS=(
 
 ### PERF_ARGS: 性能与并行参数
 
-这部分主要包含 Megatron 的并行配置。`--use-dynamic-batch-size` 和 `--max-tokens-per-gpu` 是 slime 添加的特有优化。
+这部分主要包含 Megatron 的并行配置。`--use-dynamic-batch-size` 和 `--max-tokens-per-gpu` 是 vime 添加的特有优化。
 
 -   `--max-tokens-per-gpu`: 每张 GPU 处理的最大 Token 数。启用动态批处理（`use_dynamic_batch_size`）后，系统会智能地将长短不一的样本打包，使每个 micro-batch 的总 Token 数接近此限制，从而提升训练效率。如果单个样本长度超过该值，它将独立形成一个 batch。在上下文并行（CP）模式下，`N` 张 CP 卡共享 `N * max_tokens_per_gpu` 的总长度。
 -   `--use-dynamic-batch-size`: 启用动态批处理。此时会忽略 `--micro-batch-size`。
 
 
 > 💡 **提示**：
->  slime 总是会通过 data packing 的方法训练模型，并且严格保证 per sample loss 或 per token loss 是正确的。因此，开启 dynamic batch size 不会对 loss 计算有影响，强烈推荐开启。
+>  vime 总是会通过 data packing 的方法训练模型，并且严格保证 per sample loss 或 per token loss 是正确的。因此，开启 dynamic batch size 不会对 loss 计算有影响，强烈推荐开启。
 
 ```bash
 PERF_ARGS=(
@@ -268,8 +267,8 @@ GRPO_ARGS=(
 )
 ```
 
-- `--advantage-estimator`: 除去 [GRPO](https://arxiv.org/abs/2402.03300)，slime 还支持丰富的其他训练算法，例如 [GSPO](https://arxiv.org/abs/2507.18071)、[Reinforce++](https://arxiv.org/abs/2501.03262) 与 [Reinforce++ Baseline](https://arxiv.org/abs/2501.03262)、以及 [PPO](https://arxiv.org/abs/1707.06347)；
-- `--calculate-per-token-loss`：slime 中默认的方案是 per sample loss，即 `mean(sum(sample_i) / len(sample_i))`，如果需要计算 per token loss，即 `sum(sum(sample_i)) / sum(len(sample_i))`，可以开启 `--calculate-per-token-loss`；
+- `--advantage-estimator`: 除去 [GRPO](https://arxiv.org/abs/2402.03300)，vime 还支持丰富的其他训练算法，例如 [GSPO](https://arxiv.org/abs/2507.18071)、[Reinforce++](https://arxiv.org/abs/2501.03262) 与 [Reinforce++ Baseline](https://arxiv.org/abs/2501.03262)、以及 [PPO](https://arxiv.org/abs/1707.06347)；
+- `--calculate-per-token-loss`：vime 中默认的方案是 per sample loss，即 `mean(sum(sample_i) / len(sample_i))`，如果需要计算 per token loss，即 `sum(sum(sample_i)) / sum(len(sample_i))`，可以开启 `--calculate-per-token-loss`；
 - `--use-tis`：如果需要开启 TIS (Truncated Importance Sampling)，可以开启这一设置。TIS 由此[博客](https://fengyao.notion.site/off-policy-rl)介绍。
 
 ### OPTIMIZER_ARGS: 优化器参数
@@ -289,10 +288,10 @@ OPTIMIZER_ARGS=(
 
 这部分参数用于配置 vLLM 推理服务。
 - `--rollout-num-gpus-per-engine`: 等同于 vLLM 的 `tp_size`。
-- 其他 vLLM 参数可以通过添加 `--vllm-` 前缀传递给 slime，slime 会自动透传给 vLLM。例如，要设置 vLLM 的 `--log-level INFO` 参数，只需使用 `--vllm-log-level INFO` 即可。
+- 其他 vLLM 参数可以通过添加 `--vllm-` 前缀传递给 vime，vime 会自动透传给 vLLM。例如，要设置 vLLM 的 `--log-level INFO` 参数，只需使用 `--vllm-log-level INFO` 即可。
 
 > ⚠️ **注意**：
-> slime 使用 `vllm-router` 调度多个 vLLM 引擎。`dp_size` 会通过 `rollout-num-gpus / rollout-num-gpus-per-engine` 计算得到。
+> vime 使用 `vllm-router` 调度多个 vLLM 引擎。`dp_size` 会通过 `rollout-num-gpus / rollout-num-gpus-per-engine` 计算得到。
 
 ```bash
 VLLM_ARGS=(
@@ -338,12 +337,12 @@ ray job submit ... \
 
 ### Dynamic Sampling
 
-slime 支持更复杂的采样策略，例如 [DAPO](https://dapo-sia.github.io/) 中使用的动态采样。要启用此功能，需配置以下参数：
+vime 支持更复杂的采样策略，例如 [DAPO](https://dapo-sia.github.io/) 中使用的动态采样。要启用此功能，需配置以下参数：
 
 ```bash
    --over-sampling-batch-size 64 \
    --dynamic-sampling-filter-path \
-     slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
+     vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
 ```
 
 这里 `over_sampling_batch_size` 需要大于 `rollout_batch_size`，例如配置为：
@@ -354,7 +353,7 @@ slime 支持更复杂的采样策略，例如 [DAPO](https://dapo-sia.github.io/
    --over-sampling-batch-size 64 \
 ```
 
-那么 sampling 会直接采样 64 条 prompt，每条 prompt 采样 8 次。因为 slime 内部进行的是异步采样，所以我们会先后获得每个 prompt 的 8 条回复。在收到回复时，会用 `dynamic_sampling_filter_path` 对应的函数进行筛选，如果通过，则留下这 8 条数据，否则则丢掉。
+那么 sampling 会直接采样 64 条 prompt，每条 prompt 采样 8 次。因为 vime 内部进行的是异步采样，所以我们会先后获得每个 prompt 的 8 条回复。在收到回复时，会用 `dynamic_sampling_filter_path` 对应的函数进行筛选，如果通过，则留下这 8 条数据，否则则丢掉。
 
 示例中的过滤函数 `check_reward_nonzero_std` 会检查一组样本的奖励（reward）标准差是否大于零，确保留下的每组样本其奖励分数都存在差异，从而避免数据过于单一，提升了数据的多样性。
 
@@ -391,40 +390,17 @@ def pop_first(args, rollout_id, buffer: list[list[Sample]], num_samples: int) ->
 
 
 
-### bf16 训练 fp8 推理
-
-slime 直接支持 bf16 训练，fp8 推理。对于 Qwen3-4B 模型，只需要下载如下模型：
-
-```bash
-hf download Qwen/Qwen3-4B-FP8 --local-dir /root/Qwen3-4B-FP8
-```
-
-并将 `--hf-checkpoint` 替换为：
-
-```bash
-   # 用于加载 tokenizer 等其他信息，实际上不会使用 hf 路径中的模型权重参数
-   --hf-checkpoint /root/Qwen3-4B-FP8
-
-   #  megatron checkpoint 还需要是最开始用 bf16 的 huggingface 转换的 dist 权重，不因为 FP8 rollout 而去做修改。
-   --ref-load /root/Qwen3-4B_torch_dist
-```
-
-即可触发 fp8 推理。目前我们会将 bf16 权重直接 cast 为 fp8，后续会逐渐添加对精度影响更小的量化方案。
-
-⚠️  训练的 megatron checkpoint 还需要是最开始用 bf16 的 huggingface 转换的。
-
-
 ## Multiturn 适配
 
-slime 框架高度可扩展，支持复杂的 Agent 场景（如多轮交互与工具调用）。其核心机制是通过自定义函数，重写默认的数据生成 (Rollout) 与奖励计算 (Reward) 逻辑。
+vime 框架高度可扩展，支持复杂的 Agent 场景（如多轮交互与工具调用）。其核心机制是通过自定义函数，重写默认的数据生成 (Rollout) 与奖励计算 (Reward) 逻辑。
 
-本部分以一个基于 [Search-R1](https://github.com/PeterGriffinJin/Search-R1) 的实现为例，说明如何适配 slime 以支持多轮交互。
+本部分以一个基于 [Search-R1](https://github.com/PeterGriffinJin/Search-R1) 的实现为例，说明如何适配 vime 以支持多轮交互。
 
 ### 适配思路总结
 
-适配 slime 以支持多轮交互主要包含三个步骤：
+适配 vime 以支持多轮交互主要包含三个步骤：
 
-1.  **数据准备**：将多轮交互数据集适配为 slime 的 `Sample` 对象。将对话历史、真实标签等映射到 `prompt` 和 `label` 字段，并将工具定义、中间状态等额外信息存入 `metadata` 字段，供后续函数调用。
+1.  **数据准备**：将多轮交互数据集适配为 vime 的 `Sample` 对象。将对话历史、真实标签等映射到 `prompt` 和 `label` 字段，并将工具定义、中间状态等额外信息存入 `metadata` 字段，供后续函数调用。
 
 2.  **实现自定义生成函数**：编写函数模拟“模型生成动作 → 执行工具 → 拼接观察结果”的交互循环，并正确处理 Loss Masking。
 
@@ -452,7 +428,7 @@ slime 框架高度可扩展，支持复杂的 Agent 场景（如多轮交互与�
 
 ### 步骤二：在训练脚本中指定映射
 
-完成数据准备后，在训练脚本中，通过 `ROLLOUT_ARGS` 将这个预处理好的 `metadata` 列映射到 slime 的 `Sample.metadata` 字段。
+完成数据准备后，在训练脚本中，通过 `ROLLOUT_ARGS` 将这个预处理好的 `metadata` 列映射到 vime 的 `Sample.metadata` 字段。
 
 ```bash
 ROLLOUT_ARGS=(
@@ -466,7 +442,7 @@ ROLLOUT_ARGS=(
    --label-key final_answer
 
    # 4. 将预先构造好的 "metadata" 列加载到 Sample.metadata
-   #    slime 会自动将其解析为 Python 字典
+   #    vime 会自动将其解析为 Python 字典
    --metadata-key metadata
 )
 ```
@@ -571,11 +547,9 @@ ray job submit --address="http://127.0.0.1:8265" \
      }
    }' \
    -- python3 train.py \
-   --...（其他 Megatron/vLLM/slime 参数）
+   --...（其他 Megatron/vLLM/vime 参数）
 ```
 
-slime 针对大规模混合专家（MoE）模型的分布式训练进行了深度优化。我们提供了一些端到端的训练案例以供参考：
+vime 针对大规模混合专家（MoE）模型的分布式训练进行了深度优化。我们提供了一些端到端的训练案例以供参考：
 
-- [示例：8xH100 训练 GLM-4.7-Flash](../examples/glm4.7-30B-A3B.md)
-- [示例：64xH100 训练 GLM-4.7](../examples/glm4.7-355B-A32B.md)
-- [示例：128xH100 训练 DeepSeek-R1](../examples/deepseek-r1.md)
+- [示例：8xH100 训练 Qwen3-30B-A3B](../examples/qwen3-30B-A3B.md)

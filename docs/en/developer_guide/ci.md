@@ -1,13 +1,13 @@
 # CI (Continuous Integration)
 
-slime uses GitHub Actions for CI. Tests are triggered by **PR labels** — adding a specific label to a PR will run the corresponding test suite.
+vime uses GitHub Actions for CI. Tests are triggered by **PR labels** — adding a specific label to a PR will run the corresponding test suite.
 
 ## How It Works
 
 The workflow is defined in `.github/workflows/pr-test.yml` (auto-generated from `pr-test.yml.j2`). Each CI job:
 
 1. Runs on a self-hosted GPU runner via `docker run`; most tests use `inferactinc/public:vime-vllm-cu129-latest`, while image validation uses `inferactinc/public:vime-vllm-cu129-latest`.
-2. Installs slime with `pip install -e . --no-deps`.
+2. Installs vime with `pip install -e . --no-deps`.
 3. Acquires the required GPUs via `tests/ci/gpu_lock_exec.py --count <num_gpus>`.
 4. Executes the test file: `python <test_path>.py` or `python tests/<test_file>.py`, depending on whether the test lives under `tests/` or a subdirectory such as `tests/plugin_contracts/`.
 
@@ -20,7 +20,7 @@ Add a label to your PR to trigger the corresponding test suite:
 | Label | Job | Description |
 |---|---|---|
 | `run-ci-short` | `e2e-test-short` | Lightweight smoke tests with Qwen2.5-0.5B (4 GPUs). Fast feedback loop. |
-| `run-ci-megatron` | `e2e-test-megatron` | Core Megatron training tests covering dense, MoE, PPO, MTP, OPD, etc. |
+| `run-ci-megatron` | `e2e-test-megatron` | Core Megatron training tests covering dense, MoE, PPO, MTP, etc. |
 | `run-ci-precision` | `e2e-test-precision` | Numerical precision validation (parallel check). |
 | `run-ci-ckpt` | `e2e-test-ckpt` | Checkpoint save/load correctness (sync and async-save). |
 | `run-ci-image` | `e2e-test-image` | Full test suite run on `inferactinc/public:vime-vllm-cu129-latest` image (for image validation). |
@@ -40,7 +40,7 @@ This is the most useful label for development. When you add a new test file or m
 
 This means you don't need to manually register your new test in the workflow — just make sure your test file has a top-level `NUM_GPUS = <N>` constant and `run-ci-changed` will pick it up.
 
-**Example**: If your PR adds `tests/test_qwen3_8B_opd_vllm.py` with `NUM_GPUS = 8`, adding the `run-ci-changed` label will automatically run that test on 8 GPUs.
+**Example**: If your PR adds `tests/test_mimo_7B_mtp_only_grad.py` with `NUM_GPUS = 8`, adding the `run-ci-changed` label will automatically run that test on 8 GPUs.
 
 ### `run-ci-image` — Full Suite on Test Image
 
@@ -56,8 +56,8 @@ Since this includes every test, it consumes significant GPU time — use it spar
 This is the primary label for validating Megatron-backend changes. It covers:
 
 - Dense models: GLM4-9B, Qwen3-4B (PPO)
-- MoE models: Qwen3-30B-A3B (with DeepEP + FP8), Qwen3.6-35B-A3B PD + Mooncake, Moonlight-16B-A3B
-- Specialized: MiMo-7B MTP, Qwen2.5-0.5B debug rollout-then-train, OPD with vLLM teacher
+- MoE models: Qwen3-30B-A3B (with DeepEP), Qwen3.6-35B-A3B PD + Mooncake, Moonlight-16B-A3B
+- Specialized: MiMo-7B MTP, Qwen2.5-0.5B debug rollout-then-train
 
 All tests use 8 GPUs. If you are modifying Megatron training logic, loss computation, or checkpoint conversion, this is the label to use.
 
@@ -67,7 +67,7 @@ All tests use 8 GPUs. If you are modifying Megatron training logic, loss computa
 
 ```python
 import os
-import slime.utils.external_utils.command_utils as U
+import vime.utils.external_utils.command_utils as U
 
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"

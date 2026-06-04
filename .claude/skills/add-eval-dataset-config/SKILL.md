@@ -1,11 +1,11 @@
 ---
 name: add-eval-dataset-config
-description: Guide for adding and validating evaluation dataset configuration in slime. Use when user wants to configure eval datasets via --eval-config or --eval-prompt-data, add per-dataset overrides, or customize evaluation rollout behavior.
+description: Guide for adding and validating evaluation dataset configuration in vime. Use when user wants to configure eval datasets via --eval-config or --eval-prompt-data, add per-dataset overrides, or customize evaluation rollout behavior.
 ---
 
 # Add Eval Dataset Config
 
-Configure evaluation datasets in slime with explicit dataset-level overrides and predictable runtime behavior.
+Configure evaluation datasets in vime with explicit dataset-level overrides and predictable runtime behavior.
 
 ## When to Use
 
@@ -53,7 +53,7 @@ eval:
 
 ### Step 3: Understand Override Priority
 
-`slime/utils/eval_config.py` resolves fields in this order:
+`vime/utils/eval_config.py` resolves fields in this order:
 
 1. Dataset-level values in `eval.datasets[*]`
 2. `eval.defaults`
@@ -85,7 +85,7 @@ Use a separate eval function when inference/eval behavior must differ from train
 
 ## Reference Locations
 
-- Eval config model: `slime/utils/eval_config.py`
-- Eval config resolution: `slime/utils/arguments.py`
-- Eval rollout path: `slime/rollout/vllm_rollout.py`
+- Eval config model: `vime/utils/eval_config.py`
+- Eval config resolution: `vime/utils/arguments.py`
+- Eval rollout path: `vime/rollout/vllm_rollout.py`
 - Customization docs: `docs/en/get_started/customization.md`

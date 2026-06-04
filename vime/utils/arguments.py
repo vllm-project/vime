@@ -32,8 +32,8 @@ def reset_arg(parser, name, **kwargs):
         parser.add_argument(name, **kwargs)
 
 
-def get_slime_extra_args_provider(add_custom_arguments=None):
-    def add_slime_arguments(parser):
+def get_vime_extra_args_provider(add_custom_arguments=None):
+    def add_vime_arguments(parser):
         # Ray
         def add_cluster_arguments(parser):
             parser.add_argument("--actor-num-nodes", type=int, default=1, help="Number of nodes for training actor")
@@ -618,7 +618,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "Because the sample length varies, to maximize the GPU utilization, "
                     "we will use the dynamic batch size to adjust the micro batch size according to the maximum number of tokens each gpu can run. "
                     "For example, if we have 3 samples, with the length of 100, 200, and 300, and the max_tokens_per_gpu is 300, when enabling "
-                    "dynamic batch size, slime will make 2 micro batches, i.e. [100, 200], [300]."
+                    "dynamic batch size, vime will make 2 micro batches, i.e. [100, 200], [300]."
                 ),
             )
             parser.add_argument(
@@ -1176,6 +1176,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 choices=["torch", "memray"],
                 default="torch",
             )
+            reset_arg(parser, "--record-memory-history", action="store_true", default=False)
             parser.add_argument("--check-weight-update-equal", action="store_true")
             return parser
 
@@ -1375,7 +1376,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             )
             return parser
 
-        # Add custom arguments in front to prevent overwritten some slime arguments.
+        # Add custom arguments in front to prevent overwritten some vime arguments.
         if add_custom_arguments is not None:
             parser = add_custom_arguments(parser)
 
@@ -1408,13 +1409,13 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
 
         return parser
 
-    return add_slime_arguments
+    return add_vime_arguments
 
 
 def _pre_parse_mode():
     """Pre-parse CLI to extract arguments that control parsing flow.
 
-    These arguments are removed from add_slime_arguments to avoid
+    These arguments are removed from add_vime_arguments to avoid
     registering them twice.  The returned namespace is merged into
     the final ``args`` after Phase 2 parsing.
     """
@@ -1431,7 +1432,7 @@ def parse_args(add_custom_arguments=None):
     # Users may call `parse_args` very early, thus we ensure logger is configured here
     configure_logger()
 
-    add_slime_arguments = get_slime_extra_args_provider(add_custom_arguments)
+    add_vime_arguments = get_vime_extra_args_provider(add_custom_arguments)
 
     pre = _pre_parse_mode()
     skip_vllm = pre.debug_train_only or pre.load_debug_rollout_data is not None
@@ -1441,14 +1442,14 @@ def parse_args(add_custom_arguments=None):
     if not skip_vllm:
         vllm_ns = vllm_parse_args()
 
-    # Phase 2: Parse megatron + slime args.
+    # Phase 2: Parse megatron + vime args.
     # Uses ignore_unknown_args=True so that --vllm-* and pre-parsed CLI flags are
     # silently ignored by the megatron parser.
     from vime.backends.megatron_utils.arguments import megatron_parse_args
     from vime.backends.megatron_utils.arguments import validate_args as megatron_validate_args
 
     args = megatron_parse_args(
-        extra_args_provider=add_slime_arguments,
+        extra_args_provider=add_vime_arguments,
         skip_hf_validate=pre.debug_rollout_only,
     )
 
@@ -1461,7 +1462,7 @@ def parse_args(add_custom_arguments=None):
         for key, value in vars(vllm_ns).items():
             setattr(args, key, value)
 
-    slime_validate_args(args)
+    vime_validate_args(args)
 
     if pre.train_backend == "megatron" and not args.debug_rollout_only:
         megatron_validate_args(args)
@@ -1596,7 +1597,7 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
     return eval_datasets
 
 
-def slime_validate_args(args):
+def vime_validate_args(args):
     args.eval_datasets = _resolve_eval_datasets(args)
 
     if args.kl_coef != 0 or args.use_kl_loss:
@@ -1749,6 +1750,19 @@ def slime_validate_args(args):
             args.offload_train = True
         if args.offload_rollout is None:
             args.offload_rollout = True
+        # In colocate mode the rollout engines share the actor's physical nodes, so the
+        # GPUs-per-physical-node equals actor_num_gpus_per_node. --num-gpus-per-node defaults
+        # to 8 (an 8-GPU/node assumption); on hardware with a different per-node count (e.g.
+        # 4x GB200/node) that default is wrong for MULTI-NODE colocate: the rollout-engine
+        # addr/port allocation computes node_index via num_gpus_per_node and maps every engine
+        # to node 0, so worker-node engines are handed the head node's IP and fail to bind
+        # (OSError: [Errno 99] Cannot assign requested address). Derive the real per-node count.
+        if args.num_gpus_per_node != args.actor_num_gpus_per_node:
+            logger.info(
+                f"colocate: overriding num_gpus_per_node {args.num_gpus_per_node} -> "
+                f"actor_num_gpus_per_node {args.actor_num_gpus_per_node} (per-physical-node GPU count)."
+            )
+            args.num_gpus_per_node = args.actor_num_gpus_per_node
         if args.rollout_num_gpus != args.actor_num_gpus_per_node * args.actor_num_nodes:
             logger.info(
                 f"rollout_num_gpus {args.rollout_num_gpus} != actor_num_gpus_per_node {args.actor_num_gpus_per_node} "
@@ -1763,6 +1777,9 @@ def slime_validate_args(args):
 
     if args.use_critic:
         args.offload_train = True
+
+    if args.offload_train:
+        args.disable_grad_buffers_cpu_backup = True
 
     if args.eval_function_path is None:
         args.eval_function_path = args.rollout_function_path

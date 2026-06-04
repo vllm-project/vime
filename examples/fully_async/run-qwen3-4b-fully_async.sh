@@ -28,17 +28,16 @@ source "${SCRIPT_DIR}/../../scripts/models/qwen3-4B.sh"
 
 CKPT_ARGS=(
    --hf-checkpoint /root/Qwen3-4B
-   #--hf-checkpoint /root/Qwen3-4B-FP8
    --ref-load /root/Qwen3-4B_torch_dist
-   --load /root/Qwen3-4B_slime/
-   --save /root/Qwen3-4B_slime/
+   --load /root/Qwen3-4B_vime/
+   --save /root/Qwen3-4B_vime/
    --save-interval 20
 )
 
 PROMPT_SET=/path/to/dapo-math-17k.jsonl
 
 ROLLOUT_ARGS=(
-   --rollout-function-path fully_async_rollout.generate_rollout_fully_async
+   --rollout-function-path vime.rollout.fully_async_rollout.generate_rollout_fully_async
    --prompt-data ${PROMPT_SET}
    --input-key prompt
    --label-key label

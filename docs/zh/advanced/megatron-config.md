@@ -8,7 +8,7 @@
 
 ## 设计概览
 
-默认情况下（不使用 `--megatron-config-path`），actor 和 critic 都直接继承命令行中的 Megatron / slime 参数。
+默认情况下（不使用 `--megatron-config-path`），actor 和 critic 都直接继承命令行中的 Megatron / vime 参数。
 
 使用 `--megatron-config-path` 后，配置会分成两层：
 
@@ -17,7 +17,7 @@
 
 **核心设计原则：**
 
-- **CLI 是公共基线。** slime 会先解析普通命令行参数，再应用 YAML 中的角色覆盖。
+- **CLI 是公共基线。** vime 会先解析普通命令行参数，再应用 YAML 中的角色覆盖。
 - **缺失角色自动继承。** 如果某个 role 没有出现在 YAML 中，该角色会直接继承 CLI 参数。
 - **资源申请仍由 CLI 控制。** YAML 中的 `num_nodes` 和 `num_gpus_per_node` 会被忽略；资源分配仍由 `--actor-num-*` / `--critic-num-*` 决定。
 

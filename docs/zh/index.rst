@@ -1,12 +1,12 @@
-slime 文档
+vime 文档
 ====================
 
-slime 是一个面向 RL Scaling 的 LLM 后训练框架，提供两大核心能力：
+vime 是一个面向 RL Scaling 的 LLM 后训练框架，提供两大核心能力：
 
 - 高性能训练：通过连接 Megatron 与 vLLM，支持多种模式下的高效训练；
 - 灵活的数据生成：通过自定义数据生成接口与基于服务器的引擎，实现任意训练数据生成流程。
 
-slime 是 GLM-4.7、GLM-4.6、GLM-4.5 背后的 RL 训练框架。除此之外，slime 还支持:
+vime 是 GLM-4.7、GLM-4.6、GLM-4.5 背后的 RL 训练框架。除此之外，vime 还支持:
 
 - Qwen3 系列 (Qwen3Next, Qwen3MoE, Qwen3), Qwen2.5 系列；
 - DeepSeek V3 系列 (DeepSeek V3, V3.1, DeepSeek R1)；
@@ -26,24 +26,18 @@ slime 是 GLM-4.7、GLM-4.6、GLM-4.5 背后的 RL 训练框架。除此之外�
    :caption: Dense
 
    examples/qwen3-4B.md
-   examples/glm4-9B.md
 
 .. toctree::
    :maxdepth: 1
    :caption: MoE
 
-   examples/glm4.7-30B-A3B.md
    examples/qwen3-30B-A3B.md
-   examples/glm4.7-355B-A32B.md
-   examples/deepseek-r1.md
 
 .. toctree::
    :maxdepth: 1
    :caption: 高级特性
 
-   advanced/on-policy-distillation.md
    advanced/speculative-decoding.md
-   advanced/low-precision.md
    advanced/reproducibility.md
    advanced/fault-tolerance.md
    advanced/pd-disaggregation.md
@@ -55,7 +49,6 @@ slime 是 GLM-4.7、GLM-4.6、GLM-4.5 背后的 RL 训练框架。除此之外�
    :maxdepth: 1
    :caption: 其他用法
 
-   examples/qwen3-4b-base-openhermes.md
    _examples_synced/search-r1/README.md
    _examples_synced/fully_async/README.md
    _examples_synced/retool/README.md
@@ -69,4 +62,3 @@ slime 是 GLM-4.7、GLM-4.6、GLM-4.5 背后的 RL 训练框架。除此之外�
    developer_guide/debug.md
    developer_guide/trace.md
    developer_guide/profiling.md
-

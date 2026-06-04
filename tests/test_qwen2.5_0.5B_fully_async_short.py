@@ -1,54 +1,50 @@
+"""CI smoke test for the fully-async rollout path.
+
+Mirrors ``test_qwen2.5_0.5B_async_short`` (Qwen2.5-0.5B + dapo-math-17k +
+3 rollouts of GRPO) but flips the rollout function over to
+``vime.rollout.fully_async_rollout.generate_rollout_fully_async`` so the
+fully-async worker path gets exercised end-to-end.
+
+Kept intentionally minimal so it runs in the same time budget as the
+existing 0.5B short tests.
+"""
+
 import os
-
 import vime.utils.external_utils.command_utils as U
-
 
 TIGHT_DEVICE_MEMORY = U.get_bool_env_var("VIME_TEST_TIGHT_DEVICE_MEMORY", "1")
 
-MODEL_NAME = "Qwen3.5-0.8B"
-MODEL_TYPE = "qwen3.5-0.8B"
+MODEL_NAME = "Qwen2.5-0.5B-Instruct"
+MODEL_TYPE = "qwen2.5-0.5B"
 NUM_GPUS = 4
-TORCH_DIST_CKPT = f"/dev/shm/{MODEL_NAME}_torch_dist"
 
 
 def prepare():
     U.exec_command("mkdir -p /root/models /root/datasets")
     U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/gsm8k")
-    U.convert_checkpoint(
-        model_name=MODEL_NAME,
-        megatron_model_type=MODEL_TYPE,
-        num_gpus_per_node=NUM_GPUS,
-        dir_dst="/dev/shm",
-    )
+    U.hf_download_dataset("zhuzilin/dapo-math-17k")
 
 
 def execute():
-    ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load {TORCH_DIST_CKPT} "
+    ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load /root/models/{MODEL_NAME}/ "
 
     rollout_args = (
-        "--prompt-data /root/datasets/gsm8k/train.parquet "
-        "--input-key messages "
+        # The only line that differs from test_qwen2.5_0.5B_async_short.py:
+        # use the public fully-async rollout function.
+        "--rollout-function-path vime.rollout.fully_async_rollout.generate_rollout_fully_async "
+        "--prompt-data /root/datasets/dapo-math-17k/dapo-math-17k.jsonl "
+        "--input-key prompt "
         "--label-key label "
         "--apply-chat-template "
         "--rollout-shuffle "
-        "--rm-type math "
+        "--rm-type deepscaler "
         "--num-rollout 3 "
         "--rollout-batch-size 8 "
         "--n-samples-per-prompt 4 "
-        "--rollout-max-response-len 1024 "
+        "--rollout-max-response-len 8192 "
         "--rollout-temperature 0.8 "
-        "--over-sampling-batch-size 16 "
-        "--dynamic-sampling-filter-path vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std "
         "--global-batch-size 32 "
-    )
-
-    eval_args = (
-        "--eval-interval 8 "
-        "--eval-prompt-data gsm8k /root/datasets/gsm8k/test.parquet "
-        "--n-samples-per-eval-prompt 1 "
-        "--eval-max-response-len 1024 "
-        "--eval-top-k 1 "
+        "--balance-data "
     )
 
     perf_args = (
@@ -84,7 +80,7 @@ def execute():
     vllm_args = (
         "--rollout-num-gpus-per-engine 1 "
         f"--vllm-gpu-memory-utilization {0.55 if TIGHT_DEVICE_MEMORY else 0.65} "
-        "--vllm-max-cudagraph-capture-size 64"
+        "--vllm-max-cudagraph-capture-size 32 "
     )
 
     ci_args = "--ci-test "
@@ -102,10 +98,10 @@ def execute():
         "--accumulate-allreduce-grads-in-fp32 "
         "--attention-softmax-in-fp32 "
         "--attention-backend flash "
-        "--loss-mask-type qwen3_5 "
         "--actor-num-nodes 1 "
         "--actor-num-gpus-per-node 1 "
         "--rollout-num-gpus 3 "
+        "--megatron-to-hf-mode bridge "
     )
 
     train_args = (
@@ -115,7 +111,6 @@ def execute():
         f"{grpo_args} "
         f"{U.get_default_wandb_args(__file__)} "
         f"{perf_args} "
-        f"{eval_args} "
         f"{vllm_args} "
         f"{ci_args} "
         f"{fault_tolerance_args} "
@@ -132,6 +127,8 @@ def execute():
 
 if __name__ == "__main__":
     prepare()
-    for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
-        os.environ.pop(proxy_var, None)
+    os.environ.pop("http_proxy", None)
+    os.environ.pop("https_proxy", None)
+    os.environ.pop("HTTP_PROXY", None)
+    os.environ.pop("HTTPS_PROXY", None)
     execute()

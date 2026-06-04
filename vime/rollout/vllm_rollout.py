@@ -157,11 +157,6 @@ def _vllm_meta_from_generate_choice(args: Namespace, choice: dict, usage: dict |
     if usage:
         meta["prompt_tokens"] = usage.get("prompt_tokens", 0)
         meta["completion_tokens"] = usage.get("completion_tokens", 0)
-        # vLLM reports the prefix-cache hit count nested under prompt_tokens_details
-        # (only populated when the server runs with --enable-prompt-tokens-details).
-        # Surface it so Sample.PrefixCacheInfo.add can populate prefix_cache_hit_rate;
-        # without this the numerator is pinned to 0 and the metric always reads 0.
-        meta["cached_tokens"] = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
     return meta
 
 
@@ -538,9 +533,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
             "token_ids": token_ids,
             "sampling_params": inference_sampling_params,
         }
-        with trace_span(
-            sample, "vllm_inference_generate", attrs={"max_new_tokens": params["max_new_tokens"]}
-        ) as span:
+        with trace_span(sample, "vllm_inference_generate", attrs={"max_new_tokens": params["max_new_tokens"]}) as span:
             output = await post(url, payload, headers=headers)
             # Enrich the span with response meta (finish reason + token usage), mirroring
             # SGLang's build_sglang_meta_trace_attrs. trace_span yields the raw target when
@@ -665,7 +658,14 @@ async def generate_and_rm(
 )
 async def generate_and_rm_group(
     args: Namespace, group: list[Sample], sampling_params: dict[str, Any], evaluation: bool = False
-) -> list[Sample]:
+) -> list[Sample] | list[list[Sample]]:
+    # ``generate_and_rm`` may return either a ``Sample`` or a ``list[Sample]``
+    # depending on whether the ``--custom-generate-function-path`` callable
+    # emits one trainable sample or several (e.g. multi-turn agent rollouts
+    # that fan out into multiple prefix-chained samples). The asyncio.gather
+    # below preserves whichever shape each task produced, so the group is
+    # ``list[Sample]`` for plain rollouts and ``list[list[Sample]]`` for
+    # the fan-out case.
     state = GenerateState(args)
 
     if state.aborted:

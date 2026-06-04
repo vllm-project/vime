@@ -1,1 +1,1 @@
-"""Utility package root for Slime."""
+"""Utility package root for Vime."""

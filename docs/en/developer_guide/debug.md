@@ -2,7 +2,7 @@
 
 ## Aligning Precision
 
-During the development of slime, it is often necessary to check if the model's precision is correct. This can be verified in the following ways:
+During the development of vime, it is often necessary to check if the model's precision is correct. This can be verified in the following ways:
 
 1.  **First Training Step**
     1.  Check if the generated `rollout` is coherent. If not, there are two possible reasons:
@@ -27,20 +27,20 @@ During the development of slime, it is often necessary to check if the model's p
 
 ## Separate Debugging for Training and Inference
 
-slime supports debugging the training and inference parts separately, which allows for the following:
+vime supports debugging the training and inference parts separately, which allows for the following:
 
 * When tuning/debugging the inference part, you can start the task with only a few GPUs.
 * When tuning/debugging the training part, you can ensure the model input is fixed, removing the randomness of rollouts.
 
-Specifically, slime currently provides the following parameters for separate debugging:
+Specifically, vime currently provides the following parameters for separate debugging:
 
 1.  `--debug-rollout-only`
 
-    When enabled, slime will not load Megatron and will only initialize vLLM. You can use this method to debug the inference part.
+    When enabled, vime will not load Megatron and will only initialize vLLM. You can use this method to debug the inference part.
 
 2.  `--debug-train-only`
 
-    When enabled, slime will not load vLLM and will only initialize Megatron. You can use this method to debug the training part.
+    When enabled, vime will not load vLLM and will only initialize Megatron. You can use this method to debug the training part.
 
 3.  `--save-debug-rollout-data /your/saved/debug/data_{rollout_id}.pt`
 
@@ -49,48 +49,6 @@ Specifically, slime currently provides the following parameters for separate deb
 4.  `--load-debug-rollout-data /your/saved/debug/data_{rollout_id}.pt`
 
     When enabled, data will be loaded from `args.load_debug_rollout_data.format(rollout_id=rollout_id)`, and vLLM will not be initialized (automatically setting `debug_train_only=True`). This method allows you to fix the input for the training part to tune it, for example, by switching between different parallelization strategies.
-
-## INT4 / Compressed-Tensors Quantization Checkpoint Issues
-
-When using INT4-quantized models (e.g., `compressed-tensors` with `W4A16`), the checkpoint's `config.json` contains a `quantization_config.ignore` list that specifies which parameters should **not** be quantized. During online weight updates (Megatron → vLLM), slime also reads this ignore list to decide which parameters to INT4-quantize. An incorrect ignore list can cause silent errors:
-
-1. **MoE router weights (`mlp.gate.weight`) become all zeros**
-
-   The MoE router weight (`mlp.gate.weight`, shape `[num_experts, hidden_size]`) is a plain 2D weight tensor, but it is **not** a Linear layer weight. If it is not in the ignore list, the online quantizer will INT4-quantize it into `weight_packed`, `weight_scale`, `weight_zero_point`, etc. However, vLLM does not expect quantized names for the router, so these parameters are silently skipped during `load_weights`, resulting in all-zero gate weights.
-
-   **Fix**: Ensure `config.json` contains `"re:.*mlp\\.gate\\..*"` in the ignore list.
-
-2. **Other non-Linear 2D weights**
-
-   Similar issues can occur with any 2D `.weight` tensor that is not a true Linear layer, such as `model.embed_tokens.weight`. Always verify the ignore list covers all non-Linear weights.
-
-   **Recommended ignore patterns** (for GLM-style MoE models):
-   ```json
-   "ignore": [
-     "lm_head",
-     "model.embed_tokens.weight",
-     "re:.*self_attn.*",
-     "re:.*mlp\\.shared_experts.*",
-     "re:.*mlp\\.gate_up_proj.*",
-     "re:.*mlp\\.gate_proj.*",
-     "re:.*mlp\\.up_proj.*",
-     "re:.*mlp\\.down_proj.*",
-     "re:.*eh_proj.*",
-     "re:.*mlp\\.gate\\..*"
-   ]
-   ```
-
-3. **Missing safetensors shards**
-
-   Conversion tools may occasionally produce an incomplete checkpoint (e.g., a missing `model-00010-of-00093.safetensors`). After conversion, always verify:
-   - The number of `.safetensors` files matches the expected count.
-   - The `model.safetensors.index.json` contains entries for every layer.
-   - Spot-check that critical layers (e.g., the first MoE layer) have the expected number of keys.
-
-4. **How to diagnose**
-
-   - Use `--check-weight-update-equal` to verify that weights after a Megatron → vLLM sync match the expected values. If a parameter shows all zeros on the vLLM side, it was likely incorrectly quantized or missing from the checkpoint.
-   - Use `--debug-rollout-only` with a small number of GPUs to quickly test whether vLLM can generate coherent text from the quantized checkpoint alone.
 
 ## Debug vllm illegal memory access (IMA)
 

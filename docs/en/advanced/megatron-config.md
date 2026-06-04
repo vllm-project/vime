@@ -8,7 +8,7 @@ Unlike `--vllm-config`, `--megatron-config-path` does not manage deployment, rou
 
 ## Design Overview
 
-By default, when `--megatron-config-path` is not used, both actor and critic inherit the Megatron / slime CLI arguments directly.
+By default, when `--megatron-config-path` is not used, both actor and critic inherit the Megatron / vime CLI arguments directly.
 
 With `--megatron-config-path`, the configuration is split into two layers:
 
@@ -17,7 +17,7 @@ With `--megatron-config-path`, the configuration is split into two layers:
 
 **Key design principles:**
 
-- **CLI remains the shared baseline.** slime first parses the normal CLI arguments, then applies the YAML role overrides.
+- **CLI remains the shared baseline.** vime first parses the normal CLI arguments, then applies the YAML role overrides.
 - **Missing roles inherit automatically.** If a role is absent from the YAML file, it simply keeps the CLI arguments unchanged.
 - **Resource allocation is still controlled by CLI.** `num_nodes` and `num_gpus_per_node` in YAML are ignored; placement is still controlled by `--actor-num-*` / `--critic-num-*`.
 

@@ -5,7 +5,6 @@ import multiprocessing
 import os
 import random
 import time
-from argparse import Namespace
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +12,9 @@ import numpy as np
 import ray
 import torch
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+
 from vime.backends.vllm_utils.vllm_config import ModelConfig, ServerGroupConfig, VllmConfig
+from vime.backends.vllm_utils.vllm_engine import VLLMEngine
 
 # Memory-type tag strings shared with the vLLM engine's sleep/wake_up API.
 GPU_MEMORY_TYPE_KV_CACHE = "kv_cache"
@@ -36,31 +37,6 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
-
-
-def _sanitize_vllm_router_args(ra: Any) -> Any:
-    """Replace negative int fields with dataclass defaults (legacy CLI may use -1; vllm-router rejects it)."""
-    from vllm_router.router_args import RouterArgs as VR
-
-    fixes: dict[str, Any] = {}
-    for f in dataclasses.fields(VR):
-        val = getattr(ra, f.name, None)
-        if not isinstance(val, int) or val >= 0:
-            continue
-        if f.default is not dataclasses.MISSING:
-            fixes[f.name] = f.default
-        elif f.default_factory is not dataclasses.MISSING:  # type: ignore[attr-defined]
-            fixes[f.name] = f.default_factory()  # type: ignore[misc]
-        else:
-            logger.warning("vllm-router: field %r is negative (%s); leaving as-is", f.name, val)
-    return dataclasses.replace(ra, **fixes) if fixes else ra
-
-
-def _vllm_router_args_from_cli(args: Namespace) -> Any:
-    from vllm_router.router_args import RouterArgs
-
-    ra = RouterArgs.from_cli_args(args, use_router_prefix=True)
-    return _sanitize_vllm_router_args(ra)
 
 
 @dataclasses.dataclass
@@ -116,8 +92,6 @@ class ServerGroup:
 
         pg, reordered_bundle_indices, reordered_gpu_ids = self.pg
 
-        from vime.backends.vllm_utils.vllm_engine import VLLMEngine
-
         RolloutRayActor = ray.remote(VLLMEngine)
 
         rollout_engines = []
@@ -142,7 +116,7 @@ class ServerGroup:
             env_vars = {name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST} | {
                 key: os.environ.get(key, default_val)
                 for key, default_val in {
-                    "SLIME_ENABLE_PROFILING": "true",
+                    "VIME_ENABLE_PROFILING": "true",
                 }.items()
             }
             rollout_engine = RolloutRayActor.options(
@@ -157,7 +131,6 @@ class ServerGroup:
                 rank=global_rank,
                 worker_type=self.worker_type,
                 base_gpu_id=base_gpu_id,
-                model_path=self.model_path,
                 vllm_overrides=self.vllm_overrides,
                 num_gpus_per_engine=self.num_gpus_per_engine,
             )
@@ -458,18 +431,6 @@ class RolloutManager:
     def dispose(self):
         for monitor in self._health_monitors:
             monitor.stop()
-        # Release vLLM inference workers. debug_rollout_only still hits this path at train.py end.
-        shutdown_refs = []
-        for srv in self.servers.values():
-            for group in srv.server_groups:
-                for eng in group.all_engines:
-                    if eng is not None:
-                        shutdown_refs.append(eng.shutdown.remote())
-        if shutdown_refs:
-            try:
-                ray.get(shutdown_refs)
-            except Exception as e:
-                logger.warning("Engine shutdown during dispose failed (non-fatal): %s", e)
         logging_utils.finish_tracking(self.args)
 
     @property
@@ -772,16 +733,8 @@ class RolloutManager:
         if samples[0].rollout_log_probs is not None:
             train_data["rollout_log_probs"] = [sample.rollout_log_probs for sample in samples]
 
-        if getattr(self.args, "use_rollout_routing_replay", False):
-            routed = [sample.rollout_routed_experts for sample in samples]
-            missing = [i for i, r in enumerate(routed) if r is None]
-            if missing:
-                raise ValueError(
-                    f"use_rollout_routing_replay: {len(missing)}/{len(samples)} samples missing "
-                    "rollout_routed_experts (see rollout logs for vLLM routing replay errors). "
-                    "Ensure vLLM 0.22+ serves with --enable-return-routed-experts."
-                )
-            train_data["rollout_routed_experts"] = routed
+        if samples[0].rollout_routed_experts is not None:
+            train_data["rollout_routed_experts"] = [sample.rollout_routed_experts for sample in samples]
 
         if samples[0].train_metadata is not None:
             train_data["metadata"] = [sample.train_metadata for sample in samples]
@@ -967,9 +920,11 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
         if router_port is None:
             router_port = find_available_port(random.randint(3000, 4000))
 
+    from vllm_router.router_args import RouterArgs
+
     from vime.utils.http_utils import run_router
 
-    router_args = _vllm_router_args_from_cli(args)
+    router_args = RouterArgs.from_cli_args(args, use_router_prefix=True)
 
     router_args.host = router_ip
     router_args.port = router_port
@@ -978,34 +933,23 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
     router_args.request_timeout_secs = args.router_request_timeout_secs
 
     if has_pd_disaggregation:
-        if hasattr(router_args, "vllm_pd_disaggregation"):
-            router_args.vllm_pd_disaggregation = True
-        if hasattr(router_args, "disable_circuit_breaker"):
-            router_args.disable_circuit_breaker = True
-        # PD uses the full Rust router: it accepts dynamic /workers registration (engines register
-        # after the router is up), matching slime's launch-router-then-register flow. vllm-router's
-        # MiniLB is a debug-only load balancer that requires STATIC prefill/decode URLs at
-        # construction, which slime never provides, so it can never work here. MiniLB stays off
-        # (RouterArgs defaults mini_lb=False); the old SLIME_VLLM_ROUTER_USE_RUST gate is removed.
+        router_args.vllm_pd_disaggregation = True
+        # Disable circuit breaker to prevent RDMA transfer timeouts from
+        # marking decode workers as dead. Timeouts are transient (PCIe
+        # contention under high load) and do not indicate a dead server.
+        router_args.disable_circuit_breaker = True
 
-    if any(f.name == "disable_health_check" for f in dataclasses.fields(type(router_args))):
-        router_args.disable_health_check = True
+    logger.info(f"Launch router with args: {router_args}")
 
-    logger.info("Launch HTTP router with args: %s", router_args)
-
-    process = multiprocessing.get_context("spawn").Process(
+    process = multiprocessing.Process(
         target=run_router,
         args=(router_args,),
     )
-    process.daemon = True
+    process.daemon = True  # Set the process as a daemon
     process.start()
+    # Wait 3 seconds
     time.sleep(3)
-    if not process.is_alive():
-        raise RuntimeError(
-            f"Router subprocess exited (exitcode={process.exitcode}). "
-            "Ensure the vllm-router (Rust) wheel is installed; both PD and non-PD rollout use it. "
-            "See vime.utils.http_utils run_router logs."
-        )
+    assert process.is_alive()
     logger.info(f"Router launched at {router_ip}:{router_port}, Prometheus port: {router_args.prometheus_port}")
     return router_ip, router_port, router_args.prometheus_port
 
@@ -1053,7 +997,9 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
         model_cfg.resolve(args)
 
         has_pd = model_cfg.has_pd_disaggregation
-        router_ip, router_port, prom_port = _start_router(args, has_pd_disaggregation=has_pd, force_new=(model_idx > 0))
+        router_ip, router_port, prom_port = _start_router(
+            args, has_pd_disaggregation=has_pd, force_new=(model_idx > 0)
+        )
 
         # Write back so downstream readers (vllm_rollout, vllm_engine) see the
         # router we just started (only relevant for first model in multi-model setups).
@@ -1167,9 +1113,9 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
 
 def _resolve_vllm_config(args) -> VllmConfig:
     """Build a VllmConfig from args, choosing the right source."""
-    vllm_config_path = getattr(args, "vllm_config", None)
-    if vllm_config_path is not None:
-        config = VllmConfig.from_yaml(vllm_config_path)
+    if getattr(args, "vllm_config", None):
+        config = VllmConfig.from_yaml(args.vllm_config)
+        # Validate total GPUs match.
         expected = args.rollout_num_gpus
         actual = config.total_num_gpus
         assert actual == expected, f"vllm_config total GPUs ({actual}) != rollout_num_gpus ({expected})"

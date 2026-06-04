@@ -1,12 +1,12 @@
 # vLLM Config：高级引擎部署
 
-`--vllm-config` 是一个基于 YAML 的配置系统，用于在 slime 中精细控制 vLLM 引擎的部署。它支持**多模型服务**、**Prefill-Decode (PD) 分离**、**异构服务器组**，甚至可以作为复杂推理拓扑的**独立 vLLM 启动器**。
+`--vllm-config` 是一个基于 YAML 的配置系统，用于在 vime 中精细控制 vLLM 引擎的部署。它支持**多模型服务**、**Prefill-Decode (PD) 分离**、**异构服务器组**，甚至可以作为复杂推理拓扑的**独立 vLLM 启动器**。
 
 ---
 
 ## 架构概览
 
-在默认配置（不使用 `--vllm-config`）下，slime 部署单个模型，放在单个 router 后面，使用统一的服务器组：
+在默认配置（不使用 `--vllm-config`）下，vime 部署单个模型，放在单个 router 后面，使用统一的服务器组：
 
 ![架构概览](../../../imgs/arch.png)
 
@@ -170,8 +170,8 @@ python train.py \
 **在自定义 rollout 函数中访问模型：**
 
 ```python
-from slime.rollout.vllm_rollout import get_model_url
-from slime.utils.http_utils import post
+from vime.rollout.vllm_rollout import get_model_url
+from vime.utils.http_utils import post
 
 async def my_generate(args, sample, sampling_params):
     # 路由到 actor 模型（默认）
@@ -257,25 +257,25 @@ vllm:
 
 ### 7. 独立 vLLM 启动器
 
-虽然 `--vllm-config` 是为 slime 的训练流水线设计的，但它也可以作为纯推理场景的强大启动器，通过 `--rollout-external` 模式或配置 slime 仅关注推理服务。
+虽然 `--vllm-config` 是为 vime 的训练流水线设计的，但它也可以作为纯推理场景的强大启动器，通过 `--rollout-external` 模式或配置 vime 仅关注推理服务。
 
 **使用预启动的外部引擎：**
 
-对于复杂的生产部署，你可能希望独立预启动 vLLM 引擎，然后将其连接到 slime：
+对于复杂的生产部署，你可能希望独立预启动 vLLM 引擎，然后将其连接到 vime：
 
 ```bash
 # 步骤 1：外部启动 vLLM 引擎
 vllm serve /path/to/model --port 10090 ...
 vllm serve /path/to/model --port 10091 ...
 
-# 步骤 2：将 slime 连接到外部引擎
+# 步骤 2：将 vime 连接到外部引擎
 python train.py \
   --rollout-external \
   --rollout-external-engine-addrs host1:10090 host2:10091 \
   ...
 ```
 
-> **注意：** `--vllm-config` 和 `--rollout-external` 互斥。当你希望 slime 管理完整的引擎生命周期时，使用 `--vllm-config`；当引擎已预部署时，使用 `--rollout-external`。
+> **注意：** `--vllm-config` 和 `--rollout-external` 互斥。当你希望 vime 管理完整的引擎生命周期时，使用 `--vllm-config`；当引擎已预部署时，使用 `--rollout-external`。
 
 ---
 
@@ -297,7 +297,7 @@ python train.py \
 
 对于多轮对话和 agentic 场景，会话亲和确保同一对话的所有请求路由到同一个 backend worker。这可以显著提升 prefix cache 命中率，因为 worker 已经缓存了对话历史。
 
-slime 自动为每个 sample 分配一个唯一的 `session_id`（存储在 `sample.session_id` 中）。当 router 策略为 `consistent_hash` 时，该 ID 通过 `x-session-id` header 传递，vllm-router 使用它将同一会话的所有轮次确定性地路由到同一个 worker。
+vime 自动为每个 sample 分配一个唯一的 `session_id`（存储在 `sample.session_id` 中）。当 router 策略为 `consistent_hash` 时，该 ID 通过 `x-session-id` header 传递，vllm-router 使用它将同一会话的所有轮次确定性地路由到同一个 worker。
 
 ```bash
 --router-policy consistent_hash
@@ -306,7 +306,7 @@ slime 自动为每个 sample 分配一个唯一的 `session_id`（存储在 `sam
 **工作原理：**
 
 1. 每个 sample 通过 UUID 分配唯一的 `session_id`
-2. 每次请求时，slime 在 HTTP header 中传递 `x-session-id: <session_id>`
+2. 每次请求时，vime 在 HTTP header 中传递 `x-session-id: <session_id>`
 3. vllm-router 的 consistent-hash 策略将该 key 映射到特定的 worker
 4. 后续轮次复用相同的 `session_id`，确保命中同一个 worker
 
@@ -314,7 +314,7 @@ slime 自动为每个 sample 分配一个唯一的 `session_id`（存储在 `sam
 
 ## 解析规则
 
-加载配置时，slime 按以下优先级顺序解析：
+加载配置时，vime 按以下优先级顺序解析：
 
 1. **每引擎 GPU 数回退：** 组 `num_gpus_per_engine` → 模型 `num_gpus_per_engine` → `args.rollout_num_gpus_per_engine`
 2. **模型路径回退：** 组 `overrides.model_path` → 模型 `model_path` → `args.hf_checkpoint`
@@ -392,8 +392,8 @@ python train.py \
 **自定义 rollout 函数 (`my_agent/rollout.py`)：**
 
 ```python
-from slime.rollout.vllm_rollout import get_model_url
-from slime.utils.http_utils import post
+from vime.rollout.vllm_rollout import get_model_url
+from vime.utils.http_utils import post
 
 async def generate_with_models(args, sample, sampling_params):
     """使用 actor 生成，用 reward 模型打分，与 reference 比较。"""
@@ -442,11 +442,11 @@ async def generate_with_models(args, sample, sampling_params):
 
 ### Q: 运行时如何获取特定模型的 router 地址？
 
-使用 `slime.rollout.vllm_rollout` 中的 `get_model_url(args, "model_name", "/endpoint")`。它从 `args.vllm_model_routers`（一个 `{ model_name: (ip, port) }` 字典）中读取，该字典在引擎启动后自动填充。
+使用 `vime.rollout.vllm_rollout` 中的 `get_model_url(args, "model_name", "/endpoint")`。它从 `args.vllm_model_routers`（一个 `{ model_name: (ip, port) }` 字典）中读取，该字典在引擎启动后自动填充。
 
 ### Q: 可以不训练，只用 `--vllm-config` 做推理吗？
 
-虽然 `--vllm-config` 是为 slime 的训练循环设计的，但你可以通过配置仅 rollout 的运行来实现纯推理场景。对于完全独立的 vLLM 推理服务，建议直接使用 vLLM 原生的 `launch_server`，或使用 `--rollout-external` 模式连接预部署的引擎。
+虽然 `--vllm-config` 是为 vime 的训练循环设计的，但你可以通过配置仅 rollout 的运行来实现纯推理场景。对于完全独立的 vLLM 推理服务，建议直接使用 vLLM 原生的 `launch_server`，或使用 `--rollout-external` 模式连接预部署的引擎。
 
 ### Q: `--vllm-config` 和 `--prefill-num-servers` 是什么关系？
 

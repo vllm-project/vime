@@ -172,7 +172,7 @@ Reject entire sequence if $\exists t \in T$ such that $\rho_t < C_{\text{veto}}$
 
 ## Mismatch Metrics
 
-When rollout log probabilities are available, SLIME automatically tracks comprehensive metrics to monitor training-inference mismatch and importance sampling weights. These metrics help diagnose policy divergence and guide hyperparameter tuning.
+When rollout log probabilities are available, VIME automatically tracks comprehensive metrics to monitor training-inference mismatch and importance sampling weights. These metrics help diagnose policy divergence and guide hyperparameter tuning.
 
 ### Mismatch Monitoring Metrics
 

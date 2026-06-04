@@ -1,18 +1,18 @@
 ---
 name: add-rollout-function
-description: Guide for adding a new rollout function in slime and wiring it through --rollout-function-path. Use when user wants to implement custom rollout data generation logic, custom train/eval rollout outputs, or migrate from the default vLLM rollout path.
+description: Guide for adding a new rollout function in vime and wiring it through --rollout-function-path. Use when user wants to implement custom rollout data generation logic, custom train/eval rollout outputs, or migrate from the default vLLM rollout path.
 ---
 
 # Add Rollout Function
 
-Implement a custom rollout function and integrate it safely with slime training/eval flow.
+Implement a custom rollout function and integrate it safely with vime training/eval flow.
 
 ## When to Use
 
 Use this skill when:
 
 - User asks to add a new rollout task or rollout generation function
-- User asks to replace default `slime.rollout.vllm_rollout.generate_rollout`
+- User asks to replace default `vime.rollout.vllm_rollout.generate_rollout`
 - User asks to customize train/eval data generation behavior
 
 ## Step-by-Step Guide
@@ -21,15 +21,15 @@ Use this skill when:
 
 Start from one of these references:
 
-- Async RL-style rollout: `slime/rollout/vllm_rollout.py`
-- Simple SFT-style rollout: `slime/rollout/sft_rollout.py`
+- Async RL-style rollout: `vime/rollout/vllm_rollout.py`
+- Simple SFT-style rollout: `vime/rollout/sft_rollout.py`
 
 If the task needs engine-based async generation and rewards, use the vLLM path as base.
 If the task is file/buffer-driven and simple, use sft path as base.
 
 ### Step 2: Create the New Rollout Module
 
-Create a new file, for example: `slime/rollout/<your_rollout>.py`
+Create a new file, for example: `vime/rollout/<your_rollout>.py`
 
 Required callable signature:
 
@@ -38,7 +38,7 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False) -> Rollout
     ...
 ```
 
-Return types are defined in `slime/rollout/base_types.py`.
+Return types are defined in `vime/rollout/base_types.py`.
 
 ### Step 3: Implement Train and Eval Branches Explicitly
 
@@ -48,7 +48,7 @@ Return types are defined in `slime/rollout/base_types.py`.
 Minimal skeleton:
 
 ```python
-from slime.rollout.base_types import RolloutFnTrainOutput, RolloutFnEvalOutput
+from vime.rollout.base_types import RolloutFnTrainOutput, RolloutFnEvalOutput
 
 
 def generate_rollout(args, rollout_id, data_source, evaluation=False):
@@ -83,12 +83,12 @@ If partial rollout or masking logic is involved, keep `loss_mask` semantics cons
 Set your function path via CLI:
 
 ```bash
---rollout-function-path slime.rollout.<your_rollout>.generate_rollout
+--rollout-function-path vime.rollout.<your_rollout>.generate_rollout
 ```
 
 The default and signature expectation are documented in:
 
-- `slime/utils/arguments.py`
+- `vime/utils/arguments.py`
 - `docs/en/get_started/customization.md`
 
 ## Common Mistakes
@@ -100,9 +100,9 @@ The default and signature expectation are documented in:
 
 ## Reference Locations
 
-- Default rollout: `slime/rollout/vllm_rollout.py`
-- Simple custom example: `slime/rollout/sft_rollout.py`
-- Output dataclasses: `slime/rollout/base_types.py`
-- Wiring/loading: `slime/ray/rollout.py`
-- Argument definition: `slime/utils/arguments.py`
+- Default rollout: `vime/rollout/vllm_rollout.py`
+- Simple custom example: `vime/rollout/sft_rollout.py`
+- Output dataclasses: `vime/rollout/base_types.py`
+- Wiring/loading: `vime/ray/rollout.py`
+- Argument definition: `vime/utils/arguments.py`
 - Customization docs: `docs/en/get_started/customization.md`

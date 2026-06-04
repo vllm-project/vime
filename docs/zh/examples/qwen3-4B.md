@@ -6,8 +6,8 @@
 
 ```bash
 cd /root/
-git clone https://github.com/THUDM/slime.git
-cd slime/
+git clone https://github.com/vllm-project/vime.git
+cd vime/
 pip install -e . --no-deps
 ```
 
@@ -30,7 +30,7 @@ hf download --repo-type dataset zhuzilin/aime-2024 \
 
 ```bash
 # mcore checkpoint
-cd /root/slime
+cd /root/vime
 source scripts/models/qwen3-4B.sh
 PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
     ${MODEL_ARGS[@]} \
@@ -43,13 +43,13 @@ PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
 执行训练：
 
 ```bash
-cd /root/slime
+cd /root/vime
 bash scripts/run-qwen3-4B.sh
 ```
 
 ### 参数简介
 
-这里我们简单介绍一下脚本 [run-qwen3-4B.sh](https://github.com/THUDM/slime/blob/main/scripts/run-qwen3-4B.sh) 中的各个组成部分：
+这里我们简单介绍一下脚本 [run-qwen3-4B.sh](https://github.com/vllm-project/vime/blob/main/scripts/run-qwen3-4B.sh) 中的各个组成部分：
 
 #### MODEL_ARGS
 
@@ -58,7 +58,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 ```
 
-从 [scripts/models/qwen3-4B.sh](https://github.com/THUDM/slime/blob/main/scripts/models/qwen3-4B.sh) 读取模型的 config。这些 config 都是 megatron 的参数。在使用 megatron 进行训练的时候，megatron 无法从 ckpt 中读取模型 config，需要我们自行配置。我们在 [scripts/models](https://github.com/THUDM/slime/tree/main/scripts/models/) 中提供了一些样例。
+从 [scripts/models/qwen3-4B.sh](https://github.com/vllm-project/vime/blob/main/scripts/models/qwen3-4B.sh) 读取模型的 config。这些 config 都是 megatron 的参数。在使用 megatron 进行训练的时候，megatron 无法从 ckpt 中读取模型 config，需要我们自行配置。我们在 [scripts/models](https://github.com/vllm-project/vime/tree/main/scripts/models/) 中提供了一些样例。
 
 ⚠️  注意检查模型文件中的 `--rotary-base` 等配置是否对应你当前训练模型的配置，因为同一个模型结构的不同模型可能有不同的取值。在这种情况下，你可以在导入模型参数后在脚本里进行覆盖，例如：
 
@@ -77,8 +77,8 @@ CKPT_ARGS=(
    # reference model 的 ckp
    --ref-load /root/Qwen3-4B_torch_dist
    # actor 的 load dir，如果是空的，会从 `ref_load` 里面读
-   --load /root/Qwen3-4B_slime/
-   --save /root/Qwen3-4B_slime/
+   --load /root/Qwen3-4B_vime/
+   --save /root/Qwen3-4B_vime/
    --save-interval 20
 )
 ```
@@ -98,7 +98,7 @@ ROLLOUT_ARGS=(
    --rollout-shuffle
 
    # reward model 类型，
-   # slime 提供了很多类型以及用于自定义的 --custom-rm-path
+   # vime 提供了很多类型以及用于自定义的 --custom-rm-path
    --rm-type deepscaler
 
    # 一共要训练多少 rollout
@@ -135,13 +135,13 @@ EVAL_ARGS=(
 
 #### PERF_ARGS
 
-一堆 megatron 的并行参数，只有 `--use-dynamic-batch-size` 与 `--max-tokens-per-gpu` 是 slime 添加的。
+一堆 megatron 的并行参数，只有 `--use-dynamic-batch-size` 与 `--max-tokens-per-gpu` 是 vime 添加的。
 
 `max_tokens_per_gpu` 是指每张卡最多跑多少 token，在开启 `use_dynamic_batch_size` 之后，会尽可能将一个 batch 内部长短不一的数据拼到 `max_tokens_per_gpu`，从而组成动态的 micro batch size，如果有一条数据长度超过了 `max_tokens_per_gpu`，则自成一条，不会对数据进行截断。在开启 context parallel (CP) 时，会让 CP 张卡去上的数据去共享总长为 `CP * max_tokens_per_gpu` 的 token。
 
 在开启 dynamic_batch_size，会忽略传统的 `micro_batch_size`。
 
-⚠️  slime 总是会通过 data packing 的方法训练模型，并且严格保证 per sample loss 或 per token loss，也就是开启 dynamic batch size 不会对 loss 计算有影响，推荐开启。
+⚠️  vime 总是会通过 data packing 的方法训练模型，并且严格保证 per sample loss 或 per token loss，也就是开启 dynamic batch size 不会对 loss 计算有影响，推荐开启。
 
 ```bash
 PERF_ARGS=(
@@ -164,7 +164,7 @@ PERF_ARGS=(
 
 #### GRPO_ARGS
 
-目前 slime 这是一些 grpo 相关的参数：
+目前 vime 这是一些 grpo 相关的参数：
 
 ```bash
 GRPO_ARGS=(
@@ -193,7 +193,7 @@ OPTIMIZER_ARGS=(
 
 #### VLLM_ARGS
 
-vLLM 推理所需的参数。vime 默认使用 vLLM 作为 rollout 后端（`rollout.py` 启动 `VLLMEngine`，默认 rollout 函数为 `slime.rollout.vllm_rollout.generate_rollout`），无需额外指定 backend。`--rollout-num-gpus-per-engine` 对应每个 vLLM engine 的 `tensor_parallel_size`；除此之外的 vLLM 参数均通过添加 `--vllm-` 前缀传给 slime（例如 `--vllm-max-model-len`）。
+vLLM 推理所需的参数。vime 默认使用 vLLM 作为 rollout 后端（`rollout.py` 启动 `VLLMEngine`，默认 rollout 函数为 `vime.rollout.vllm_rollout.generate_rollout`），无需额外指定 backend。`--rollout-num-gpus-per-engine` 对应每个 vLLM engine 的 `tensor_parallel_size`；除此之外的 vLLM 参数均通过添加 `--vllm-` 前缀传给 vime（例如 `--vllm-max-model-len`）。
 
 ```bash
 VLLM_ARGS=(
@@ -204,16 +204,16 @@ VLLM_ARGS=(
 
 rollout 并发较高时，还可以通过 `--vllm-` 前缀调节 vLLM scheduler，例如 `--vllm-max-num-seqs`、`--vllm-max-num-batched-tokens`；调试或规避 CUDA graph 相关限制时可加 `--vllm-enforce-eager`。
 
-⚠️  slime 会用 vLLM router 来调度多个 vLLM server。训推一体（`--colocate`）时，训练与推理权重经 CUDA IPC 同步；训推分离时，训练侧经 NCCL 与 vLLM engine 同步权重。
+⚠️  vime 会用 vLLM router 来调度多个 vLLM server。训推一体（`--colocate`）时，训练与推理权重经 CUDA IPC 同步；训推分离时，训练侧经 NCCL 与 vLLM engine 同步权重。
 
 ### dynamic sampling
 
-slime 支持了更复杂的 sampling 方案，例如 [DAPO](https://dapo-sia.github.io/) 中的 dynamic sampling。如果要开启 dynamic sampling，需要配置：
+vime 支持了更复杂的 sampling 方案，例如 [DAPO](https://dapo-sia.github.io/) 中的 dynamic sampling。如果要开启 dynamic sampling，需要配置：
 
 ```bash
    --over-sampling-batch-size ${OVER_SAMPLING_BS} \
    --dynamic-sampling-filter-path \
-     slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std \
+     vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std \
 ```
 
 这里 `over_sampling_batch_size` 需要大于 ``rollout_batch_size`，例如配置为：
@@ -224,7 +224,7 @@ slime 支持了更复杂的 sampling 方案，例如 [DAPO](https://dapo-sia.git
    --over-sampling-batch-size 64 \
 ```
 
-那么 sampling 会直接采样 64 条 prompt，每条 prompt 采样 8 次。因为 slime 内部进行的是异步采样，所以我们会先后获得每个 prompt 的 8 条回复。在收到回复时，会用 `dynamic_sampling_filter_path` 对应的函数进行筛选，如果通过，则留下这 8 条数据，否则则丢掉。例子中的函数是判断回答是否全对或全错：
+那么 sampling 会直接采样 64 条 prompt，每条 prompt 采样 8 次。因为 vime 内部进行的是异步采样，所以我们会先后获得每个 prompt 的 8 条回复。在收到回复时，会用 `dynamic_sampling_filter_path` 对应的函数进行筛选，如果通过，则留下这 8 条数据，否则则丢掉。例子中的函数是判断回答是否全对或全错：
 
 ```python
 def check_reward_nonzero_std(args, samples: list[Sample], **kwargs):
@@ -278,7 +278,7 @@ ray job submit ... \
    ...
 ```
 
-此时，就会分配 2 张卡给训练，6 张卡给推理。`--rollout-num-gpus` 与 `--actor-num-gpus-per-node` 一样，是传给 `train.py` 的 **Ray 资源参数**：框架据此创建 placement group，并把前若干 bundle 分给训练 actor、后续 bundle 分给 rollout engine（见 `slime/ray/placement_group.py`）。**共卡模式（`--colocate`）下该参数会被忽略**，并自动设为 `actor_num_gpus_per_node * actor_num_nodes`。请勿把 `--rollout-num-gpus` 写在 `VLLM_ARGS` 中。
+此时，就会分配 2 张卡给训练，6 张卡给推理。`--rollout-num-gpus` 与 `--actor-num-gpus-per-node` 一样，是传给 `train.py` 的 **Ray 资源参数**：框架据此创建 placement group，并把前若干 bundle 分给训练 actor、后续 bundle 分给 rollout engine（见 `vime/ray/placement_group.py`）。**共卡模式（`--colocate`）下该参数会被忽略**，并自动设为 `actor_num_gpus_per_node * actor_num_nodes`。请勿把 `--rollout-num-gpus` 写在 `VLLM_ARGS` 中。
 
 训推分离时，`VLLM_ARGS` 仅需配置推理后端相关参数，例如：
 
@@ -297,6 +297,6 @@ VLLM_ARGS=(
 
 ### 异步训练
 
-当进行训推分离时，你会发现训练和推理的 GPU 总是相互等待着，为了避免这种资源空闲，我们可以开启异步训练。开启的方式即为将启动脚本中的 `train.py` 改变为 `train_async.py`。这样 slime 就会在进行当前 rollout 的训练时进行下一个 rollout 的数据生成了。
+当进行训推分离时，你会发现训练和推理的 GPU 总是相互等待着，为了避免这种资源空闲，我们可以开启异步训练。开启的方式即为将启动脚本中的 `train.py` 改变为 `train_async.py`。这样 vime 就会在进行当前 rollout 的训练时进行下一个 rollout 的数据生成了。
 
 `train.py` 和 `train_async.py` 的差别只在于 train loop 的同步逻辑，我们通过 ray 的异步（`.remote`, `ray.get`）实现了这点。

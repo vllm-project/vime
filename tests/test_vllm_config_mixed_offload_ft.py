@@ -15,7 +15,7 @@ import tempfile
 
 import vime.utils.external_utils.command_utils as U
 
-TIGHT_DEVICE_MEMORY = U.get_bool_env_var("SLIME_TEST_TIGHT_DEVICE_MEMORY", "1")
+TIGHT_DEVICE_MEMORY = U.get_bool_env_var("VIME_TEST_TIGHT_DEVICE_MEMORY", "1")
 
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
@@ -46,9 +46,7 @@ def prepare():
 
 
 def execute():
-    config_file = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yaml", prefix="vllm_mixed_offload_ft_", delete=False
-    )
+    config_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", prefix="vllm_mixed_offload_ft_", delete=False)
     config_file.write(VLLM_CONFIG_YAML)
     config_file.flush()
     config_path = config_file.name

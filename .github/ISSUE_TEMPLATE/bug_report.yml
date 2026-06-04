@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report a bug to help us improve slime. Please check the docs and existing issues before submitting.
+description: Report a bug to help us improve vime. Please check the docs and existing issues before submitting.
 title: "[Bug] "
 labels: ["bug"]
 body:
@@ -8,13 +8,13 @@ body:
       value: |
         Thank you for taking the time to report a bug!
 
-        > **Note:** slime's open-source collaboration is currently focused on **bug fixes** and **general-purpose RL optimizations**.
-        > Feature requests are outside our current scope — please see [CONTRIBUTING.md](https://github.com/THUDM/slime/blob/main/CONTRIBUTING.md) for details.
+        > **Note:** vime's open-source collaboration is currently focused on **bug fixes** and **general-purpose RL optimizations**.
+        > Feature requests are outside our current scope — please see [CONTRIBUTING.md](https://github.com/vllm-project/vime/blob/main/CONTRIBUTING.md) for details.
 
         Before submitting, please make sure you have:
-        - [ ] Read the [documentation](https://thudm.github.io/slime/) and [FAQ](https://thudm.github.io/slime/en/get_started/qa.html)
-        - [ ] Searched [existing issues](https://github.com/THUDM/slime/issues) to avoid duplicates
-        - [ ] Reproduced the issue with the latest version of slime
+        - [ ] Read the [documentation](https://vllm-project.github.io/vime/) and [FAQ](https://vllm-project.github.io/vime/en/get_started/qa.html)
+        - [ ] Searched [existing issues](https://github.com/vllm-project/vime/issues) to avoid duplicates
+        - [ ] Reproduced the issue with the latest version of vime
 
   - type: textarea
     id: description
@@ -60,9 +60,9 @@ body:
     attributes:
       label: Environment
       description: |
-        Please provide your environment details. You can run `pip show slime` and `python -c "import torch; print(torch.__version__)"` to get some of this info.
+        Please provide your environment details. You can run `pip show vime` and `python -c "import torch; print(torch.__version__)"` to get some of this info.
       value: |
-        - slime version:
+        - vime version:
         - Python version:
         - PyTorch version:
         - CUDA version:
@@ -93,11 +93,11 @@ body:
     attributes:
       label: Pre-submission Checklist
       options:
-        - label: I have read the [CONTRIBUTING.md](https://github.com/THUDM/slime/blob/main/CONTRIBUTING.md) and understand the collaboration scope.
+        - label: I have read the [CONTRIBUTING.md](https://github.com/vllm-project/vime/blob/main/CONTRIBUTING.md) and understand the collaboration scope.
           required: true
-        - label: I have read the [documentation](https://thudm.github.io/slime/) and my issue is not addressed there.
+        - label: I have read the [documentation](https://vllm-project.github.io/vime/) and my issue is not addressed there.
           required: true
-        - label: I have searched for [existing issues](https://github.com/THUDM/slime/issues) and this is not a duplicate.
+        - label: I have searched for [existing issues](https://github.com/vllm-project/vime/issues) and this is not a duplicate.
           required: true
         - label: I have provided a minimal, reproducible example.
           required: true

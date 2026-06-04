@@ -5,9 +5,9 @@
 # allocation during TP-side grad sync, avoiding OOM under allocator
 # fragmentation when the combined grad buffer would otherwise be very large.
 # SUM/AVG are element-wise, so chunking is mathematically equivalent.
-# Chunk size: SLIME_GRAD_COALESCE_CHUNK_BYTES, default 1 GiB.
+# Chunk size: VIME_GRAD_COALESCE_CHUNK_BYTES, default 1 GiB.
 #
-# Cross-compatible across the Megatron-LM versions slime is run against:
+# Cross-compatible across the Megatron-LM versions vime is run against:
 # the core_v0.13.0 line (DDP config exposes `use_custom_fsdp`, `_get_main_grad_attr`
 # takes `(param, use_custom_fsdp)`, target function takes `(model, config)`) and
 # the post-core_v0.15.0rc7 dev line (`use_megatron_fsdp`, single-arg
@@ -46,7 +46,7 @@ try:
     def _fsdp_flag(ddp_config):
         return bool(getattr(ddp_config, "use_megatron_fsdp", False) or getattr(ddp_config, "use_custom_fsdp", False))
 
-    _chunk_bytes = int(os.environ.get("SLIME_GRAD_COALESCE_CHUNK_BYTES") or (1 << 30))
+    _chunk_bytes = int(os.environ.get("VIME_GRAD_COALESCE_CHUNK_BYTES") or (1 << 30))
 
     def _split_into_chunks(params, grads, target_bytes):
         """Greedy split keeping params/grads aligned. A single grad larger
@@ -131,7 +131,7 @@ try:
     _fmg._allreduce_layernorm_grads = _allreduce_non_tensor_model_parallel_grads
 
     logger.info(
-        "slime grad coalesce patch applied to "
+        "vime grad coalesce patch applied to "
         "megatron.core.distributed.finalize_model_grads."
         "_allreduce_non_tensor_model_parallel_grads (chunk=%d MiB)",
         _chunk_bytes // (1 << 20),
@@ -139,7 +139,7 @@ try:
 
 except ImportError as exc:
     warnings.warn(
-        f"slime grad coalesce patch not applied — Megatron import failed ({exc!r}). "
+        f"vime grad coalesce patch not applied — Megatron import failed ({exc!r}). "
         "If this is a Megatron upgrade, the symbol layout may have changed; "
         "without this patch, large-model TP grad sync may OOM.",
         stacklevel=2,

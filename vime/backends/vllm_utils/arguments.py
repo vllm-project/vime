@@ -316,12 +316,6 @@ def validate_args(args):
     args.vllm_dp_size = args.vllm_data_parallel_size
     args.vllm_pp_size = args.vllm_pipeline_parallel_size
 
-    # NOTE: TP is intentionally NOT precomputed here. A global ``vllm_tp_size`` derived from the
-    # *global* rollout_num_gpus_per_engine would shadow the per-engine value and break
-    # heterogeneous per-group engines (different num_gpus_per_engine). TP is resolved per engine
-    # in ``vllm_engine._resolve_vllm_parallel_sizes`` (tp = gpus_per_engine // pp), mirroring
-    # upstream slime's sglang_engine. (pp divisibility is validated there, per engine.)
-
     if getattr(args, "vllm_router_ip", None):
         args.vllm_router_ip = _wrap_ipv6(args.vllm_router_ip)
 

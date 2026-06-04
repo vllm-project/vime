@@ -7,7 +7,7 @@
 1. **高性能训练**：通过连接 Megatron 与 vLLM，支持各种模式的高效训练；
 2. **灵活的数据生成**：通过自定义数据生成接口以及 server based engine，实现任意的训练数据生成流程。
 
-Vime 继承 slime 的广泛模型支持，包括：
+Vime 继承了 slime 广泛的模型支持，包括：
 
 - Qwen 系列（Qwen3.6、Qwen3.5、Qwen3Next、Qwen3MoE、Qwen3、Qwen2.5）；
 - DeepSeek V3 系列（DeepSeek V3、V3.1、DeepSeek R1）；
@@ -45,10 +45,10 @@ Vime 继承 slime 的广泛模型支持，包括：
 Vime 的参数分为三类：
 
 1. **Megatron 参数**：Vime 会读取 Megatron 中的全部参数，可通过传入如 `--tensor-model-parallel-size 2` 的方式配置 Megatron；
-2. **vLLM 参数**：vLLM server 与 engine 相关选项以 `--vllm-` 为前缀（例如 `--vllm-gpu-memory-utilization`）。路由相关选项分两类前缀：vllm-router 自身的选项以 `--router-` 传入（例如 `--router-policy round_robin`、`--router-request-timeout-secs`），Vime 侧用于告诉 Vime *router 在哪里* 的编排参数则以 `--vllm-router-` 为前缀（`--vllm-router-ip`、`--vllm-router-port`）。完整参数见 [slime/backends/vllm_utils/arguments.py](slime/backends/vllm_utils/arguments.py)。
-3. **框架参数**：与 slime/Vime 编排相关的开关（rollout GPU、数据路径、RL 算法等），见 [slime/utils/arguments.py](slime/utils/arguments.py)。
+2. **vLLM 参数**：vLLM server 与 engine 相关选项以 `--vllm-` 为前缀（例如 `--vllm-gpu-memory-utilization`）。路由相关选项分两类前缀：vllm-router 自身的选项以 `--router-` 传入（例如 `--router-policy round_robin`、`--router-request-timeout-secs`），Vime 侧用于告诉 Vime *router 在哪里* 的编排参数则以 `--vllm-router-` 为前缀（`--vllm-router-ip`、`--vllm-router-port`）。完整参数见 [vime/backends/vllm_utils/arguments.py](vime/backends/vllm_utils/arguments.py)。
+3. **框架参数**：与 Vime 编排相关的开关（rollout GPU、数据路径、RL 算法等），见 [vime/utils/arguments.py](vime/utils/arguments.py)。
 
-`--rollout-num-gpus-per-engine` 对应每个 vLLM engine 的 tensor parallel size。默认 rollout 入口为 `slime.rollout.vllm_rollout.generate_rollout`。
+`--rollout-num-gpus-per-engine` 对应每个 vLLM engine 的 tensor parallel size。默认 rollout 入口为 `vime.rollout.vllm_rollout.generate_rollout`。
 
 完整使用说明请查阅 [使用文档](docs/zh/get_started/usage.md)。
 
@@ -82,7 +82,7 @@ Vime 由 slime 衍生而来。以下上游资源与本仓库文档仍沿用 slim
 ## 常见 Q&A 与致谢
 
 - 常见问题请见 [Q&A](docs/zh/get_started/qa.md)
-- 特别感谢 **vLLM** 项目与 **slime** 社区，以及 Vime 所依赖的 Megatron-LM 等开源项目。
+- 特别感谢 **slime** 社区，以及 slime 所依赖的 **SGLang**、**Megatron-LM** 等开源项目。
 
 引用 Vime 请使用：
 

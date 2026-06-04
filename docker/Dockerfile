@@ -7,6 +7,7 @@ ARG PATCH_VERSION=latest
 ARG MEGATRON_COMMIT=1dcf0dafa884ad52ffb243625717a3471643e087
 
 ARG ENABLE_CUDA_13=0
+ARG TMS_CUDA_MAJOR=
 
 # ======================================== Setup =============================================
 
@@ -82,9 +83,12 @@ RUN NVCC_APPEND_FLAGS="--threads 4" \
 RUN git clone https://github.com/NVIDIA/Megatron-LM.git --recursive && \
     cd Megatron-LM && git checkout ${MEGATRON_COMMIT}
 
-# Pinned to d64a639 (older than vime upstream's a193d9d); the newer commit
-# requires TMS_CUDA_MAJOR env var to build a multi-CUDA wheel.
-RUN pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@d64a639 --no-cache-dir --force-reinstall
+# torch_memory_saver pinned to a193d9dd (upstream slime #1916). The newer commit
+# ships a multi-CUDA wheel and requires TMS_CUDA_MAJOR at build time; default it
+# to the running torch's CUDA major (slime #1924).
+RUN TMS_CUDA_MAJOR="${TMS_CUDA_MAJOR:-$(python -c 'import torch; print(torch.version.cuda.split(".")[0])')}" && \
+    export TMS_CUDA_MAJOR && \
+    pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@a193d9dd1b877d33c64a41cfb3db9f867df2d926 --no-cache-dir --force-reinstall
 RUN pip install git+https://github.com/radixark/Megatron-Bridge.git@bridge --no-deps --no-build-isolation
 RUN pip install nvidia-modelopt[torch]>=0.37.0 --no-build-isolation
 

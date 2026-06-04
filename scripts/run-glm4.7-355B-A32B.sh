@@ -156,7 +156,7 @@ if [ -n "${HOSTFILE}" ]; then
     fi
     echo "Starting Ray worker on ${WORKER_IP}"
     ssh root@"${WORKER_IP}" \
-      "pkill -9 -f "vllm serve" ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus ${ACTOR_NUM_GPUS_PER_NODE} --node-ip-address ${WORKER_IP} --disable-usage-stats" &
+      "pkill -9 -f 'vllm serve' ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus ${ACTOR_NUM_GPUS_PER_NODE} --node-ip-address ${WORKER_IP} --disable-usage-stats" &
   done
   wait
 fi

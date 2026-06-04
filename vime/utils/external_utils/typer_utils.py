@@ -5,7 +5,7 @@ from typing import Annotated
 import typer
 
 
-def dataclass_cli(func, env_var_prefix: str = "SLIME_SCRIPT_"):
+def dataclass_cli(func, env_var_prefix: str = "VIME_SCRIPT_"):
     """Modified from https://github.com/fastapi/typer/issues/154#issuecomment-1544876144"""
 
     # The dataclass type is the first argument of the function.
@@ -58,12 +58,12 @@ if __name__ == "__main__":
 
     runner = CliRunner()
 
-    res1 = runner.invoke(app, [], env={"SLIME_SCRIPT_NAME": "EnvName", "SLIME_SCRIPT_COUNT": "10"})
+    res1 = runner.invoke(app, [], env={"VIME_SCRIPT_NAME": "EnvName", "VIME_SCRIPT_COUNT": "10"})
     print(f"{res1.stdout=}")
     assert res1.exit_code == 0
     assert "EnvName|10" in res1.stdout.strip()
 
-    res2 = runner.invoke(app, ["--count", "999"], env={"SLIME_SCRIPT_NAME": "EnvName"})
+    res2 = runner.invoke(app, ["--count", "999"], env={"VIME_SCRIPT_NAME": "EnvName"})
     print(f"{res2.stdout=}")
     assert res2.exit_code == 0
     assert "EnvName|999" in res2.stdout.strip()

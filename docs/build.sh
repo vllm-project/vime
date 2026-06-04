@@ -10,4 +10,4 @@ if [ "$LANG" != "en" ] && [ "$LANG" != "zh" ]; then
 fi
 
 cd $SCRIPT_DIR
-SLIME_DOC_LANG=$LANG sphinx-build -b html -D language=$LANG --conf-dir ./  ./$LANG ./build/$LANG 
+VIME_DOC_LANG=$LANG sphinx-build -b html -D language=$LANG --conf-dir ./  ./$LANG ./build/$LANG

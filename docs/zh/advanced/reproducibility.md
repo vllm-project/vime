@@ -1,6 +1,6 @@
 # 可复现性
 
-可复现性是科研进展的基础。slime 通过结合 vLLM 的 [batch-invariant 确定性推理](https://vllm.ai/blog/2025-11-10-bitwise-consistent-train-inference) 与 Megatron-LM 的 deterministic 模式，支持 bitwise 级的实验复现。
+可复现性是科研进展的基础。vime 通过结合 vLLM 的 [batch-invariant 确定性推理](https://vllm.ai/blog/2025-11-10-bitwise-consistent-train-inference) 与 Megatron-LM 的 deterministic 模式，支持 bitwise 级的实验复现。
 
 为了开启确定性训练，你需要通过 `pip uninstall flash_attn_3 -y` 卸载 flash attention 3，并设置：
 
@@ -34,7 +34,7 @@ hf download --repo-type dataset zhuzilin/gsm8k --local-dir /root/gsm8k
 hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir /root/Qwen2.5-0.5B-Instruct
 
 # convert ckpt
-cd slime/
+cd vime/
 source scripts/models/qwen2.5-0.5B.sh
 PYTHONPATH=/root/Megatron-LM/ python \
    tools/convert_hf_to_torch_dist.py \

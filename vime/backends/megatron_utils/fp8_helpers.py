@@ -6,12 +6,10 @@ available, which disables the UE8M0 requantization path.
 
 import torch
 
-# deep_gemm is a third-party DeepSeek MoE GEMM library; not all images ship it.
-# When missing, the UE8M0 requantization path falls back to None so callers can
-# skip it gracefully (matches the module docstring contract).
 try:
-    import deep_gemm.utils.layout as _deep_gemm_layout
+    import vllm.third_party.deep_gemm.utils.layout as _deep_gemm_layout
     from vllm.utils.deep_gemm import get_tma_aligned_size as _get_tma_aligned_size
+
     _HAS_DEEP_GEMM = True
 except ImportError:
     _deep_gemm_layout = None

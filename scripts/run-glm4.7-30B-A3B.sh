@@ -118,11 +118,9 @@ VLLM_ARGS=(
    --vllm-data-parallel-size 8
 
    # mtp
-
-
-   --vllm-max-num-seqs 512
    --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
    --vllm-max-cudagraph-capture-size 64
+   --vllm-max-num-seqs 512
 )
 
 MISC_ARGS=(

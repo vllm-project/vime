@@ -1,15 +1,15 @@
 # Quick Start
 
 
-This document will guide you through setting up the environment and getting started with slime within one hour, covering environment configuration, data preparation, training startup, and key code analysis and modifications.
+This document will guide you through setting up the environment and getting started with vime within one hour, covering environment configuration, data preparation, training startup, and key code analysis and modifications.
 
 ## Basic Environment Setup
 
-Since slime may contain temporary patches for vllm/megatron, to avoid potential environment configuration issues, we strongly recommend **users to use our latest Docker image**, which comes pre-configured with all dependencies.
+Since vime may contain temporary patches for vllm/megatron, to avoid potential environment configuration issues, we strongly recommend **users to use our latest Docker image**, which comes pre-configured with all dependencies.
 
 ### Hardware Support
 
-**slime** supports multiple NVIDIA GPU hardware platforms:
+**vime** supports multiple NVIDIA GPU hardware platforms:
 
 - **B200 Series**: Fully supported with identical setup steps as H-series GPUs
 - **H-Series (H100/H200)**: Official support with comprehensive CI testing and stable performance
@@ -20,7 +20,7 @@ Since slime may contain temporary patches for vllm/megatron, to avoid potential 
 - B-series basic functionality is stable and suitable for development/testing, but currently lacks CI protection
 - Both hardware platforms use identical installation and startup procedures
 
-- For scenarios where Docker is not convenient, please refer to [build_conda.sh](https://github.com/THUDM/slime/blob/main/build_conda.sh).
+- For scenarios where Docker is not convenient, please refer to [build_conda.sh](https://github.com/vllm-project/vime/blob/main/build_conda.sh).
 
 ### Pull and Start Docker Container
 
@@ -36,13 +36,13 @@ docker run --rm --gpus all --ipc=host --shm-size=16g \
   -it inferactinc/public:vime-vllm-cu129-latest /bin/bash
 ```
 
-### Install slime
+### Install vime
 
-slime is already installed in the docker image. To update to the latest verison, please execute the following command:
+vime is already installed in the docker image. To update to the latest verison, please execute the following command:
 
 ```bash
 # Path can be adjusted according to actual situation
-cd /root/slime
+cd /root/vime
 git pull
 pip install -e . --no-deps
 ```
@@ -52,8 +52,8 @@ pip install -e . --no-deps
 You can download required models and datasets from platforms like Hugging Face, ModelScope, etc. Here are the commands to download example resources using `huggingface_hub`:
 
 ```bash
-# Download model weights (GLM-Z1-9B)
-hf download zai-org/GLM-Z1-9B-0414 --local-dir /root/GLM-Z1-9B-0414
+# Download model weights (Qwen3-4B)
+hf download zai-org/Qwen3-4B --local-dir /root/Qwen3-4B
 
 # Download training dataset (dapo-math-17k)
 hf download --repo-type dataset zhuzilin/dapo-math-17k \
@@ -70,11 +70,11 @@ hf download --repo-type dataset zhuzilin/aime-2024 \
 
 When using Megatron as the training backend, you need to first convert Hugging Face format model weights to Megatron `torch_dist` format.
 
-First, load the configuration file of the target model. The `slime/scripts/models` directory contains configuration files for supported models. You need to `source` the corresponding model script to load the configuration parameters into the current environment. Here we use GLM4-9B model as an example, and it's similar for Qwen3-4B, Qwen3.5, Qwen3.6, GLM-4.7-Flash, Qwen3-30B-A3B, etc.
+First, load the configuration file of the target model. The `vime/scripts/models` directory contains configuration files for supported models. You need to `source` the corresponding model script to load the configuration parameters into the current environment. Here we use Qwen3-4B model as an example.
 
 ```bash
-cd /root/slime
-source scripts/models/glm4-9B.sh
+cd /root/vime
+source scripts/models/qwen3-4B.sh
 ```
 
 Next, run the conversion script. Please note the following parameters:
@@ -84,12 +84,11 @@ Next, run the conversion script. Please note the following parameters:
 ```bash
 PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
     ${MODEL_ARGS[@]} \
-    --hf-checkpoint /root/GLM-Z1-9B-0414 \
-    --save /root/GLM-Z1-9B-0414_torch_dist
+    --hf-checkpoint /root/Qwen3-4B \
+    --save /root/Qwen3-4B_torch_dist
 ```
 
 For larger models, you can use `torchrun` to start the conversion script to convert with multi-gpus or even multi-nodes.
-Note: When converting the kimi-k2 model weights, you need to open config.json in the model path and change "model_type": "kimi_k2" to "model_type": "deepseek_v3".
 
 ### Convert from Megatron Format to Hugging Face Format
 
@@ -98,8 +97,8 @@ You can use the following script to convert the saved Megatron checkpoints back 
 ```bash
 PYTHONPATH=/root/Megatron-LM python tools/convert_torch_dist_to_hf.py \
   --input-dir /path/to/torch_dist_ckpt/iter_xxx/ \
-  --output-dir /root/GLM-Z1-9B-0414-iter_xxx \
-  --origin-hf-dir /root/GLM-Z1-9B-0414
+  --output-dir /root/Qwen3-4B-iter_xxx \
+  --origin-hf-dir /root/Qwen3-4B
 ```
 
 Note that as Megatron will do padding to embedding for better performance, it may happen that the converted embedding is not correct. In that case, please manually set `--vocab-size` during convertion.
@@ -109,25 +108,25 @@ Note that as Megatron will do padding to embedding for better performance, it ma
 After completing the above preparation work, you can run the training script.
 
 ```bash
-cd /root/slime
-bash scripts/run-glm4-9B.sh
+cd /root/vime
+bash scripts/run-qwen3-4B.sh
 ```
 
-We still use the run-glm4-9B.sh script as an example to briefly analyze the main parameters.
+We still use the run-qwen3-4B.sh script as an example to briefly analyze the main parameters.
 
 ### MODEL_ARGS: Model Configuration Parameters
 
 ```bash
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-source "${SCRIPT_DIR}/models/glm4-9B.sh"
+source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 ```
 
-This part loads model configuration from the `scripts/models/glm4-9B.sh` file through the `source` command. These configurations are all hyperparameters required by Megatron. Since Megatron cannot directly read model configuration from checkpoints, it needs to be manually specified. We provide configuration examples for some commonly used models in the `scripts/models/` directory.
+This part loads model configuration from the `scripts/models/qwen3-4B.sh` file through the `source` command. These configurations are all hyperparameters required by Megatron. Since Megatron cannot directly read model configuration from checkpoints, it needs to be manually specified. We provide configuration examples for some commonly used models in the `scripts/models/` directory.
 
 > ⚠️ **Note**:
 > Please make sure to check whether the parameters in the model configuration file (such as `--rotary-base`) completely match the model you are currently using. Different versions of the same model structure may use different configuration values. If you need to modify, you can directly override after `source`, for example:
 > ```bash
-> source "${SCRIPT_DIR}/models/glm4-9B.sh"
+> source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 > MODEL_ARGS+=(--rotary-base 10000)
 > ```
 
@@ -136,14 +135,14 @@ This part loads model configuration from the `scripts/models/glm4-9B.sh` file th
 ```bash
 CKPT_ARGS=(
    # To load tokenizer and other information, won't actually use model weight parameters from hf path
-   --hf-checkpoint /root/GLM-Z1-9B-0414
+   --hf-checkpoint /root/Qwen3-4B
    # Reference Model's Megatron format checkpoint
-   --ref-load /root/GLM-Z1-9B-0414_torch_dist
+   --ref-load /root/Qwen3-4B_torch_dist
    # Actor model loading path. Should typically match --save for checkpoint resumption
    # If empty or doesn't contain a valid checkpoint, loads from --ref-load instead
-   --load /root/GLM-Z1-9B-0414_slime/
+   --load /root/Qwen3-4B_vime/
    # Model save path during training
-   --save /root/GLM-Z1-9B-0414_slime/
+   --save /root/Qwen3-4B_vime/
    # Model save interval (steps)
    --save-interval 20
 )
@@ -170,7 +169,7 @@ The entire training process can be viewed as a closed loop of **"Data Sampling �
 In this process, the "output" and "consumption" of each round must be equal, following this constraint:
 **`(rollout-batch-size × n-samples-per-prompt) = (global-batch-size × num-steps-per-rollout)`**
 
-- In slime, if `--num-steps-per-rollout` is set, `--global-batch-size` will be automatically set if not set, and if set, it will be validated using the above formula.
+- In vime, if `--num-steps-per-rollout` is set, `--global-batch-size` will be automatically set if not set, and if set, it will be validated using the above formula.
 
 **Training Process Count Control**
 - `--num-rollout`: Controls the **total number of execution rounds** of the entire **"sampling→training"** loop.
@@ -186,7 +185,7 @@ ROLLOUT_ARGS=(
    # Whether to shuffle data in Rollout phase
    --rollout-shuffle
 
-   # Reward Model type. slime has built-in multiple types, also supports custom through --custom-rm-path
+   # Reward Model type. vime has built-in multiple types, also supports custom through --custom-rm-path
    --rm-type deepscaler
 
    # These five parameters control the relationship between rollout and train
@@ -226,13 +225,13 @@ EVAL_ARGS=(
 
 ### PERF_ARGS: Performance and Parallelism Parameters
 
-This part mainly contains Megatron's parallel configuration. `--use-dynamic-batch-size` and `--max-tokens-per-gpu` are slime-specific optimizations.
+This part mainly contains Megatron's parallel configuration. `--use-dynamic-batch-size` and `--max-tokens-per-gpu` are vime-specific optimizations.
 
 - `--max-tokens-per-gpu`: Maximum number of tokens processed per GPU. After enabling dynamic batching (`use_dynamic_batch_size`), the system will intelligently pack samples of varying lengths so that the total token count of each micro-batch approaches this limit, thereby improving training efficiency. If a single sample length exceeds this value, it will form an independent batch. In context parallel (CP) mode, `N` CP cards share the total length of `N * max_tokens_per_gpu`.
 - `--use-dynamic-batch-size`: Enable dynamic batching. At this time, `--micro-batch-size` will be ignored.
 
 > 💡 **Tip**:
-> slime always trains models through data packing methods and strictly ensures that per sample loss or per token loss is correct. Therefore, enabling dynamic batch size will not affect loss calculation, and it is strongly recommended to enable it.
+> vime always trains models through data packing methods and strictly ensures that per sample loss or per token loss is correct. Therefore, enabling dynamic batch size will not affect loss calculation, and it is strongly recommended to enable it.
 
 ```bash
 PERF_ARGS=(
@@ -269,8 +268,8 @@ GRPO_ARGS=(
 )
 ```
 
-- `--advantage-estimator`: In addition to [GRPO](https://arxiv.org/abs/2402.03300), slime also supports several other training algorithms, such as [GSPO](https://arxiv.org/abs/2507.18071), [Reinforce++](https://arxiv.org/abs/2501.03262) and [Reinforce++ Baseline](https://arxiv.org/abs/2501.03262), and [PPO](https://arxiv.org/abs/1707.06347).
-- `--calculate-per-token-loss`: By default, slime calculates the loss on a per-sample basis, i.e., `mean(sum(sample_i) / len(sample_i))`. To calculate the loss on a per-token basis, i.e., `sum(sum(sample_i)) / sum(len(sample_i))`, you can enable this flag.
+- `--advantage-estimator`: In addition to [GRPO](https://arxiv.org/abs/2402.03300), vime also supports several other training algorithms, such as [GSPO](https://arxiv.org/abs/2507.18071), [Reinforce++](https://arxiv.org/abs/2501.03262) and [Reinforce++ Baseline](https://arxiv.org/abs/2501.03262), and [PPO](https://arxiv.org/abs/1707.06347).
+- `--calculate-per-token-loss`: By default, vime calculates the loss on a per-sample basis, i.e., `mean(sum(sample_i) / len(sample_i))`. To calculate the loss on a per-token basis, i.e., `sum(sum(sample_i)) / sum(len(sample_i))`, you can enable this flag.
 - `--use-tis`: Enable this setting to use TIS (Truncated Importance Sampling), which is introduced by this [blog](https://fengyao.notion.site/off-policy-rl).
 
 ### OPTIMIZER_ARGS: Optimizer Parameters
@@ -290,10 +289,10 @@ OPTIMIZER_ARGS=(
 
 This part of parameters is used to configure the vLLM inference service.
 - `--rollout-num-gpus-per-engine`: Equivalent to vLLM's `tp_size`.
-- Other vLLM parameters can be passed to slime by adding the `--vllm-` prefix, and slime will automatically forward them to vLLM. For example, to set vLLM's `--log-level INFO` parameter, just use `--vllm-log-level INFO`.
+- Other vLLM parameters can be passed to vime by adding the `--vllm-` prefix, and vime will automatically forward them to vLLM. For example, to set vLLM's `--log-level INFO` parameter, just use `--vllm-log-level INFO`.
 
 > ⚠️ **Note**:
-> slime uses `vllm-router` to schedule multiple vLLM engines. `dp_size` is calculated through `rollout-num-gpus / rollout-num-gpus-per-engine`.
+> vime uses `vllm-router` to schedule multiple vLLM engines. `dp_size` is calculated through `rollout-num-gpus / rollout-num-gpus-per-engine`.
 
 ```bash
 VLLM_ARGS=(
@@ -336,12 +335,12 @@ At this time, training and inference will share all 8 GPUs.
 
 ### Dynamic Sampling
 
-slime supports more complex sampling strategies, such as dynamic sampling used in [DAPO](https://dapo-sia.github.io/). To enable this feature, you need to configure the following parameters:
+vime supports more complex sampling strategies, such as dynamic sampling used in [DAPO](https://dapo-sia.github.io/). To enable this feature, you need to configure the following parameters:
 
 ```bash
    --over-sampling-batch-size 64 \
    --dynamic-sampling-filter-path \
-     slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
+     vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
 ```
 
 Here `over_sampling_batch_size` needs to be greater than `rollout_batch_size`, for example, configured as:
@@ -352,7 +351,7 @@ Here `over_sampling_batch_size` needs to be greater than `rollout_batch_size`, f
    --over-sampling-batch-size 64 \
 ```
 
-Then each sampling will directly sample 64 prompts, and each prompt will be sampled 8 times. Because slime performs asynchronous sampling internally, we will successively obtain 8 responses for each prompt. When receiving responses, the function corresponding to `dynamic_sampling_filter_path` will be used for filtering. If it passes, these 8 pieces of data will be kept; otherwise, they will be discarded.
+Then each sampling will directly sample 64 prompts, and each prompt will be sampled 8 times. Because vime performs asynchronous sampling internally, we will successively obtain 8 responses for each prompt. When receiving responses, the function corresponding to `dynamic_sampling_filter_path` will be used for filtering. If it passes, these 8 pieces of data will be kept; otherwise, they will be discarded.
 
 The filtering function `check_reward_nonzero_std` in the example will check whether the standard deviation of rewards for a group of samples is greater than zero, ensuring that the reward scores of each group of samples left have differences, thereby avoiding overly homogeneous data and improving data diversity.
 
@@ -387,39 +386,17 @@ That is, take out the first `num_samples` prompts corresponding to `num_samples 
 > 💡 **Tip**:
 > The `sample.metadata` of each partial rollout sample stores the rollout id of the first generation, which can be used for data filtering.
 
-### bf16 Training fp8 Inference
-
-slime directly supports bf16 training and fp8 inference. For Qwen3-4B model, you only need to download the following model:
-
-```bash
-hf download Qwen/Qwen3-4B-FP8 --local-dir /root/Qwen3-4B-FP8
-```
-
-And replace `--hf-checkpoint` with:
-
-```bash
-   # Used to load tokenizer and other information, actually won't use model weight parameters from hf path
-   --hf-checkpoint /root/Qwen3-4B-FP8
-
-   # The megatron checkpoint still needs to be the dist weights converted from bf16 huggingface at the beginning, not modified because of FP8 rollout.
-   --ref-load /root/Qwen3-4B_torch_dist
-```
-
-This will trigger fp8 inference. Currently, we will directly cast bf16 weights to fp8, and we will gradually add quantization schemes with less impact on accuracy in the future.
-
-⚠️ The training megatron checkpoint still needs to be the one converted from bf16 huggingface at the beginning.
-
 ## Multiturn Adaptation
 
-The slime framework is highly extensible and supports complex Agent scenarios (such as multi-turn interaction and tool calling). Its core mechanism is to rewrite the default data generation (Rollout) and reward calculation (Reward) logic through custom functions.
+The vime framework is highly extensible and supports complex Agent scenarios (such as multi-turn interaction and tool calling). Its core mechanism is to rewrite the default data generation (Rollout) and reward calculation (Reward) logic through custom functions.
 
-This section uses an implementation based on [Search-R1](https://github.com/PeterGriffinJin/Search-R1) as an example to illustrate how to adapt slime to support multi-turn interaction.
+This section uses an implementation based on [Search-R1](https://github.com/PeterGriffinJin/Search-R1) as an example to illustrate how to adapt vime to support multi-turn interaction.
 
 ### Adaptation Strategy Summary
 
-Adapting slime to support multi-turn interaction mainly includes three steps:
+Adapting vime to support multi-turn interaction mainly includes three steps:
 
-1. **Data Preparation**: Adapt the multi-turn interaction dataset to slime's `Sample` objects. Map conversation history, real labels, etc. to `prompt` and `label` fields, and store additional information such as tool definitions and intermediate states in the `metadata` field for subsequent function calls.
+1. **Data Preparation**: Adapt the multi-turn interaction dataset to vime's `Sample` objects. Map conversation history, real labels, etc. to `prompt` and `label` fields, and store additional information such as tool definitions and intermediate states in the `metadata` field for subsequent function calls.
 
 2. **Implement Custom Generation Function**: Write functions to simulate the interaction loop of "model generates action → executes tool → concatenates observation results", and correctly handle Loss Masking.
 
@@ -447,7 +424,7 @@ You need to convert it to:
 
 ### Step Two: Specify Mapping in Training Script
 
-After completing data preparation, in the training script, map this preprocessed `metadata` column to slime's `Sample.metadata` field through `ROLLOUT_ARGS`.
+After completing data preparation, in the training script, map this preprocessed `metadata` column to vime's `Sample.metadata` field through `ROLLOUT_ARGS`.
 
 ```bash
 ROLLOUT_ARGS=(
@@ -461,7 +438,7 @@ ROLLOUT_ARGS=(
    --label-key final_answer
 
    # 4. Load the pre-constructed "metadata" column into Sample.metadata
-   #    slime will automatically parse it as a Python dictionary
+   #    vime will automatically parse it as a Python dictionary
    --metadata-key metadata
 )
 ```
@@ -565,21 +542,18 @@ ray job submit --address="http://127.0.0.1:8265" \
      }
    }' \
    -- python3 train.py \
-   --... # Other Megatron/vLLM/slime arguments
+   --... # Other Megatron/vLLM/vime arguments
 ```
 
 Optionally, the following environment variables may be needed based on your environment. For example, when there are multiple IPs and the wrong one is chosen in a Docker or SLURM envionment. We provide an example used in a SLURM + enroot multi-node system as follows:
 
 ```
-export SLIME_HOST_IP=$(hostname -I | awk '{print $1}')
+export VIME_HOST_IP=$(hostname -I | awk '{print $1}')
 export GLOO_SOCKET_IFNAME=$(ip -o -4 addr show | awk '$4 ~ /^10\\./ {print $2}')
 export NCCL_SOCKET_IFNAME=$(ip -o -4 addr show | awk '$4 ~ /^10\\./ {print $2}')
 export NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=$(ip -o -4 addr show | awk '$4 ~ /^10\./ {print $2}')
 ```
 
-slime has been deeply optimized for distributed training of large-scale Mixture of Experts (MoE) models. We provide some end-to-end training cases for reference:
+vime has been deeply optimized for distributed training of large-scale Mixture of Experts (MoE) models. We provide some end-to-end training cases for reference:
 
-- [Example: 8xH100 Training GLM-4.7-Flash](../examples/glm4.7-30B-A3B.md)
-- [Example: 64xH100 Training GLM-4.7](../examples/glm4.7-355B-A32B.md)
-- [Example: 128xH100 Training DeepSeek-R1](../examples/deepseek-r1.md)
-- The scripts such as `scripts/run_qwen3_30b_a3b.py`, `scripts/run_glm45_355b_a32b.py` also support multi-node training, though there are little documentations about it currently.
+- [Example: Qwen3-30B-A3B with 8xH100](../examples/qwen3-30B-A3B.md)

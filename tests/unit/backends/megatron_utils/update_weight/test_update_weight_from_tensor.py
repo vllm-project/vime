@@ -51,9 +51,9 @@ def _install_stubs():
     _dist.barrier = dist_stub.barrier
     _dist.all_gather_object = dist_stub.all_gather_object
 
-    slime_utils = types.ModuleType("vime.utils.distributed_utils")
-    slime_utils.get_gloo_group = MagicMock(return_value="gloo")
-    sys.modules.setdefault("vime.utils.distributed_utils", slime_utils)
+    vime_utils = types.ModuleType("vime.utils.distributed_utils")
+    vime_utils.get_gloo_group = MagicMock(return_value="gloo")
+    sys.modules.setdefault("vime.utils.distributed_utils", vime_utils)
 
     hf_iter_stub = MagicMock()
     hf_iter_stub.get_hf_weight_chunks.return_value = iter([])

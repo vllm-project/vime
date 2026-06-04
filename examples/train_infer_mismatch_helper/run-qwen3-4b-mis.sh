@@ -28,10 +28,9 @@ source "/root/vime/scripts/models/qwen3-4B.sh"
 
 CKPT_ARGS=(
    --hf-checkpoint /root/Qwen3-4B
-   #--hf-checkpoint /root/Qwen3-4B-FP8
    --ref-load /root/Qwen3-4B_torch_dist
-   # --load /root/Qwen3-4B_slime/
-   --save /root/Qwen3-4B_slime/
+   # --load /root/Qwen3-4B_vime/
+   --save /root/Qwen3-4B_vime/
    --save-interval 200
 )
 
