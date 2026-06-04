@@ -13,7 +13,7 @@ from argparse import Namespace
 from dataclasses import dataclass
 
 import vime.utils.external_utils.command_utils as U
-from vime.backends.vllm_utils.vllm_engine import _wait_server_healthy, launch_server_process
+from vime.backends.vllm_utils.vllm_engine import _compute_server_args, _wait_server_healthy, launch_server_process
 from vime.rollout import vllm_rollout
 from vime.utils import http_utils
 from vime.utils.types import Sample
@@ -65,13 +65,6 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def _visible_devices(num_gpus: int) -> str:
-    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if visible_devices:
-        return ",".join(visible_devices.split(",")[:num_gpus])
-    return ",".join(str(i) for i in range(num_gpus))
-
-
 def _stop_process_tree(process) -> None:
     if not process.is_alive():
         return
@@ -113,24 +106,44 @@ def _execute_case(case: VLLMGenerateCase):
         U.exec_command(f"hf download {case.hf_repo} --local-dir {case.model_path}")
 
     server_port = _free_port()
-    server_args = Namespace(
+    args = Namespace(
         rollout_num_gpus_per_engine=case.num_gpus,
+        num_gpus_per_node=case.num_gpus,
+        hf_checkpoint=case.model_path,
         seed=1234,
         vllm_gpu_memory_utilization=0.9,
         vllm_async_scheduling=False,
         vllm_enforce_eager=False,
+        vllm_enable_sleep_mode=False,
         rollout_max_context_len=case.max_model_len,
         use_rollout_routing_replay=case.use_rollout_routing_replay,
+        vllm_dp_size=1,
+        # Placement attrs so _compute_server_args derives the GPU base through the
+        # real get_base_gpu_id() path rather than a hardcoded id. A single
+        # colocate engine at rank 0 -> local base 0, and the child server's
+        # CUDA_VISIBLE_DEVICES is computed exactly as the production VLLMEngine
+        # does (honoring an externally set CUDA_VISIBLE_DEVICES instead of always
+        # grabbing physical GPU 0).
+        colocate=True,
+        actor_num_nodes=1,
+        actor_num_gpus_per_node=case.num_gpus,
+        use_critic=False,
+        debug_rollout_only=False,
     )
 
-    process = launch_server_process(
-        bind_host="127.0.0.1",
-        server_port=server_port,
-        args=server_args,
+    # ``launch_server_process`` consumes a single ``server_args`` dict built by
+    # ``_compute_server_args`` since the PR #68 multi-node topology refactor
+    # (this test predates it). Let it derive GPU placement via
+    # get_base_gpu_id()/_to_local_gpu_id() — identical to VLLMEngine — so the
+    # launched server tracks CUDA_VISIBLE_DEVICES.
+    server_args = _compute_server_args(
+        args,
         rank=0,
-        visible_devices=_visible_devices(case.num_gpus),
-        model_path=case.model_path,
+        dist_init_addr=None,
+        host="127.0.0.1",
+        port=server_port,
     )
+    process = launch_server_process(server_args)
 
     try:
         _wait_server_healthy(f"http://127.0.0.1:{server_port}", process)
