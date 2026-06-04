@@ -1,0 +1,313 @@
+"""Shared adapter primitives for token-capturing agent rollouts."""
+
+from __future__ import annotations
+
+import asyncio
+import dataclasses
+import hashlib
+import json
+import logging
+import uuid
+from collections.abc import Callable
+from typing import Any
+
+import aiohttp
+from aiohttp import web
+
+from vime.agent.trajectory import TokenSegment, TurnRecord
+
+
+ADAPTER_KEY = web.AppKey("adapter", object)
+TOKENIZER_KEY = web.AppKey("tokenizer", object)
+ENGINE_URL_KEY = web.AppKey("engine_url", object)
+MODEL_KEY = web.AppKey("model", object)
+TOOL_PARSER_KEY = web.AppKey("tool_parser", object)
+REASONING_PARSER_KEY = web.AppKey("reasoning_parser", object)
+
+
+@dataclasses.dataclass
+class AdapterChain:
+    """Protocol-neutral chat chain state used by HTTP adapters."""
+
+    system_hash: str = ""
+    chat_messages: list[dict] = dataclasses.field(default_factory=list)
+    tools_schema: list[dict] | None = None
+    seen_msgs: int = 0
+    msg_hashes: list[str] = dataclasses.field(default_factory=list)
+    turns: list[TurnRecord] = dataclasses.field(default_factory=list)
+
+
+class BaseAdapter:
+    """Base HTTP adapter with per-instance session lifecycle state."""
+
+    session_cls: type
+
+    def __init__(self, *, tokenizer, engine_url, model=None, tool_parser=None, reasoning_parser=None) -> None:
+        self.store: dict[str, Any] = {}
+        self.inflight: dict[str, set[asyncio.Task]] = {}
+        self.closed: set[str] = set()
+        self.app = web.Application(client_max_size=64 * 1024 * 1024)
+        self.app[ADAPTER_KEY] = self
+        self.app[TOKENIZER_KEY] = tokenizer
+        self.app[ENGINE_URL_KEY] = engine_url.rstrip("/") if isinstance(engine_url, str) else engine_url
+        self.app[MODEL_KEY] = model
+        self.app[TOOL_PARSER_KEY] = tool_parser
+        self.app[REASONING_PARSER_KEY] = reasoning_parser
+
+    def open_session(
+        self,
+        sid: str,
+        *,
+        sampling_defaults: dict | None = None,
+        max_context_tokens: int = 0,
+    ) -> None:
+        register_session(
+            self.store,
+            sid,
+            self.session_cls,
+            sampling_defaults=sampling_defaults,
+            max_context_tokens=max_context_tokens,
+        )
+
+    async def shutdown_session(self, sid: str, *, wait_timeout: float = 5.0) -> None:
+        await shutdown_session_tasks(sid, self.closed, self.inflight, wait_timeout=wait_timeout)
+
+    async def finish_session(self, sid: str, *, wait_timeout: float = 5.0) -> list[TokenSegment]:
+        raise NotImplementedError
+
+
+def strip_cache_control(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {k: strip_cache_control(v) for k, v in obj.items() if k != "cache_control"}
+    if isinstance(obj, list):
+        return [strip_cache_control(x) for x in obj]
+    return obj
+
+
+def stable_hash(obj: Any) -> str:
+    payload = json.dumps(strip_cache_control(obj), sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    return hashlib.sha1(payload).hexdigest()[:12]
+
+
+def json_arguments(value: Any) -> str:
+    if value is None:
+        return "{}"
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def render_token_ids(chain: AdapterChain, tokenizer) -> list[int]:
+    enc = tokenizer.apply_chat_template(
+        chain.chat_messages,
+        tools=chain.tools_schema,
+        tokenize=True,
+        add_generation_prompt=True,
+    )
+    ids = enc["input_ids"] if hasattr(enc, "__getitem__") and "input_ids" in enc else enc
+    return list(ids)
+
+
+def request_session_id(
+    request: web.Request,
+    *,
+    body: dict | None = None,
+    include_x_api_key: bool = False,
+) -> str:
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        sid = auth[7:].strip()
+        if sid:
+            return sid
+
+    if body is not None:
+        metadata = body.get("metadata")
+        if isinstance(metadata, dict) and metadata.get("session_id"):
+            return str(metadata["session_id"])
+        if body.get("user"):
+            return str(body["user"])
+
+    if include_x_api_key:
+        api_key = request.headers.get("X-Api-Key")
+        if api_key:
+            return api_key.strip()
+
+    return "default"
+
+
+def register_session(
+    store: dict[str, Any],
+    sid: str,
+    session_factory: Callable[[], Any],
+    *,
+    sampling_defaults: dict | None = None,
+    max_context_tokens: int = 0,
+) -> None:
+    if sid in store:
+        raise ValueError(f"session_id {sid!r} already exists; sids must be unique per agent run")
+    session = store[sid] = session_factory()
+    session.sampling_defaults = dict(sampling_defaults or {})
+    session.max_context_tokens = int(max_context_tokens or 0)
+
+
+def _sampling_params(session: Any, body: dict, *, max_token_keys: tuple[str, ...], stop_keys: tuple[str, ...]) -> dict:
+    sp: dict[str, Any] = {
+        "skip_special_tokens": False,
+        "spaces_between_special_tokens": False,
+        "no_stop_trim": True,
+        "max_new_tokens": 4096,
+        **(session.sampling_defaults or {}),
+    }
+
+    for key in max_token_keys:
+        if body.get(key) is not None:
+            sp["max_new_tokens"] = min(int(sp.get("max_new_tokens", body[key])), int(body[key]))
+            break
+
+    for src_k, dst_k in (("temperature", "temperature"), ("top_p", "top_p"), ("top_k", "top_k")):
+        if src_k in body:
+            sp[dst_k] = body[src_k]
+
+    for key in stop_keys:
+        if body.get(key):
+            sp["stop"] = body[key]
+            break
+
+    return sp
+
+
+def _engine_sampling_body(sp: dict) -> dict:
+    """Map the canonical (sglang-shaped) sampling dict to a vLLM ``/inference/v1/generate``
+    ``sampling_params`` body. vLLM uses ``max_tokens`` (not ``max_new_tokens``) and returns
+    per-token logprobs when ``logprobs`` is set."""
+    body: dict[str, Any] = {
+        "max_tokens": int(sp.get("max_new_tokens", 4096)),
+        "logprobs": 1,
+    }
+    if "temperature" in sp:
+        body["temperature"] = sp["temperature"]
+    if "top_p" in sp:
+        body["top_p"] = sp["top_p"]
+    tk = sp.get("top_k")
+    if tk is not None and (tk > 0 or tk == -1):
+        body["top_k"] = tk
+    if sp.get("stop"):
+        body["stop"] = sp["stop"]
+    if sp.get("stop_token_ids"):
+        body["stop_token_ids"] = sp["stop_token_ids"]
+    if sp.get("skip_special_tokens") is not None:
+        body["skip_special_tokens"] = bool(sp["skip_special_tokens"])
+    return body
+
+
+def _tokens_and_logprobs_from_choice(choice: dict) -> tuple[list[int], list[float]]:
+    """Parse ``token_ids`` + ``logprobs.content[i].logprob`` from a vLLM
+    ``/inference/v1/generate`` choice. Mirrors vime ``_inference_generate_tokens_and_logprobs``."""
+    tids_raw = choice.get("token_ids")
+    if not (isinstance(tids_raw, list) and tids_raw and all(isinstance(x, int) for x in tids_raw)):
+        return [], []
+    tids = [int(x) for x in tids_raw]
+    lp = choice.get("logprobs")
+    if not isinstance(lp, dict):
+        return tids, [0.0] * len(tids)
+    content = lp.get("content")
+    if isinstance(content, list) and content:
+        lps: list[float] = []
+        for i in range(len(tids)):
+            if i < len(content) and isinstance(content[i], dict):
+                lps.append(float(content[i].get("logprob", 0.0)))
+            else:
+                lps.append(0.0)
+        return tids, lps
+    return tids, [0.0] * len(tids)
+
+
+async def call_engine_generate(
+    prompt_ids: list[int],
+    session: Any,
+    body: dict,
+    app,
+    *,
+    max_token_keys: tuple[str, ...],
+    stop_keys: tuple[str, ...],
+    log_prefix: str,
+    logger: logging.Logger,
+    session_id: str | None = None,
+) -> TurnRecord:
+    sp = _sampling_params(session, body, max_token_keys=max_token_keys, stop_keys=stop_keys)
+
+    if session.max_context_tokens > 0:
+        remaining_context = session.max_context_tokens - len(prompt_ids)
+        if remaining_context <= 0:
+            logger.warning(
+                "[%s] prompt exceeds max_context_tokens (%d >= %d)",
+                log_prefix,
+                len(prompt_ids),
+                session.max_context_tokens,
+            )
+            return TurnRecord(prompt_ids=list(prompt_ids), output_ids=[], finish_reason="length")
+        sp["max_new_tokens"] = min(int(sp.get("max_new_tokens", remaining_context)), remaining_context)
+
+    engine_url = app[ENGINE_URL_KEY]
+    model = app[MODEL_KEY]
+    payload: dict[str, Any] = {
+        "token_ids": list(prompt_ids),
+        "sampling_params": _engine_sampling_body(sp),
+    }
+    if model:
+        payload["model"] = model
+    # session_id routes via vllm-router's consistent_hash policy (x-session-id header);
+    # see vime ``vllm_rollout.py`` headers handling.
+    headers = {"x-session-id": session_id} if session_id and session_id != "default" else None
+    timeout = aiohttp.ClientTimeout(total=None, sock_read=900)
+    task = asyncio.current_task()
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as sess, sess.post(
+            f"{engine_url}/inference/v1/generate",
+            json=payload,
+            headers=headers,
+        ) as r:
+            if r.status >= 400:
+                text = await r.text()
+                raise RuntimeError(f"engine upstream {r.status}: {text[:400]}")
+            data = await r.json(content_type=None)
+        choice = (data.get("choices") or [{}])[0]
+        output_ids, output_log_probs = _tokens_and_logprobs_from_choice(choice)
+        fr = choice.get("finish_reason")
+        finish = fr if isinstance(fr, str) and fr else "stop"
+    except (asyncio.CancelledError, aiohttp.ClientError, asyncio.TimeoutError):
+        # vLLM ``/inference/v1/generate`` has no per-request HTTP abort endpoint (unlike
+        # sglang ``/abort_request``). Cancelling the in-flight task tears down the aiohttp
+        # request, which drops the streaming connection so the engine stops generating.
+        if task is not None:
+            task.cancel()
+        raise
+
+    return TurnRecord(
+        prompt_ids=list(prompt_ids),
+        output_ids=output_ids,
+        finish_reason=finish,
+        output_log_probs=output_log_probs,
+    )
+
+
+async def shutdown_session_tasks(
+    sid: str,
+    closed: set[str],
+    inflight: dict[str, set[asyncio.Task]],
+    *,
+    wait_timeout: float = 5.0,
+) -> None:
+    closed.add(sid)
+    tasks = [t for t in inflight.pop(sid, ()) if not t.done()]
+    if not tasks:
+        return
+    _, pending = await asyncio.wait(tasks, timeout=wait_timeout)
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+async def ok_response(request: web.Request) -> web.Response:
+    return web.json_response({"ok": True})
