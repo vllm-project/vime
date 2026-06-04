@@ -381,7 +381,14 @@ def _resolve_subprocess_cvd(visible_devices: str) -> str:
         if tok == "":
             continue
         idx = int(tok)
-        out.append(inh[idx] if 0 <= idx < len(inh) else tok)
+        if not (0 <= idx < len(inh)):
+            # Local indices must address the inherited set; an out-of-range index means a
+            # broken placement invariant — fail loudly rather than silently mis-pin the GPU.
+            raise IndexError(
+                f"local GPU index {idx} is out of range for inherited "
+                f"CUDA_VISIBLE_DEVICES={inherited!r} ({len(inh)} devices)"
+            )
+        out.append(inh[idx])
     return ",".join(out)
 
 

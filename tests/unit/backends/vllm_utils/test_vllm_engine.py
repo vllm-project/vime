@@ -89,6 +89,15 @@ def test_resolve_subprocess_cvd_identity_when_inherited_is_zero_based(monkeypatc
 
 
 @pytest.mark.unit
+def test_resolve_subprocess_cvd_raises_on_out_of_range(monkeypatch):
+    # A local index that doesn't address the inherited set means a broken placement
+    # invariant — fail fast instead of silently mis-pinning the GPU.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,5")  # only 2 visible devices
+    with pytest.raises(IndexError):
+        mod._resolve_subprocess_cvd("0,1,2,3")  # local 2,3 out of range
+
+
+@pytest.mark.unit
 def test_compute_vllm_engine_topology_single_node(vllm_args):
     vllm_args.num_gpus_per_node = 8
     vllm_args.rollout_num_gpus_per_engine = 4
