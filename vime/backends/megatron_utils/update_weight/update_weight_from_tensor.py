@@ -488,9 +488,7 @@ class vLLMColocateWorkerExtension:
                 - ipc_handles_pickled: base64(cloudpickle({gpu_uuid: (func, args)}))
         """
         if not getattr(self, "_weight_update_active", False):
-            raise RuntimeError(
-                "start_weight_update must be called before update_weights."
-            )
+            raise RuntimeError("start_weight_update must be called before update_weights.")
 
         import base64
 
@@ -499,9 +497,7 @@ class vLLMColocateWorkerExtension:
         # Deserialise cloudpickle+b64 encoded IPC handles back to raw callables.
         inner = dict(update_info)
         if "ipc_handles_pickled" in inner:
-            inner["ipc_handles"] = cloudpickle.loads(
-                base64.b64decode(inner.pop("ipc_handles_pickled"))
-            )
+            inner["ipc_handles"] = cloudpickle.loads(base64.b64decode(inner.pop("ipc_handles_pickled")))
 
         names: list[str] = inner["names"]
         shapes: list[list[int]] = inner["shapes"]

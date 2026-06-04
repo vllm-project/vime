@@ -795,9 +795,9 @@ class VLLMEngine(RayActor):
 
         payload = dict(update_info)
         if payload.get("ipc_handles") is not None:
-            payload["ipc_handles_pickled"] = base64.b64encode(
-                cloudpickle.dumps(payload.pop("ipc_handles"))
-            ).decode("utf-8")
+            payload["ipc_handles_pickled"] = base64.b64encode(cloudpickle.dumps(payload.pop("ipc_handles"))).decode(
+                "utf-8"
+            )
         response = self._make_request(
             "collective_rpc",
             {"method": "update_weights_chunk", "kwargs": {"update_info": payload}},
