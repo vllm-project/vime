@@ -177,10 +177,7 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
     build_env = env_module.build_env
     if not callable(build_env):
         raise ValueError("Environment module must expose a callable `build_env(sample, args)`.")
-    try:
-        env = build_env(sample=sample, args=args)
-    except TypeError:
-        env = build_env(sample, args)
+    env = build_env(sample=sample, args=args)
 
     messages = _build_initial_messages(sample)
     response_tokens: list[int] = []
