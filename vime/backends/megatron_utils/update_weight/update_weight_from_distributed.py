@@ -6,6 +6,7 @@ import socket
 import time
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 import ray
 import torch
@@ -411,7 +412,7 @@ def connect_rollout_engines_from_distributed(
     group_name: str,
     rollout_engines: Sequence[ActorHandle],
     engine_gpu_counts: Sequence[int] | None = None,
-) -> dist.ProcessGroup:
+) -> Any:
     """
     Create NCCL group: training rank 0 + all engine GPUs. Blocks until joined.
 
@@ -474,20 +475,32 @@ def connect_rollout_engines_from_distributed(
 def disconnect_rollout_engines_from_distributed(
     args: Namespace,
     group_name: str,
-    model_update_groups: dist.ProcessGroup,
+    model_update_groups: Any,
     rollout_engines: Sequence[ActorHandle],
 ) -> None:
     """
-    Destroy NCCL on training and engines.
+    Tear down the weight-update NCCL group on the rollout engines.
+
+    ``model_update_groups`` is a vLLM ``PyNcclCommunicator`` returned by
+    ``NCCLWeightTransferEngine.trainer_init`` (built on a ``StatelessProcessGroup``),
+    NOT a torch c10d ``ProcessGroup``. It is deliberately not registered in
+    torch.distributed's global registry, so ``dist.destroy_process_group`` on it
+    raises ``ValueError: Invalid process group specified`` (see #127 regression).
+
+    We therefore do not tear the trainer-side communicator down here; this matches
+    the pre-#127 behavior. (Note ``engine.destroy_weights_update_group`` is itself
+    a no-op on the engine side.) An explicit ``model_update_groups.destroy()`` would
+    abort the NCCL comm, but that changes long-standing behavior and risks the
+    CUDA-graph-capture self-deadlock documented in ``PyNcclCommunicator.destroy``;
+    leave it out of this fix.
     """
     refs = [engine.destroy_weights_update_group.remote(group_name) for engine in rollout_engines]
-    dist.destroy_process_group(model_update_groups)
     ray.get(refs)
 
 
 def update_weights_from_distributed(
     group_name: str,
-    group: dist.ProcessGroup,
+    group: Any,
     weight_version: int,
     rollout_engines: Sequence[ActorHandle],
     converted_named_tensors: Sequence[tuple[str, torch.Tensor]],
