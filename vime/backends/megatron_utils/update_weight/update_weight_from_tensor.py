@@ -510,7 +510,7 @@ class vLLMColocateWorkerExtension:
         # parameter — the vLLM IPCWeightTransferEngine.trainer_send_weights
         # convention, which differs from SkyRL's single-packed-buffer approach).
         weights: list[tuple[str, torch.Tensor]] = []
-        for name, shape, ipc_handle in zip(names, shapes, ipc_handles):
+        for name, _shape, ipc_handle in zip(names, shapes, ipc_handles):
             if physical_gpu_id not in ipc_handle:
                 raise ValueError(
                     f"IPC handle not found for GPU UUID {physical_gpu_id}. "
