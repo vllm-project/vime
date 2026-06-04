@@ -326,7 +326,7 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
                 "sample_len": len(sample.tokens),
                 "rendered_len": len(rendered_ids),
             }
-            if getattr(args, "strict_multiturn_render_token_match", False) and not is_prefix_stable:
+            if not is_prefix_stable:
                 raise RuntimeError(
                     "Full conversation render is not prefix-stable with the generated token stream: "
                     f"{sample.metadata['multiturn_render']}"
