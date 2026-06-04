@@ -107,11 +107,6 @@ def _new_span_id() -> str:
 
 def build_vllm_meta_trace_attrs(output: dict[str, Any]) -> dict[str, Any]:
     """Trace-span attributes from a vLLM ``/inference/v1/generate`` response.
-
-    vLLM exposes far less per-request meta than SGLang's ``meta_info`` (no
-    PD-disaggregation timing): only the finish reason and token usage are
-    available on the response. Richer request timing lives in vLLM's own OTLP
-    traces (``gen_ai.latency.*``, enabled via ``--otlp-traces-endpoint``).
     """
     attrs: dict[str, Any] = {}
     choices = output.get("choices") or []

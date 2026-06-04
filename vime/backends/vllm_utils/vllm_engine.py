@@ -494,16 +494,7 @@ def _wait_worker_process_alive(process: multiprocessing.Process, timeout_s: floa
 
 
 def _wait_server_healthy(base_url: str, process: multiprocessing.Process | None) -> None:
-    """Wait until the vLLM server responds on ``GET /health`` (no time limit, SGLang-style).
-
-    Loops until /health returns 200, or — for a managed subprocess — until it dies (fail fast via
-    ``process.is_alive()``). There is no overall deadline, so a slow-but-healthy startup (a large
-    MoE / DP engine loading + compiling + capturing CUDA graphs across replicas) is never
-    spuriously timed out. The per-probe ``timeout=3`` bounds each individual request so a single
-    stuck socket cannot wedge the loop. In external mode (``process is None``) there is no liveness
-    signal, so a permanently unreachable URL loops indefinitely by design (the external engine is
-    caller-managed). Mirrors vime's SGLang backend _wait_server_healthy.
-    """
+    """Wait until the vLLM server responds on ``GET /health``."""
     while True:
         try:
             response = requests.get(f"{base_url}/health", timeout=3)
@@ -700,12 +691,7 @@ class VLLMEngine(RayActor):
             _wait_worker_process_alive(self.process)
 
     def _make_request(self, endpoint: str, payload: dict | None = None, *, timeout: float) -> dict | None:
-        """Control-plane POST returning parsed JSON (mirrors SGLang's ``_make_request``).
-
-        The single choke point for control-plane POSTs: headless workers (node_rank>0) own no
-        HTTP server, so they no-op to None; otherwise POST and parse via the shared
-        ``_response_json`` (also reused by the query-param endpoints /sleep, /wake_up, ...).
-        """
+        """Control-plane POST returning parsed JSON."""
         if self.node_rank != 0:
             return None
         url = f"{self._http_base()}/{endpoint.lstrip('/')}"
