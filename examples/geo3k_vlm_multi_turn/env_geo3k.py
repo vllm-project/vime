@@ -39,14 +39,12 @@ class Geo3kEnv(BaseInteractionEnv):
         self.ground_truth = str(ground_truth) if ground_truth is not None else None
         self.tool_calls: list[dict[str, Any]] = []
         self.last_tool_score: float | None = None
-        self.correct = False
         self.turn = 0
         self.max_turns = max_turns
 
     def reset(self):
         self.tool_calls.clear()
         self.last_tool_score = None
-        self.correct = False
         self.turn = 0
         # No initial observation is needed; the question lives in the prompt.
         observation: dict[str, Any] = {}
@@ -192,7 +190,6 @@ class Geo3kEnv(BaseInteractionEnv):
             answer_text = self._extract_answer_from_text(response_text)
             score = self._score_answer(answer_text) if answer_text else 0.0
             self.last_tool_score = score
-            self.correct = score == 1.0
             info["tool_executed"] = False
             info["answer"] = answer_text
             info["score"] = score
@@ -234,7 +231,7 @@ class Geo3kEnv(BaseInteractionEnv):
 
         score = self._score_answer(parsed_answer)
         self.last_tool_score = score
-        self.correct = score == 1.0
+        is_correct = score == 1.0
         tool_record = {"name": name, "answer": parsed_answer, "score": score}
         self.tool_calls.append(tool_record)
         info.update(tool_record)
@@ -246,7 +243,7 @@ class Geo3kEnv(BaseInteractionEnv):
             "tool_score": score,
         }
 
-        return obs, self.correct or is_final_turn, info
+        return obs, is_correct or is_final_turn, info
 
     def _parse_tool_payload(self, raw_json: str) -> dict[str, Any] | None:
         """Parse tool payload strictly as JSON. Malformed payloads are rejected."""
