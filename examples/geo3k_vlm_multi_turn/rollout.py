@@ -318,7 +318,6 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
             render_prefix_len = len(input_ids) + len(new_tokens)
             pending_obs_offset = render_prefix_len
             rendered_body = await render()
-            latest_features = rendered_body.get("features")
             rendered_ids = _coerce_flat_int_token_ids(rendered_body.get("token_ids"))
             is_prefix_stable = rendered_ids[:pending_obs_offset] == sample.tokens[:pending_obs_offset]
             sample.metadata["multiturn_render"] = {
