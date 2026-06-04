@@ -521,6 +521,8 @@ def _wait_server_healthy(base_url: str, process: multiprocessing.Process | None)
         if process is not None and not process.is_alive():
             raise RuntimeError(f"vLLM server exited unexpectedly with code {process.exitcode}")
         time.sleep(2)
+
+
 class VLLMEngine(RayActor):
     """Ray actor for vLLM OpenAI HTTP rollout (connect or spawn local ``vllm serve``)."""
 

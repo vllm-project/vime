@@ -7,7 +7,7 @@
 1. **High-performance training**: Efficient training in various modes by connecting Megatron with vLLM;
 2. **Flexible data generation**: Arbitrary training data generation workflows through custom data generation interfaces and server-based engines.
 
-Vime supports a broad model set, including:
+Vime inherits broad model support from slime, including:
 
 - Qwen series (Qwen3.6, Qwen3.5, Qwen3Next, Qwen3MoE, Qwen3, Qwen2.5);
 - DeepSeek V3 series (DeepSeek V3, V3.1, DeepSeek R1);

@@ -19,7 +19,7 @@ Thank you for your interest in contributing to vime! This document describes our
 
 ## About vime
 
-**vime** is a reinforcement learning (RL) post-training framework built on [**vLLM**](https://github.com/vllm-project/vllm) and [**Megatron-LM**](https://github.com/NVIDIA/Megatron-LM) as its core backends. It is derived from [vime](https://github.com/vllm-project/vime).
+**vime** is a reinforcement learning (RL) post-training framework built on [**vLLM**](https://github.com/vllm-project/vllm) and [**Megatron-LM**](https://github.com/NVIDIA/Megatron-LM) as its core backends. It is derived from [slime](https://github.com/THUDM/slime).
 
 ## Project Principles
 
@@ -242,7 +242,7 @@ By contributing to vime, you agree that your contributions will be licensed unde
 
 ## 关于vime
 
-**vime**是以[**vLLM**](https://github.com/vllm-project/vllm)与[**Megatron-LM**](https://github.com/NVIDIA/Megatron-LM)为核心后端的RL后训练框架，源自[vime](https://github.com/vllm-project/vime)。
+**vime**是以[**vLLM**](https://github.com/vllm-project/vllm)与[**Megatron-LM**](https://github.com/NVIDIA/Megatron-LM)为核心后端的RL后训练框架，源自[slime](https://github.com/THUDM/slime)。
 
 ## 项目理念
 

@@ -1,87 +1,80 @@
-"""On-Policy Distillation (OPD): teacher logprobs via vLLM ``/inference/v1/generate``.
-
-The reward function sends the full (prompt + student response) token sequence to
-an external vLLM teacher server's ``/inference/v1/generate`` endpoint with
-``prompt_logprobs`` enabled; the post-process step reads the per-token teacher
-logprobs out of the response and stores them on each sample for the OPD KL
-penalty.
-
-Endpoint contract (vime vLLM disaggregated ``/inference/v1/generate``):
-
-- Request body::
-
-    {
-        "token_ids": [...],            # full prompt+response token ids
-        "model": <teacher model>,      # OPTIONAL on this endpoint; only sent when
-                                       # --opd-teacher-model is set (single-model
-                                       # teacher servers use their loaded model)
-        "sampling_params": {
-            "max_tokens": 1,           # endpoint requires >=1; the generated
-                                       # token is ignored
-            "temperature": 0,
-            "prompt_logprobs": 1,      # score every prompt token
-            "skip_special_tokens": False,
-        },
-    }
-
-- Response body (``GenerateResponse``)::
-
-    {
-        "choices": [{"token_ids": [...], "logprobs": {...}, ...}],
-        "prompt_logprobs": [           # TOP-LEVEL, aligned with the input token_ids
-            None,                      # position 0: no prior context
-            {<token_id>: {"logprob": -3.21, "rank": 1, "decoded_token": "..."}, ...},
-            ...
-        ],
-    }
-
-``prompt_logprobs[i]`` is a dict ``{token_id -> Logprob}`` for the token at
-position ``i``. JSON serializes integer dict keys as strings, so we look up by
-both ``int`` and ``str``. See ``vllm/entrypoints/serve/disagg/protocol.py``
-(``GenerateRequest`` / ``GenerateResponse``).
-"""
-
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
-import aiohttp
 import torch
 
+from vime.utils.http_utils import post
 from vime.utils.types import Sample
 
 
+def _teacher_base_url(rm_url: str) -> str:
+    """Strip the path off ``--rm-url`` to get the teacher server base (scheme://host:port)."""
+    parts = urlsplit(rm_url)
+    return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+
+
 async def reward_func(args, sample, **kwargs):
-    if sample.multimodal_inputs and sample.multimodal_inputs.get("images"):
-        # ``/inference/v1/generate`` is token-only; a multimodal teacher requires the
-        # render -> generate flow (``/v1/chat/completions/render`` then attach
-        # ``features``), as in ``vime.rollout.vllm_rollout.generate``. Not yet wired
-        # for OPD — fail loudly rather than silently scoring a text-only sequence.
+    teacher_model = getattr(args, "opd_teacher_model", None)
+    sampling_params = {
+        "max_tokens": 1,
+        "temperature": 0,
+        "prompt_logprobs": 1,
+        "skip_special_tokens": False,
+    }
+    base = _teacher_base_url(args.rm_url)
+    mm = sample.multimodal_inputs or {}
+    images = mm.get("images")
+    # Only image multimodal is wired here (mirrors vllm_rollout.generate, which renders
+    # images only). Fail loud on other modalities rather than silently scoring text-only
+    # without their context.
+    unsupported = [k for k, v in mm.items() if k != "images" and v]
+    if unsupported and not images:
         raise NotImplementedError(
-            "OPD multimodal teacher scoring over /inference/v1/generate is not implemented; "
-            "wire the /v1/chat/completions/render -> /inference/v1/generate flow first."
+            "OPD teacher scoring over /inference/v1/generate supports only image multimodal; "
+            f"got unsupported modalities: {unsupported}"
         )
 
-    payload: dict[str, Any] = {
-        "token_ids": sample.tokens,
-        "sampling_params": {
-            "max_tokens": 1,
-            "temperature": 0,
-            "prompt_logprobs": 1,
-            "skip_special_tokens": False,
-        },
-    }
-    # ``model`` is optional on /inference/v1/generate. Only send it when the teacher
-    # model is explicitly named; never fall back to the *student* checkpoint
-    # (args.hf_checkpoint), which would mis-name a teacher!=student server.
-    teacher_model = getattr(args, "opd_teacher_model", None)
+    if images:
+        # Multimodal: render (preprocess images) to get token_ids + features, then
+        # score the student's full prompt+response token sequence with those features
+        # attached — mirrors vime.rollout.vllm_rollout.generate's disaggregated MM flow.
+        # Lazy import: these helpers live in vllm_rollout, which pulls in the rollout/
+        # router stack the text-only reward path never needs — import only when an
+        # image sample is actually scored.
+        from vime.rollout.vllm_rollout import (
+            _align_mm_feature_placeholders_to_tokens,
+            _coerce_flat_int_token_ids,
+            _mm_render_response_to_generate_body,
+        )
+        from vime.utils.processing_utils import encode_image_for_rollout_engine
+
+        content: list[dict[str, Any]] = [{"type": "text", "text": sample.prompt}]
+        for image in images:
+            content.append({"type": "image_url", "image_url": {"url": encode_image_for_rollout_engine(image)}})
+        render_payload: dict[str, Any] = {"messages": [{"role": "user", "content": content}]}
+        if teacher_model:
+            render_payload["model"] = teacher_model
+        render_data = await post(f"{base}/v1/chat/completions/render", render_payload)
+
+        body = _mm_render_response_to_generate_body(render_data, teacher_model or "")
+        canonical = _coerce_flat_int_token_ids(sample.tokens)
+        # Align the rendered feature placeholders to VIME's canonical ids BEFORE
+        # overriding token_ids (the aligner reads the render's token_ids first).
+        _align_mm_feature_placeholders_to_tokens(body, canonical)
+        body["token_ids"] = canonical
+        body["sampling_params"] = sampling_params
+        if teacher_model:
+            body["model"] = teacher_model
+        else:
+            body.pop("model", None)
+        return await post(args.rm_url, body)
+
+    payload: dict[str, Any] = {"token_ids": sample.tokens, "sampling_params": sampling_params}
     if teacher_model:
         payload["model"] = teacher_model
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post(args.rm_url, json=payload) as resp:
-            resp.raise_for_status()
-            return await resp.json()
+    return await post(args.rm_url, payload)
 
 
 def _logprob_for_token(pos_entry: dict | None, token_id: int) -> float:
