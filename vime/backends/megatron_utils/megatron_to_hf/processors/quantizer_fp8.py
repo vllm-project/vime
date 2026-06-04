@@ -100,15 +100,6 @@ def _quantize_param(name, weight, weight_block_size):
             weight_block_size=weight_block_size
         ):
             qweight, scale = quant_weight_ue8m0(weight, weight_block_size=weight_block_size)
-            # vLLM's MoE FP8 loader expects the RAW block scale
-            # [ceil(n/128), ceil(k/128)] -- the on-disk weight_scale_inv format. It
-            # narrows the scale per-TP (shard_dim) and TMA-packs it itself inside
-            # process_weights_after_loading. transform_scale_ue8m0 produces SGLang's
-            # mn-major TMA-packed layout (slime targets the SGLang engine); under a
-            # vLLM rollout engine that pre-packed scale's numel mismatches vLLM's
-            # per-rank w2/w13 scale buffer (w2 expects [n/128,k/128] -> narrow on the
-            # k-block dim), so the online update_weights asserts in fused_moe _load_w2.
-            # Send the raw block scale and let vLLM do its own narrow + packing.
         else:
             qweight, scale = blockwise_cast_to_fp8_triton(weight, weight_block_size)
         scale_name = name.replace(".weight", ".weight_scale_inv")
