@@ -69,6 +69,18 @@
       ],
     },
 
+    'agent-adapter-test': {
+      'label': 'run-ci-agent-adapter',
+      'always': True,
+      'cpu': True,
+      'extra_pip_deps': 'openai openai-agents anthropic',
+      'tests': [
+        {'test_file': 'test_agent_trajectory.py', 'num_gpus': 0},
+        {'test_file': 'test_agent_adapters.py', 'num_gpus': 0},
+        {'test_file': 'test_agent_sdk_adapters.py', 'num_gpus': 0},
+      ],
+    },
+
     'e2e-test-image': {
       'label': 'run-ci-image',
       'image': 'inferactinc/public:vime-vllm-cu129-latest',
@@ -175,6 +187,9 @@ jobs:
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install pytest numpy packaging pyyaml omegaconf tqdm httpx pybase64 pylatexenc sympy aiohttp pillow
+<% if config.get('extra_pip_deps') %>
+          pip install << config.extra_pip_deps >>
+<% endif %>
 
       - name: Install
         shell: bash
