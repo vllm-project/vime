@@ -315,7 +315,8 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
 
             next_user_message = env.format_observation(observation)
             messages.append(next_user_message)
-            pending_obs_offset = len(input_ids) + len(train_tokens)
+            render_prefix_len = len(input_ids) + len(new_tokens)
+            pending_obs_offset = render_prefix_len
             rendered_body = await render()
             latest_features = rendered_body.get("features")
             rendered_ids = _coerce_flat_int_token_ids(rendered_body.get("token_ids"))
