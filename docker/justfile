@@ -53,14 +53,18 @@ manifest VARIANT:
         docker manifest push "$TAG"
     done
 
-debug:
+# ---- test/debug image used by the `run-ci-image` validation job ----
+# Analogous to slime's `slimerl/slime-test`: the `e2e-test-image` CI job pulls
+# `inferactinc/public:vime-cu129-test-latest`. Built single-arch (the image-
+# validation runner is x86).
+build-test:
     #!/bin/bash
     set -euxo pipefail
     cd ..
 
     VERSION="$(cat docker/version.txt | tr -d '\n')"
-    ARCH="$(uname -m)"
-    TAG="{{IMAGE}}:vime-debug-${VERSION}-${ARCH}"
+    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t "{{IMAGE}}:vime-cu129-test-${VERSION}"
+    docker push "{{IMAGE}}:vime-cu129-test-${VERSION}"
 
-    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t "$TAG"
-    docker push "$TAG"
+    docker tag "{{IMAGE}}:vime-cu129-test-${VERSION}" "{{IMAGE}}:vime-cu129-test-latest"
+    docker push "{{IMAGE}}:vime-cu129-test-latest"
