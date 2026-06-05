@@ -6,7 +6,7 @@ vime uses GitHub Actions for CI. Tests are triggered by **PR labels** — adding
 
 The workflow is defined in `.github/workflows/pr-test.yml` (auto-generated from `pr-test.yml.j2`). Each CI job:
 
-1. Runs on a self-hosted GPU runner via `docker run`; most tests use `inferactinc/public:vime-cu129-latest`, while image validation uses `inferactinc/public:vime-cu129-latest`.
+1. Runs on a self-hosted GPU runner via `docker run` using the `inferactinc/public:vime-cu129-latest` image.
 2. Installs vime with `pip install -e . --no-deps`.
 3. Acquires the required GPUs via `tests/ci/gpu_lock_exec.py --count <num_gpus>`.
 4. Executes the test file: `python <test_path>.py` or `python tests/<test_file>.py`, depending on whether the test lives under `tests/` or a subdirectory such as `tests/plugin_contracts/`.
