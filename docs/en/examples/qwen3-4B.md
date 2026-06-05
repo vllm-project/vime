@@ -2,7 +2,7 @@
 
 ## Environment Setup
 
-After pulling the `inferactinc/public:vime-cu129-latest` image, initialize the image environment as follows:
+After pulling the `inferactinc/public:vime-latest` image, initialize the image environment as follows:
 
 ```bash
 cd /root/

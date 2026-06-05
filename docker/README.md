@@ -3,13 +3,13 @@
 vime ships one image based on the official vllm image, published to
 `inferactinc/public`:
 
-- `vime-cu129-latest` — rolling pointer to the current image
-- `vime-cu129-nightly-<date>` — immutable dated snapshot (e.g. `vime-cu129-nightly-20260603a`)
+- `vime-latest` — rolling pointer to the current image
+- `vime-nightly-<date>` — immutable dated snapshot (e.g. `vime-nightly-20260603a`)
 
 Build locally:
 
 ```bash
-docker build -f docker/Dockerfile -t vime-cu129 .
+docker build -f docker/Dockerfile -t vime .
 ```
 
 ## Release matrix
