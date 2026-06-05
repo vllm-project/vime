@@ -24,7 +24,7 @@ BUILDER := "vime-builder"
 
 # Default — cu12.9, no cu marker in the tag.
 build:
-    ARG_TAG_SUFFIX="" ARG_BUILD_EXTRA_ARGS="" just _build-digest
+    ARG_TAG_SUFFIX="" ARG_BUILD_EXTRA_ARGS="--build-arg INSTALL_FLASHQLA=1" just _build-digest
 
 # cu13 variant — vLLM default-CUDA base; ENABLE_CUDA_13 builds the CUDA-13
 # TransformerEngine/Triton on top.
@@ -71,7 +71,7 @@ build-test:
     cd ..
 
     VERSION="$(cat docker/version.txt | tr -d '\n')"
-    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t "{{IMAGE}}:vime-test-${VERSION}"
+    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" --build-arg INSTALL_FLASHQLA=1 -t "{{IMAGE}}:vime-test-${VERSION}"
     docker push "{{IMAGE}}:vime-test-${VERSION}"
 
     docker tag "{{IMAGE}}:vime-test-${VERSION}" "{{IMAGE}}:vime-test-latest"

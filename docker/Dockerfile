@@ -45,6 +45,17 @@ RUN git clone https://github.com/Dao-AILab/flash-attention.git && \
 RUN pip install git+https://github.com/ISEEKYAN/mbridge.git@89eb10887887bc74853f89a4de258c0702932a1c --no-deps
 
 RUN pip install flash-linear-attention==0.4.1
+# FlashQLA: optional GDN backend for Qwen3.5/Qwen3-Next (--qwen-gdn-backend flashqla; requires SM90+).
+# Mirrors slime's split (x86 docker/Dockerfile installs it; arm Dockerfile.gb10 makes it opt-in):
+# vime has one Dockerfile, so gate on INSTALL_FLASHQLA (justfile sets =1 for the x86 release,
+# leaves =0 for arm). Verified on gb200/Blackwell: the wheel builds but `import flash_qla` raises
+# "FlashQLA now support sm90 only" and the install downgrades tilelang (breaks vLLM) — so arm skips.
+ARG INSTALL_FLASHQLA=0
+RUN if [ "${INSTALL_FLASHQLA}" = "1" ]; then \
+      pip install git+https://github.com/QwenLM/FlashQLA.git --no-build-isolation; \
+    else \
+      echo "Skipping FlashQLA (INSTALL_FLASHQLA=0; sm90/Hopper-only — use --qwen-gdn-backend fla)"; \
+    fi
 RUN pip install tilelang -f https://tile-ai.github.io/whl/nightly/cu128/
 
 # cublas + (cu13) cuda dev headers. The arm64 (sbsa) vllm/vllm-openai base ships
