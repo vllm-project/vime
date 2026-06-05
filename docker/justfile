@@ -1,62 +1,61 @@
-# Release images publish to the company hub `inferactinc/public`.
+# Release images publish to the company hub `inferactinc/public` as multi-arch
+# manifests, exactly like upstream `vllm/vllm-openai:nightly`: ONE tag carries
+# both the linux/amd64 and linux/arm64 digests and `docker pull` auto-selects
+# the platform. No arch suffix is ever published as a tag.
 #
-# Platform (amd64 / arm64) is selected automatically by a multi-arch manifest —
-# there is intentionally NO arch suffix on the consumed tag, mirroring how the
-# upstream `vllm/vllm-openai` tags work. Build on each arch's native host, then
-# fuse the per-arch images into one tag with `just manifest <variant>`.
+# The CUDA + source-built FA/TE images can't be cross-emulated, so each arch is
+# built on its own native host and pushed BY DIGEST (no tag lands in the hub),
+# then the two digests are fused into the final tag with `just manifest`.
 #
 # Tag scheme (mirrors slime's `nightly-dev-<date>` + `latest`):
 #   inferactinc/public:vime-<variant>-<version>   immutable, multi-arch
-#   inferactinc/public:vime-<variant>-latest      rolling, multi-arch
-# where <version> comes from docker/version.txt and <variant> is cu129 / cu13.
+#   inferactinc/public:vime-<variant>-latest      rolling,   multi-arch
+# <version> comes from docker/version.txt; <variant> is cu129 / cu13.
 
 IMAGE := "inferactinc/public"
+BUILDER := "vime-builder"
 
-# ---- per-arch build + push (run on a host of the target arch) ----
+# ---- per-arch build, pushed BY DIGEST (run once on an amd64 host, once on an arm64 host) ----
 
 # cu129 — default vLLM base.
 build-cu129:
-    ARG_VARIANT="cu129" ARG_BUILD_EXTRA_ARGS="" just _build-arch
+    ARG_VARIANT="cu129" ARG_BUILD_EXTRA_ARGS="" just _build-digest
 
 # cu13 — vLLM default-CUDA base; ENABLE_CUDA_13 builds the CUDA-13
 # TransformerEngine/Triton on top.
 build-cu13:
-    ARG_VARIANT="cu13" ARG_BUILD_EXTRA_ARGS='--build-arg BASE_IMAGE=vllm/vllm-openai:v0.22.0-ubuntu2404 --build-arg ENABLE_CUDA_13=1' just _build-arch
+    ARG_VARIANT="cu13" ARG_BUILD_EXTRA_ARGS='--build-arg BASE_IMAGE=vllm/vllm-openai:v0.22.0-ubuntu2404 --build-arg ENABLE_CUDA_13=1' just _build-digest
 
-_build-arch:
+_build-digest:
     #!/bin/bash
     set -euxo pipefail
     cd ..
 
     VERSION="$(cat docker/version.txt | tr -d '\n')"
-    ARCH="$(uname -m)"   # x86_64 | aarch64 — staging tag only, fused away by `manifest`
-    STAGING="{{IMAGE}}:vime-${ARG_VARIANT}-${VERSION}-${ARCH}"
+    PLATFORM="linux/$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')"
+    META="/tmp/vime-${ARG_VARIANT}-$(uname -m).json"
 
-    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" $ARG_BUILD_EXTRA_ARGS -t "$STAGING"
-    docker push "$STAGING"
+    # push-by-digest requires the docker-container buildx driver.
+    docker buildx inspect {{BUILDER}} >/dev/null 2>&1 || docker buildx create --name {{BUILDER}} --driver docker-container
 
-# ---- fuse the per-arch images into one multi-arch tag ----
-# Run once after the matching `build-<variant>` has pushed on BOTH arch hosts.
-# `just manifest cu129` produces vime-cu129-<version> (immutable) and
-# vime-cu129-latest (rolling), each a multi-arch manifest.
-manifest VARIANT:
+    docker buildx build --builder {{BUILDER}} --platform "$PLATFORM" -f docker/Dockerfile $ARG_BUILD_EXTRA_ARGS --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -o "type=image,name={{IMAGE}},push-by-digest=true,push=true" --metadata-file "$META" .
+
+    echo "Pushed ${ARG_VARIANT} ${PLATFORM} by digest — pass this to \`just manifest\`:"
+    jq -r '."containerimage.digest"' "$META"
+
+# ---- fuse the two per-arch digests into one multi-arch tag ----
+# Run once after `build-<variant>` has pushed on BOTH hosts, passing the digests
+# it printed:  just manifest cu129 sha256:<amd64> sha256:<arm64>
+manifest VARIANT AMD_DIGEST ARM_DIGEST:
     #!/bin/bash
     set -euxo pipefail
 
     VERSION="$(cat docker/version.txt | tr -d '\n')"
-    SRC_X86="{{IMAGE}}:vime-{{VARIANT}}-${VERSION}-x86_64"
-    SRC_ARM="{{IMAGE}}:vime-{{VARIANT}}-${VERSION}-aarch64"
+    docker buildx imagetools create -t "{{IMAGE}}:vime-{{VARIANT}}-${VERSION}" -t "{{IMAGE}}:vime-{{VARIANT}}-latest" "{{IMAGE}}@{{AMD_DIGEST}}" "{{IMAGE}}@{{ARM_DIGEST}}"
 
-    for TAG in "{{IMAGE}}:vime-{{VARIANT}}-${VERSION}" "{{IMAGE}}:vime-{{VARIANT}}-latest"; do
-        docker manifest rm "$TAG" 2>/dev/null || true
-        docker manifest create "$TAG" "$SRC_X86" "$SRC_ARM"
-        docker manifest push "$TAG"
-    done
-
-# ---- test/debug image used by the `run-ci-image` validation job ----
-# Analogous to slime's `slimerl/slime-test`: the `e2e-test-image` CI job pulls
-# `inferactinc/public:vime-cu129-test-latest`. Built single-arch (the image-
-# validation runner is x86).
+# ---- single-arch test/debug image for the run-ci-image validation job ----
+# slime-test analog; the e2e-test-image runner is x86, so this is amd64-only and
+# needs no manifest.
 build-test:
     #!/bin/bash
     set -euxo pipefail
