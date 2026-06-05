@@ -56,7 +56,7 @@ def test_openai_agents_sdk_responses_runs_tool_loop_against_adapter(monkeypatch)
                 "final after tool",
             ]
         )
-        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, engine_url="http://unused")
+        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, vllm_url="http://unused")
         client = TestClient(TestServer(adapter.app))
         await client.start_server()
         base_url = str(client.make_url("/v1/"))
@@ -126,7 +126,7 @@ def test_openai_agents_sdk_chat_completions_runs_against_adapter(monkeypatch):
 
         monkeypatch.setattr(openai, "_generate", fake_generate)
         tokenizer = SDKTokenizer(["chat final"])
-        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, engine_url="http://unused")
+        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, vllm_url="http://unused")
         client = TestClient(TestServer(adapter.app))
         await client.start_server()
         base_url = str(client.make_url("/v1/"))
@@ -181,7 +181,7 @@ def test_openai_sdk_chat_completion_streaming_runs_against_adapter(monkeypatch):
         tokenizer = SDKTokenizer(
             ["streamed via sdk <tool_call><function=lookup><parameter=query>slime</parameter></function></tool_call>"]
         )
-        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, engine_url="http://unused")
+        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, vllm_url="http://unused")
         client = TestClient(TestServer(adapter.app))
         await client.start_server()
         base_url = str(client.make_url("/v1/"))
@@ -256,7 +256,7 @@ def test_openai_sdk_responses_streaming_runs_against_adapter(monkeypatch):
 
         monkeypatch.setattr(openai, "_generate", fake_generate)
         tokenizer = SDKTokenizer(["response stream via sdk"])
-        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, engine_url="http://unused")
+        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, vllm_url="http://unused")
         client = TestClient(TestServer(adapter.app))
         await client.start_server()
         base_url = str(client.make_url("/v1/"))
@@ -313,7 +313,7 @@ def test_anthropic_sdk_non_streaming_messages_runs_against_adapter(monkeypatch):
 
         monkeypatch.setattr(anthropic, "_generate", fake_generate)
         tokenizer = SDKTokenizer(["anthropic json"])
-        adapter = anthropic.AnthropicAdapter(tokenizer=tokenizer, engine_url="http://unused")
+        adapter = anthropic.AnthropicAdapter(tokenizer=tokenizer, vllm_url="http://unused")
         client = TestClient(TestServer(adapter.app))
         await client.start_server()
         base_url = str(client.make_url("/"))
@@ -362,7 +362,7 @@ def test_anthropic_sdk_streaming_messages_runs_against_adapter(monkeypatch):
 
         monkeypatch.setattr(anthropic, "_generate", fake_generate)
         tokenizer = SDKTokenizer(["anthropic final"])
-        adapter = anthropic.AnthropicAdapter(tokenizer=tokenizer, engine_url="http://unused")
+        adapter = anthropic.AnthropicAdapter(tokenizer=tokenizer, vllm_url="http://unused")
         client = TestClient(TestServer(adapter.app))
         await client.start_server()
         base_url = str(client.make_url("/"))

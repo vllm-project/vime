@@ -2,7 +2,7 @@
 
 The adapter exposes ``/v1/messages`` and ``/v1/messages/count_tokens``. It
 renders each Anthropic message history with the served model's chat template,
-calls the rollout engine's ``/inference/v1/generate`` with ``token_ids``, and
+calls vLLM's ``/inference/v1/generate`` with ``token_ids``, and
 records the exact sampled token ids/logprobs as ``TurnRecord`` objects. New
 code should use ``AnthropicAdapter`` and call ``finish_session()`` at trajectory
 end to drain trainable ``TokenSegment`` objects.
@@ -26,7 +26,7 @@ from vime.agent.adapters.common import ADAPTER_KEY, REASONING_PARSER_KEY, TOKENI
 from vime.agent.adapters.common import AdapterChain as Chain
 from vime.agent.adapters.common import (
     BaseAdapter,
-    call_engine_generate,
+    call_vllm_generate,
     ok_response,
     render_token_ids,
     request_session_id,
@@ -58,10 +58,10 @@ class AnthropicAdapter(BaseAdapter):
 
     session_cls = Session
 
-    def __init__(self, *, tokenizer, engine_url, model=None, tool_parser=None, reasoning_parser=None) -> None:
+    def __init__(self, *, tokenizer, vllm_url, model=None, tool_parser=None, reasoning_parser=None) -> None:
         super().__init__(
             tokenizer=tokenizer,
-            engine_url=engine_url,
+            vllm_url=vllm_url,
             model=model,
             tool_parser=tool_parser,
             reasoning_parser=reasoning_parser,
@@ -268,7 +268,7 @@ def _extend_chat_messages(target: Chain, body: dict) -> None:
 
 
 def _build_prompt(target: Chain, body: dict, kind: str, tok) -> list[int]:
-    """Replace/extend chat_messages and render input ids for the engine."""
+    """Replace/extend chat_messages and render input ids for vLLM."""
     (_extend_chat_messages if kind == "append" else _replace_chat_messages)(target, body)
     return render_token_ids(target, tok)
 
@@ -276,15 +276,15 @@ def _build_prompt(target: Chain, body: dict, kind: str, tok) -> list[int]:
 async def _generate(
     prompt_ids: list[int], s: Session, body: dict, app, *, session_id: str | None = None
 ) -> TurnRecord:
-    """Call the rollout engine and return a TurnRecord.
+    """Call vLLM and return a TurnRecord.
 
     1. build sampling_params (session defaults overlaid with body overrides)
-    2. POST the engine ``/inference/v1/generate``; on cancel/error tear down
+    2. POST vLLM ``/inference/v1/generate``; on cancel/error tear down
        the request (vLLM has no per-request HTTP abort endpoint)
     3. keep the exact prompt/output token ids; trajectory merge later compares
        later prompt tokens with earlier outputs to build the loss mask
     """
-    return await call_engine_generate(
+    return await call_vllm_generate(
         prompt_ids,
         s,
         body,

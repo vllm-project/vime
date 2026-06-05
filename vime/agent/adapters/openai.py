@@ -2,7 +2,7 @@
 
 The adapter exposes ``/v1/chat/completions`` and ``/v1/responses``. Both
 endpoints render incoming messages with the served model's chat template, call
-the rollout engine's ``/inference/v1/generate`` with ``token_ids``, and record
+vLLM's ``/inference/v1/generate`` with ``token_ids``, and record
 the exact sampled token ids/logprobs as ``TurnRecord`` objects. New code should
 use ``OpenAIAdapter`` and call ``finish_session()`` at trajectory end to drain
 trainable ``TokenSegment`` objects.
@@ -22,7 +22,7 @@ from aiohttp import web
 
 from vime.agent.adapters.common import ADAPTER_KEY, REASONING_PARSER_KEY, TOKENIZER_KEY, TOOL_PARSER_KEY
 from vime.agent.adapters.common import AdapterChain as Chain
-from vime.agent.adapters.common import BaseAdapter, call_engine_generate
+from vime.agent.adapters.common import BaseAdapter, call_vllm_generate
 from vime.agent.adapters.common import json_arguments as _json_arguments
 from vime.agent.adapters.common import ok_response, render_token_ids, request_session_id
 from vime.agent.adapters.common import stable_hash as _hash
@@ -46,10 +46,10 @@ class OpenAIAdapter(BaseAdapter):
 
     session_cls = Session
 
-    def __init__(self, *, tokenizer, engine_url, model=None, tool_parser=None, reasoning_parser=None) -> None:
+    def __init__(self, *, tokenizer, vllm_url, model=None, tool_parser=None, reasoning_parser=None) -> None:
         super().__init__(
             tokenizer=tokenizer,
-            engine_url=engine_url,
+            vllm_url=vllm_url,
             model=model,
             tool_parser=tool_parser,
             reasoning_parser=reasoning_parser,
@@ -282,7 +282,7 @@ def _build_prompt(target: Chain, messages: list[dict], tools_schema: list[dict] 
 async def _generate(
     prompt_ids: list[int], s: Session, body: dict, app, *, session_id: str | None = None
 ) -> TurnRecord:
-    return await call_engine_generate(
+    return await call_vllm_generate(
         prompt_ids,
         s,
         body,

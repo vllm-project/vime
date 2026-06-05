@@ -19,7 +19,7 @@ from vime.agent.trajectory import TokenSegment, TurnRecord
 
 ADAPTER_KEY = web.AppKey("adapter", object)
 TOKENIZER_KEY = web.AppKey("tokenizer", object)
-ENGINE_URL_KEY = web.AppKey("engine_url", object)
+VLLM_URL_KEY = web.AppKey("vllm_url", object)
 MODEL_KEY = web.AppKey("model", object)
 TOOL_PARSER_KEY = web.AppKey("tool_parser", object)
 REASONING_PARSER_KEY = web.AppKey("reasoning_parser", object)
@@ -42,14 +42,14 @@ class BaseAdapter:
 
     session_cls: type
 
-    def __init__(self, *, tokenizer, engine_url, model=None, tool_parser=None, reasoning_parser=None) -> None:
+    def __init__(self, *, tokenizer, vllm_url, model=None, tool_parser=None, reasoning_parser=None) -> None:
         self.store: dict[str, Any] = {}
         self.inflight: dict[str, set[asyncio.Task]] = {}
         self.closed: set[str] = set()
         self.app = web.Application(client_max_size=64 * 1024 * 1024)
         self.app[ADAPTER_KEY] = self
         self.app[TOKENIZER_KEY] = tokenizer
-        self.app[ENGINE_URL_KEY] = engine_url.rstrip("/") if isinstance(engine_url, str) else engine_url
+        self.app[VLLM_URL_KEY] = vllm_url.rstrip("/") if isinstance(vllm_url, str) else vllm_url
         self.app[MODEL_KEY] = model
         self.app[TOOL_PARSER_KEY] = tool_parser
         self.app[REASONING_PARSER_KEY] = reasoning_parser
@@ -176,7 +176,7 @@ def _sampling_params(session: Any, body: dict, *, max_token_keys: tuple[str, ...
     return sp
 
 
-def _engine_sampling_body(sp: dict) -> dict:
+def _vllm_sampling_body(sp: dict) -> dict:
     """Map the canonical (sglang-shaped) sampling dict to a vLLM ``/inference/v1/generate``
     ``sampling_params`` body. vLLM uses ``max_tokens`` (not ``max_new_tokens``) and returns
     per-token logprobs when ``logprobs`` is set."""
@@ -222,7 +222,7 @@ def _tokens_and_logprobs_from_choice(choice: dict) -> tuple[list[int], list[floa
     return tids, [0.0] * len(tids)
 
 
-async def call_engine_generate(
+async def call_vllm_generate(
     prompt_ids: list[int],
     session: Any,
     body: dict,
@@ -248,11 +248,11 @@ async def call_engine_generate(
             return TurnRecord(prompt_ids=list(prompt_ids), output_ids=[], finish_reason="length")
         sp["max_new_tokens"] = min(int(sp.get("max_new_tokens", remaining_context)), remaining_context)
 
-    engine_url = app[ENGINE_URL_KEY]
+    vllm_url = app[VLLM_URL_KEY]
     model = app[MODEL_KEY]
     payload: dict[str, Any] = {
         "token_ids": list(prompt_ids),
-        "sampling_params": _engine_sampling_body(sp),
+        "sampling_params": _vllm_sampling_body(sp),
     }
     if model:
         payload["model"] = model
@@ -263,13 +263,13 @@ async def call_engine_generate(
     task = asyncio.current_task()
     try:
         async with aiohttp.ClientSession(timeout=timeout) as sess, sess.post(
-            f"{engine_url}/inference/v1/generate",
+            f"{vllm_url}/inference/v1/generate",
             json=payload,
             headers=headers,
         ) as r:
             if r.status >= 400:
                 text = await r.text()
-                raise RuntimeError(f"engine upstream {r.status}: {text[:400]}")
+                raise RuntimeError(f"vllm upstream {r.status}: {text[:400]}")
             data = await r.json(content_type=None)
         choice = (data.get("choices") or [{}])[0]
         output_ids, output_log_probs = _tokens_and_logprobs_from_choice(choice)
@@ -278,7 +278,7 @@ async def call_engine_generate(
     except (asyncio.CancelledError, aiohttp.ClientError, asyncio.TimeoutError):
         # vLLM ``/inference/v1/generate`` has no per-request HTTP abort endpoint (unlike
         # sglang ``/abort_request``). Cancelling the in-flight task tears down the aiohttp
-        # request, which drops the streaming connection so the engine stops generating.
+        # request, which drops the streaming connection so vLLM stops generating.
         if task is not None:
             task.cancel()
         raise

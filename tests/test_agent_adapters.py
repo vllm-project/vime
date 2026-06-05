@@ -12,7 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from vime.agent.adapters import anthropic, openai
-from vime.agent.adapters.common import ENGINE_URL_KEY
+from vime.agent.adapters.common import MODEL_KEY, VLLM_URL_KEY
 from vime.agent.trajectory import TurnRecord
 
 
@@ -43,23 +43,28 @@ class ScriptedTokenizer(ToyTokenizer):
         return self.prompts.pop(0)
 
 
-class FakeSGLang:
+class FakeVLLM:
     def __init__(self, turns: list[list[tuple[float, int]]]) -> None:
         self.turns = [list(turn) for turn in turns]
         self.requests: list[dict] = []
         self.routing_keys: list[str | None] = []
 
     async def handle_generate(self, request):
-        self.routing_keys.append(request.headers.get("X-SMG-Routing-Key"))
+        self.routing_keys.append(request.headers.get("x-session-id"))
         self.requests.append(await request.json())
-        assert self.turns, "unexpected /generate call"
-        output_token_logprobs = [[logprob, token_id] for logprob, token_id in self.turns.pop(0)]
+        assert self.turns, "unexpected /inference/v1/generate call"
+        turn = self.turns.pop(0)
+        token_ids = [token_id for _logprob, token_id in turn]
+        content = [{"logprob": logprob} for logprob, _token_id in turn]
         return web.json_response(
             {
-                "meta_info": {
-                    "output_token_logprobs": output_token_logprobs,
-                    "finish_reason": {"type": "stop"},
-                }
+                "choices": [
+                    {
+                        "token_ids": token_ids,
+                        "logprobs": {"content": content},
+                        "finish_reason": "stop",
+                    }
+                ]
             }
         )
 
@@ -226,7 +231,7 @@ def test_openai_chat_completion_endpoint_records_token_segments(monkeypatch):
     async def run_case():
         monkeypatch.setattr(openai, "_generate", fake_generate)
         tokenizer = ToyTokenizer({(101,): "hello"})
-        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, engine_url="http://unused")
+        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, vllm_url="http://unused")
         adapter.open_session("sid-chat", sampling_defaults={"max_new_tokens": 8})
         client = TestClient(TestServer(adapter.app))
         await client.start_server()
@@ -264,7 +269,7 @@ def test_openai_chat_completion_streaming_returns_sse_chunks_and_records_segment
     async def run_case():
         monkeypatch.setattr(openai, "_generate", fake_generate)
         tokenizer = ToyTokenizer({(401,): "streamed text"})
-        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, engine_url="http://unused")
+        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, vllm_url="http://unused")
         adapter.open_session("sid-chat-stream", sampling_defaults={"max_new_tokens": 8})
         client = TestClient(TestServer(adapter.app))
         await client.start_server()
@@ -310,7 +315,7 @@ def test_openai_chat_completion_streaming_returns_tool_call_delta(monkeypatch):
         monkeypatch.setattr(openai, "_generate", fake_generate)
         raw = "use it <tool_call><function=lookup><parameter=query>slime</parameter></function></tool_call>"
         tokenizer = ToyTokenizer({(451,): raw})
-        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, engine_url="http://unused")
+        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, vllm_url="http://unused")
         adapter.open_session("sid-chat-tool-stream", sampling_defaults={"max_new_tokens": 8})
         client = TestClient(TestServer(adapter.app))
         await client.start_server()
@@ -361,7 +366,7 @@ def test_openai_responses_endpoint_returns_function_calls(monkeypatch):
         monkeypatch.setattr(openai, "_generate", fake_generate)
         raw = "look <tool_call><function=lookup><parameter=query>slime</parameter></function></tool_call>"
         tokenizer = ToyTokenizer({(301,): raw})
-        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, engine_url="http://unused")
+        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, vllm_url="http://unused")
         adapter.open_session("sid-responses", sampling_defaults={"max_new_tokens": 8})
         client = TestClient(TestServer(adapter.app))
         await client.start_server()
@@ -411,7 +416,7 @@ def test_openai_responses_streaming_preserves_function_call_output(monkeypatch):
         monkeypatch.setattr(openai, "_generate", fake_generate)
         raw = "<tool_call><function=lookup><parameter=query>slime</parameter></function></tool_call>"
         tokenizer = ToyTokenizer({(551,): raw})
-        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, engine_url="http://unused")
+        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, vllm_url="http://unused")
         adapter.open_session("sid-responses-tool-stream", sampling_defaults={"max_new_tokens": 8})
         client = TestClient(TestServer(adapter.app))
         await client.start_server()
@@ -459,7 +464,7 @@ def test_openai_responses_streaming_returns_sse_events_and_records_segments(monk
     async def run_case():
         monkeypatch.setattr(openai, "_generate", fake_generate)
         tokenizer = ToyTokenizer({(501,): "response text"})
-        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, engine_url="http://unused")
+        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, vllm_url="http://unused")
         adapter.open_session("sid-responses-stream", sampling_defaults={"max_new_tokens": 8})
         client = TestClient(TestServer(adapter.app))
         await client.start_server()
@@ -504,7 +509,7 @@ def test_anthropic_messages_endpoint_returns_non_stream_json_and_records_segment
     async def run_case():
         monkeypatch.setattr(anthropic, "_generate", fake_generate)
         tokenizer = ToyTokenizer({(581,): "plain response"})
-        adapter = anthropic.AnthropicAdapter(tokenizer=tokenizer, engine_url="http://unused")
+        adapter = anthropic.AnthropicAdapter(tokenizer=tokenizer, vllm_url="http://unused")
         adapter.open_session("sid-anthropic-json", sampling_defaults={"max_new_tokens": 8})
         client = TestClient(TestServer(adapter.app))
         await client.start_server()
@@ -547,7 +552,7 @@ def test_anthropic_messages_endpoint_streams_blocks_and_records_segments(monkeyp
             "delegate <tool_call><function=Task><parameter=description>inspect</parameter></function></tool_call>"
         )
         tokenizer = ToyTokenizer({(601,): raw_output})
-        adapter = anthropic.AnthropicAdapter(tokenizer=tokenizer, engine_url="http://unused")
+        adapter = anthropic.AnthropicAdapter(tokenizer=tokenizer, vllm_url="http://unused")
         adapter.open_session("sid-anthropic-stream", sampling_defaults={"max_new_tokens": 8})
         client = TestClient(TestServer(adapter.app))
         await client.start_server()
@@ -598,16 +603,16 @@ def test_anthropic_messages_endpoint_streams_blocks_and_records_segments(monkeyp
 
 
 @pytest.mark.unit
-def test_openai_responses_multiturn_uses_sglang_tokens_for_training_segment():
+def test_openai_responses_multiturn_uses_vllm_tokens_for_training_segment():
     async def run_case():
-        upstream = FakeSGLang(
+        upstream = FakeVLLM(
             [
                 [(-0.20, 20), (-0.21, 21)],
                 [(-0.40, 40)],
             ]
         )
         upstream_app = web.Application()
-        upstream_app.router.add_post("/generate", upstream.handle_generate)
+        upstream_app.router.add_post("/inference/v1/generate", upstream.handle_generate)
         upstream_server = TestServer(upstream_app)
         await upstream_server.start_server()
 
@@ -622,7 +627,7 @@ def test_openai_responses_multiturn_uses_sglang_tokens_for_training_segment():
                 (40,): "done",
             },
         )
-        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, engine_url=str(upstream_server.make_url("")).rstrip("/"))
+        adapter = openai.OpenAIAdapter(tokenizer=tokenizer, vllm_url=str(upstream_server.make_url("")).rstrip("/"))
         adapter.open_session("sid-openai-token", sampling_defaults={"max_new_tokens": 99})
         client = TestClient(TestServer(adapter.app))
         await client.start_server()
@@ -681,10 +686,10 @@ def test_openai_responses_multiturn_uses_sglang_tokens_for_training_segment():
         assert function_call["name"] == "lookup"
         assert function_call["arguments"] == '{"query": "slime"}'
         assert second_data["output"][0]["content"][0]["text"] == "done"
-        assert [req["input_ids"] for req in upstream.requests] == [[10, 11], [10, 11, 20, 21, 30, 31]]
+        assert [req["token_ids"] for req in upstream.requests] == [[10, 11], [10, 11, 20, 21, 30, 31]]
         assert upstream.routing_keys == ["sid-openai-token", "sid-openai-token"]
-        assert upstream.requests[0]["sampling_params"]["max_new_tokens"] == 5
-        assert upstream.requests[1]["sampling_params"]["max_new_tokens"] == 7
+        assert upstream.requests[0]["sampling_params"]["max_tokens"] == 5
+        assert upstream.requests[1]["sampling_params"]["max_tokens"] == 7
         assert segments[0].prompt_ids == [10, 11]
         assert segments[0].response_ids == [20, 21, 30, 31, 40]
         assert segments[0].loss_mask == [1, 1, 0, 0, 1]
@@ -694,16 +699,16 @@ def test_openai_responses_multiturn_uses_sglang_tokens_for_training_segment():
 
 
 @pytest.mark.unit
-def test_anthropic_messages_multiturn_uses_sglang_tokens_for_training_segment():
+def test_anthropic_messages_multiturn_uses_vllm_tokens_for_training_segment():
     async def run_case():
-        upstream = FakeSGLang(
+        upstream = FakeVLLM(
             [
                 [(-1.20, 120), (-1.21, 121)],
                 [(-1.40, 140), (-1.41, 141)],
             ]
         )
         upstream_app = web.Application()
-        upstream_app.router.add_post("/generate", upstream.handle_generate)
+        upstream_app.router.add_post("/inference/v1/generate", upstream.handle_generate)
         upstream_server = TestServer(upstream_app)
         await upstream_server.start_server()
 
@@ -720,7 +725,7 @@ def test_anthropic_messages_multiturn_uses_sglang_tokens_for_training_segment():
         )
         adapter = anthropic.AnthropicAdapter(
             tokenizer=tokenizer,
-            engine_url=str(upstream_server.make_url("")).rstrip("/"),
+            vllm_url=str(upstream_server.make_url("")).rstrip("/"),
         )
         adapter.open_session("sid-anthropic-token", sampling_defaults={"max_new_tokens": 99})
         client = TestClient(TestServer(adapter.app))
@@ -783,10 +788,10 @@ def test_anthropic_messages_multiturn_uses_sglang_tokens_for_training_segment():
         assert tool_use["name"] == "lookup"
         assert tool_use["input"] == {"query": "slime"}
         assert second_data["content"] == [{"type": "text", "text": "anthropic done"}]
-        assert [req["input_ids"] for req in upstream.requests] == [[110, 111], [110, 111, 120, 121, 130]]
+        assert [req["token_ids"] for req in upstream.requests] == [[110, 111], [110, 111, 120, 121, 130]]
         assert upstream.routing_keys == ["sid-anthropic-token", "sid-anthropic-token"]
-        assert upstream.requests[0]["sampling_params"]["max_new_tokens"] == 5
-        assert upstream.requests[1]["sampling_params"]["max_new_tokens"] == 7
+        assert upstream.requests[0]["sampling_params"]["max_tokens"] == 5
+        assert upstream.requests[1]["sampling_params"]["max_tokens"] == 7
         assert segments[0].prompt_ids == [110, 111]
         assert segments[0].response_ids == [120, 121, 130, 140, 141]
         assert segments[0].loss_mask == [1, 1, 0, 1, 1]
@@ -796,7 +801,7 @@ def test_anthropic_messages_multiturn_uses_sglang_tokens_for_training_segment():
 
 
 @pytest.mark.unit
-def test_openai_generate_posts_input_ids_and_extracts_logprobs():
+def test_openai_generate_posts_token_ids_and_extracts_logprobs():
     async def run_case():
         captured = {}
         captured_headers = {}
@@ -806,15 +811,18 @@ def test_openai_generate_posts_input_ids_and_extracts_logprobs():
             captured.update(await request.json())
             return web.json_response(
                 {
-                    "meta_info": {
-                        "output_token_logprobs": [[-0.7, 701], [-0.8, 702]],
-                        "finish_reason": {"type": "stop"},
-                    }
+                    "choices": [
+                        {
+                            "token_ids": [701, 702],
+                            "logprobs": {"content": [{"logprob": -0.7}, {"logprob": -0.8}]},
+                            "finish_reason": "stop",
+                        }
+                    ]
                 }
             )
 
         upstream_app = web.Application()
-        upstream_app.router.add_post("/generate", handle_generate)
+        upstream_app.router.add_post("/inference/v1/generate", handle_generate)
         server = TestServer(upstream_app)
         await server.start_server()
         try:
@@ -823,15 +831,15 @@ def test_openai_generate_posts_input_ids_and_extracts_logprobs():
                 [11, 12],
                 session,
                 {"max_tokens": 3, "temperature": 0.25, "stop": ["</s>"]},
-                {ENGINE_URL_KEY: str(server.make_url("")).rstrip("/")},
+                {VLLM_URL_KEY: str(server.make_url("")).rstrip("/"), MODEL_KEY: None},
             )
         finally:
             await server.close()
 
-        assert captured["input_ids"] == [11, 12]
-        assert captured["return_logprob"] is True
-        assert captured_headers.get("X-SMG-Routing-Key") is None
-        assert captured["sampling_params"]["max_new_tokens"] == 3
+        assert captured["token_ids"] == [11, 12]
+        assert captured["sampling_params"]["logprobs"] == 1
+        assert captured_headers.get("x-session-id") is None
+        assert captured["sampling_params"]["max_tokens"] == 3
         assert captured["sampling_params"]["temperature"] == 0.25
         assert captured["sampling_params"]["stop"] == ["</s>"]
         assert turn.prompt_ids == [11, 12]
