@@ -1,33 +1,57 @@
-release-primary:
-    ARG_TAG_POSTFIX="" ARG_BUILD_EXTRA_ARGS="" just _release-raw
+# Release images publish to the company hub `inferactinc/public`.
+#
+# Platform (amd64 / arm64) is selected automatically by a multi-arch manifest —
+# there is intentionally NO arch suffix on the consumed tag, mirroring how the
+# upstream `vllm/vllm-openai` tags work. Build on each arch's native host, then
+# fuse the per-arch images into one tag with `just manifest <variant>`.
+#
+# Tag scheme (mirrors slime's `nightly-dev-<date>` + `latest`):
+#   inferactinc/public:vime-<variant>-<version>   immutable, multi-arch
+#   inferactinc/public:vime-<variant>-latest      rolling, multi-arch
+# where <version> comes from docker/version.txt and <variant> is cu129 / cu13.
 
-# Should be executed on ARM machines.
-# Inherits the Dockerfile's default cu129 BASE_IMAGE; that tag is a multi-arch
-# manifest, so docker selects the arm64 image automatically on an ARM host.
-release-cu129-arm64:
-    ARG_TAG_POSTFIX="-cu129-arm64" ARG_BUILD_EXTRA_ARGS="" just _release-raw
+IMAGE := "inferactinc/public"
 
-# Should be executed on ARM machines.
-# The default-CUDA vLLM tag (no cuXXX suffix) already ships CUDA 13.0;
-# ENABLE_CUDA_13 then builds the CUDA-13 TransformerEngine/Triton on top.
-release-cu13-arm64:
-    ARG_TAG_POSTFIX="-cu13-arm64" ARG_BUILD_EXTRA_ARGS='--build-arg BASE_IMAGE=vllm/vllm-openai:v0.22.0-ubuntu2404 --build-arg ENABLE_CUDA_13=1' just _release-raw
+# ---- per-arch build + push (run on a host of the target arch) ----
 
-_release-raw:
+# cu129 — default vLLM base.
+build-cu129:
+    ARG_VARIANT="cu129" ARG_BUILD_EXTRA_ARGS="" just _build-arch
+
+# cu13 — vLLM default-CUDA base; ENABLE_CUDA_13 builds the CUDA-13
+# TransformerEngine/Triton on top.
+build-cu13:
+    ARG_VARIANT="cu13" ARG_BUILD_EXTRA_ARGS='--build-arg BASE_IMAGE=vllm/vllm-openai:v0.22.0-ubuntu2404 --build-arg ENABLE_CUDA_13=1' just _build-arch
+
+_build-arch:
     #!/bin/bash
     set -euxo pipefail
     cd ..
 
     VERSION="$(cat docker/version.txt | tr -d '\n')"
-    IMAGE_TAG=${VERSION}${ARG_TAG_POSTFIX}
+    ARCH="$(uname -m)"   # x86_64 | aarch64 — staging tag only, fused away by `manifest`
+    STAGING="{{IMAGE}}:vime-${ARG_VARIANT}-${VERSION}-${ARCH}"
 
-    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" $ARG_BUILD_EXTRA_ARGS -t aosheninferact/vime-vllm:$IMAGE_TAG
-    docker push aosheninferact/vime-vllm:$IMAGE_TAG
+    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" $ARG_BUILD_EXTRA_ARGS -t "$STAGING"
+    docker push "$STAGING"
 
-    if [ -z "${ARG_TAG_POSTFIX}" ]; then
-        docker tag aosheninferact/vime-vllm:$IMAGE_TAG aosheninferact/vime-vllm:latest
-        docker push aosheninferact/vime-vllm:latest
-    fi
+# ---- fuse the per-arch images into one multi-arch tag ----
+# Run once after the matching `build-<variant>` has pushed on BOTH arch hosts.
+# `just manifest cu129` produces vime-cu129-<version> (immutable) and
+# vime-cu129-latest (rolling), each a multi-arch manifest.
+manifest VARIANT:
+    #!/bin/bash
+    set -euxo pipefail
+
+    VERSION="$(cat docker/version.txt | tr -d '\n')"
+    SRC_X86="{{IMAGE}}:vime-{{VARIANT}}-${VERSION}-x86_64"
+    SRC_ARM="{{IMAGE}}:vime-{{VARIANT}}-${VERSION}-aarch64"
+
+    for TAG in "{{IMAGE}}:vime-{{VARIANT}}-${VERSION}" "{{IMAGE}}:vime-{{VARIANT}}-latest"; do
+        docker manifest rm "$TAG" 2>/dev/null || true
+        docker manifest create "$TAG" "$SRC_X86" "$SRC_ARM"
+        docker manifest push "$TAG"
+    done
 
 debug:
     #!/bin/bash
@@ -35,10 +59,8 @@ debug:
     cd ..
 
     VERSION="$(cat docker/version.txt | tr -d '\n')"
-    IMAGE_TAG=${VERSION}
+    ARCH="$(uname -m)"
+    TAG="{{IMAGE}}:vime-debug-${VERSION}-${ARCH}"
 
-    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t aosheninferact/vime-vllm-test:$IMAGE_TAG
-    docker push aosheninferact/vime-vllm-test:$IMAGE_TAG
-
-    docker tag aosheninferact/vime-vllm-test:$IMAGE_TAG aosheninferact/vime-vllm-test:latest
-    docker push aosheninferact/vime-vllm-test:latest
+    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -t "$TAG"
+    docker push "$TAG"
