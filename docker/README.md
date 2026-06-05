@@ -1,10 +1,7 @@
 # Docker release rule
 
-vime ships one image based on the official vllm image, published to
-`inferactinc/public`:
-
-- `vime-latest` — rolling pointer to the current image
-- `vime-nightly-<date>` — immutable dated snapshot (e.g. `vime-nightly-20260603a`)
+vime ships one image based on the official vllm image, published as
+`inferactinc/public:vime-latest`.
 
 Build locally:
 
