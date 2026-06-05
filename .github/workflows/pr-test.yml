@@ -108,7 +108,7 @@ jobs:
             -v /mnt/nvme0n1/vime_ci/models:/root/models \
             -v /mnt/nvme0n1/vime_ci/datasets:/root/datasets \
             -w "$GITHUB_WORKSPACE" \
-            inferactinc/public:vime-vllm-cu129-latest \
+            inferactinc/public:vime-cu129-latest \
             bash -lc '
               set -euo pipefail
               pip install -e . --no-deps --break-system-packages
@@ -192,7 +192,7 @@ jobs:
             -v /mnt/nvme0n1/vime_ci/models:/root/models \
             -v /mnt/nvme0n1/vime_ci/datasets:/root/datasets \
             -w "$GITHUB_WORKSPACE" \
-            inferactinc/public:vime-vllm-cu129-latest \
+            inferactinc/public:vime-cu129-latest \
             bash -lc '
               set -euo pipefail
               pip install -e . --no-deps --break-system-packages
@@ -276,7 +276,7 @@ jobs:
             -v /mnt/nvme0n1/vime_ci/models:/root/models \
             -v /mnt/nvme0n1/vime_ci/datasets:/root/datasets \
             -w "$GITHUB_WORKSPACE" \
-            inferactinc/public:vime-vllm-cu129-latest \
+            inferactinc/public:vime-cu129-latest \
             bash -lc '
               set -euo pipefail
               pip install -e . --no-deps --break-system-packages
@@ -360,7 +360,7 @@ jobs:
             -v /mnt/nvme0n1/vime_ci/models:/root/models \
             -v /mnt/nvme0n1/vime_ci/datasets:/root/datasets \
             -w "$GITHUB_WORKSPACE" \
-            inferactinc/public:vime-vllm-cu129-latest \
+            inferactinc/public:vime-cu129-latest \
             bash -lc '
               set -euo pipefail
               pip install -e . --no-deps --break-system-packages
@@ -444,7 +444,7 @@ jobs:
             -v /mnt/nvme0n1/vime_ci/models:/root/models \
             -v /mnt/nvme0n1/vime_ci/datasets:/root/datasets \
             -w "$GITHUB_WORKSPACE" \
-            inferactinc/public:vime-vllm-cu129-latest \
+            inferactinc/public:vime-cu129-latest \
             bash -lc '
               set -euo pipefail
               pip install -e . --no-deps --break-system-packages
@@ -594,7 +594,7 @@ jobs:
             -v /mnt/nvme0n1/vime_ci/models:/root/models \
             -v /mnt/nvme0n1/vime_ci/datasets:/root/datasets \
             -w "$GITHUB_WORKSPACE" \
-            inferactinc/public:vime-vllm-cu129-latest \
+            inferactinc/public:vime-cu129-latest \
             bash -lc '
               set -euo pipefail
               pip install -e . --no-deps --break-system-packages
@@ -646,7 +646,7 @@ jobs:
             -e HTTPS_PROXY \
             -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
             -w "$GITHUB_WORKSPACE" \
-            inferactinc/public:vime-vllm-cu129-latest \
+            inferactinc/public:vime-cu129-latest \
             bash -lc '
               set -euo pipefail
               pip install -e . --no-deps --break-system-packages
@@ -749,7 +749,7 @@ jobs:
             -v /mnt/nvme0n1/vime_ci/models:/root/models \
             -v /mnt/nvme0n1/vime_ci/datasets:/root/datasets \
             -w "$GITHUB_WORKSPACE" \
-            inferactinc/public:vime-vllm-cu129-latest \
+            inferactinc/public:vime-cu129-latest \
             bash -lc '
               set -euo pipefail
               pip install -e . --no-deps --break-system-packages

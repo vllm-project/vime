@@ -28,12 +28,12 @@ Please execute the following commands to pull the latest image and start an inte
 
 ```shell
 # Pull the latest image
-docker pull inferactinc/public:vime-vllm-cu129-latest
+docker pull inferactinc/public:vime-cu129-latest
 
 # Start the container
 docker run --rm --gpus all --ipc=host --shm-size=16g \
   --ulimit memlock=-1 --ulimit stack=67108864 \
-  -it inferactinc/public:vime-vllm-cu129-latest /bin/bash
+  -it inferactinc/public:vime-cu129-latest /bin/bash
 ```
 
 ### Install vime
