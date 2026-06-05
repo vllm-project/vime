@@ -36,15 +36,18 @@ from typing import Any
 from vime.rollout.vllm_rollout import (
     GenerateState,
     _align_engine_tokens_and_logprobs,
+    _align_mm_feature_placeholders_to_tokens,
     _apply_vllm_routed_experts,
     _base_dataset_prompt_ids,
     _build_inference_sampling_params,
     _coerce_flat_int_token_ids,
     _inference_generate_tokens_and_logprobs,
+    _mm_render_response_to_generate_body,
     _prepare_prompt_ids,
     _vllm_meta_from_generate_choice,
 )
 from vime.utils import http_utils
+from vime.utils.processing_utils import encode_image_for_rollout_engine
 from vime.utils.trace_utils import build_vllm_meta_trace_attrs, trace_span
 from vime.utils.types import Sample
 
@@ -73,17 +76,12 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
     prompt_ids = _prepare_prompt_ids(sample, state.tokenizer, state.processor)
     base_prompt_ids = _base_dataset_prompt_ids(sample, state.tokenizer, state.processor)
 
-    # Streaming generate is token-only (like the non-streaming text path). The
-    # multimodal render→generate flow in vllm_rollout.generate is a two-call
-    # dance (/v1/chat/completions/render then /inference/v1/generate) that
-    # doesn't map cleanly onto a single streamed call, so route MM samples
-    # through the non-streaming generate instead of silently dropping images.
+    # Multimodal samples use the same render-dance as the non-streaming text
+    # path (/v1/chat/completions/render → features), then stream the generate
+    # call. Streaming only changes how output is returned (SSE deltas vs one
+    # JSON); the image render (input prep) is identical. Built below once
+    # sampling params + token_ids are resolved.
     images = sample.multimodal_inputs.get("images") if sample.multimodal_inputs else None
-    if images:
-        raise NotImplementedError(
-            "vllm_streaming_rollout.generate_streaming does not support multimodal samples yet; "
-            "use vime.rollout.vllm_rollout.generate for image inputs."
-        )
 
     params = dict(sampling_params)
     if len(sample.response) > 0:
@@ -109,18 +107,38 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
     else:
         token_ids = prompt_ids
 
-    payload: dict[str, Any] = {
-        "model": args.hf_checkpoint,
-        "token_ids": token_ids,
-        "sampling_params": inference_sampling_params,
-        "stream": True,
-    }
-
     # Use session_id for consistent_hash routing (vime convention: x-session-id
     # header + policy "consistent_hash"). See vllm_rollout.generate.
     headers = None
     if sample.session_id and getattr(args, "router_policy", None) == "consistent_hash":
         headers = {"x-session-id": sample.session_id}
+
+    payload: dict[str, Any]
+    if images:
+        # Same render-dance as vllm_rollout.generate's MM path, then stream.
+        # mm placeholders live in the (stable) prompt prefix, so re-rendering and
+        # re-aligning to the current token_ids holds across partial continuations.
+        content: list[dict[str, Any]] = [{"type": "text", "text": sample.prompt}]
+        for image in images:
+            content.append({"type": "image_url", "image_url": {"url": encode_image_for_rollout_engine(image)}})
+        render_payload = {"model": args.hf_checkpoint, "messages": [{"role": "user", "content": content}]}
+        with trace_span(sample, "vllm_mm_render", attrs={"model": args.hf_checkpoint}):
+            render_data = await http_utils.post(
+                f"{base}/v1/chat/completions/render", render_payload, headers=headers
+            )
+        payload = _mm_render_response_to_generate_body(render_data, args.hf_checkpoint)
+        if token_ids:
+            _align_mm_feature_placeholders_to_tokens(payload, token_ids)
+            payload["token_ids"] = token_ids
+        payload["sampling_params"] = inference_sampling_params
+        payload["stream"] = True
+    else:
+        payload = {
+            "model": args.hf_checkpoint,
+            "token_ids": token_ids,
+            "sampling_params": inference_sampling_params,
+            "stream": True,
+        }
 
     # Snapshot pre-call sample state. vLLM's SSE chunks are *deltas* within this
     # call; on each chunk we append the delta and rebuild the post-call view of
