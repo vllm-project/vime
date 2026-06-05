@@ -46,11 +46,10 @@ class OpenAIAdapter(BaseAdapter):
 
     session_cls = Session
 
-    def __init__(self, *, tokenizer, vllm_url, model=None, tool_parser=None, reasoning_parser=None) -> None:
+    def __init__(self, *, tokenizer, vllm_url, tool_parser=None, reasoning_parser=None) -> None:
         super().__init__(
             tokenizer=tokenizer,
             vllm_url=vllm_url,
-            model=model,
             tool_parser=tool_parser,
             reasoning_parser=reasoning_parser,
         )

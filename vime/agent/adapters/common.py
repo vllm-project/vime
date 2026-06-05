@@ -20,7 +20,6 @@ from vime.agent.trajectory import TokenSegment, TurnRecord
 ADAPTER_KEY = web.AppKey("adapter", object)
 TOKENIZER_KEY = web.AppKey("tokenizer", object)
 VLLM_URL_KEY = web.AppKey("vllm_url", object)
-MODEL_KEY = web.AppKey("model", object)
 TOOL_PARSER_KEY = web.AppKey("tool_parser", object)
 REASONING_PARSER_KEY = web.AppKey("reasoning_parser", object)
 
@@ -42,7 +41,7 @@ class BaseAdapter:
 
     session_cls: type
 
-    def __init__(self, *, tokenizer, vllm_url, model=None, tool_parser=None, reasoning_parser=None) -> None:
+    def __init__(self, *, tokenizer, vllm_url, tool_parser=None, reasoning_parser=None) -> None:
         self.store: dict[str, Any] = {}
         self.inflight: dict[str, set[asyncio.Task]] = {}
         self.closed: set[str] = set()
@@ -50,7 +49,6 @@ class BaseAdapter:
         self.app[ADAPTER_KEY] = self
         self.app[TOKENIZER_KEY] = tokenizer
         self.app[VLLM_URL_KEY] = vllm_url.rstrip("/") if isinstance(vllm_url, str) else vllm_url
-        self.app[MODEL_KEY] = model
         self.app[TOOL_PARSER_KEY] = tool_parser
         self.app[REASONING_PARSER_KEY] = reasoning_parser
 
@@ -249,13 +247,10 @@ async def call_vllm_generate(
         sp["max_new_tokens"] = min(int(sp.get("max_new_tokens", remaining_context)), remaining_context)
 
     vllm_url = app[VLLM_URL_KEY]
-    model = app[MODEL_KEY]
     payload: dict[str, Any] = {
         "token_ids": list(prompt_ids),
         "sampling_params": _vllm_sampling_body(sp),
     }
-    if model:
-        payload["model"] = model
     # session_id routes via vllm-router's consistent_hash policy (x-session-id header);
     # see vime ``vllm_rollout.py`` headers handling.
     headers = {"x-session-id": session_id} if session_id and session_id != "default" else None

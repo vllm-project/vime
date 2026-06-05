@@ -12,7 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from vime.agent.adapters import anthropic, openai
-from vime.agent.adapters.common import MODEL_KEY, VLLM_URL_KEY
+from vime.agent.adapters.common import VLLM_URL_KEY
 from vime.agent.trajectory import TurnRecord
 
 
@@ -831,7 +831,7 @@ def test_openai_generate_posts_token_ids_and_extracts_logprobs():
                 [11, 12],
                 session,
                 {"max_tokens": 3, "temperature": 0.25, "stop": ["</s>"]},
-                {VLLM_URL_KEY: str(server.make_url("")).rstrip("/"), MODEL_KEY: None},
+                {VLLM_URL_KEY: str(server.make_url("")).rstrip("/")},
             )
         finally:
             await server.close()
