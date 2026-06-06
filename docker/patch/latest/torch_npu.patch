@@ -1,0 +1,16 @@
+--- a/torch_npu/distributed/distributed_c10d.py
++++ b/torch_npu/distributed/distributed_c10d.py
+@@ -688,8 +688,11 @@ def _new_process_group_helper(
+     # Ops like allgather + chunk are done under eager mode.
+     # Eagerly connect single device to avoid collective ops hanging.
+-    if device_id and pg._get_backend(device_id).supports_splitting:
+-        eager_backend = pg._get_backend(device_id)
+-        eager_backend.eager_connect_single_device(device_id)
++    try:
++        if device_id and pg._get_backend(device_id).supports_splitting:
++            eager_backend = pg._get_backend(device_id)
++            eager_backend.eager_connect_single_device(device_id)
++    except RuntimeError:
++        pass
+ 
+     return pg
