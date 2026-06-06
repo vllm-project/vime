@@ -130,6 +130,12 @@ RUN cd Megatron-LM && \
     rm megatron.patch && \
     pip install -e .
 
+COPY docker/patch/${PATCH_VERSION}/vllm.patch /tmp/
+RUN VLLM_SITE=$(python3 -c "import vllm; print(vllm.__file__.rsplit('/',1)[0])") && \
+    cd ${VLLM_SITE} && \
+    patch -p2 --no-backup-if-mismatch < /tmp/vllm.patch && \
+    rm /tmp/vllm.patch
+
 # ====================================== Install main package ============================================
 
 ARG VIME_COMMIT=main

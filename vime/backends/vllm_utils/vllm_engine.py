@@ -921,13 +921,13 @@ class VLLMEngine(RayActor):
         del action
         return {"ok": True, "supported": False, "note": "vLLM has no weights_checker endpoint."}
 
-    def init_weights_update_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
+    def init_weights_update_group(self, master_address, master_port, rank_offset, world_size, group_name, backend, target_tp_rank=None, shard_rank=None):
         """Call ``POST /init_weight_transfer_engine`` with an ``init_info`` block.
 
-        ``group_name`` / ``backend`` are accepted for a uniform caller signature but are not sent to vLLM.
+        ``group_name`` / ``backend`` are accepted for a uniform caller signature but is not sent to vLLM.
         Always uses the vllm-native weight transfer engine; reload-on-continue fallback is no longer supported.
         """
-        del group_name, backend
+        del backend
         payload = {
             "init_info": {
                 "master_address": master_address,
@@ -936,6 +936,11 @@ class VLLMEngine(RayActor):
                 "world_size": world_size,
             }
         }
+        if target_tp_rank is not None:
+            payload["init_info"]["target_tp_rank"] = target_tp_rank
+            payload["init_info"]["group_name"] = group_name
+        if shard_rank is not None:
+            payload["init_info"]["shard_rank"] = shard_rank
         init_timeout_s = self._weight_transfer_http_timeout()
         last_error = None
         for attempt in range(1, 4):
@@ -967,7 +972,6 @@ class VLLMEngine(RayActor):
 
         Payload matches vLLM NCCL weight transfer (see upstream rlhf_http_nccl example).
         """
-        del group_name
         if weight_version is not None:
             self._weight_version = str(weight_version)
         if flush_cache:
@@ -979,6 +983,8 @@ class VLLMEngine(RayActor):
             "shapes": [list(s) for s in shapes],
             "packed": bool(packed),
         }
+        if group_name.startswith("vime-shard-") or group_name.startswith("vime-pp_") and "_tp" in group_name:
+            update_info["group_name"] = group_name
         return self._post_vllm_update_weights_http(update_info)
 
     def update_weights_from_disk(self, model_path: str, load_format: str | None = None):

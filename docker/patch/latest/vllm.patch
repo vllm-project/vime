@@ -1,0 +1,108 @@
+diff --git a/vllm/distributed/weight_transfer/nccl_engine.py b/vllm/distributed/weight_transfer/nccl_engine.py
+index 1111111..2222222 100644
+--- a/vllm/distributed/weight_transfer/nccl_engine.py
++++ b/vllm/distributed/weight_transfer/nccl_engine.py
+@@ -1,5 +1,7 @@
+ from __future__ import annotations
+ 
++import logging
++
+ from typing import TYPE_CHECKING, Any, Optional
+ 
+ import torch
+@@ -20,6 +22,7 @@
+ if TYPE_CHECKING:
+     from vllm.config import VllmConfig
+ 
++logger = logging.getLogger(__name__)
+ 
+ 
+ @dataclasses.dataclass
+@@ -37,6 +40,9 @@ class NCCLWeightTransferInitInfo:
+     world_size: int
+     rank_offset: int = 0
+     group_name: Optional[str] = None
++    target_tp_rank: Optional[int] = None
++    shard_rank: Optional[int] = None
++    group_name_for_engine: Optional[str] = None
+ 
+ 
+ @dataclasses.dataclass
+@@ -147,7 +153,9 @@ class NCCLWeightTransferEngine:
+         model_update_groups = {}
+         for group_name, init_info in init_infos.items():
+             assert isinstance(init_info, NCCLWeightTransferInitInfo), init_info
+-            model_update_group = cls._stateless_init_process_group(init_info)
++            model_update_group = cls._stateless_init_process_group(
++                init_info, vllm_config=vllm_config
++            )
+             model_update_groups[group_name] = model_update_group
+         return model_update_groups
+ 
+@@ -170,10 +178,16 @@ class NCCLWeightTransferEngine:
+         return model_update_groups
+ 
+     @classmethod
+-    def _stateless_init_process_group(
++    def _stateless_init_process_group(  # type: ignore[override]
+         cls, init_info: NCCLWeightTransferInitInfo
+     ) -> PyNcclCommunicator:
++        return cls._stateless_init_process_group_v2(init_info)
++
++    @classmethod
++    def _stateless_init_process_group_v2(
++        cls, init_info: NCCLWeightTransferInitInfo, *, vllm_config=None
++    ) -> PyNcclCommunicator:
+         from vllm.distributed.parallel_state import (
+             in_the_same_tp_group_as_pp,
+         )
+@@ -185,6 +199,23 @@ class NCCLWeightTransferEngine:
+             assert in_the_same_tp_group_as_pp(), (
+                 "Weight transfer across PP groups is not supported."
+             )
++
++        target_tp_rank = getattr(init_info, "target_tp_rank", None)
++        if target_tp_rank is not None and vllm_config is not None:
++            tp_rank = get_tp_group().rank_in_group
++            if tp_rank != target_tp_rank:
++                logger.debug(
++                    "Skipping NCCL group init for group_name=%s: "
++                    "tp_rank=%d != target_tp_rank=%d",
++                    init_info.group_name, tp_rank, target_tp_rank,
++                )
++                return None
++            logger.debug(
++                "Creating NCCL group for group_name=%s: tp_rank=%d matches target_tp_rank=%d",
++                init_info.group_name, tp_rank, target_tp_rank,
++            )
++
+         from vllm.distributed.device_communicators.stateless_comm import (
+             StatelessProcessGroup,
+         )
+@@ -247,7 +278,12 @@ class NCCLWeightTransferEngine:
+             assert group_name in model_update_groups, (
+                 f"Group {group_name} not found in model_update_groups"
+             )
+-            group = model_update_groups[group_name]
++            group = model_update_groups.get(group_name)
++            if group is None:
++                logger.debug(
++                    "receive_weights: skipping group_name=%s (not active for this rank)",
++                    group_name,
++                )
++                continue
+             if packed:
+                 cls._packed_nccl_broadcast(group, update_info)
+             else:
+diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
+index 3333333..4444444 100644
+--- a/vllm/v1/worker/gpu_worker.py
++++ b/vllm/v1/worker/gpu_worker.py
+@@ -1,5 +1,5 @@
+ # ... existing imports ...
+ 
+     def load_weights_direct(self, named_weights):
+         for name, weight in named_weights:
+             param = self.model.get_parameter(name)
+-            param.copy_(weight)
++            param.data.copy_(weight)

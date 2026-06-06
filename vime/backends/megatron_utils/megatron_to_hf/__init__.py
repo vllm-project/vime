@@ -5,7 +5,7 @@ from .gpt_oss import convert_gpt_oss_to_hf
 from .llama import convert_llama_to_hf
 from .mimo import convert_mimo_to_hf
 from .processors import quantize_params, remove_padding
-from .qwen2 import convert_qwen2_to_hf
+from .qwen2 import convert_qwen2_to_hf, convert_qwen2_to_hf_shard
 from .qwen3_5 import convert_qwen3_5_to_hf
 from .qwen3_next import convert_qwen3_next_to_hf
 from .qwen3_vl import convert_qwen3vl_to_hf
@@ -24,6 +24,20 @@ def convert_to_hf(args, model_name, name, param, quantization_config=None):
     param = remove_padding(name, param, args.vocab_size)
 
     converted_named_tensors = _convert_to_hf_core(args, model_name, name, param)
+
+    return quantize_params(args, name, converted_named_tensors, quantization_config)
+
+
+def remove_padding_shard(name, param, vocab_size, tp_rank, tp_size):
+    """Shard-aware remove_padding. Embedding/output_layer are handled separately."""
+    return param
+
+
+def convert_to_hf_shard(args, model_name, name, param, tp_rank, tp_size, quantization_config=None):
+    """Shard-level HF conversion without all_gather. Each TP rank converts its own shard."""
+    param = remove_padding_shard(name, param, args.vocab_size, tp_rank, tp_size)
+
+    converted_named_tensors = _convert_to_hf_shard_core(args, model_name, name, param, tp_rank, tp_size)
 
     return quantize_params(args, name, converted_named_tensors, quantization_config)
 
@@ -56,3 +70,9 @@ def _convert_to_hf_core(args, model_name, name, param):
         raise ValueError(f"Unsupported model: {model_name}")
 
     return converted_named_tensors
+
+
+def _convert_to_hf_shard_core(args, model_name, name, param, tp_rank, tp_size):
+    if "qwen2" in model_name or "qwen3" in model_name:
+        return convert_qwen2_to_hf_shard(args, name, param, tp_rank, tp_size)
+    raise ValueError(f"Shard-level conversion not yet supported for model: {model_name}")
