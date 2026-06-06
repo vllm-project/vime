@@ -72,29 +72,35 @@ diff --git a/mindspeed/features_manager/features_manager.py b/mindspeed/features
 index 1234567..abcdef0 100644
 --- a/mindspeed/features_manager/features_manager.py
 +++ b/mindspeed/features_manager/features_manager.py
-@@ -52,7 +52,10 @@ class MindSpeedFeaturesManager:
+@@ -52,5 +52,8 @@ class MindSpeedFeaturesManager:
              args = validate_args(args, defaults)  # bypass args.x validation
              post_validate_features_args(args=args)  # args.x = old_x
          """
 -        for feature in cls.FEATURES_LIST:
+-            feature.pre_validate_args(args)
 +        for feature in cls.FEATURES_LIST:
-             try:
-                 feature.pre_validate_args(args)
-             except AttributeError:
-@@ -68,7 +71,10 @@ class MindSpeedFeaturesManager:
++            try:
++                feature.pre_validate_args(args)
++            except AttributeError:
++                pass
+@@ -68,5 +71,8 @@ class MindSpeedFeaturesManager:
              args = validate_args(args, defaults)  # bypass args.x validation
              post_validate_features_args(args=args)  # args.x = old_x
          """
 -        for feature in cls.FEATURES_LIST:
+-            feature.post_validate_args(args)
 +        for feature in cls.FEATURES_LIST:
-             try:
-                 feature.post_validate_args(args)
-             except AttributeError:
-@@ -79,7 +85,10 @@ class MindSpeedFeaturesManager:
++            try:
++                feature.post_validate_args(args)
++            except AttributeError:
++                pass
+@@ -79,5 +85,8 @@ class MindSpeedFeaturesManager:
      def validate_features_args(cls, args):
          """Validate arguments of all features."""
 -        for feature in cls.FEATURES_LIST:
+-            feature.validate_args(args)
 +        for feature in cls.FEATURES_LIST:
-             try:
-                 feature.validate_args(args)
-             except AttributeError:
++            try:
++                feature.validate_args(args)
++            except AttributeError:
++                pass
