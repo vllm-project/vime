@@ -27,6 +27,6 @@ def validate_server_group_gpu_indices(
         f"len(reordered_gpu_ids)={num_available_gpus}, "
         f"rollout_num_gpus={rollout_num_gpus}, "
         f"rollout_num_gpus_per_engine={rollout_num_gpus_per_engine}. "
-        "Please align --rollout-num-gpus and --rollout-num-gpus-per-engine "
-        "with the rollout engine GPU placement."
+        "Please align --rollout-num-gpus, --rollout-num-gpus-per-engine, "
+        "and --vllm-config server_groups."
     )
