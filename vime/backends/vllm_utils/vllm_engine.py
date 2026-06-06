@@ -78,21 +78,6 @@ def get_base_gpu_id(args, rank):
     return start_index
 
 
-def _to_local_gpu_id(physical_gpu_id: int) -> int:
-    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if not cvd:
-        return physical_gpu_id
-    visible = [int(x) for x in cvd.split(",") if x.strip() != ""]
-    if physical_gpu_id in visible:
-        return visible.index(physical_gpu_id)
-    if 0 <= physical_gpu_id < len(visible):
-        return physical_gpu_id
-    raise RuntimeError(
-        f"GPU id {physical_gpu_id} is not valid under CUDA_VISIBLE_DEVICES={cvd}. "
-        f"Expected one of {visible} (physical) or 0..{len(visible)-1} (local)."
-    )
-
-
 @dataclasses.dataclass(frozen=True)
 class VllmEngineTopology:
     """Per-Ray-actor placement for one slice of a logical rollout engine."""
@@ -354,51 +339,13 @@ def redact_cmd_for_log(cmd: list[str]) -> str:
     return " ".join(parts)
 
 
-def _resolve_subprocess_cvd(visible_devices: str) -> str:
-    """Map ``visible_devices`` (LOCAL 0-based indices) to ABSOLUTE physical GPU ids.
-
-    ``compute_server_args`` builds ``visible_devices`` from ``_to_local_gpu_id`` — i.e.
-    indices into the actor's *visible* GPU set, not absolute physical ids.  Rollout
-    actors run with ``RAY_EXPERIMENTAL_NOSET_*`` so Ray does NOT restrict their CVD;
-    they inherit the raylet's ``CUDA_VISIBLE_DEVICES`` (e.g. ``"4,5,6,7"`` when the run
-    was launched that way to avoid an occupied GPU).  Setting the ``vllm serve``
-    subprocess CVD to the raw local indices (``"0,1,2,3"``) makes CUDA read them as
-    ABSOLUTE physical 0-3, desyncing colocate — the Megatron trainer (Ray-placed on the
-    inherited 4-7) and vLLM then sit on different physical GPUs, so the IPC weight
-    handles (keyed by physical GPU UUID) don't match ("IPC handle not found").
-
-    Composing the local indices back through the inherited set recovers the physical
-    ids (``"4,5,6,7"``).  No-op when CVD is unset or already identity 0-based, so the
-    full-machine / 0-based path is unchanged.
-    """
-    inherited = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if not inherited:
-        return visible_devices
-    inh = [x for x in inherited.split(",") if x.strip() != ""]
-    out: list[str] = []
-    for tok in visible_devices.split(","):
-        tok = tok.strip()
-        if tok == "":
-            continue
-        idx = int(tok)
-        if not (0 <= idx < len(inh)):
-            # Local indices must address the inherited set; an out-of-range index means a
-            # broken placement invariant — fail loudly rather than silently mis-pin the GPU.
-            raise IndexError(
-                f"local GPU index {idx} is out of range for inherited "
-                f"CUDA_VISIBLE_DEVICES={inherited!r} ({len(inh)} devices)"
-            )
-        out.append(inh[idx])
-    return ",".join(out)
-
-
 def build_vllm_subprocess_env(server_args: dict[str, Any]) -> dict[str, str]:
     """Child-process environment for ``vllm serve``."""
     args = server_args["args"]
     env = os.environ.copy()
     env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
     env.setdefault("NCCL_CUMEM_ENABLE", "0")
-    env["CUDA_VISIBLE_DEVICES"] = _resolve_subprocess_cvd(server_args["visible_devices"])
+    env["CUDA_VISIBLE_DEVICES"] = server_args["visible_devices"]
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")
     if getattr(args, "colocate", False):
         import vime
@@ -1131,7 +1078,6 @@ def _compute_server_args(
 
     topology = compute_vllm_engine_topology(args, rank, num_gpus_per_engine=gpus_per_engine)
     base = base_gpu_id if base_gpu_id is not None else get_base_gpu_id(args, rank)
-    base = _to_local_gpu_id(base)
 
     master_addr: str | None = None
     master_port: int | None = None

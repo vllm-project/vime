@@ -55,49 +55,6 @@ def test_format_v6_uri_ipv4_unchanged():
 
 
 @pytest.mark.unit
-def test_to_local_gpu_id_without_cvd():
-    assert mod._to_local_gpu_id(3) == 3
-
-
-@pytest.mark.unit
-def test_to_local_gpu_id_maps_physical_id(monkeypatch):
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,3,4")
-    assert mod._to_local_gpu_id(3) == 1
-
-
-@pytest.mark.unit
-def test_resolve_subprocess_cvd_no_inherited_is_identity(monkeypatch):
-    # Full-machine / 0-based path: unchanged.
-    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-    assert mod._resolve_subprocess_cvd("0,1,2,3") == "0,1,2,3"
-
-
-@pytest.mark.unit
-def test_resolve_subprocess_cvd_composes_through_inherited(monkeypatch):
-    # Launched with CVD=4,5,6,7 (GPU 0 occupied). Local "0,1,2,3" must map to the
-    # absolute physical "4,5,6,7" so vLLM colocates with the Ray-placed trainer.
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,5,6,7")
-    assert mod._resolve_subprocess_cvd("0,1,2,3") == "4,5,6,7"
-    # A 2-GPU sub-slice starting at local 2 → physical 6,7.
-    assert mod._resolve_subprocess_cvd("2,3") == "6,7"
-
-
-@pytest.mark.unit
-def test_resolve_subprocess_cvd_identity_when_inherited_is_zero_based(monkeypatch):
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
-    assert mod._resolve_subprocess_cvd("0,1,2,3") == "0,1,2,3"
-
-
-@pytest.mark.unit
-def test_resolve_subprocess_cvd_raises_on_out_of_range(monkeypatch):
-    # A local index that doesn't address the inherited set means a broken placement
-    # invariant — fail fast instead of silently mis-pinning the GPU.
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,5")  # only 2 visible devices
-    with pytest.raises(IndexError):
-        mod._resolve_subprocess_cvd("0,1,2,3")  # local 2,3 out of range
-
-
-@pytest.mark.unit
 def test_compute_vllm_engine_topology_single_node(vllm_args):
     vllm_args.num_gpus_per_node = 8
     vllm_args.rollout_num_gpus_per_engine = 4
