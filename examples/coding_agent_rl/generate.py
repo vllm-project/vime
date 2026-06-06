@@ -88,7 +88,7 @@ class _State(metaclass=SingletonMeta):
         self.max_context_len = int(getattr(args, "rollout_max_context_len", 0) or 0)
         self.tool_parser = getattr(args, "vllm_tool_call_parser", None) or None
         self.reasoning_parser = getattr(args, "vllm_reasoning_parser", None) or None
-        engine_url = f"http://{args.vllm_router_ip}:{args.vllm_router_port}"
+        vllm_url = f"http://{args.vllm_router_ip}:{args.vllm_router_port}"
         public_host = os.environ.get("VIME_HEAD_HOST")
         if not public_host:
             raise RuntimeError(
@@ -99,7 +99,7 @@ class _State(metaclass=SingletonMeta):
             )
         self.adapter = AnthropicAdapter(
             tokenizer=self.tokenizer,
-            engine_url=engine_url,
+            vllm_url=vllm_url,
             model=args.hf_checkpoint,
             tool_parser=self.tool_parser,
             reasoning_parser=self.reasoning_parser,
