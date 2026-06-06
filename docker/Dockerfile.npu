@@ -61,6 +61,12 @@ RUN cd MindSpeed && \
     fi && \
     rm mindspeed.patch
 
+COPY docker/patch/${PATCH_VERSION}/torch_npu.patch /tmp/
+RUN TORCH_NPU_DIR=$(python3 -c "import importlib.util; print(importlib.util.find_spec('torch_npu').submodule_search_locations[0])") && \
+    cd ${TORCH_NPU_DIR} && \
+    patch -p2 < /tmp/torch_npu.patch && \
+    rm /tmp/torch_npu.patch
+
 ARG VIME_COMMIT=ascend
 RUN git clone -b ${VIME_COMMIT} https://github.com/vllm-project/vime.git /home/ma-user/vime && \
     cd /home/ma-user/vime && \

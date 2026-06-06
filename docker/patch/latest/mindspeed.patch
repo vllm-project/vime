@@ -68,3 +68,33 @@ index ea73b44c..4e21de90
  
      def enable_recompute_norm(self, norm_ckpt):
          self.is_recompute_norm = True
+diff --git a/mindspeed/features_manager/features_manager.py b/mindspeed/features_manager/features_manager.py
+index 1234567..abcdef0 100644
+--- a/mindspeed/features_manager/features_manager.py
++++ b/mindspeed/features_manager/features_manager.py
+@@ -52,7 +52,10 @@ class MindSpeedFeaturesManager:
+             args = validate_args(args, defaults)  # bypass args.x validation
+             post_validate_features_args(args=args)  # args.x = old_x
+         """
+-        for feature in cls.FEATURES_LIST:
++        for feature in cls.FEATURES_LIST:
+             try:
+                 feature.pre_validate_args(args)
+             except AttributeError:
+@@ -68,7 +71,10 @@ class MindSpeedFeaturesManager:
+             args = validate_args(args, defaults)  # bypass args.x validation
+             post_validate_features_args(args=args)  # args.x = old_x
+         """
+-        for feature in cls.FEATURES_LIST:
++        for feature in cls.FEATURES_LIST:
+             try:
+                 feature.post_validate_args(args)
+             except AttributeError:
+@@ -79,7 +85,10 @@ class MindSpeedFeaturesManager:
+     def validate_features_args(cls, args):
+         """Validate arguments of all features."""
+-        for feature in cls.FEATURES_LIST:
++        for feature in cls.FEATURES_LIST:
+             try:
+                 feature.validate_args(args)
+             except AttributeError:
