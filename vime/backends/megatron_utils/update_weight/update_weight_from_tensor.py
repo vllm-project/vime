@@ -303,14 +303,6 @@ class UpdateWeightFromTensor:
         # ── 1. Pause generation and flush KV cache (rank 0 only) ────────────
         if rank == 0:
             if self._colocated_engines:
-                # Quiesce BEFORE freeing weights. ``pause_generation`` posts ``/pause`` with
-                # mode="keep" -> scheduler enters PAUSED_ALL (token_budget=0, no new step) and
-                # the call blocks until the engine is idle. This guarantees no in-flight model
-                # step overlaps the ``release_memory_occupation(level=0)`` + IPC weight injection
-                # below. Without it, an in-flight step's device->host sync
-                # (gpu_model_runner.get_output()/_bookkeeping_sync._to_list) hangs forever once
-                # the weight/KV memory is mutated under it (intermittent weight-sync hang).
-                # Mirrors the distributed branch below and slime, which pause every engine.
                 ray.get([engine.pause_generation.remote() for engine in self._colocated_engines])
                 ray.get([engine.release_memory_occupation.remote(level=0) for engine in self._colocated_engines])
             if self._distributed_engines:
@@ -380,8 +372,6 @@ class UpdateWeightFromTensor:
                         for engine in self._colocated_engines
                     ]
                 )
-                # Counterpart to the pause_generation() in step 1: clear the PAUSED state so the
-                # scheduler resumes stepping now that weights are live and KV is re-allocated.
                 ray.get([engine.continue_generation.remote() for engine in self._colocated_engines])
             if self._distributed_engines:
                 ray.get([engine.continue_generation.remote() for engine in self._distributed_engines])
