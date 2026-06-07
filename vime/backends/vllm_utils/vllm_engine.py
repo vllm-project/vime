@@ -757,7 +757,7 @@ class VLLMEngine(RayActor):
         """Reset the prefix cache via ``POST /reset_prefix_cache``."""
         if self.node_rank != 0:
             return
-        params = {"reset_running_requests": False, "reset_external": False}
+        params = {"reset_running_requests": False}
         requests.post(f"{self._http_base()}/reset_prefix_cache", params=params).raise_for_status()
 
     def get_url(self):
