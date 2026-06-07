@@ -130,6 +130,17 @@ RUN cd Megatron-LM && \
     rm megatron.patch && \
     pip install -e .
 
+# Patch vLLM: skip execute_dummy_batch while the engine is asleep / being put to sleep, so a
+# colocate DP+EP rollout's staged sleep/wake weight-sync doesn't run a forward against freed KV
+# (illegal memory access at update_weights / the post-rollout sleep offload). vLLM PR #44483
+# lineage, broadened to guard on EngineCore.is_sleeping() (covers the cuMem offload window).
+# vLLM is a pip install (not a git checkout) so apply with plain `git apply` (no --3way).
+COPY docker/patch/${PATCH_VERSION}/vllm.patch /tmp/vllm.patch
+RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirname(vllm.__file__)))')" && \
+    cd "$VLLM_SITE" && \
+    git apply -v /tmp/vllm.patch && \
+    rm /tmp/vllm.patch
+
 # ====================================== Install main package ============================================
 
 ARG VIME_COMMIT=main

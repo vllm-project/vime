@@ -121,25 +121,14 @@ def _get_vllm_dp_size(args) -> int:
 
 
 def _resolve_vllm_parallel_sizes(args, *, gpus_per_engine: int) -> tuple[int, int]:
-    # Derive TP per-engine from THIS engine's GPU count (matches upstream slime's
-    # sglang_engine: tp = _gpus_per_engine // pp). Deliberately does NOT consult a global
-    # ``args.vllm_tp_size``: validate_args used to set that from the *global*
-    # rollout_num_gpus_per_engine, which shadowed this per-engine value and made a
-    # heterogeneous per-group engine (e.g. a tp=2 group) launch with the global TP —
-    # desyncing the weight-transfer rendezvous (the 300s "3/4 clients joined" hang).
     pp = _get_vllm_pp_size(args)
     dp = _get_vllm_dp_size(args)
-    if dp != 1:
-        raise NotImplementedError(
-            "vLLM data parallelism (vllm_data_parallel_size>1) is not wired in this base: TP is "
-            "computed as gpus_per_engine // pp (no DP term) and --data-parallel-size is not "
-            "forwarded. DP/EP support lands in a follow-up PR."
-        )
-    if gpus_per_engine % pp != 0:
+    if gpus_per_engine % (pp * dp) != 0:
         raise ValueError(
-            f"num_gpus_per_engine ({gpus_per_engine}) must be divisible by " f"vllm_pipeline_parallel_size ({pp})"
+            f"num_gpus_per_engine ({gpus_per_engine}) must be divisible by "
+            f"vllm_pipeline_parallel_size * vllm_data_parallel_size ({pp} * {dp} = {pp * dp})"
         )
-    tp = gpus_per_engine // pp
+    tp = gpus_per_engine // (pp * dp)
     return tp, pp
 
 

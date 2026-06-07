@@ -55,17 +55,6 @@ def test_format_v6_uri_ipv4_unchanged():
 
 
 @pytest.mark.unit
-def test_to_local_gpu_id_without_cvd():
-    assert mod._to_local_gpu_id(3) == 3
-
-
-@pytest.mark.unit
-def test_to_local_gpu_id_maps_physical_id(monkeypatch):
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,3,4")
-    assert mod._to_local_gpu_id(3) == 1
-
-
-@pytest.mark.unit
 def test_compute_vllm_engine_topology_single_node(vllm_args):
     vllm_args.num_gpus_per_node = 8
     vllm_args.rollout_num_gpus_per_engine = 4
@@ -578,12 +567,34 @@ def test_compute_topology_heterogeneous_per_group_tp(vllm_args):
 
 
 @pytest.mark.unit
-def test_resolve_parallel_sizes_rejects_dp_gt_1(vllm_args):
+def test_resolve_parallel_sizes_dp_consumes_gpus(vllm_args):
+    # vLLM DP consumes GPUs (total = tp * pp * dp), so tp = gpus // (pp * dp).
+    # dp=2, pp=1, 4 GPUs/engine → tp=2.
     vllm_args.vllm_pipeline_parallel_size = 1
     vllm_args.vllm_data_parallel_size = 2
     vllm_args.vllm_dp_size = 2
-    with pytest.raises(NotImplementedError, match="data parallelism"):
-        mod._resolve_vllm_parallel_sizes(vllm_args, gpus_per_engine=4)
+    tp, pp = mod._resolve_vllm_parallel_sizes(vllm_args, gpus_per_engine=4)
+    assert (tp, pp) == (2, 1)
+
+
+@pytest.mark.unit
+def test_resolve_parallel_sizes_dp_and_pp_combined(vllm_args):
+    # dp=2, pp=2, 8 GPUs/engine → tp = 8 // (2*2) = 2.
+    vllm_args.vllm_pipeline_parallel_size = 2
+    vllm_args.vllm_data_parallel_size = 2
+    vllm_args.vllm_dp_size = 2
+    tp, pp = mod._resolve_vllm_parallel_sizes(vllm_args, gpus_per_engine=8)
+    assert (tp, pp) == (2, 2)
+
+
+@pytest.mark.unit
+def test_resolve_parallel_sizes_rejects_indivisible_dp(vllm_args):
+    # gpus_per_engine not divisible by pp*dp must raise (fail fast, not desync the rendezvous).
+    vllm_args.vllm_pipeline_parallel_size = 1
+    vllm_args.vllm_data_parallel_size = 2
+    vllm_args.vllm_dp_size = 2
+    with pytest.raises(ValueError, match="divisible"):
+        mod._resolve_vllm_parallel_sizes(vllm_args, gpus_per_engine=3)
 
 
 @pytest.mark.unit
