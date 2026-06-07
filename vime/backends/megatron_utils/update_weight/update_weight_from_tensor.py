@@ -130,7 +130,7 @@ class UpdateWeightFromTensor:
 
     Engine lifecycle per ``update_weights`` call::
 
-        colocated:   release_memory_occupation(level=0) (rank 0)
+        colocated:   pause_generation / flush_cache      (rank 0)
         distributed: pause_generation / flush_cache      (rank 0)
         init_weight_transfer_engine                      (rank 0, colocated, first call only)
         start_weight_update                              (coordinator rank per engine only)
@@ -139,8 +139,8 @@ class UpdateWeightFromTensor:
           update_weights_from_distributed                (src rank, distributed)
           barrier                                        (all ranks)
         finish_weight_update                             (coordinator rank per engine only)
-        colocated:   resume_memory_occupation(tags=["weights", "kv_cache"]) (rank 0)
-        distributed: continue_generation                           (rank 0)
+        colocated:   continue_generation                 (rank 0)
+        distributed: continue_generation                 (rank 0)
     """
 
     def __init__(
@@ -304,7 +304,7 @@ class UpdateWeightFromTensor:
         if rank == 0:
             if self._colocated_engines:
                 ray.get([engine.pause_generation.remote() for engine in self._colocated_engines])
-                ray.get([engine.release_memory_occupation.remote(level=0) for engine in self._colocated_engines])
+                ray.get([engine.flush_cache.remote() for engine in self._colocated_engines])
             if self._distributed_engines:
                 ray.get([engine.pause_generation.remote() for engine in self._distributed_engines])
                 ray.get([engine.flush_cache.remote() for engine in self._distributed_engines])
@@ -366,12 +366,6 @@ class UpdateWeightFromTensor:
                     rollout_engines=all_engines,
                 )
             if self._colocated_engines:
-                ray.get(
-                    [
-                        engine.resume_memory_occupation.remote(tags=["weights", "kv_cache"])
-                        for engine in self._colocated_engines
-                    ]
-                )
                 ray.get([engine.continue_generation.remote() for engine in self._colocated_engines])
             if self._distributed_engines:
                 ray.get([engine.continue_generation.remote() for engine in self._distributed_engines])
@@ -512,7 +506,7 @@ class vLLMColocateWorkerExtension:
         # parameter — the vLLM IPCWeightTransferEngine.trainer_send_weights
         # convention, which differs from SkyRL's single-packed-buffer approach).
         weights: list[tuple[str, torch.Tensor]] = []
-        for name, _shape, ipc_handle in zip(names, shapes, ipc_handles):
+        for name, _shape, ipc_handle in zip(names, shapes, ipc_handles, strict=True):
             if physical_gpu_id not in ipc_handle:
                 raise ValueError(
                     f"IPC handle not found for GPU UUID {physical_gpu_id}. "

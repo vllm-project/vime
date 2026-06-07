@@ -844,19 +844,11 @@ class VLLMEngine(RayActor):
         return self._weight_version
 
     def release_memory_occupation(self, level: int = 1):
-        """``POST /sleep?level={level}`` when sleep mode is enabled.
-
-        level=1 (default) releases KV cache only.
-        level=0 releases both KV cache and model weights (required before IPC tensor injection).
-        Returns a no-op dict when ``--vllm-enable-sleep-mode`` was not set.
-        """
-        if self.node_rank != 0:  # /sleep bypasses _make_request (query params, not JSON body); guard explicitly.
+        if self.node_rank != 0:
             return None
         self.flush_cache()
         if not getattr(self.args, "vllm_enable_sleep_mode", False):
             return {"ok": True, "sleep_mode": False, "note": "vLLM sleep mode disabled; no /sleep call."}
-        # vLLM ``POST /sleep`` reads ``level`` from query params, not JSON body
-        # (``vllm.entrypoints.serve.sleep.api_router.sleep``).
         response = requests.post(
             f"{self._http_base()}/sleep",
             params={"level": level},
@@ -866,13 +858,11 @@ class VLLMEngine(RayActor):
 
     def resume_memory_occupation(self, tags: list[str] | None = None):
         """``POST /wake_up`` when sleep mode is on; else a no-op placeholder dict."""
-        if self.node_rank != 0:  # /wake_up bypasses _make_request (query params, not JSON body); guard explicitly.
+        if self.node_rank != 0:
             return None
         if not getattr(self.args, "vllm_enable_sleep_mode", False):
             return {"ok": True, "sleep_mode": False}
         tags = _normalize_vllm_wake_tags(tags)
-        # vLLM ``POST /wake_up`` uses ``query_params.getlist("tags")``, not JSON.
-        # Omit params when ``tags`` is empty so the server wakes all tags (see api_router.wake_up).
         wake_params: list[tuple[str, str]] | None = [("tags", t) for t in tags] if tags else None
         response = requests.post(
             f"{self._http_base()}/wake_up",

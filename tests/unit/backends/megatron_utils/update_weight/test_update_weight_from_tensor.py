@@ -179,7 +179,7 @@ def _run_update(obj, *, chunks=None, ipc_engine_cls=None, ipc_args_cls=None) -> 
 
 
 @pytest.mark.unit
-def test_colocated_lifecycle_uses_vllm_sleep_and_weight_transfer_apis(upw_vllm):
+def test_colocated_lifecycle_uses_pause_flush_and_weight_transfer_apis(upw_vllm):
     obj = _make_instance(upw_vllm)
     engine = RecordingVLLMEngine()
     obj._colocated_engines = [engine]
@@ -190,17 +190,22 @@ def test_colocated_lifecycle_uses_vllm_sleep_and_weight_transfer_apis(upw_vllm):
 
     barrier_count = _run_update(obj, chunks=_chunks(2))
 
-    assert len(engine.release_memory_occupation.calls) == 1
-    assert engine.release_memory_occupation.calls[0].kwargs.get("level") == 0
+    # Colocate quiesce mirrors slime / the distributed branch: pause_generation +
+    # flush_cache, with no /sleep round-trip. (level=0 freed no GPU memory and the
+    # paired resume only warned "Executor is not sleeping"; continue_generation
+    # already handles resume.)
+    assert len(engine.pause_generation.calls) == 1
+    assert len(engine.flush_cache.calls) == 1
+    assert len(engine.release_memory_occupation.calls) == 0
     assert len(engine.init_weight_transfer_engine.calls) == 1
     assert engine.init_weight_transfer_engine.calls[0].args[0] == {"init_info": {}}
     assert len(engine.start_weight_update.calls) == 1
     assert engine.start_weight_update.calls[0].kwargs.get("is_checkpoint_format") is True
     assert len(engine.finish_weight_update.calls) == 1
-    assert len(engine.resume_memory_occupation.calls) == 1
+    assert len(engine.continue_generation.calls) == 1
+    assert len(engine.resume_memory_occupation.calls) == 0
     # lifecycle barriers + one per HF chunk
     assert barrier_count >= 2 + 2
-    assert engine.resume_memory_occupation.calls[0].kwargs.get("tags") == ["weights", "kv_cache"]
 
 
 @pytest.mark.unit
