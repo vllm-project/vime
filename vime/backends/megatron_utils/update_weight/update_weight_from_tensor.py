@@ -44,47 +44,49 @@ def _current_gpu_uuid() -> str:
 def _build_ipc_update_info_from_named_tensors(
     named_tensors: Iterable[tuple[str, torch.Tensor]],
 ) -> tuple[dict[str, list], list[torch.Tensor]]:
-    """Build vLLM IPC ``update_info`` payload from tensors on this rank's GPU.
+    """Build vLLM IPC ``update_info`` as ONE **packed uint8 buffer** per chunk.
 
-    Each handle is keyed by the physical GPU UUID of the producing rank rather
-    than by a local device index. The coordinator gathers all ranks' dicts and
-    merges them; the receiver looks up its own UUID to pick the matching handle,
-    then vLLM unconditionally overwrites ``args[6]`` (device_index) with its own
-    local index before ``rebuild_cuda_tensor``. This UUID-keyed routing makes
-    the path correct under any ``CUDA_VISIBLE_DEVICES`` ordering without
-    relying on a torch reductions monkey-patch.
+    One CUDA IPC handle per *parameter* made colocate weight-sync ~4.3x slower
+    than slime: ``cudaIpcOpenMemHandle`` is a driver-level call and serialises,
+    and a 30B MoE chunk carries ~170 params (≈19.5k IPC opens/sync). Instead, use
+    vLLM's own ``pack_tensors`` to coalesce the whole chunk into a SINGLE
+    contiguous uint8 buffer and export ONE IPC handle for it; the receiver opens
+    one handle and ``unpack_tensor`` slices it back into per-param views. This
+    reuses vLLM's tested packed path (``vllm.distributed.weight_transfer.packed_tensor``,
+    the same primitive its native ``packed=True`` IPC mode uses). See issue #175.
 
-    Return the contiguous tensor refs alongside the payload. ``reduce_tensor``
-    only exports CUDA IPC metadata, so the producer storage must stay alive
-    until the receiver opens the handle.
+    The handle is keyed by the producing rank's physical GPU UUID (not a local
+    device index). The coordinator merges per-rank handle dicts and the receiver
+    looks up its own UUID; vLLM then overwrites ``args[6]`` (device_index) before
+    ``rebuild_cuda_tensor``, so the path is correct under any
+    ``CUDA_VISIBLE_DEVICES`` ordering.
+
+    Return the packed-buffer ref alongside the payload: ``reduce_tensor`` only
+    exports CUDA IPC metadata, so the producer storage must stay alive until the
+    receiver opens the handle.
     """
     from torch.multiprocessing.reductions import reduce_tensor
+    from vllm.distributed.weight_transfer.packed_tensor import pack_tensors
 
-    names: list[str] = []
-    dtype_names: list[str] = []
-    shapes: list[list[int]] = []
-    ipc_handles: list[dict[str, tuple]] = []
-    weight_refs: list[torch.Tensor] = []
     gpu_uuid = _current_gpu_uuid()
 
-    for name, tensor in named_tensors:
-        names.append(name)
-        dtype_names.append(str(tensor.dtype).split(".")[-1])
-        shapes.append(list(tensor.shape))
-        weight = tensor.detach().contiguous()
-        weight_refs.append(weight)
-        rebuild_func, ipc_args = reduce_tensor(weight)
-        ipc_handles.append({gpu_uuid: (rebuild_func, ipc_args)})
+    # vime already pre-chunks via the HF weight iterator, so pack the *entire*
+    # chunk into one buffer (effectively-unbounded buffer_size_bytes).
+    chunk = pack_tensors(iter(named_tensors), lambda item: item[1].detach(), 1 << 40)
+    if chunk is None:
+        return {"packed_handle": {}, "names": [], "shapes": [], "dtype_names": [], "tensor_sizes": []}, []
 
-    return (
-        {
-            "names": names,
-            "dtype_names": dtype_names,
-            "shapes": shapes,
-            "ipc_handles": ipc_handles,
-        },
-        weight_refs,
-    )
+    rebuild_func, ipc_args = reduce_tensor(chunk.packed_tensor)
+    info = {
+        "packed_handle": {gpu_uuid: (rebuild_func, ipc_args)},
+        "names": chunk.names,
+        "shapes": chunk.shapes,
+        # torch.dtype isn't JSON-serialisable for the collective_rpc bridge; pass
+        # names and rebuild on the receiver.
+        "dtype_names": [str(dt).split(".")[-1] for dt in chunk.dtypes],
+        "tensor_sizes": chunk.tensor_sizes,
+    }
+    return info, [chunk.packed_tensor]
 
 
 def _serialize_ipc_update_info(info: dict[str, list]) -> str:
@@ -105,23 +107,19 @@ def _deserialize_ipc_update_info(payload: str) -> dict[str, list]:
 
 
 def _merge_ipc_update_infos(infos: Sequence[dict[str, list]]) -> dict[str, list]:
-    """Merge per-rank IPC payloads so each weight has handles for every GPU UUID in the slot."""
+    """Merge per-rank packed payloads so the single packed handle carries an entry for every GPU UUID in the slot.
+
+    The packed-buffer layout (names / shapes / dtypes / tensor_sizes) is
+    identical across ranks (same model, same iterator order), so we keep the
+    base metadata and combine only the per-UUID ``packed_handle`` dicts.
+    """
     if not infos:
         raise ValueError("no IPC update_info payloads to merge")
     base = infos[0]
-    merged_handles: list[dict[str, tuple]] = []
-    num_params = len(base["names"])
-    for i in range(num_params):
-        combined: dict[str, tuple] = {}
-        for info in infos:
-            combined.update(info["ipc_handles"][i])
-        merged_handles.append(combined)
-    return {
-        "names": base["names"],
-        "dtype_names": base["dtype_names"],
-        "shapes": base["shapes"],
-        "ipc_handles": merged_handles,
-    }
+    combined: dict[str, tuple] = {}
+    for info in infos:
+        combined.update(info["packed_handle"])
+    return {**base, "packed_handle": combined}
 
 
 class UpdateWeightFromTensor:
@@ -421,23 +419,21 @@ class vLLMColocateWorkerExtension:
     def update_weights_chunk(self, update_info: dict) -> None:
         """Receive and load a single chunk of weights via CUDA IPC.
 
-        Accepts the ``update_info`` dict produced by
-        ``VLLMEngine.update_weights`` / ``update_weights``, which
-        carries ``ipc_handles_pickled`` (cloudpickle + base64 serialised CUDA
-        IPC handles assembled by the trainer's
-        ``IPCWeightTransferEngine.trainer_send_weights``).
-
-        Deserialises IPC handles inline (the same pattern as SkyRL's
-        NewInferenceWorkerWrap) and reconstructs each weight tensor before
-        loading into the model — no dependency on
-        ``weight_transfer_engine.receive_weights``.
+        Accepts the packed ``update_info`` produced by
+        ``_build_ipc_update_info_from_named_tensors`` /
+        ``VLLMEngine.update_weights_from_tensor``: the whole chunk packed into
+        ONE contiguous uint8 buffer with a SINGLE CUDA IPC handle plus per-param
+        unpack metadata. Opens one handle (not one per param — see issue #175)
+        and ``unpack_tensor`` slices it into per-param views before loading.
 
         Args:
-            update_info: Dict with keys:
+            update_info: Dict with keys (handle as ``packed_handle`` or
+                ``packed_handle_pickled`` = base64(cloudpickle(...))):
+                - packed_handle: {gpu_uuid: (rebuild_func, args)}  (one uint8 buffer)
                 - names: list[str]
-                - dtype_names: list[str]
                 - shapes: list[list[int]]
-                - ipc_handles_pickled: base64(cloudpickle({gpu_uuid: (func, args)}))
+                - dtype_names: list[str]   (rebuilt to torch.dtype here)
+                - tensor_sizes: list[int]  (bytes per tensor in the buffer)
         """
         if not getattr(self, "_weight_update_active", False):
             raise RuntimeError("start_weight_update must be called before update_weights.")
@@ -446,35 +442,36 @@ class vLLMColocateWorkerExtension:
 
         import cloudpickle
 
-        # Deserialise cloudpickle+b64 encoded IPC handles back to raw callables.
-        inner = dict(update_info)
-        if "ipc_handles_pickled" in inner:
-            inner["ipc_handles"] = cloudpickle.loads(base64.b64decode(inner.pop("ipc_handles_pickled")))
+        from vllm.distributed.weight_transfer.packed_tensor import unpack_tensor
 
-        names: list[str] = inner["names"]
-        shapes: list[list[int]] = inner["shapes"]
-        ipc_handles: list[dict] = inner["ipc_handles"]
+        # Deserialise cloudpickle+b64 encoded packed payload (single IPC handle).
+        inner = dict(update_info)
+        if "packed_handle_pickled" in inner:
+            inner["packed_handle"] = cloudpickle.loads(base64.b64decode(inner.pop("packed_handle_pickled")))
 
         device_index = torch.cuda.current_device()
         physical_gpu_id = str(torch.cuda.get_device_properties(device_index).uuid)
 
-        # Reconstruct weights from per-tensor IPC handles (one handle per
-        # parameter — the vLLM IPCWeightTransferEngine.trainer_send_weights
-        # convention, which differs from SkyRL's single-packed-buffer approach).
-        weights: list[tuple[str, torch.Tensor]] = []
-        for name, _shape, ipc_handle in zip(names, shapes, ipc_handles, strict=True):
-            if physical_gpu_id not in ipc_handle:
-                raise ValueError(
-                    f"IPC handle not found for GPU UUID {physical_gpu_id}. "
-                    f"Available UUIDs: {list(ipc_handle.keys())}"
-                )
-            func, args = ipc_handle[physical_gpu_id]
-            # Index 6 is the device_index in torch's rebuild_cuda_tensor tuple.
-            # Remap to the local (receiver-side) device index.
-            list_args = list(args)
-            list_args[6] = device_index
-            weight: torch.Tensor = func(*list_args)
-            weights.append((name, weight))
+        # Open the SINGLE packed uint8 IPC buffer for this GPU, then unpack it
+        # back into per-param views (vLLM's unpack_tensor). One
+        # cudaIpcOpenMemHandle per chunk, not per parameter (issue #175).
+        packed_handle: dict = inner["packed_handle"]
+        if physical_gpu_id not in packed_handle:
+            raise ValueError(
+                f"IPC handle not found for GPU UUID {physical_gpu_id}. "
+                f"Available UUIDs: {list(packed_handle.keys())}"
+            )
+        func, args = packed_handle[physical_gpu_id]
+        # Index 6 is the device_index in torch's rebuild_cuda_tensor tuple.
+        # Remap to the local (receiver-side) device index.
+        list_args = list(args)
+        list_args[6] = device_index
+        packed_buf: torch.Tensor = func(*list_args)
+
+        dtypes = [getattr(torch, dn) for dn in inner["dtype_names"]]
+        weights: list[tuple[str, torch.Tensor]] = unpack_tensor(
+            packed_buf, inner["names"], inner["shapes"], dtypes, inner["tensor_sizes"]
+        )
 
         # Load weights into the model.
         from vllm.config import set_current_vllm_config

@@ -703,23 +703,33 @@ class VLLMEngine(RayActor):
     def update_weights_from_tensor(
         self,
         *,
+        packed_handle: dict,
         names: list[str],
-        dtype_names: list[str],
         shapes: list[list[int]],
-        ipc_handles: list[dict] | None = None,
+        dtype_names: list[str],
+        tensor_sizes: list[int],
         weight_version: str | None = None,
         flush_cache: bool = False,
     ) -> dict | None:
-        """POST ``IPCWeightTransferUpdateInfo`` (names / dtype_names / shapes /
-        ipc_handles) to ``/update_weights``; record ``weight_version`` only on
-        success. ``ipc_handles`` are base64-cloudpickle'd (rebuild_fn closures).
+        """POST packed IPC ``update_info`` to ``update_weights_chunk``; record
+        ``weight_version`` only on success.
+
+        The whole chunk is one packed uint8 buffer behind a SINGLE CUDA IPC
+        handle (``packed_handle``) plus unpack metadata (names / shapes /
+        dtype_names / tensor_sizes); see issue #175. The handle is
+        base64-cloudpickle'd (rebuild_fn closures) for the HTTP bridge; the
+        metadata stays JSON-native.
         """
         if self.node_rank != 0:
             return None
 
-        payload: dict = {"names": names, "dtype_names": dtype_names, "shapes": shapes}
-        if ipc_handles is not None:
-            payload["ipc_handles_pickled"] = base64.b64encode(cloudpickle.dumps(ipc_handles)).decode("utf-8")
+        payload: dict = {
+            "names": names,
+            "shapes": shapes,
+            "dtype_names": dtype_names,
+            "tensor_sizes": tensor_sizes,
+            "packed_handle_pickled": base64.b64encode(cloudpickle.dumps(packed_handle)).decode("utf-8"),
+        }
         if flush_cache:
             self.flush_cache()
 
