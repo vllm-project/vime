@@ -475,7 +475,7 @@ def _wait_server_healthy(base_url: str, process: multiprocessing.Process | None)
     """Wait until the vLLM server responds on ``GET /health``."""
     while True:
         try:
-            response = requests.get(f"{base_url}/health", timeout=3)
+            response = requests.get(f"{base_url}/health")
             if response.status_code == 200:
                 return
         except requests.RequestException:
@@ -512,9 +512,6 @@ class VLLMEngine(RayActor):
 
     def _http_base(self) -> str:
         return f"http://{self.server_host}:{self.server_port}"
-
-    def _weight_transfer_http_timeout(self) -> float:
-        return float(self.args.vllm_weight_transfer_timeout_sec)
 
     def init(
         self,
@@ -585,7 +582,6 @@ class VLLMEngine(RayActor):
         response = requests.post(
             f"http://{self.router_ip}:{self.router_port}/workers",
             json=payload,
-            timeout=30,
         )
         response.raise_for_status()
 
@@ -594,14 +590,11 @@ class VLLMEngine(RayActor):
             return
         worker_url = self._http_base()
         try:
-            all_workers = requests.get(f"http://{self.router_ip}:{self.router_port}/workers", timeout=30).json()[
-                "workers"
-            ]
+            all_workers = requests.get(f"http://{self.router_ip}:{self.router_port}/workers").json()["workers"]
             for worker in all_workers:
                 if worker["url"] == worker_url:
                     response = requests.delete(
                         f"http://{self.router_ip}:{self.router_port}/workers/{quote(worker_url, safe='')}",
-                        timeout=30,
                     )
                     response.raise_for_status()
                     return
@@ -628,7 +621,7 @@ class VLLMEngine(RayActor):
         treated as a mismatch (e.g. vLLM ``parallel_config`` may not surface ``nnodes``), so the
         check stays strict for reported fields without false-failing on unreported ones.
         """
-        response = requests.get(f"{self._http_base()}/server_info", params={"config_format": "json"}, timeout=30)
+        response = requests.get(f"{self._http_base()}/server_info", params={"config_format": "json"})
         body = _response_json(response)
         parallel_cfg = body.get("vllm_config", {}).get("parallel_config", {})
         if not parallel_cfg:
@@ -668,12 +661,12 @@ class VLLMEngine(RayActor):
         else:
             _wait_worker_process_alive(self.process)
 
-    def _make_request(self, endpoint: str, payload: dict | None = None, *, timeout: float) -> dict | None:
+    def _make_request(self, endpoint: str, payload: dict | None = None) -> dict | None:
         """Control-plane POST returning parsed JSON."""
         if self.node_rank != 0:
             return None
         url = f"{self._http_base()}/{endpoint.lstrip('/')}"
-        return _response_json(requests.post(url, json=payload or {}, timeout=timeout))
+        return _response_json(requests.post(url, json=payload or {}))
 
     def _post_vllm_update_weights_http(self, update_info: dict) -> dict:
         """POST ``/update_weights`` with ``{"update_info": ...}`` (vLLM RLHF control plane).
@@ -684,7 +677,6 @@ class VLLMEngine(RayActor):
         return self._make_request(
             "update_weights",
             {"update_info": update_info},
-            timeout=self._weight_transfer_http_timeout(),
         )
 
     def health_generate(self, timeout: float = 5.0) -> bool:
@@ -721,7 +713,6 @@ class VLLMEngine(RayActor):
         response = self._make_request(
             "collective_rpc",
             {"method": "update_weights_chunk", "kwargs": {"update_info": payload}},
-            timeout=self._weight_transfer_http_timeout(),
         )
         if weight_version is not None:
             self._weight_version = str(weight_version)
@@ -759,23 +750,15 @@ class VLLMEngine(RayActor):
         response = self._make_request(
             "collective_rpc",
             {"method": "update_weights_chunk", "kwargs": {"update_info": payload}},
-            timeout=self._weight_transfer_http_timeout(),
         )
         return response
 
     def flush_cache(self):
-        """Reset the prefix cache via ``POST /reset_prefix_cache``.
-
-        vLLM's endpoint always returns 200 (it does not signal a busy engine),
-        so a single call suffices — no retry loop. ``reset_running_requests``
-        stays False: if any block is still in use the server skips the reset and
-        still returns 200; vime only calls this when the engine is idle
-        (colocate sleep / keep-mode pause).
-        """
+        """Reset the prefix cache via ``POST /reset_prefix_cache``."""
         if self.node_rank != 0:
             return
-        params = {"reset_running_requests": False}
-        requests.post(f"{self._http_base()}/reset_prefix_cache", params=params, timeout=60).raise_for_status()
+        params = {"reset_running_requests": False, "reset_external": False}
+        requests.post(f"{self._http_base()}/reset_prefix_cache", params=params).raise_for_status()
 
     def get_url(self):
         """Worker HTTP base URL, or ``None`` when ``node_rank != 0``."""
@@ -840,7 +823,6 @@ class VLLMEngine(RayActor):
         response = requests.post(
             f"{self._http_base()}/sleep",
             params={"level": level},
-            timeout=30,
         )
         return _response_json(response)
 
@@ -853,7 +835,6 @@ class VLLMEngine(RayActor):
         response = requests.post(
             f"{self._http_base()}/wake_up",
             params=wake_params,
-            timeout=30,
         )
         return _response_json(response)
 
@@ -863,11 +844,10 @@ class VLLMEngine(RayActor):
         For IPC mode the payload is ``{"init_info": {}}``; for NCCL use
         ``init_weights_update_group`` which constructs the payload from typed args.
         """
-        init_timeout_s = self._weight_transfer_http_timeout()
         last_error = None
         for attempt in range(1, 4):
             try:
-                return self._make_request("init_weight_transfer_engine", payload, timeout=init_timeout_s)
+                return self._make_request("init_weight_transfer_engine", payload)
             except Exception as e:
                 last_error = e
                 if attempt < 3:
@@ -877,11 +857,7 @@ class VLLMEngine(RayActor):
 
     def start_weight_update(self, is_checkpoint_format: bool = False) -> dict:
         """``POST /start_weight_update`` — signals vLLM to enter IPC weight-update mode."""
-        return self._make_request(
-            "start_weight_update",
-            {"is_checkpoint_format": is_checkpoint_format},
-            timeout=self._weight_transfer_http_timeout(),
-        )
+        return self._make_request("start_weight_update", {"is_checkpoint_format": is_checkpoint_format})
 
     def finish_weight_update(self) -> dict:
         """``POST /finish_weight_update`` — signals vLLM to exit IPC weight-update mode.
@@ -890,7 +866,7 @@ class VLLMEngine(RayActor):
         ``update_weights_from_tensor`` (the IPC data-carrying RPC), matching vime's
         single-RPC version-with-data semantics.
         """
-        return self._make_request("finish_weight_update", {}, timeout=self._weight_transfer_http_timeout())
+        return self._make_request("finish_weight_update", {})
 
     def check_weights(self, action: str):
         """No vLLM ``weights_checker`` route; return a placeholder dict."""
@@ -912,11 +888,10 @@ class VLLMEngine(RayActor):
                 "world_size": world_size,
             }
         }
-        init_timeout_s = self._weight_transfer_http_timeout()
         last_error = None
         for attempt in range(1, 4):
             try:
-                return self._make_request("init_weight_transfer_engine", payload, timeout=init_timeout_s)
+                return self._make_request("init_weight_transfer_engine", payload)
             except Exception as e:
                 last_error = e
                 if attempt < 3:
@@ -968,7 +943,6 @@ class VLLMEngine(RayActor):
                 "method": "reload_weights",
                 "kwargs": {"weights_path": model_path, "is_checkpoint_format": True},
             },
-            timeout=600,
         )
         return _response_json(response)
 
@@ -980,7 +954,6 @@ class VLLMEngine(RayActor):
             f"{self._http_base()}/pause",
             params={"mode": "keep", "clear_cache": "false"},
             json={},
-            timeout=120,
         )
         response.raise_for_status()
         return response
@@ -989,7 +962,7 @@ class VLLMEngine(RayActor):
         """``POST /resume`` to continue generation after pause."""
         if self.node_rank != 0:
             return None
-        response = requests.post(f"{self._http_base()}/resume", json={}, timeout=120)
+        response = requests.post(f"{self._http_base()}/resume", json={})
         response.raise_for_status()
         return response
 
@@ -1028,7 +1001,7 @@ class VLLMEngine(RayActor):
             )
         ):
             logger.warning("vLLM start_profile: extra kwargs may be ignored by server; see vLLM profiling docs.")
-        response = requests.post(f"{self._http_base()}/start_profile", json={}, timeout=30)
+        response = requests.post(f"{self._http_base()}/start_profile", json={})
         response.raise_for_status()
         return response
 
@@ -1036,7 +1009,7 @@ class VLLMEngine(RayActor):
         """POST ``/stop_profile`` to stop an active server-side profile."""
         if self.node_rank != 0:
             return None
-        response = requests.post(f"{self._http_base()}/stop_profile", json={}, timeout=30)
+        response = requests.post(f"{self._http_base()}/stop_profile", json={})
         response.raise_for_status()
         return response
 
