@@ -183,11 +183,16 @@ def test_finish_weight_update_posts_empty_body(vllm_engine, monkeypatch):
 
 @pytest.mark.unit
 def test_update_weights_from_tensor_posts_ipc_payload_and_records_version(vllm_engine, monkeypatch):
-    posted: list[dict] = []
+    calls: list[tuple[str, dict, float]] = []
+
+    def fake_make_request(endpoint: str, payload: dict, timeout: float):
+        calls.append((endpoint, payload, timeout))
+        return {"ok": True}
+
     monkeypatch.setattr(
         vllm_engine,
-        "_post_vllm_update_weights_http",
-        lambda payload: (posted.append(payload), {"ok": True})[1],
+        "_make_request",
+        fake_make_request,
     )
     assert vllm_engine._weight_version is None
 
@@ -199,8 +204,12 @@ def test_update_weights_from_tensor_posts_ipc_payload_and_records_version(vllm_e
         weight_version="42",
     )
 
-    assert len(posted) == 1
-    sent = posted[0]
+    assert len(calls) == 1
+    endpoint, posted, timeout = calls[0]
+    assert endpoint == "collective_rpc"
+    assert timeout == vllm_engine._weight_transfer_http_timeout()
+    assert posted["method"] == "update_weights_chunk"
+    sent = posted["kwargs"]["update_info"]
     # ipc_handles got cloudpickle'd into ipc_handles_pickled
     assert "ipc_handles" not in sent
     assert isinstance(sent["ipc_handles_pickled"], str)
@@ -214,10 +223,10 @@ def test_update_weights_from_tensor_posts_ipc_payload_and_records_version(vllm_e
 def test_update_weights_from_tensor_does_not_advance_version_on_failure(vllm_engine, monkeypatch):
     """POST failure must not advance _weight_version (else a retry would skip the resync)."""
 
-    def fake_post_vllm_fail(payload: dict) -> dict:
+    def fake_make_request_fail(endpoint: str, payload: dict, timeout: float) -> dict:
         raise RuntimeError("simulated POST failure")
 
-    monkeypatch.setattr(vllm_engine, "_post_vllm_update_weights_http", fake_post_vllm_fail)
+    monkeypatch.setattr(vllm_engine, "_make_request", fake_make_request_fail)
 
     vllm_engine._weight_version = "old"
     with pytest.raises(RuntimeError, match="simulated POST failure"):
@@ -441,9 +450,40 @@ def test_resume_memory_occupation_wake_tags_query(vllm_engine, monkeypatch):
 
 
 @pytest.mark.unit
-def test_resume_memory_occupation_skips_when_sleep_disabled(vllm_engine):
+def test_release_memory_occupation_flushes_then_posts_sleep(vllm_engine, monkeypatch):
+    calls: list[str] = []
+
+    def fake_flush_cache():
+        calls.append("flush_cache")
+
+    def fake_post(url, *, params=None, timeout=30, json=None):
+        calls.append(url)
+        assert params == {"level": 2}
+        assert timeout == 30
+        assert json is None
+        return _MockResponse(json_data={"ok": True, "sleep_mode": True})
+
     vllm_engine.args.vllm_enable_sleep_mode = False
-    assert vllm_engine.resume_memory_occupation() == {"ok": True, "sleep_mode": False}
+    monkeypatch.setattr(vllm_engine, "flush_cache", fake_flush_cache)
+    monkeypatch.setattr(mod.requests, "post", fake_post)
+
+    assert vllm_engine.release_memory_occupation(level=2) == {"ok": True, "sleep_mode": True}
+    assert calls == ["flush_cache", "http://127.0.0.1:8765/sleep"]
+
+
+@pytest.mark.unit
+def test_resume_memory_occupation_posts_wake_even_when_sleep_disabled(vllm_engine, monkeypatch):
+    seen: list[tuple] = []
+
+    def fake_post(url, *, params=None, timeout=30, json=None):
+        seen.append((url, params, timeout, json))
+        return _MockResponse(json_data={"ok": True, "sleep_mode": True})
+
+    vllm_engine.args.vllm_enable_sleep_mode = False
+    monkeypatch.setattr(mod.requests, "post", fake_post)
+
+    assert vllm_engine.resume_memory_occupation() == {"ok": True, "sleep_mode": True}
+    assert seen == [("http://127.0.0.1:8765/wake_up", None, 30, None)]
 
 
 @pytest.mark.unit

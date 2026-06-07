@@ -844,11 +844,10 @@ class VLLMEngine(RayActor):
         return self._weight_version
 
     def release_memory_occupation(self, level: int = 1):
+        """Flush prefix cache, then ``POST /sleep?level={level}``."""
         if self.node_rank != 0:
             return None
         self.flush_cache()
-        if not getattr(self.args, "vllm_enable_sleep_mode", False):
-            return {"ok": True, "sleep_mode": False, "note": "vLLM sleep mode disabled; no /sleep call."}
         response = requests.post(
             f"{self._http_base()}/sleep",
             params={"level": level},
@@ -857,11 +856,9 @@ class VLLMEngine(RayActor):
         return _response_json(response)
 
     def resume_memory_occupation(self, tags: list[str] | None = None):
-        """``POST /wake_up`` when sleep mode is on; else a no-op placeholder dict."""
+        """``POST /wake_up`` with vLLM-supported wake tags."""
         if self.node_rank != 0:
             return None
-        if not getattr(self.args, "vllm_enable_sleep_mode", False):
-            return {"ok": True, "sleep_mode": False}
         tags = _normalize_vllm_wake_tags(tags)
         wake_params: list[tuple[str, str]] | None = [("tags", t) for t in tags] if tags else None
         response = requests.post(
