@@ -173,8 +173,8 @@ def test_get_base_gpu_id_colocate(vllm_args):
 def test_start_weight_update_posts_four_phase_endpoint(vllm_engine, monkeypatch):
     calls: list[tuple] = []
 
-    def fake_post(endpoint: str, payload: dict, timeout: float):
-        calls.append((endpoint, payload, timeout))
+    def fake_post(endpoint: str, payload: dict):
+        calls.append((endpoint, payload))
         return {"ok": True}
 
     monkeypatch.setattr(vllm_engine, "_make_request", fake_post)
@@ -185,15 +185,14 @@ def test_start_weight_update_posts_four_phase_endpoint(vllm_engine, monkeypatch)
     assert len(calls) == 1
     assert calls[0][0] == "start_weight_update"
     assert calls[0][1] == {"is_checkpoint_format": True}
-    assert calls[0][2] == vllm_engine._weight_transfer_http_timeout()
 
 
 @pytest.mark.unit
 def test_finish_weight_update_posts_empty_body(vllm_engine, monkeypatch):
     calls: list[tuple] = []
 
-    def fake_post(endpoint: str, payload: dict, timeout: float):
-        calls.append((endpoint, payload, timeout))
+    def fake_post(endpoint: str, payload: dict):
+        calls.append((endpoint, payload))
         return {"done": True}
 
     monkeypatch.setattr(vllm_engine, "_make_request", fake_post)
@@ -201,22 +200,18 @@ def test_finish_weight_update_posts_empty_body(vllm_engine, monkeypatch):
     result = vllm_engine.finish_weight_update()
 
     assert result == {"done": True}
-    assert calls == [("finish_weight_update", {}, vllm_engine._weight_transfer_http_timeout())]
+    assert calls == [("finish_weight_update", {})]
 
 
 @pytest.mark.unit
 def test_update_weights_from_tensor_posts_ipc_payload_and_records_version(vllm_engine, monkeypatch):
-    calls: list[tuple[str, dict, float]] = []
+    posted: list[tuple[str, dict]] = []
 
-    def fake_make_request(endpoint: str, payload: dict, timeout: float):
-        calls.append((endpoint, payload, timeout))
+    def fake_post(endpoint: str, payload: dict):
+        posted.append((endpoint, payload))
         return {"ok": True}
 
-    monkeypatch.setattr(
-        vllm_engine,
-        "_make_request",
-        fake_make_request,
-    )
+    monkeypatch.setattr(vllm_engine, "_make_request", fake_post)
     assert vllm_engine._weight_version is None
 
     vllm_engine.update_weights_from_tensor(
@@ -227,12 +222,9 @@ def test_update_weights_from_tensor_posts_ipc_payload_and_records_version(vllm_e
         weight_version="42",
     )
 
-    assert len(calls) == 1
-    endpoint, posted, timeout = calls[0]
-    assert endpoint == "collective_rpc"
-    assert timeout == vllm_engine._weight_transfer_http_timeout()
-    assert posted["method"] == "update_weights_chunk"
-    sent = posted["kwargs"]["update_info"]
+    assert posted[0][0] == "collective_rpc"
+    assert posted[0][1]["method"] == "update_weights_chunk"
+    sent = posted[0][1]["kwargs"]["update_info"]
     # ipc_handles got cloudpickle'd into ipc_handles_pickled
     assert "ipc_handles" not in sent
     assert isinstance(sent["ipc_handles_pickled"], str)
@@ -246,10 +238,10 @@ def test_update_weights_from_tensor_posts_ipc_payload_and_records_version(vllm_e
 def test_update_weights_from_tensor_does_not_advance_version_on_failure(vllm_engine, monkeypatch):
     """POST failure must not advance _weight_version (else a retry would skip the resync)."""
 
-    def fake_make_request_fail(endpoint: str, payload: dict, timeout: float) -> dict:
+    def fake_post_fail(endpoint: str, payload: dict) -> dict:
         raise RuntimeError("simulated POST failure")
 
-    monkeypatch.setattr(vllm_engine, "_make_request", fake_make_request_fail)
+    monkeypatch.setattr(vllm_engine, "_make_request", fake_post_fail)
 
     vllm_engine._weight_version = "old"
     with pytest.raises(RuntimeError, match="simulated POST failure"):
@@ -318,8 +310,8 @@ def test_update_weights_from_distributed_posts_update_weights_without_checkpoint
 def test_post_vllm_update_weights_http_wraps_update_info(vllm_engine, monkeypatch):
     seen: list[tuple] = []
 
-    def fake_post(endpoint: str, payload: dict, timeout: float):
-        seen.append((endpoint, payload, timeout))
+    def fake_post(endpoint: str, payload: dict):
+        seen.append((endpoint, payload))
         return {"status": "ok"}
 
     monkeypatch.setattr(vllm_engine, "_make_request", fake_post)
@@ -329,55 +321,6 @@ def test_post_vllm_update_weights_http_wraps_update_info(vllm_engine, monkeypatc
     assert result == {"status": "ok"}
     assert seen[0][0] == "update_weights"
     assert seen[0][1] == {"update_info": {"names": ["w"], "packed": False}}
-
-
-@pytest.mark.unit
-def test_weight_transfer_http_timeout_reads_config(vllm_engine):
-    vllm_engine.args.vllm_weight_transfer_timeout_sec = 123.5
-    assert vllm_engine._weight_transfer_http_timeout() == 123.5
-
-
-@pytest.mark.unit
-def test_weight_transfer_http_timeout_uses_argument_default(vllm_engine):
-    assert vllm_engine.args.vllm_weight_transfer_timeout_sec == 900.0
-    assert vllm_engine._weight_transfer_http_timeout() == 900.0
-
-
-@pytest.mark.unit
-def test_start_weight_update_uses_config_timeout(vllm_engine, monkeypatch):
-    vllm_engine.args.vllm_weight_transfer_timeout_sec = 123.5
-    calls: list[tuple] = []
-
-    def fake_post(endpoint: str, payload: dict, timeout: float):
-        calls.append((endpoint, payload, timeout))
-        return {"ok": True}
-
-    monkeypatch.setattr(vllm_engine, "_make_request", fake_post)
-
-    vllm_engine.start_weight_update()
-    assert calls[0][2] == 123.5
-
-
-@pytest.mark.unit
-def test_init_weights_update_group_uses_config_timeout(vllm_engine, monkeypatch):
-    vllm_engine.args.vllm_weight_transfer_timeout_sec = 123.5
-    calls: list[tuple] = []
-
-    def fake_post(endpoint: str, payload: dict, timeout: float):
-        calls.append((endpoint, payload, timeout))
-        return {"initialized": True}
-
-    monkeypatch.setattr(vllm_engine, "_make_request", fake_post)
-
-    vllm_engine.init_weights_update_group(
-        "127.0.0.1",
-        29500,
-        rank_offset=1,
-        world_size=4,
-        group_name="unused",
-        backend="nccl",
-    )
-    assert calls[0][2] == 123.5
 
 
 @pytest.mark.unit
@@ -513,7 +456,7 @@ def test_resume_memory_occupation_posts_wake_even_when_sleep_disabled(vllm_engin
 def test_init_weights_update_group_retries_then_succeeds(vllm_engine, monkeypatch):
     attempts = {"n": 0}
 
-    def fake_post(endpoint: str, payload: dict, timeout: float):
+    def fake_post(endpoint: str, payload: dict):
         attempts["n"] += 1
         if attempts["n"] < 2:
             raise requests.ConnectionError("transient")
@@ -669,7 +612,7 @@ def test_make_request_short_circuits_on_headless(vllm_engine, monkeypatch):
 
     monkeypatch.setattr(mod.requests, "post", _boom)
     vllm_engine.node_rank = 1
-    assert vllm_engine._make_request("whatever", {}, timeout=1) is None
+    assert vllm_engine._make_request("whatever", {}) is None
 
 
 @pytest.mark.unit
