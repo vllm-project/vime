@@ -390,9 +390,7 @@ def build_vllm_cmd_and_env(server_args: dict[str, Any]) -> tuple[list[str], dict
     if getattr(args, "fp16", False):
         cmd += ["--dtype", "float16"]
 
-    if (getattr(args, "offload_rollout", False) or getattr(args, "colocate", False)) and not getattr(
-        args, "vllm_enable_sleep_mode", False
-    ):
+    if getattr(args, "offload_rollout", False) and not getattr(args, "vllm_enable_sleep_mode", False):
         cmd += ["--enable-sleep-mode"]
         args.vllm_enable_sleep_mode = True
 

@@ -139,6 +139,29 @@ def test_build_vllm_subprocess_env_colocate(vllm_args, monkeypatch):
 
 
 @pytest.mark.unit
+def test_build_vllm_cmd_adds_sleep_mode_only_for_offload_rollout(vllm_args):
+    vllm_args.offload_rollout = True
+    server_args = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
+
+    cmd, _ = mod.build_vllm_cmd_and_env(server_args)
+
+    assert "--enable-sleep-mode" in cmd
+    assert vllm_args.vllm_enable_sleep_mode is True
+
+
+@pytest.mark.unit
+def test_build_vllm_cmd_does_not_infer_sleep_mode_from_colocate(vllm_args):
+    vllm_args.colocate = True
+    vllm_args.offload_rollout = False
+    server_args = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
+
+    cmd, _ = mod.build_vllm_cmd_and_env(server_args)
+
+    assert "--enable-sleep-mode" not in cmd
+    assert not getattr(vllm_args, "vllm_enable_sleep_mode", False)
+
+
+@pytest.mark.unit
 def test_get_base_gpu_id_colocate(vllm_args):
     vllm_args.colocate = True
     vllm_args.num_gpus_per_node = 8
