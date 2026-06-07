@@ -106,8 +106,7 @@ def _new_span_id() -> str:
 
 
 def build_vllm_meta_trace_attrs(output: dict[str, Any]) -> dict[str, Any]:
-    """Trace-span attributes from a vLLM ``/inference/v1/generate`` response.
-    """
+    """Trace-span attributes from a vLLM ``/inference/v1/generate`` response."""
     attrs: dict[str, Any] = {}
     choices = output.get("choices") or []
     if choices and choices[0].get("finish_reason") is not None:

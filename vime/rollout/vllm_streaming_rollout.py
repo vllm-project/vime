@@ -123,9 +123,7 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
             content.append({"type": "image_url", "image_url": {"url": encode_image_for_rollout_engine(image)}})
         render_payload = {"model": args.hf_checkpoint, "messages": [{"role": "user", "content": content}]}
         with trace_span(sample, "vllm_mm_render", attrs={"model": args.hf_checkpoint}):
-            render_data = await http_utils.post(
-                f"{base}/v1/chat/completions/render", render_payload, headers=headers
-            )
+            render_data = await http_utils.post(f"{base}/v1/chat/completions/render", render_payload, headers=headers)
         payload = _mm_render_response_to_generate_body(render_data, args.hf_checkpoint)
         if token_ids:
             _align_mm_feature_placeholders_to_tokens(payload, token_ids)

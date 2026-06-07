@@ -61,9 +61,7 @@ def _install_stubs():
     ray_mod.ObjectRef = object
     ray_mod.actor = types.ModuleType("ray.actor")
     ray_mod.actor.ActorHandle = object
-    ray_mod._private = types.SimpleNamespace(
-        services=types.SimpleNamespace(get_node_ip_address=lambda: "127.0.0.1")
-    )
+    ray_mod._private = types.SimpleNamespace(services=types.SimpleNamespace(get_node_ip_address=lambda: "127.0.0.1"))
     sys.modules.setdefault("ray", ray_mod)
     sys.modules.setdefault("ray.actor", ray_mod.actor)
 
@@ -393,9 +391,7 @@ def test_raw_packed_path_sends_dense_chunks_only(upw, monkeypatch):
     obj._group_name = "g"
     obj._hf_weight_iterator = None
     obj._use_vllm_packed = lambda: True
-    obj._iter_non_expert_chunks = lambda: iter(
-        [[("dense.0", torch.zeros(1))], [("dense.1", torch.zeros(1))]]
-    )
+    obj._iter_non_expert_chunks = lambda: iter([[("dense.0", torch.zeros(1))], [("dense.1", torch.zeros(1))]])
     obj._iter_expert_chunks = lambda: (_ for _ in ()).throw(AssertionError("expert pass should be skipped"))
 
     seen: list[tuple[list[str], bool, str]] = []
@@ -421,10 +417,8 @@ def test_raw_nonpacked_path_runs_dense_then_expert(upw, monkeypatch):
     obj._group_name = "g"
     obj._hf_weight_iterator = None
     obj._use_vllm_packed = lambda: False
-    obj._iter_non_expert_chunks = lambda: iter(
-        [[("dense.0", torch.zeros(1))], [("dense.1", torch.zeros(1))]]
-    )
-    obj._iter_expert_chunks = lambda: iter([ [("expert.0", torch.zeros(1))] ])
+    obj._iter_non_expert_chunks = lambda: iter([[("dense.0", torch.zeros(1))], [("dense.1", torch.zeros(1))]])
+    obj._iter_expert_chunks = lambda: iter([[("expert.0", torch.zeros(1))]])
 
     seen: list[tuple[list[str], bool, str]] = []
     monkeypatch.setattr(
@@ -470,9 +464,7 @@ def test_bridge_path_forwards_packed_flag_and_listifies_chunks(upw, monkeypatch)
     monkeypatch.setattr(upw.dist, "barrier", lambda *args, **kwargs: None)
     monkeypatch.setattr(upw, "get_gloo_group", lambda: "gloo")
 
-    upw.UpdateWeightFromDistributed._sync_bridge_weights_to_rollout_engines(
-        obj, pbar="pbar", use_vllm_packed=True
-    )
+    upw.UpdateWeightFromDistributed._sync_bridge_weights_to_rollout_engines(obj, pbar="pbar", use_vllm_packed=True)
 
     assert seen == [
         (["bridge.0"], True, "pbar"),
