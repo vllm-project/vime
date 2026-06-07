@@ -13,6 +13,7 @@ import io
 import json
 import logging
 import os
+import shlex
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -279,3 +280,222 @@ class E2BSandbox:
             )
         except Exception:
             return ""
+
+
+# ---------------------------------------------------------------------------
+# Modal backend
+# ---------------------------------------------------------------------------
+# A second concrete Sandbox provider (alongside E2BSandbox) backed by
+# ``modal.Sandbox``. Selected at runtime by the coding-agent example's
+# ``make_sandbox()`` factory via ``VIME_AGENT_SANDBOX_BACKEND=modal``; the E2B
+# path is untouched when this backend is not selected.
+#
+# Reverse-network note: coding_agent_rl runs Claude Code *inside* the sandbox,
+# which dials back to the in-process Anthropic adapter on the training head
+# (``ANTHROPIC_BASE_URL=adapter_url``). Modal sandboxes have outbound internet
+# when ``block_network=False`` (the default here), so they can reach the head as
+# long as the adapter URL is publicly routable. On a private cluster, expose the
+# adapter's ``SHIM_PORT`` through a tunnel (e.g. cloudflared) and point
+# ``SLIME_HEAD_HOST`` / ``ADAPTER_URL_OVERRIDE`` at it. (Verified end-to-end:
+# a Modal sandbox successfully dialed back through a cloudflared tunnel.)
+#
+# Gap map vs E2B:
+#   * Modal exec has no ``user=`` -> emulate with ``runuser -u <user>``.
+#   * ``write_file`` streams str/bytes/host-Path over command stdin, then chowns.
+#   * Image comes from a registry tag (``Image.from_registry``), optionally with
+#     ``REGISTRY_USERNAME``/``REGISTRY_PASSWORD`` from DOCKER_* env for private
+#     registries.
+#   * Cleanup always reaches ``terminate`` (a leaked Modal sandbox counts against
+#     the account's concurrent-sandbox cap until its wall-clock timeout).
+
+_modal_app_env = ("VIME_AGENT_SANDBOX_MODAL_APP", "SWE_SANDBOX_MODAL_APP")
+_modal_cpu_env = ("VIME_AGENT_SANDBOX_MODAL_CPU", "SWE_SANDBOX_MODAL_CPU")
+_modal_memory_mb_env = ("VIME_AGENT_SANDBOX_MODAL_MEMORY_MB", "SWE_SANDBOX_MODAL_MEMORY_MB")
+_modal_block_network_env = ("VIME_AGENT_SANDBOX_MODAL_BLOCK_NETWORK", "SWE_SANDBOX_MODAL_BLOCK_NETWORK")
+_modal_max_output_bytes_env = ("VIME_AGENT_SANDBOX_MODAL_MAX_OUTPUT_BYTES", "SWE_SANDBOX_MODAL_MAX_OUTPUT_BYTES")
+
+_MODAL_WRITE_CHUNK = 2 * 1024 * 1024  # 2 MiB stdin chunks for host-Path uploads
+
+
+def _truthy(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+class ModalSandbox:
+    """Async context manager around ``modal.Sandbox``.
+
+    Mirrors :class:`E2BSandbox`'s public surface so the coding-agent example can
+    swap backends without touching its bootstrap / runner / evaluator code: same
+    ``__aenter__`` / ``__aexit__``, ``exec``, ``write_file``, ``read_file``, and
+    ``sandbox_id``. ``modal`` is imported lazily so importing this module never
+    requires the dependency unless the Modal backend is actually used.
+    """
+
+    # Shared lifetime env with E2BSandbox so run.sh sets one knob for both.
+    lifetime_sec_env = ("VIME_AGENT_SANDBOX_LIFETIME_SEC", "SWE_SANDBOX_LIFETIME_SEC")
+    default_lifetime_sec = 3600
+    default_app_name = "vime-coding-agent-sandbox"
+    default_cpu = 2.0
+    default_memory_mb = 8192
+
+    def __init__(
+        self,
+        image: str,
+        *,
+        timeout: int | None = None,
+        app_name: str | None = None,
+        cpu: float | None = None,
+        memory_mb: int | None = None,
+        block_network: bool | None = None,
+        max_output_bytes: int | None = None,
+    ) -> None:
+        self.image = image
+        self.timeout = int(timeout) if timeout is not None else self._lifetime_sec_from_env()
+        self.app_name = app_name or _getenv(*_modal_app_env, default=self.default_app_name)
+        self.cpu = float(cpu) if cpu is not None else float(_getenv(*_modal_cpu_env, default=str(self.default_cpu)))
+        self.memory_mb = (
+            int(memory_mb)
+            if memory_mb is not None
+            else int(_getenv(*_modal_memory_mb_env, default=str(self.default_memory_mb)))
+        )
+        if block_network is not None:
+            self.block_network = bool(block_network)
+        else:
+            self.block_network = _truthy(_getenv(*_modal_block_network_env, default="0"))
+        self.max_output_bytes = (
+            int(max_output_bytes)
+            if max_output_bytes is not None
+            else int(_getenv(*_modal_max_output_bytes_env, default="0"))
+        )
+        self._sb = None
+        self._app = None
+        self.sandbox_id = ""
+
+    @classmethod
+    def _lifetime_sec_from_env(cls) -> int:
+        return int(_getenv(*cls.lifetime_sec_env, default=str(cls.default_lifetime_sec)))
+
+    @staticmethod
+    def _registry_secret(modal):
+        """Build a private-registry Secret from DOCKER_* env, or None for public."""
+        user = os.environ.get("DOCKER_USERNAME")
+        pw = os.environ.get("DOCKER_PASSWORD")
+        if user and pw:
+            return modal.Secret.from_dict({"REGISTRY_USERNAME": user, "REGISTRY_PASSWORD": pw})
+        return None
+
+    async def __aenter__(self) -> ModalSandbox:
+        import modal
+
+        self._app = await modal.App.lookup.aio(self.app_name, create_if_missing=True)
+        secret = self._registry_secret(modal)
+        image = (
+            modal.Image.from_registry(self.image, secret=secret)
+            if secret is not None
+            else modal.Image.from_registry(self.image)
+        )
+        self._sb = await modal.Sandbox.create.aio(
+            image=image,
+            app=self._app,
+            cpu=self.cpu,
+            memory=self.memory_mb,
+            timeout=self.timeout,
+            block_network=self.block_network,
+        )
+        self.sandbox_id = self._sb.object_id
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        # Always reach terminate: a leaked sandbox counts against Modal's
+        # concurrent-sandbox cap until its wall-clock timeout fires.
+        if self._sb is not None:
+            try:
+                await self._sb.terminate.aio()
+            except Exception as e:
+                logger.warning("[agent.sandbox] modal terminate %s failed: %s", (self.sandbox_id or "")[:12], e)
+            finally:
+                self._sb = None
+
+    @staticmethod
+    def _build_argv(cmd: str, user: str, env: dict[str, str] | None) -> list[str]:
+        """argv for running ``cmd`` as ``user``. Modal has no user= on exec, so
+        non-root uses ``runuser``; env keys are whitelisted through so the target
+        user's shell still sees them (matches the E2B ``envs=`` semantics)."""
+        if user == "root":
+            return ["bash", "-lc", cmd]
+        argv = ["runuser", "-u", user]
+        if env:
+            argv.append("--whitelist-environment=" + ",".join(env.keys()))
+        argv += ["--", "bash", "-lc", cmd]
+        return argv
+
+    def _cap(self, text: str | None) -> str:
+        text = text or ""
+        if self.max_output_bytes and len(text) > self.max_output_bytes:
+            return text[: self.max_output_bytes] + f"\n<truncated; output exceeded {self.max_output_bytes} bytes>\n"
+        return text
+
+    async def exec(
+        self,
+        cmd: str,
+        *,
+        user: str = "root",
+        env: dict[str, str] | None = None,
+        timeout: int = 120,
+        check: bool = False,
+    ) -> ExecResult:
+        import modal
+
+        argv = self._build_argv(cmd, user, env)
+        proc = await self._sb.exec.aio(*argv, timeout=timeout, env=env or None)
+        try:
+            out, err = await asyncio.gather(proc.stdout.read.aio(), proc.stderr.read.aio())
+            rc = await proc.wait.aio()
+        except modal.exception.SandboxTimeoutError:
+            # Backend-specific timeout: mirror E2B's *contract* (raise on check,
+            # else hand back a tuple) rather than its exact exception type.
+            if check:
+                raise RuntimeError(f"modal exec timed out after {timeout}s: {cmd[:120]}") from None
+            return -1, "", f"<modal exec timeout after {timeout}s>"
+        out, err = self._cap(out), self._cap(err)
+        if check and rc != 0:
+            raise RuntimeError(f"modal exec failed (exit={rc}): {cmd[:120]}\n{err[:400]}")
+        return int(rc or 0), out, err
+
+    async def write_file(self, sandbox_path: str, content: FileContent, *, user: str = "root") -> None:
+        directory = os.path.dirname(sandbox_path) or "."
+        create_cmd = f"mkdir -p {shlex.quote(directory)} && cat > {shlex.quote(sandbox_path)}"
+        # text=False -> binary stdin so host Paths / bytes stream verbatim.
+        proc = await self._sb.exec.aio("bash", "-lc", create_cmd, timeout=600, text=False)
+        try:
+            if isinstance(content, Path):
+                with open(content, "rb") as fp:
+                    while True:
+                        chunk = fp.read(_MODAL_WRITE_CHUNK)
+                        if not chunk:
+                            break
+                        proc.stdin.write(chunk)
+                        await proc.stdin.drain.aio()
+            else:
+                data = content.encode() if isinstance(content, str) else content
+                proc.stdin.write(data)
+                await proc.stdin.drain.aio()
+            proc.stdin.write_eof()
+            await proc.stdin.drain.aio()
+            rc = await proc.wait.aio()
+        except Exception as e:
+            raise OSError(f"modal write_file({sandbox_path}) failed: {e!r}") from e
+        if rc != 0:
+            raise OSError(f"modal write_file({sandbox_path}) exit={rc}")
+        if user != "root":
+            crc, _, cerr = await self.exec(
+                f"chown {shlex.quote(user)}:{shlex.quote(user)} {shlex.quote(sandbox_path)}",
+                user="root",
+                check=False,
+            )
+            if crc != 0:
+                logger.warning("[agent.sandbox] modal chown %s -> %s failed: %s", sandbox_path, user, cerr[:200])
+
+    async def read_file(self, sandbox_path: str, *, user: str = "root") -> str:
+        rc, out, _ = await self.exec(f"cat -- {shlex.quote(sandbox_path)}", user=user, timeout=120, check=False)
+        return out if rc == 0 else ""

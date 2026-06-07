@@ -90,12 +90,19 @@ class _State(metaclass=SingletonMeta):
         self.reasoning_parser = getattr(args, "vllm_reasoning_parser", None) or None
         vllm_url = f"http://{args.vllm_router_ip}:{args.vllm_router_port}"
         public_host = os.environ.get("VIME_HEAD_HOST")
-        if not public_host:
+        # ADAPTER_URL_OVERRIDE lets a reverse tunnel (e.g. cloudflared) supply a
+        # ready-made public adapter URL when the head has no directly routable
+        # host:port -- e.g. Modal sandboxes on a private cluster. When set it
+        # fully replaces the VIME_HEAD_HOST + SHIM_PORT construction below.
+        adapter_url_override = os.environ.get("ADAPTER_URL_OVERRIDE")
+        if not public_host and not adapter_url_override:
             raise RuntimeError(
-                "VIME_HEAD_HOST is not set. Export it to the host IP that "
-                "sandboxes can reach for reverse-connection to the Anthropic adapter. "
-                "Without it the sandbox cannot dial back and the rollout will "
-                "silently abort."
+                "Neither VIME_HEAD_HOST nor ADAPTER_URL_OVERRIDE is set. Export "
+                "VIME_HEAD_HOST to the host IP that sandboxes can reach for "
+                "reverse-connection to the Anthropic adapter, or set "
+                "ADAPTER_URL_OVERRIDE to a full public adapter URL (e.g. a "
+                "cloudflared tunnel). Without one the sandbox cannot dial back "
+                "and the rollout will silently abort."
             )
         self.adapter = AnthropicAdapter(
             tokenizer=self.tokenizer,
@@ -115,7 +122,7 @@ class _State(metaclass=SingletonMeta):
             thread_name="anthropic-adapter",
             runner_kwargs={"handler_cancellation": True},
         )
-        self.adapter_url = f"http://{public_host}:{self.app_handle.port}"
+        self.adapter_url = adapter_url_override or f"http://{public_host}:{self.app_handle.port}"
         logger.info(
             "[coding_agent_rl] tokenizer=%s adapter=%s max_context_len=%s tool_parser=%s reasoning_parser=%s",
             args.hf_checkpoint,

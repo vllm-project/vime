@@ -20,7 +20,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from vime.agent.sandbox import E2BSandbox, Sandbox
+from vime.agent.sandbox import E2BSandbox, ModalSandbox, Sandbox
 
 
 logger = logging.getLogger(__name__)
@@ -55,12 +55,28 @@ CC_PROMPT = os.environ.get(
 _BOOT_SEM: asyncio.Semaphore | None = None
 
 
+def make_sandbox(image: str) -> Sandbox:
+    """Construct the configured sandbox backend for ``image``.
+
+    Backend is chosen by ``VIME_AGENT_SANDBOX_BACKEND`` (read per call so run.sh
+    / tests can set it): ``e2b`` (default, unchanged behavior) or ``modal``.
+    Both backends satisfy the same :class:`Sandbox` Protocol, so the work-sandbox
+    and eval-sandbox call sites below stay backend-agnostic.
+    """
+    backend = os.environ.get("VIME_AGENT_SANDBOX_BACKEND", "e2b").strip().lower()
+    if backend == "modal":
+        return ModalSandbox(image)
+    if backend in ("", "e2b"):
+        return E2BSandbox(image)
+    raise ValueError(f"unknown VIME_AGENT_SANDBOX_BACKEND={backend!r} (expected 'e2b' or 'modal')")
+
+
 # ---------------------------------------------------------------------------
 # Sandbox bootstrap (Node + Claude Code + agent user)
 # ---------------------------------------------------------------------------
 @asynccontextmanager
-async def boot_agent_sandbox(image: str) -> AsyncIterator[E2BSandbox]:
-    """Boot a fresh E2B sandbox and install the Claude Code toolchain.
+async def boot_agent_sandbox(image: str) -> AsyncIterator[Sandbox]:
+    """Boot a fresh sandbox (E2B or Modal) and install the Claude Code toolchain.
 
     This is the provisioning wrapper for the work sandbox: create the sandbox
     from the dataset image, install Node 22 + Claude Code CLI from host
@@ -74,7 +90,7 @@ async def boot_agent_sandbox(image: str) -> AsyncIterator[E2BSandbox]:
     sb = None
     last_err: Exception | None = None
     for attempt in range(SWE_BOOT_RETRIES):
-        cand = E2BSandbox(image)
+        cand = make_sandbox(image)
         try:
             async with _BOOT_SEM:
                 await cand.__aenter__()
@@ -312,7 +328,7 @@ async def evaluate(
         logger.warning("[e2b.evaluate] no swepro/eval_cmd; reward=0")
         return 0.0, False, True
 
-    async with E2BSandbox(image) as ev:
+    async with make_sandbox(image) as ev:
         await ensure_agent_user(ev, workdir)
         if swepro:
             await _setup_swepro_assets(ev, swepro)
