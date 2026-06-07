@@ -449,18 +449,27 @@ class ModalSandbox:
         argv = self._build_argv(cmd, user, env)
         proc = await self._sb.exec.aio(*argv, timeout=timeout, env=env or None)
         try:
-            out, err = await asyncio.gather(proc.stdout.read.aio(), proc.stderr.read.aio())
-            rc = await proc.wait.aio()
+            # Gather reads with wait so a chatty stream can't backpressure-stall
+            # the other before the process is reaped (matches Modal's own idiom).
+            out, err, rc = await asyncio.gather(proc.stdout.read.aio(), proc.stderr.read.aio(), proc.wait.aio())
         except modal.exception.SandboxTimeoutError:
-            # Backend-specific timeout: mirror E2B's *contract* (raise on check,
-            # else hand back a tuple) rather than its exact exception type.
+            # Defensive: most Modal paths signal a per-exec timeout via rc == -1
+            # (handled below, no exception), but keep this for any that raise.
             if check:
                 raise RuntimeError(f"modal exec timed out after {timeout}s: {cmd[:120]}") from None
             return -1, "", f"<modal exec timeout after {timeout}s>"
+        rc = int(rc) if rc is not None else 0
         out, err = self._cap(out), self._cap(err)
+        # Modal returns rc == -1 (no exception) when a per-exec timeout fires or
+        # the process is killed. Surface it as a clear timeout rather than a
+        # generic non-zero exit.
+        if rc == -1:
+            if check:
+                raise RuntimeError(f"modal exec timed out / was killed after {timeout}s: {cmd[:120]}")
+            return -1, out, err or f"<modal exec timeout/killed after {timeout}s>"
         if check and rc != 0:
             raise RuntimeError(f"modal exec failed (exit={rc}): {cmd[:120]}\n{err[:400]}")
-        return int(rc or 0), out, err
+        return rc, out, err
 
     async def write_file(self, sandbox_path: str, content: FileContent, *, user: str = "root") -> None:
         directory = os.path.dirname(sandbox_path) or "."
@@ -482,11 +491,16 @@ class ModalSandbox:
                 await proc.stdin.drain.aio()
             proc.stdin.write_eof()
             await proc.stdin.drain.aio()
-            rc = await proc.wait.aio()
+            # Drain stderr alongside wait so the write can't stall on a full
+            # stderr pipe, and so the failure message is preserved.
+            err_raw, rc = await asyncio.gather(proc.stderr.read.aio(), proc.wait.aio())
         except Exception as e:
             raise OSError(f"modal write_file({sandbox_path}) failed: {e!r}") from e
         if rc != 0:
-            raise OSError(f"modal write_file({sandbox_path}) exit={rc}")
+            err_msg = (
+                err_raw.decode("utf-8", "replace") if isinstance(err_raw, (bytes, bytearray)) else str(err_raw or "")
+            )
+            raise OSError(f"modal write_file({sandbox_path}) exit={rc}: {err_msg[:300]}")
         if user != "root":
             crc, _, cerr = await self.exec(
                 f"chown {shlex.quote(user)}:{shlex.quote(user)} {shlex.quote(sandbox_path)}",

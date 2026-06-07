@@ -463,6 +463,29 @@ async def test_exec_timeout_check_raises(fake_modal):
     assert "timed out" in str(ei.value)
 
 
+# Modal 1.4.2 does NOT raise on a per-exec timeout; wait() returns rc == -1
+# (verified on real Modal). These cover that real path, not just the raise path.
+@aiotest
+async def test_exec_rc_minus1_noncheck_returns_timeout(fake_modal):
+    ms = await _entered()
+    ms._sb.next_rc = -1
+    ms._sb.next_stdout = ""
+    ms._sb.next_stderr = ""  # real Modal timeout yields empty streams + rc=-1
+    rc, out, err = await ms.exec("sleep 999", timeout=1, check=False)
+    assert rc == -1
+    assert "timeout" in err or "killed" in err
+
+
+@aiotest
+async def test_exec_rc_minus1_check_raises_as_timeout(fake_modal):
+    ms = await _entered()
+    ms._sb.next_rc = -1
+    with pytest.raises(RuntimeError) as ei:
+        await ms.exec("sleep 999", timeout=1, check=True)
+    msg = str(ei.value)
+    assert "timed out" in msg or "killed" in msg
+
+
 # ---------------------------------------------------------------------------
 # write_file: str / bytes / host Path, mkdir+cat, eof, chown
 # ---------------------------------------------------------------------------
