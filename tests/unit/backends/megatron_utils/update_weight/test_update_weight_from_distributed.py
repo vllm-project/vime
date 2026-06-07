@@ -4,15 +4,107 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import sys
+import types
 from dataclasses import dataclass, field
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 
+MODULE_PATH = "vime.backends.megatron_utils.update_weight.update_weight_from_distributed"
+
 
 @pytest.fixture(scope="module")
 def upw():
-    return importlib.import_module("vime.backends.megatron_utils.update_weight.update_weight_from_distributed")
+    previous = sys.modules.pop(MODULE_PATH, None)
+    try:
+        yield importlib.import_module(MODULE_PATH)
+    finally:
+        sys.modules.pop(MODULE_PATH, None)
+        if previous is not None:
+            sys.modules[MODULE_PATH] = previous
+
+
+def _install_stubs():
+    mpu_stub = MagicMock()
+    mpu_stub.get_data_parallel_rank.return_value = 0
+    mpu_stub.get_tensor_model_parallel_rank.return_value = 0
+    mpu_stub.get_tensor_model_parallel_world_size.return_value = 1
+    mpu_stub.get_pipeline_model_parallel_rank.return_value = 0
+    mpu_stub.get_expert_model_parallel_world_size.return_value = 1
+    mpu_stub.get_expert_model_parallel_group.return_value = "ep_group"
+
+    megatron_core = types.ModuleType("megatron.core")
+    megatron_core.__path__ = []
+    megatron_core.mpu = mpu_stub
+    parallel_state_mod = types.ModuleType("megatron.core.parallel_state")
+    parallel_state_mod.get_tensor_model_parallel_rank = mpu_stub.get_tensor_model_parallel_rank
+    parallel_state_mod.get_tensor_model_parallel_world_size = mpu_stub.get_tensor_model_parallel_world_size
+    transformer_mod = types.ModuleType("megatron.core.transformer")
+    transformer_mod.__path__ = []
+    transformer_layer_mod = types.ModuleType("megatron.core.transformer.transformer_layer")
+    transformer_layer_mod.get_transformer_layer_offset = lambda *args, **kwargs: 0
+    transformer_mod.transformer_layer = transformer_layer_mod
+    megatron_core.parallel_state = parallel_state_mod
+    megatron_core.transformer = transformer_mod
+    megatron_mod = types.ModuleType("megatron")
+    megatron_mod.core = megatron_core
+    sys.modules.setdefault("megatron", megatron_mod)
+    sys.modules.setdefault("megatron.core", megatron_core)
+    sys.modules.setdefault("megatron.core.parallel_state", parallel_state_mod)
+    sys.modules.setdefault("megatron.core.transformer", transformer_mod)
+    sys.modules.setdefault("megatron.core.transformer.transformer_layer", transformer_layer_mod)
+
+    ray_mod = types.ModuleType("ray")
+    ray_mod.get = lambda refs: refs
+    ray_mod.ObjectRef = object
+    ray_mod.actor = types.ModuleType("ray.actor")
+    ray_mod.actor.ActorHandle = object
+    ray_mod._private = types.SimpleNamespace(
+        services=types.SimpleNamespace(get_node_ip_address=lambda: "127.0.0.1")
+    )
+    sys.modules.setdefault("ray", ray_mod)
+    sys.modules.setdefault("ray.actor", ray_mod.actor)
+
+    vime_utils = types.ModuleType("vime.utils.distributed_utils")
+    vime_utils.get_gloo_group = MagicMock(return_value="gloo")
+    sys.modules.setdefault("vime.utils.distributed_utils", vime_utils)
+
+    nccl_mod = types.ModuleType("vllm.distributed.weight_transfer.nccl_engine")
+
+    class DummyNCCLTrainerSendWeightsArgs:
+        def __init__(self, *, group, packed):
+            self.group = group
+            self.packed = packed
+
+    class DummyNCCLWeightTransferEngine:
+        @staticmethod
+        def trainer_send_weights(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def trainer_init(*args, **kwargs):
+            return object()
+
+    nccl_mod.NCCLTrainerSendWeightsArgs = DummyNCCLTrainerSendWeightsArgs
+    nccl_mod.NCCLWeightTransferEngine = DummyNCCLWeightTransferEngine
+    vllm_mod = types.ModuleType("vllm")
+    vllm_mod.__path__ = []
+    distributed_mod = types.ModuleType("vllm.distributed")
+    distributed_mod.__path__ = []
+    weight_transfer_mod = types.ModuleType("vllm.distributed.weight_transfer")
+    weight_transfer_mod.__path__ = []
+    vllm_mod.distributed = distributed_mod
+    distributed_mod.weight_transfer = weight_transfer_mod
+    weight_transfer_mod.nccl_engine = nccl_mod
+    sys.modules.setdefault("vllm", vllm_mod)
+    sys.modules.setdefault("vllm.distributed", distributed_mod)
+    sys.modules.setdefault("vllm.distributed.weight_transfer", weight_transfer_mod)
+    sys.modules.setdefault("vllm.distributed.weight_transfer.nccl_engine", nccl_mod)
+
+
+_install_stubs()
 
 
 @dataclass
@@ -42,6 +134,12 @@ class RecordingEngine:
     )
     start_weight_update: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod("start_ref"))
     finish_weight_update: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod("finish_ref"))
+
+
+@dataclass
+class RecordingLock:
+    acquire: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod("acquired"))
+    release: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod("released"))
 
 
 @dataclass
@@ -93,6 +191,23 @@ def _patch_nccl_on_module(
 def _patch_trainer_send(monkeypatch, upw, seen: list[dict]) -> None:
     _patch_nccl_on_module(monkeypatch, upw, send_seen=seen)
     monkeypatch.setattr(upw.torch.cuda, "synchronize", lambda: None)
+
+
+def _make_instance(upw):
+    obj = object.__new__(upw.UpdateWeightFromDistributed)
+    obj.args = type("Args", (), {"update_weight_buffer_size": 1 << 30, "vllm_weight_sync_packed": True})()
+    obj.model = []
+    obj.weights_getter = lambda: {}
+    obj.model_name = "test"
+    obj.quantization_config = None
+    obj.weight_version = 0
+    obj._model_update_groups = DummyGroup()
+    obj._hf_weight_iterator = None
+    obj._is_pp_src_rank = True
+    obj._group_name = "g"
+    obj.rollout_engines = []
+    obj.rollout_engine_lock = RecordingLock()
+    return obj
 
 
 @pytest.mark.unit
@@ -272,6 +387,100 @@ def test_empty_tensor_list_still_dispatches(upw, monkeypatch):
 
 
 @pytest.mark.unit
+def test_raw_packed_path_sends_dense_chunks_only(upw, monkeypatch):
+    obj = _make_instance(upw)
+    obj._is_pp_src_rank = True
+    obj._group_name = "g"
+    obj._hf_weight_iterator = None
+    obj._use_vllm_packed = lambda: True
+    obj._iter_non_expert_chunks = lambda: iter(
+        [[("dense.0", torch.zeros(1))], [("dense.1", torch.zeros(1))]]
+    )
+    obj._iter_expert_chunks = lambda: (_ for _ in ()).throw(AssertionError("expert pass should be skipped"))
+
+    seen: list[tuple[list[str], bool, str]] = []
+    monkeypatch.setattr(
+        upw.UpdateWeightFromDistributed,
+        "_update_bucket_weights_from_distributed",
+        lambda self, converted_named_tensors, pbar=None, packed=False: seen.append(
+            ([name for name, _ in converted_named_tensors], packed, pbar)
+        ),
+    )
+    monkeypatch.setattr(upw.dist, "barrier", lambda *args, **kwargs: None)
+    monkeypatch.setattr(upw, "get_gloo_group", lambda: "gloo")
+
+    upw.UpdateWeightFromDistributed._send_weights(obj, pbar="pbar")
+
+    assert seen == [(["dense.0"], True, "pbar"), (["dense.1"], True, "pbar")]
+
+
+@pytest.mark.unit
+def test_raw_nonpacked_path_runs_dense_then_expert(upw, monkeypatch):
+    obj = _make_instance(upw)
+    obj._is_pp_src_rank = True
+    obj._group_name = "g"
+    obj._hf_weight_iterator = None
+    obj._use_vllm_packed = lambda: False
+    obj._iter_non_expert_chunks = lambda: iter(
+        [[("dense.0", torch.zeros(1))], [("dense.1", torch.zeros(1))]]
+    )
+    obj._iter_expert_chunks = lambda: iter([ [("expert.0", torch.zeros(1))] ])
+
+    seen: list[tuple[list[str], bool, str]] = []
+    monkeypatch.setattr(
+        upw.UpdateWeightFromDistributed,
+        "_update_bucket_weights_from_distributed",
+        lambda self, converted_named_tensors, pbar=None, packed=False: seen.append(
+            ([name for name, _ in converted_named_tensors], packed, pbar)
+        ),
+    )
+    barriers: list[str] = []
+    monkeypatch.setattr(upw.dist, "barrier", lambda *args, **kwargs: barriers.append(kwargs.get("group")))
+    monkeypatch.setattr(upw, "get_gloo_group", lambda: "gloo")
+
+    upw.UpdateWeightFromDistributed._send_weights(obj, pbar="pbar")
+
+    assert seen == [
+        (["dense.0"], False, "pbar"),
+        (["dense.1"], False, "pbar"),
+        (["expert.0"], False, "pbar"),
+    ]
+    assert barriers == ["gloo", "gloo"]
+
+
+@pytest.mark.unit
+def test_bridge_path_forwards_packed_flag_and_listifies_chunks(upw, monkeypatch):
+    obj = _make_instance(upw)
+    obj._is_pp_src_rank = True
+    obj._group_name = "g"
+    obj.weights_getter = lambda: {"actor": torch.zeros(1)}
+    obj._hf_weight_iterator = MagicMock()
+    obj._hf_weight_iterator.get_hf_weight_chunks.return_value = iter(
+        ((("bridge.0", torch.zeros(1)),), (("bridge.1", torch.zeros(1)),))
+    )
+
+    seen: list[tuple[list[str], bool, str]] = []
+    monkeypatch.setattr(
+        upw.UpdateWeightFromDistributed,
+        "_update_bucket_weights_from_distributed",
+        lambda self, converted_named_tensors, pbar=None, packed=False: seen.append(
+            ([name for name, _ in converted_named_tensors], packed, pbar)
+        ),
+    )
+    monkeypatch.setattr(upw.dist, "barrier", lambda *args, **kwargs: None)
+    monkeypatch.setattr(upw, "get_gloo_group", lambda: "gloo")
+
+    upw.UpdateWeightFromDistributed._sync_bridge_weights_to_rollout_engines(
+        obj, pbar="pbar", use_vllm_packed=True
+    )
+
+    assert seen == [
+        (["bridge.0"], True, "pbar"),
+        (["bridge.1"], True, "pbar"),
+    ]
+
+
+@pytest.mark.unit
 def test_source_no_standalone_use_vllm_param(upw):
     src = inspect.getsource(upw)
     lines = [line.strip() for line in src.splitlines() if "use_vllm=" in line and "use_vllm_packed" not in line]
@@ -345,7 +554,7 @@ def test_source_wraps_sync_with_weight_update_session(upw):
     src = inspect.getsource(upw.UpdateWeightFromDistributed.update_weights)
     assert "_begin_vllm_weight_update_session" in src
     assert "_end_vllm_weight_update_session" in src
-    assert "_sync_weights_to_rollout_engines" in src
+    assert "_send_weights" in src
 
 
 @pytest.mark.unit
@@ -358,6 +567,6 @@ def test_source_uses_nccl_trainer_send_weights_args(upw):
 @pytest.mark.unit
 def test_cuda_sync_once_after_all_buckets_not_per_bucket(upw):
     send_src = inspect.getsource(upw.update_weights_from_distributed)
-    sync_src = inspect.getsource(upw.UpdateWeightFromDistributed._sync_weights_to_rollout_engines)
+    sync_src = inspect.getsource(upw.UpdateWeightFromDistributed.update_weights)
     assert "torch.cuda.synchronize" not in send_src
     assert "torch.cuda.synchronize" in sync_src
