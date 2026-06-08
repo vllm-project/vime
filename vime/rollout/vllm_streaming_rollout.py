@@ -24,36 +24,53 @@ the full list-so-far), whereas vLLM's ``/inference/v1/generate`` SSE chunks
 carry **delta** ``token_ids`` + ``logprobs`` per
 ``GenerateResponseStreamChoice`` — so we *accumulate* the per-chunk deltas
 (``+=``) rather than overwriting from each chunk. Each delta choice has the
-same shape as the non-streaming choice, so :func:`_inference_generate_tokens_and_logprobs`
-parses it unchanged.
+same ``token_ids`` / ``logprobs.content`` shape as the non-streaming choice, so
+we parse it inline exactly like :func:`vime.rollout.vllm_rollout.generate`.
 """
 
+import base64
+import io
 import json
 import logging
 from argparse import Namespace
 from typing import Any
 
+import numpy as np
+
 from vime.rollout.vllm_rollout import (
     GenerateState,
-    _align_engine_tokens_and_logprobs,
     _align_mm_feature_placeholders_to_tokens,
-    _apply_vllm_routed_experts,
-    _base_dataset_prompt_ids,
     _build_inference_sampling_params,
     _coerce_flat_int_token_ids,
-    _inference_generate_tokens_and_logprobs,
     _mm_render_response_to_generate_body,
     _prepare_prompt_ids,
-    _vllm_meta_from_generate_choice,
 )
 from vime.utils import http_utils
-from vime.utils.processing_utils import encode_image_for_rollout_engine
+from vime.utils.processing_utils import build_processor_kwargs, encode_image_for_rollout_engine
 from vime.utils.trace_utils import build_vllm_meta_trace_attrs, trace_span
 from vime.utils.types import Sample
 
 __all__ = ["generate_streaming"]
 
 logger = logging.getLogger(__name__)
+
+
+def _base_dataset_prompt_ids(sample: Sample, tokenizer, processor: Any) -> list[int]:
+    """Token ids for the dataset prompt only (never reuse ``sample.tokens``).
+
+    Used for partial-continuation budgeting: ``max_new_tokens -= len(sample.tokens)
+    - len(base_prompt_ids)`` when ``sample.response`` is non-empty. vLLM's
+    ``/inference/v1/generate`` is token-only, so on a partial resume we re-send the
+    full prefix and must subtract the already-generated tokens from the budget.
+    This lives here (not in ``vllm_rollout``) because it is specific to the
+    streaming path's partial-continuation handling.
+    """
+    raw_multimodal_inputs = sample.multimodal_inputs or {}
+    has_multimodal_inputs = any(value is not None for value in raw_multimodal_inputs.values())
+    if processor and has_multimodal_inputs:
+        processor_output = processor(text=sample.prompt, **build_processor_kwargs(raw_multimodal_inputs))
+        return _coerce_flat_int_token_ids(processor_output["input_ids"][0])
+    return _coerce_flat_int_token_ids(tokenizer.encode(sample.prompt, add_special_tokens=False))
 
 
 async def generate_streaming(args: Namespace, sample: Sample, sampling_params: dict[str, Any]) -> Sample:
@@ -191,8 +208,18 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
                     finish_reason = choice["finish_reason"]
 
                 # Each streamed choice carries only this chunk's *delta* tokens
-                # (GenerateResponseStreamChoice), so accumulate.
-                delta_tokens, delta_log_probs = _inference_generate_tokens_and_logprobs(choice)
+                # (GenerateResponseStreamChoice), so accumulate. Parse token_ids +
+                # logprobs.content inline, the same way the non-streaming generate() does.
+                delta_tokens = choice.get("token_ids") or []
+                delta_log_probs = []
+                lp = choice.get("logprobs")
+                if isinstance(lp, dict):
+                    content_items = lp.get("content") or []
+                    delta_log_probs = [
+                        float(it.get("logprob", 0.0)) if isinstance(it, dict) else 0.0 for it in content_items
+                    ]
+                if len(delta_log_probs) != len(delta_tokens):
+                    delta_log_probs = (delta_log_probs + [0.0] * len(delta_tokens))[: len(delta_tokens)]
                 if delta_tokens:
                     call_tokens += delta_tokens
                     call_log_probs += delta_log_probs
@@ -221,9 +248,26 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
     if finish_reason and last_choice is not None:
         # Finalize exactly like the non-streaming path: align logprobs to tokens,
         # rebuild meta + output_token_logprobs, then let Sample own status.
-        new_response_tokens, new_response_log_probs = _align_engine_tokens_and_logprobs(call_tokens, call_log_probs)
+        new_response_tokens = call_tokens
+        if len(call_log_probs) == len(call_tokens):
+            new_response_log_probs = [float(x) for x in call_log_probs]
+        else:
+            new_response_log_probs = ([float(x) for x in call_log_probs] + [0.0] * len(call_tokens))[: len(call_tokens)]
 
-        meta = _vllm_meta_from_generate_choice(args, last_choice, last_usage)
+        # Build meta_info from the terminal choice + usage, mirroring generate().
+        fr = last_choice.get("finish_reason") or "stop"
+        if isinstance(fr, dict):
+            finish = fr
+        elif fr == "length":
+            finish = {"type": "length"}
+        elif fr in ("abort", "cancelled"):
+            finish = {"type": "abort"}
+        else:
+            finish = {"type": "stop"}
+        meta: dict[str, Any] = {"finish_reason": finish}
+        if last_usage:
+            meta["prompt_tokens"] = last_usage.get("prompt_tokens", 0)
+            meta["completion_tokens"] = last_usage.get("completion_tokens", 0)
         if new_response_tokens:
             meta["output_token_logprobs"] = [
                 [float(lp), int(tid)] for lp, tid in zip(new_response_log_probs, new_response_tokens, strict=True)
@@ -240,8 +284,17 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
             sample.loss_mask = base_loss_mask + [1] * len(new_response_tokens)
 
         sample.update_from_meta_info(args, meta)
-        # MoE routing replay (when requested) ships on the terminal choice.
-        _apply_vllm_routed_experts(args, sample, last_choice)
+        # MoE routing replay (when requested) ships on the terminal choice. Guard the
+        # value (not just key presence): vLLM includes ``routed_experts: null`` when
+        # replay is off, matching vllm_rollout.generate's #183 fix.
+        if last_choice.get("routed_experts") is not None:
+            raw = base64.b64decode(last_choice["routed_experts"].encode("ascii"), validate=True)
+            arr = np.load(io.BytesIO(raw), allow_pickle=False)
+            sample.rollout_routed_experts = np.ascontiguousarray(arr.astype(np.int32, copy=True)).reshape(
+                len(sample.tokens) - 1,
+                args.num_layers,
+                args.moe_router_topk,
+            )
     elif state.aborted:
         sample.status = Sample.Status.ABORTED
 
