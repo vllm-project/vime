@@ -659,7 +659,16 @@ index e2705bd9f..a0aa109b5 100644
 +
      test_mode: bool = False
      """Whether to run real-time tests."""
- 
+
+@@ -1787,7 +1790,7 @@ class TransformerConfig(ModelParallelConfig):
+                     f"Token dispatcher type: {self.moe_token_dispatcher_type} does not support "
+                     f"variable sequence length, please use alltoall dispatcher instead."
+                 )
+-
++        self.moe_permute_fusion = False
+         if self.moe_permute_fusion:
+             from megatron.core.transformer.moe.moe_utils import (
+                 fused_permute,
 diff --git a/megatron/core/transformer/transformer_layer.py b/megatron/core/transformer/transformer_layer.py
 index 3ea405770..5a42001b9 100644
 --- a/megatron/core/transformer/transformer_layer.py

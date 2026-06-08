@@ -104,10 +104,14 @@ def _get_model_provider_func(
         if getattr(args, "decoder_last_pipeline_num_layers", None) is not None:
             provider.num_layers_in_last_pipeline_stage = args.decoder_last_pipeline_num_layers
         # provider.gradient_accumulation_fusion = args.gradient_accumulation_fusion
+        provider.freeze_language_model = False
+        provider.freeze_vision_model = False
         provider.gradient_accumulation_fusion = False
         provider.recompute_granularity = args.recompute_granularity
         provider.recompute_method = args.recompute_method
         provider.recompute_num_layers = args.recompute_num_layers
+        provider.moe_permute_fusion = args.moe_permute_fusion
+        provider.moe_aux_loss_coeff = args.moe_aux_loss_coeff
         for key, value in vars(args).items():
             if hasattr(provider, key):
                 continue

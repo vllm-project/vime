@@ -2,6 +2,10 @@ import logging
 
 import torch
 
+from vime.utils.common import is_npu
+if is_npu():
+    import mindspeed.megatron_adaptor
+
 try:
     import deep_ep
     from torch_memory_saver import torch_memory_saver
