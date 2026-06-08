@@ -1739,18 +1739,6 @@ def vime_validate_args(args):
     if args.debug_rollout_only:
         if args.colocate and (not args.rollout_num_gpus):
             args.rollout_num_gpus = args.actor_num_gpus_per_node * args.actor_num_nodes
-            # debug_rollout_only forces colocate=False below (to skip train-side
-            # offload / memory logic), but the rollout engines still physically
-            # share the actor's nodes. The colocate branch further down derives
-            # num_gpus_per_node from actor_num_gpus_per_node for exactly this
-            # reason, yet it is gated on args.colocate and so never runs here.
-            # Without it, --num-gpus-per-node keeps its 8-GPU/node default; on
-            # hardware with a different per-node count (e.g. 4x GB200/node) the
-            # rollout-engine addr/port allocation computes node_index via
-            # num_gpus_per_node and maps every engine to node 0, so worker-node
-            # engines are handed the head node's IP and fail to bind
-            # (OSError: [Errno 99] Cannot assign requested address). Derive the
-            # real per-node count here too.
             if args.num_gpus_per_node != args.actor_num_gpus_per_node:
                 logger.info(
                     f"debug_rollout_only colocate: overriding num_gpus_per_node "
