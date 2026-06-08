@@ -67,7 +67,7 @@ export WANDB_API_KEY=your_wandb_api_key
 VIME_SCRIPT_MODEL_NAME=Qwen3-VL-4B-Instruct ./examples/geo3k_vlm/run_geo3k_vlm.sh
 
 # SFT
-./examples/geo_3k_vlm/run_geo3k_vlm_sft.sh
+./examples/geo3k_vlm/run_geo3k_vlm_sft.sh
 ```
 
 ### Configuration
