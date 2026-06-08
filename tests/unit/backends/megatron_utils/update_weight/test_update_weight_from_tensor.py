@@ -78,13 +78,50 @@ def _install_stubs():
     return hf_iter_stub, upw_dist_mod
 
 
-_HF_ITER_STUB, _UPW_DIST_MOD = _install_stubs()
+# Placeholder iterator stored on freshly-built instances; every test that drives a real
+# update overrides obj._hf_weight_iterator with its own MagicMock, so this only needs to be
+# a non-None object.
+_HF_ITER_STUB = MagicMock()
+_HF_ITER_STUB.get_hf_weight_chunks.return_value = iter([])
+
+# Modules stubbed by _install_stubs(), plus torch.distributed attributes it overwrites.
+# These are installed ONLY for this module's tests (inside the fixture) and restored on
+# teardown. Installing at import time leaked the stubs into sibling modules' COLLECTION (and
+# left MagicMocks on torch.distributed), one source of the cross-test order-pollution.
+_STUBBED_MODULES = (
+    "megatron",
+    "megatron.core",
+    "ray",
+    "ray.actor",
+    "vime.utils.distributed_utils",
+    "vime.backends.megatron_utils.update_weight.hf_weight_iterator_base",
+    "vime.backends.megatron_utils.update_weight.update_weight_from_distributed",
+)
+_DIST_ATTRS = ("get_rank", "get_world_size", "get_process_group_ranks", "barrier", "all_gather_object")
 
 
 @pytest.fixture(scope="module")
 def upw_vllm():
+    import torch.distributed as _dist
+
+    saved_mods = {k: sys.modules.get(k) for k in (*_STUBBED_MODULES, MODULE_PATH)}
+    saved_dist = {a: getattr(_dist, a, None) for a in _DIST_ATTRS}
+    # Pop first so _install_stubs()'s setdefault() actually installs stubs (hermetic).
+    for k in _STUBBED_MODULES:
+        sys.modules.pop(k, None)
+    _install_stubs()
     sys.modules.pop(MODULE_PATH, None)
-    return importlib.import_module(MODULE_PATH)
+    try:
+        yield importlib.import_module(MODULE_PATH)
+    finally:
+        for k, original in saved_mods.items():
+            if original is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = original
+        for a, original in saved_dist.items():
+            if original is not None:
+                setattr(_dist, a, original)
 
 
 @dataclass

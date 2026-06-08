@@ -15,15 +15,45 @@ import torch
 MODULE_PATH = "vime.backends.megatron_utils.update_weight.update_weight_from_distributed"
 
 
+# Modules stubbed by _install_stubs(). These are installed ONLY for the duration of this
+# module's tests (inside the fixture) and restored on teardown. Installing them at import
+# time (top level) left a fake ``vllm`` (with no ``.engine``) in sys.modules, which broke
+# COLLECTION of sibling test modules (e.g. test_vllm_engine.py -> ModuleNotFoundError
+# 'vllm.engine'). pytest imports all test modules in one process before running fixtures,
+# so the stub leak must be confined to test runtime, not collection.
+_STUBBED_MODULES = (
+    "megatron",
+    "megatron.core",
+    "megatron.core.parallel_state",
+    "megatron.core.transformer",
+    "megatron.core.transformer.transformer_layer",
+    "ray",
+    "ray.actor",
+    "vime.utils.distributed_utils",
+    "vllm",
+    "vllm.distributed",
+    "vllm.distributed.weight_transfer",
+    "vllm.distributed.weight_transfer.nccl_engine",
+)
+
+
 @pytest.fixture(scope="module")
 def upw():
-    previous = sys.modules.pop(MODULE_PATH, None)
+    saved = {k: sys.modules.get(k) for k in (*_STUBBED_MODULES, MODULE_PATH)}
+    # Pop first so _install_stubs()'s setdefault() actually installs the stubs (hermetic),
+    # then drop the module-under-test so it re-imports against the stubs.
+    for k in _STUBBED_MODULES:
+        sys.modules.pop(k, None)
+    _install_stubs()
+    sys.modules.pop(MODULE_PATH, None)
     try:
         yield importlib.import_module(MODULE_PATH)
     finally:
-        sys.modules.pop(MODULE_PATH, None)
-        if previous is not None:
-            sys.modules[MODULE_PATH] = previous
+        for k, original in saved.items():
+            if original is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = original
 
 
 def _install_stubs():
@@ -100,9 +130,6 @@ def _install_stubs():
     sys.modules.setdefault("vllm.distributed", distributed_mod)
     sys.modules.setdefault("vllm.distributed.weight_transfer", weight_transfer_mod)
     sys.modules.setdefault("vllm.distributed.weight_transfer.nccl_engine", nccl_mod)
-
-
-_install_stubs()
 
 
 @dataclass
@@ -501,6 +528,7 @@ def test_connect_rollout_engines_always_uses_vllm_trainer_init(upw, monkeypatch)
     _patch_nccl_on_module(monkeypatch, upw, init_seen=seen)
     monkeypatch.setattr(upw.torch.cuda, "synchronize", lambda: None)
     monkeypatch.setattr(upw.torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(upw.torch.cuda, "current_device", lambda: 0)
     monkeypatch.setattr(upw.ray, "get", lambda refs: refs)
     monkeypatch.setattr(upw.ray._private.services, "get_node_ip_address", lambda: "127.0.0.1")
 

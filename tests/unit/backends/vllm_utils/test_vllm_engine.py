@@ -12,6 +12,27 @@ import torch
 from vime.backends.vllm_utils import vllm_engine as mod
 
 
+@pytest.fixture(autouse=True)
+def _seed_vllm_cli_action_table_cache():
+    """Skip the device-probing rebuild of the vLLM CLI action table on CPU.
+
+    ``get_vllm_cli_action_table()`` builds its table via ``AsyncEngineArgs.add_cli_args``,
+    which probes the accelerator and raises ``RuntimeError: Failed to infer device type``
+    on a GPU-less host. The table only drives which ``vllm_*`` values are forwarded to the
+    ``vllm serve`` subprocess; the cmd/topology/sleep-mode assertions in this module exercise
+    vime's own explicit flag logic, not forwarding. Seed an empty (already-built) cache so the
+    rebuild is skipped, and restore the original on teardown so we never leak across modules.
+    """
+    import vime.backends.vllm_utils.arguments as _args
+
+    saved = _args._VLLM_CLI_ACTION_TABLE_CACHE
+    _args._VLLM_CLI_ACTION_TABLE_CACHE = {}
+    try:
+        yield
+    finally:
+        _args._VLLM_CLI_ACTION_TABLE_CACHE = saved
+
+
 class _MockResponse:
     def __init__(self, *, json_data: dict | None = None, text: str = "", status_code: int = 200):
         self._json_data = json_data
