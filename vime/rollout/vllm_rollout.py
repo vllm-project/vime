@@ -373,7 +373,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         sample.rollout_log_probs = []
     sample.rollout_log_probs += new_response_log_probs
 
-    if "routed_experts" in choice:
+    if ("routed_experts" in choice) and (choice["routed_experts"] is not None):
         raw = base64.b64decode(choice["routed_experts"].encode("ascii"), validate=True)
         arr = np.load(io.BytesIO(raw), allow_pickle=False)
         sample.rollout_routed_experts = np.ascontiguousarray(arr.astype(np.int32, copy=True)).reshape(
