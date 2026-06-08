@@ -373,11 +373,6 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         sample.rollout_log_probs = []
     sample.rollout_log_probs += new_response_log_probs
 
-    # Guard the value, not just key presence: unlike sglang (which omits the key when
-    # routed experts are not requested), the vLLM engine includes ``routed_experts: null``
-    # in the response. A bare ``in`` check would pass and ``None.encode()`` would crash the
-    # rollout for every MoE model without rollout-routing-replay. ``.get(...) is not None``
-    # handles both key-absent and key-present-but-null.
     if choice.get("routed_experts") is not None:
         raw = base64.b64decode(choice["routed_experts"].encode("ascii"), validate=True)
         arr = np.load(io.BytesIO(raw), allow_pickle=False)
