@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 
 from vime.utils.memory_utils import available_memory, clear_memory, print_memory
+from vime.utils.common import is_npu
 
 logger = logging.getLogger(__name__)
 
@@ -181,10 +182,13 @@ class ReloadableProcessGroup(torch.distributed.ProcessGroup):
         reloadable_groups = ReloadableProcessGroup.GROUPS.get(pid, [])
         logger.info(f"Reloading {len(reloadable_groups)} process groups in pid {pid}")
         old_new_group = old_new_group_dict.get(pid)
+        backend = "nccl"
+        if is_npu():
+            backend = "hccl"
         for reloadable_group in reloadable_groups:
             if reloadable_group.group is not None:
                 continue
-            group = old_new_group(ranks=reloadable_group.group_info["ranks"], backend="nccl")
+            group = old_new_group(ranks=reloadable_group.group_info["ranks"], backend=backend)
             reloadable_group.group = group
 
     def rank(self) -> int:
