@@ -2,7 +2,7 @@
 
 [English](./README.md) · [代码仓库](https://github.com/vllm-project/vime)
 
-**Vime** 是基于 [slime](https://github.com/THUDM/slime) 的 RL scaling 用 LLM post-training 框架。在保留 slime 训练栈与数据生成设计的同时，默认以 [**vLLM**](https://github.com/vllm-project/vllm)（配合 [vllm-router](https://github.com/vllm-project/router)）作为 rollout 后端，替代 SGLang。Vime 提供两大核心能力：
+**Vime** 是基于 [slime](https://github.com/THUDM/slime) 的 RL scaling 用 LLM post-training 框架。在保留 slime 训练栈与数据生成设计的同时，默认以 [**vLLM**](https://github.com/vllm-project/vllm)（配合 [vllm-router](https://github.com/vllm-project/router)）作为 rollout 后端。Vime 提供两大核心能力：
 
 1. **高性能训练**：通过连接 Megatron 与 vLLM，支持各种模式的高效训练；
 2. **灵活的数据生成**：通过自定义数据生成接口以及 server based engine，实现任意的训练数据生成流程。
@@ -12,6 +12,11 @@ Vime 继承了 slime 广泛的模型支持，包括：
 - Qwen 系列（Qwen3.6、Qwen3.5、Qwen3Next、Qwen3MoE、Qwen3、Qwen2.5）；
 - DeepSeek V3 系列（DeepSeek V3、V3.1、DeepSeek R1）；
 - Llama 3。
+
+讨论渠道：
+
+- [Slack](https://vllm-dev.slack.com/archives/C0B8W5QFL22/p1780899164831779)
+- [微信群](./imgs/wechat_group.png)
 
 ## 目录
 
@@ -95,6 +100,8 @@ Vime 由 slime 衍生而来。以下上游资源与本仓库文档仍沿用 slim
 ## 定位
 
 vLLM 社区横向支持许多 LLM post-training 框架，包括 [NeMo RL](https://github.com/NVIDIA-NeMo/RL)、[OpenRLHF](https://github.com/openrlhf/openrlhf)、[verl](https://github.com/verl-project/verl) 等。我们构建 Vime 项目，是因为一些 post-training 用户喜欢 slime，但 slime 维护者没有足够精力维护 vLLM 集成。Vime 并不是这些框架的竞争者；相反，我们希望它能与它们共存，为用户提供更多选择。vLLM 社区也会持续支持这些 post-training 框架中的 vLLM 集成。
+
+我们不期望大量新的 post-training 相关功能直接加入 Vime。欢迎 bugfix 和性能优化。
 
 ## 引用
 

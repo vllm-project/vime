@@ -13,6 +13,11 @@ Vime inherits broad model support from slime, including:
 - DeepSeek V3 series (DeepSeek V3, V3.1, DeepSeek R1);
 - Llama 3.
 
+Discussion channels:
+
+- [slack](https://vllm-dev.slack.com/archives/C0B8W5QFL22/p1780899164831779)
+- [wechat group](./imgs/wechat_group.png)
+
 ## Table of Contents
 
 - [Vime](#vime)
@@ -95,6 +100,8 @@ Special thanks to the **slime** community for their great work. Vime is maintain
 ## Positioning
 
 The vLLM community horizontally supports many LLM post-training frameworks, including [NeMo RL](https://github.com/NVIDIA-NeMo/RL), [OpenRLHF](https://github.com/openrlhf/openrlhf), [verl](https://github.com/verl-project/verl), and so on. We build the Vime project because some post-training users like slime but the slime maintainers don't have the bandwidth to maintain the vLLM integration. Vime is not meant to be a competitor to these frameworks; instead, we hope it can coexist and provide more options for users. The vLLM community will continue to support the vLLM integration in these post-training frameworks.
+
+We don't expect heavy new post-training related features to be directly added to Vime. Bugfixes and performance optimizations are welcome.
 
 ## Citation
 
