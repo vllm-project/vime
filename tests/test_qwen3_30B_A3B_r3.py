@@ -99,7 +99,13 @@ def execute():
     )
 
     if USE_DEEPEP:
-        vllm_args += "--vllm-all2all-backend deepep_high_throughput "
+        # deepep is an expert-parallel all2all backend, so enable EP. Without EP the MoE
+        # expert FFN is tensor-sharded across the engine's TP ranks (moe_ffn/TP = 768/8 = 96),
+        # which an FP8 block-quantized checkpoint rejects ("output_size of gate's and up's
+        # weight = 96 is not divisible by block_n = 128"). EP keeps each expert's gate/up
+        # whole (768, divisible by 128). Mirrors the proven DP+EP rollout config in the PD
+        # tests (test_qwen3.6_35B_A3B_pd_mooncake / test_glm4.7_30B_A3B_pd_mooncake).
+        vllm_args += "--vllm-all2all-backend deepep_high_throughput --vllm-enable-expert-parallel "
 
     ci_args = "--ci-test "
 
