@@ -337,9 +337,6 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
             "sampling_params": inference_sampling_params,
         }
 
-        if args.use_rollout_routing_replay:
-            payload["return_routed_experts"] = True
-
         with trace_span(sample, "vllm_generate", attrs={"max_new_tokens": sampling_params["max_new_tokens"]}) as span:
             output = await post(url, payload, headers=headers)
             if hasattr(span, "update"):
@@ -376,7 +373,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         sample.rollout_log_probs = []
     sample.rollout_log_probs += new_response_log_probs
 
-    if "routed_experts" in choice:
+    if choice.get("routed_experts") is not None:
         raw = base64.b64decode(choice["routed_experts"].encode("ascii"), validate=True)
         arr = np.load(io.BytesIO(raw), allow_pickle=False)
         sample.rollout_routed_experts = np.ascontiguousarray(arr.astype(np.int32, copy=True)).reshape(
