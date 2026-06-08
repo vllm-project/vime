@@ -46,7 +46,7 @@ PYTHONPATH=/root/Megatron-LM/ python \
 可以使用如下脚本进行训练：
 
 ```bash
-bash script/run-qwen2.5-0.5B-reproducibility.sh
+bash scripts/run-qwen2.5-0.5B-reproducibility.sh
 ```
 
 这个 PR 中记录了 wandb 的截图 [pull#370](https://github.com/THUDM/slime/pull/370)。
