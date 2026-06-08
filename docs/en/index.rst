@@ -6,7 +6,7 @@ vime is an LLM post-training framework for RL scaling, providing two core capabi
 - High-Performance Training: Supports efficient training in various modes by connecting Megatron with vLLM;
 - Flexible Data Generation: Enables arbitrary training data generation workflows through custom data generation interfaces and server-based engines.
 
-vime is the RL-framework behind GLM-4.7, GLM-4.6 and GLM-4.5. Apart from models from Z.ai, we also supports the following models:
+vime is built on `slime <https://github.com/THUDM/slime>`_, the RL framework behind GLM-4.7, GLM-4.6 and GLM-4.5. vime keeps slime's training stack and data-generation design while using vLLM as the default rollout backend, and inherits broad model support from slime, including:
 
 - Qwen3 series (Qwen3Next, Qwen3MoE, Qwen3), Qwen2.5 series;
 - DeepSeek V3 series (DeepSeek V3, V3.1, DeepSeek R1);
