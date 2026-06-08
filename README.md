@@ -15,12 +15,17 @@ Vime inherits broad model support from slime, including:
 
 ## Table of Contents
 
-- [Architecture Overview](#architecture-overview)
-- [Quick Start](#quick-start)
-- [Arguments Walkthrough](#arguments-walkthrough)
-- [Developer Guide](#developer-guide)
-- [slime doc](#slime-doc)
-- [FAQ & Acknowledgements](#faq--acknowledgements)
+- [Vime](#vime)
+  - [Table of Contents](#table-of-contents)
+  - [Architecture Overview](#architecture-overview)
+  - [Quick Start](#quick-start)
+  - [Arguments Walkthrough](#arguments-walkthrough)
+  - [Developer Guide](#developer-guide)
+  - [slime doc](#slime-doc)
+  - [FAQ](#faq)
+  - [Acknowledgements](#acknowledgements)
+  - [Positioning](#positioning)
+  - [Citation](#citation)
 
 ## Architecture Overview
 
@@ -79,12 +84,19 @@ Vime is derived from slime. The following upstream resources and in-repo guides 
 - English docs in this repo: [docs/en/](docs/en/)
 - Chinese docs in this repo: [docs/zh/](docs/zh/)
 
-## FAQ & Acknowledgements
+## FAQ
 
-- For frequently asked questions, please see the [Q&A](docs/en/get_started/qa.md)
-- Special thanks to the **slime** community and the open-source projects that slime depends on, including **SGLang**, **Megatron-LM**, and others that Vime builds upon.
+For frequently asked questions, please see the [Q&A](docs/en/get_started/qa.md)
 
-Citation:
+## Acknowledgements
+
+Special thanks to the **slime** community for their great work. Vime is maintained by the vLLM community.
+
+## Positioning
+
+The vLLM community horizontally supports many LLM post-training frameworks, including [NeMo RL](https://github.com/NVIDIA-NeMo/RL), [OpenRLHF](https://github.com/openrlhf/openrlhf), [verl](https://github.com/verl-project/verl), and so on. We build the Vime project because some post-training users like slime but the slime maintainers don't have the bandwidth to maintain the vLLM integration. Vime is not meant to be a competitor to these frameworks; instead, we hope it can coexist and provide more options for users. The vLLM community will continue to support the vLLM integration in these post-training frameworks.
+
+## Citation
 
 ```bibtex
 @misc{vime,
@@ -92,7 +104,6 @@ Citation:
   title        = {Vime: An LLM post-training framework with vLLM for RL Scaling},
   year         = {2026},
   howpublished = {\url{https://github.com/vllm-project/vime}},
-  note         = {Based on slime. GitHub repository.},
-  urldate      = {2026-05-25}
+  urldate      = {2026-06}
 }
 ```
