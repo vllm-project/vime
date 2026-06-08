@@ -815,7 +815,7 @@ class VLLMEngine(RayActor):
             )
         return self._weight_version
 
-    def release_memory_occupation(self, level: int = 1):
+    def release_memory_occupation(self, level: int = 2):
         """Flush prefix cache, then ``POST /sleep?level={level}``."""
         if self.node_rank != 0:
             return None
