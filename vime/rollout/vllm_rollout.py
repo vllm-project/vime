@@ -397,11 +397,6 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     if usage:
         meta["prompt_tokens"] = usage.get("prompt_tokens", 0)
         meta["completion_tokens"] = usage.get("completion_tokens", 0)
-    if new_response_tokens:
-        meta["output_token_logprobs"] = [
-            [float(lp_val), int(tid)] for lp_val, tid in zip(new_response_log_probs, new_response_tokens, strict=True)
-        ]
-
     sample.update_from_meta_info(args, meta)
 
     return sample
