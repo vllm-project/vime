@@ -53,7 +53,7 @@ class Sample:
     # metadata used during training, e.g., what loss to use for this sample.
     train_metadata: dict | None = None
 
-    # Session ID for consistent_hash routing (used when --router-policy consistent_hash)
+    # Session ID for consistent hashing routing (used when router policy is consistent_hashing)
     session_id: str | None = None
 
     non_generation_time: float = 0.0  # time spent in non-generation steps
@@ -164,7 +164,7 @@ class Sample:
         And extract
         """
         if args.vllm_speculative_config:
-            # cannot directly use spec info from rollout engine because of partial rollout.
+            # cannot directly use spec info from vLLM because of partial rollout.
             self.spec_info.add(meta_info=meta_info)
 
         # Collect prefix cache statistics

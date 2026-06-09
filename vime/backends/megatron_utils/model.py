@@ -583,7 +583,8 @@ def train_one_step(
         # Update parameters.
         update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
 
-        # Update learning rate.
+        # Update learning rate. Use the per-step global_batch_size when dynamic
+        # batching is on so the scheduler's samples-seen counter tracks reality.
         assert update_successful
         opt_param_scheduler.step(increment=step_global_batch_size)
 
@@ -843,7 +844,10 @@ def train(
 
 
 def save(
-    iteration: int, model: Sequence[DDP], optimizer: MegatronOptimizer, opt_param_scheduler: OptimizerParamScheduler
+    iteration: int,
+    model: Sequence[DDP],
+    optimizer: MegatronOptimizer,
+    opt_param_scheduler: OptimizerParamScheduler,
 ) -> None:
     """Persist a training checkpoint safely with forward hooks disabled.
 

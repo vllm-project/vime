@@ -10,7 +10,7 @@ Pins two contracts that the rollout / training boundary depends on:
 
   2. ``update_from_meta_info`` finish_reason → Status enum mapping
      (length→TRUNCATED, abort→ABORTED, stop→COMPLETED). The match
-     statement at types.py:176-182 is the only place the engine's
+     statement at types.py:176-182 is the only place vLLM's
      finish_reason gets translated; a typo'd enum or removed case here
      would silently mis-tag every sample.
 """

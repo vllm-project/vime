@@ -114,7 +114,7 @@ class ModelConfig:
 
 @dataclasses.dataclass
 class VllmConfig:
-    """Configuration for vLLM rollout engine deployment.
+    """Configuration for vLLM engine deployment.
 
     Loaded from ``--vllm-config`` YAML file.
 
