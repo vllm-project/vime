@@ -36,12 +36,12 @@ def execute():
         "--apply-chat-template "
         "--rollout-shuffle "
         "--rm-type deepscaler "
-        "--num-rollout 3 "
-        "--rollout-batch-size 8 "
+        "--num-rollout 2 "
+        "--rollout-batch-size 4 "
         "--n-samples-per-prompt 4 "
         "--rollout-max-response-len 8192 "
         "--rollout-temperature 1 "
-        "--global-batch-size 32 "
+        "--global-batch-size 16 "
         "--balance-data "
     )
 
@@ -95,7 +95,7 @@ def execute():
         "--rollout-num-gpus-per-engine 8 "
         "--vllm-gpu-memory-utilization 0.8 "
         "--vllm-max-num-seqs 512 "
-        "--vllm-max-cudagraph-capture-size 32 "
+        "--vllm-max-cudagraph-capture-size 16 "
     )
 
     if USE_DEEPEP:

@@ -16,6 +16,9 @@ from vime.rollout.rm_hub.deepscaler import get_deepscaler_rule_based_reward
 
 
 @pytest.mark.unit
+NUM_GPUS = 0
+
+
 def test_response_split_on_think_marker_grades_tail():
     """The default chat format puts the answer after ``</think>``. Only
     the tail is graded — pre-think reasoning is ignored, even if it

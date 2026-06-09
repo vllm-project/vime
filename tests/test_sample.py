@@ -29,6 +29,9 @@ from vime.utils.types import Sample
 # ---------------------------------------------------------------------------
 
 
+NUM_GPUS = 0
+
+
 def _make_sample(**overrides) -> Sample:
     """Build a Sample with one non-default value per field-category so the
     round-trip test exercises every code path in to_dict/from_dict, not

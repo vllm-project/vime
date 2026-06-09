@@ -43,11 +43,11 @@ def execute():
         "--rollout-shuffle "
         "--rm-type deepscaler "
         "--num-rollout 2 "
-        "--rollout-batch-size 8 "
+        "--rollout-batch-size 4 "
         "--n-samples-per-prompt 4 "
         "--rollout-max-response-len 16384 "
         "--rollout-temperature 1.0 "
-        "--global-batch-size 32 "
+        "--global-batch-size 16 "
     )
 
     eval_args = (

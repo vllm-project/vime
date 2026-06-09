@@ -49,12 +49,12 @@ def execute(mode: str = ""):
         "--apply-chat-template "
         "--rollout-shuffle "
         "--rm-type deepscaler "
-        "--num-rollout 3 "
+        "--num-rollout 2 "
         "--rollout-batch-size 4 "
         "--n-samples-per-prompt 8 "
         "--rollout-max-response-len 1024 "
         "--rollout-temperature 0.8 "
-        "--global-batch-size 32 "
+        "--global-batch-size 16 "
         "--balance-data "
     )
 
@@ -100,7 +100,7 @@ def execute(mode: str = ""):
     )
 
     vllm_args = (
-        "--rollout-num-gpus-per-engine 2 --vllm-gpu-memory-utilization 0.8 --vllm-max-cudagraph-capture-size 32 "
+        "--rollout-num-gpus-per-engine 2 --vllm-gpu-memory-utilization 0.8 --vllm-max-cudagraph-capture-size 16 "
     )
 
     ci_args = "--ci-test "

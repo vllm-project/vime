@@ -3,7 +3,6 @@ import tempfile
 
 import vime.utils.external_utils.command_utils as U
 
-TIGHT_DEVICE_MEMORY = U.get_bool_env_var("VIME_TEST_TIGHT_DEVICE_MEMORY", "1")
 
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
@@ -42,12 +41,12 @@ megatron:
         "--apply-chat-template "
         "--rollout-shuffle "
         "--rm-type deepscaler "
-        "--num-rollout 3 "
-        "--rollout-batch-size 8 "
+        "--num-rollout 2 "
+        "--rollout-batch-size 4 "
         "--n-samples-per-prompt 4 "
         "--rollout-max-response-len 1024 "
         "--rollout-temperature 0.8 "
-        "--global-batch-size 32 "
+        "--global-batch-size 16 "
         "--balance-data "
     )
 
@@ -85,7 +84,7 @@ megatron:
     vllm_args = (
         "--rollout-num-gpus-per-engine 1 "
         "--rollout-num-gpus 2 "
-        f"--vllm-gpu-memory-utilization {0.55 if TIGHT_DEVICE_MEMORY else 0.65} "
+        "--vllm-gpu-memory-utilization 0.65 "
         "--vllm-max-cudagraph-capture-size 64"
     )
 

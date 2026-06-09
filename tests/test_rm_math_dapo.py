@@ -35,6 +35,9 @@ from vime.rollout.rm_hub.math_dapo_utils import (
 
 
 @pytest.mark.unit
+NUM_GPUS = 0
+
+
 def test_last_boxed_picks_rightmost():
     assert last_boxed_only_string(r"\boxed{first}, then \boxed{42}") == r"\boxed{42}"
 

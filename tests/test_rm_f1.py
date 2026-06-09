@@ -35,6 +35,9 @@ from vime.rollout.rm_hub.f1 import f1_score, normalize_answer
         ("the", ""),  # all-article input collapses to empty
     ],
 )
+NUM_GPUS = 0
+
+
 def test_normalize_answer(raw, expected):
     assert normalize_answer(raw) == expected
 

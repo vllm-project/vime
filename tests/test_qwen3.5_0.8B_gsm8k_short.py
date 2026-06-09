@@ -3,7 +3,6 @@ import os
 import vime.utils.external_utils.command_utils as U
 
 
-TIGHT_DEVICE_MEMORY = U.get_bool_env_var("VIME_TEST_TIGHT_DEVICE_MEMORY", "1")
 
 MODEL_NAME = "Qwen3.5-0.8B"
 MODEL_TYPE = "qwen3.5-0.8B"
@@ -34,13 +33,13 @@ def execute():
         "--rollout-shuffle "
         "--rm-type math "
         "--num-rollout 3 "
-        "--rollout-batch-size 8 "
+        "--rollout-batch-size 4 "
         "--n-samples-per-prompt 4 "
         "--rollout-max-response-len 1024 "
         "--rollout-temperature 0.8 "
         "--over-sampling-batch-size 16 "
         "--dynamic-sampling-filter-path vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std "
-        "--global-batch-size 32 "
+        "--global-batch-size 16 "
     )
 
     eval_args = (
@@ -83,7 +82,7 @@ def execute():
 
     vllm_args = (
         "--rollout-num-gpus-per-engine 1 "
-        f"--vllm-gpu-memory-utilization {0.6 if TIGHT_DEVICE_MEMORY else 0.7} "
+        "--vllm-gpu-memory-utilization 0.7 "
         "--vllm-max-cudagraph-capture-size 64"
     )
 
