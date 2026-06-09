@@ -6,7 +6,7 @@ Note: Please make sure the cudnn version in the environment is 9.16.0.29 to prev
 pip install nvidia-cudnn-cu12==9.16.0.29
 ```
 
-The multi-turn rollout is implemented through a [custom generate function](rollout.py#L309), overriding the original generate function.
+The multi-turn rollout is implemented through a [custom generate function](rollout.py), overriding the original generate function.
 
 In terms of the environment interaction, this example initializes a [custom interactive environment](env_geo3k.py) with the APIs below.
 <details>
@@ -21,8 +21,7 @@ In terms of the environment interaction, this example initializes a [custom inte
 
 The reward model is the default math RM. 
 
-![VLM multi-turn geo3k reward](geo3k_vlm_multi_turn_reward.png)
-![Rollout megatron](rollout_experiment_result_megatron.png)
+![VLM multi-turn geo3k reward](vlm-multiturn-rewardscore.png)
 
 ## Reproduce
 ```bash

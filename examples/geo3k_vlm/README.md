@@ -20,7 +20,7 @@ provider.freeze_vision_model = False
 ```
 
 <p align="center">
-  <img src="fsdp_vs_megatron.png" alt="Reward Plot" width="800">
+  <img src="vlm-rewardscore.png" alt="GEO3K VLM rollout raw reward" width="800">
 </p>
 
 ## Data Preparation (For SFT Training)
@@ -76,7 +76,7 @@ VIME_SCRIPT_MODEL_NAME=Qwen3-VL-4B-Instruct ./examples/geo3k_vlm/run_geo3k_vlm.s
 |---------------------|---------|-------------|
 | `VIME_SCRIPT_MODEL_NAME` | `Qwen3-VL-8B-Instruct` | Model name |
 | `VIME_SCRIPT_DATASET_NAME` | `chenhegu/geo3k_imgurl` | HuggingFace dataset name |
-| `VIME_SCRIPT_NUM_GPUS` | `8` | Number of GPUs |
+| `VIME_SCRIPT_NUM_GPUS` | `8` | Number of GPUs used for colocated training and rollout |
 | `VIME_SCRIPT_EXTERNAL_RAY` | `0` | Use external Ray cluster (`1` to enable) |
 
 ### Supported Models
