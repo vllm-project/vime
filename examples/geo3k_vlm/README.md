@@ -12,7 +12,7 @@ Note: Please make sure the cudnn version in the environment is 9.16.0.29 to prev
 pip install nvidia-cudnn-cu12==9.16.0.29
 ```
 
-**Important:** We use [Megatron Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) to support multimodal models. However, not all Megatron arguments are passed through to Megatron Bridge — you may need to set some manually [here](https://github.com/vllm-project/vime/blob/main/vime/backends/megatron_utils/model_provider.py#L89) (currently only parallelization-related arguments are passed). For example, for Qwen3-VL-30B-A3B you may need to add:
+**Important:** We use [Megatron Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) to support multimodal models. However, not all Megatron arguments are passed through to Megatron Bridge — you may need to set some manually [here](https://github.com/vllm-project/vime/blob/main/vime/backends/megatron_utils/model_provider.py) (currently only parallelization-related arguments are passed). For example, for Qwen3-VL-30B-A3B you may need to add:
 ```python
 provider.moe_aux_loss_coeff = args.moe_aux_loss_coeff
 provider.freeze_language_model = False
@@ -65,6 +65,9 @@ export WANDB_API_KEY=your_wandb_api_key
 
 # With different model
 VIME_SCRIPT_MODEL_NAME=Qwen3-VL-4B-Instruct ./examples/geo3k_vlm/run_geo3k_vlm.sh
+
+# Qwen3.5
+./examples/geo3k_vlm/run_geo3k_qwen35.sh
 
 # SFT
 ./examples/geo3k_vlm/run_geo3k_vlm_sft.sh

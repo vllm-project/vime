@@ -9,7 +9,7 @@ pip install -U transformers
 # To restore the original Megatron Bridge, run:
 #   pip install git+https://github.com/fzyzcjy/Megatron-Bridge.git@dev_rl --no-build-isolation
 # TODO: Remove this once Megatron & Megatron Bridge are upgraded upstream.
-pip install git+https://github.com/coding-famer/Megatron-Bridge-vime.git@qwen35 --no-build-isolation
+pip install git+https://github.com/andakai/Megatron-Bridge.git@qwen35 --no-build-isolation
 
 # Configuration
 TRAIN_BACKEND="megatron"
