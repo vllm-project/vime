@@ -27,6 +27,7 @@ from ray.actor import ActorHandle
 
 from vime.utils.distributed_utils import get_gloo_group
 
+from ..lora_utils import is_lora_enabled, lora_adapter_name, save_lora_adapter_for_vllm
 from .hf_weight_iterator_base import HfWeightIteratorBase
 from .update_weight_from_distributed import (
     connect_rollout_engines_from_distributed,
@@ -269,6 +270,9 @@ class UpdateWeightFromTensor:
         version++, flush caches, process buckets. Progress on rank 0.
         """
         self.weight_version += 1
+        if is_lora_enabled(self.args):
+            self._update_lora_adapter()
+            return
 
         rank = dist.get_rank()
         if rank == 0:
@@ -344,6 +348,30 @@ class UpdateWeightFromTensor:
                 all_refs.extend(refs_distributed)
 
         return all_refs, long_lived_tensors
+
+    @torch.no_grad()
+    def _update_lora_adapter(self) -> None:
+        """Export the current adapter and ask vLLM engines to load it by path."""
+        rank = dist.get_rank()
+        if rank == 0:
+            ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
+            ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
+        dist.barrier(group=get_gloo_group())
+
+        adapter_path = save_lora_adapter_for_vllm(self.model, self.args, self.weight_version)
+
+        if rank == 0:
+            refs = [
+                engine.load_lora_adapter.remote(
+                    lora_adapter_name(self.args),
+                    adapter_path,
+                    weight_version=str(self.weight_version),
+                )
+                for engine in self.rollout_engines
+            ]
+            ray.get(refs)
+            ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
+        dist.barrier(group=get_gloo_group())
 
 
 def _send_to_colocated_engine(

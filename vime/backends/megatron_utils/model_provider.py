@@ -108,6 +108,19 @@ def _get_model_provider_func(
             provider.num_layers_in_last_pipeline_stage = args.decoder_last_pipeline_num_layers
         provider.finalize()
 
+        if role == "actor":
+            from .lora_utils import create_lora_instance, is_lora_enabled
+
+            if is_lora_enabled(args):
+                lora = create_lora_instance(args)
+
+                def _apply_lora_hook(model_chunks):
+                    transformed = lora(model_chunks, training=True)
+                    lora.set_params_to_save(transformed)
+                    return transformed
+
+                provider.register_pre_wrap_hook(_apply_lora_hook)
+
         if role == "critic":
             _original_provide = provider.provide
 

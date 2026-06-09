@@ -102,6 +102,14 @@ def get_model_url(args: Namespace, model_name: str, endpoint: str = "/inference/
     return f"http://{args.vllm_router_ip}:{args.vllm_router_port}{endpoint}"
 
 
+def _rollout_model_name(args: Namespace) -> str:
+    if getattr(args, "lora_rank", 0) > 0:
+        from vime.backends.megatron_utils.lora_utils import lora_adapter_name
+
+        return lora_adapter_name(args)
+    return args.hf_checkpoint
+
+
 class GenerateState(metaclass=SingletonMeta):
     """
     The global state for the generation process.
@@ -326,13 +334,13 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
             data_url = encode_image_for_rollout_engine(image)
             content.append({"type": "image_url", "image_url": {"url": data_url}})
         render_payload = {
-            "model": args.hf_checkpoint,
+            "model": _rollout_model_name(args),
             "messages": [{"role": "user", "content": content}],
         }
         render_url = f"{base}/v1/chat/completions/render"
         with trace_span(sample, "vllm_mm_render", attrs={"model": args.hf_checkpoint}):
             render_data = await post(render_url, render_payload, headers=headers)
-        generate_body = _mm_render_response_to_generate_body(render_data, args.hf_checkpoint)
+        generate_body = _mm_render_response_to_generate_body(render_data, _rollout_model_name(args))
         canonical_token_ids = _coerce_flat_int_token_ids(sample.tokens)
         if canonical_token_ids:
             _align_mm_feature_placeholders_to_tokens(generate_body, canonical_token_ids)
@@ -344,7 +352,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     else:
         url = f"{base}/inference/v1/generate"
         payload = {
-            "model": args.hf_checkpoint,
+            "model": _rollout_model_name(args),
             "token_ids": prompt_ids,
             "sampling_params": inference_sampling_params,
         }

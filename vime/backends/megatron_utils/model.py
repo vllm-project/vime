@@ -951,6 +951,10 @@ def save(
     args = get_args()
     if should_disable_forward_pre_hook(args):
         disable_forward_pre_hook(model)
+    from .lora_utils import is_lora_enabled, save_lora_adapter_for_vllm
+
+    if is_lora_enabled(args):
+        save_lora_adapter_for_vllm(model, args, iteration)
     save_checkpoint(
         iteration,
         model,
