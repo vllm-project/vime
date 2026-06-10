@@ -6,8 +6,9 @@ import json
 import logging
 import tempfile
 from argparse import Namespace
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -68,7 +69,9 @@ def parse_exclude_modules(value: str | Sequence[str] | None) -> list[str]:
     return parse_target_modules(value)
 
 
-def normalize_target_modules(target_modules: str | Sequence[str], exclude_modules: str | Sequence[str] | None = None) -> list[str]:
+def normalize_target_modules(
+    target_modules: str | Sequence[str], exclude_modules: str | Sequence[str] | None = None
+) -> list[str]:
     modules = parse_target_modules(target_modules)
     exclude = set(parse_exclude_modules(exclude_modules))
     return [module for module in modules if module not in exclude]
