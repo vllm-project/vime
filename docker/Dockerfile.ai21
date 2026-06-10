@@ -1,0 +1,40 @@
+# AI21 overlay image: layers AI21 add-on deps on top of the standard vime image.
+# This is additive — it does NOT modify docker/Dockerfile — so upstream merges stay clean.
+#
+# Build the base vime image first (see docker/README.md), then:
+#
+#     docker build -f docker/Dockerfile.ai21 \
+#       --build-arg BASE_IMAGE=<your-vime-image> \
+#       -t vime-ai21:latest .
+#
+# Adds: the Google Cloud CLI (gcloud/gsutil for vime_plugins.checkpoint.gcs_sync), the
+# Artifact-Registry keyring auth, and an install of requirements_ai21.txt from AI21's private
+# Python indices.
+
+ARG BASE_IMAGE=vime:latest
+FROM ${BASE_IMAGE}
+
+WORKDIR /root/
+
+# --- Google Cloud CLI (gcloud + gsutil), used by the GCS checkpoint sync sidecar ----------------
+RUN apt-get update && apt-get install -y curl gnupg && \
+    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+      | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list && \
+    apt-get update && apt-get install -y google-cloud-cli && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# --- AI21 private-index auth (keyring) ----------------------------------------------------------
+RUN pip install keyrings.google-artifactregistry-auth
+
+# --- AI21 add-on Python deps --------------------------------------------------------------------
+# The --extra-index-url list points at AI21's Artifact Registry (publishing-337912); the keyring
+# provider supplies the oauth token. Mirror the indices from ai21-verl/Dockerfile.
+COPY requirements_ai21.txt /root/requirements_ai21.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --keyring-provider subprocess \
+      --extra-index-url https://oauth2accesstoken@us-python.pkg.dev/publishing-337912/infra-python/simple/ \
+      --extra-index-url https://oauth2accesstoken@us-python.pkg.dev/publishing-337912/agents-python/simple/ \
+      --extra-index-url https://oauth2accesstoken@us-python.pkg.dev/publishing-337912/studio-python/simple/ \
+      --extra-index-url https://oauth2accesstoken@us-python.pkg.dev/publishing-337912/lm2-python/simple/ \
+      -r /root/requirements_ai21.txt

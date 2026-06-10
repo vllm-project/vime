@@ -1,0 +1,24 @@
+# AI21 add-on dependencies for vime — install ON TOP of the core requirements:
+#
+#     pip install -e .                       # core vime (requirements.txt)
+#     pip install -r requirements_ai21.txt   # AI21 add-ons (needs the AI21 private index, see docker/Dockerfile.ai21)
+#
+# What's here, by feature:
+#   - Reward (vime_plugins/rm/ai21_evaluators.py): ai21-evaluators, alignment-core, filelock, pydantic
+#   - GCS checkpoint sync (vime_plugins/checkpoint/gcs_sync.py): gcsfs, s3fs, fsspec, crcmod
+#     (also needs the gcloud + gsutil CLIs from docker/Dockerfile.ai21)
+#
+# Intentionally OMITTED from ai21-verl/requirements_ai21.txt: the Maestro/agent-loop deps
+# (ai21-flows, maestro-common, ai21-training-actions, coding-actions, ai21-models-gateway) — the
+# multi-turn loop is being replaced and uses vime's existing seams — and the Jamba model deps
+# (mamba-ssm, causal-conv1d, flashinfer). Versions mirror ai21-verl; bump for vime's python/torch.
+#
+# NOTE: this file is kept alphabetically sorted (pre-commit requirements-txt-fixer enforces it).
+ai21-evaluators[opik_evals,exact_match_evals,ragas,dashboard,eyeballer,length,language,file_formats,regex_parsers,ifbench,reasoning_gym,openai]==1.91.1
+alignment-core==1.43.1
+crcmod
+filelock>=3.20.0
+fsspec[http]==2025.3.0
+gcsfs==2025.3.0
+pydantic>=2.12.0
+s3fs==2025.3.0
