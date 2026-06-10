@@ -37,6 +37,7 @@ import threading
 from typing import Any
 
 from vime.utils.types import Sample
+from vime_plugins.utils.config_dump import maybe_dump_resolved_config
 
 _init_lock = threading.Lock()
 _initialized = False
@@ -166,6 +167,7 @@ async def _score_one(args, sample: Sample, **kwargs) -> float | dict[str, Any]:
 
 async def ai21_reward(args, sample_or_samples, **kwargs):
     """Entry point for ``--custom-rm-path``. Handles both single Sample and list[Sample]."""
+    maybe_dump_resolved_config(args)
     if isinstance(sample_or_samples, list):
         return await asyncio.gather(*[_score_one(args, s, **kwargs) for s in sample_or_samples])
     return await _score_one(args, sample_or_samples, **kwargs)

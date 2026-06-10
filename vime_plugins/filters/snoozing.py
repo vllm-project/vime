@@ -24,20 +24,31 @@ Config is read from ``args`` if present, else the matching env var, else a defau
                                                                             filter then == check_reward_nonzero_std)
     snooze_mean_score_threshold   AI21_SNOOZE_MEAN_SCORE_THRESHOLD    1.0   (>= this mean == "easy")
     snooze_id_key                 AI21_SNOOZE_ID_KEY                  "id"  (metadata key for the stable prompt id)
+    filtered_rollout_dump_path    AI21_FILTERED_ROLLOUT_DUMP_PATH     None  (JSONL file; when set, every
+                                                                            dropped group is appended to it)
+
+Filtered-out dumping (parity with ai21-verl ``_dump_filtered_out_batch``, PR #113): when
+``filtered_rollout_dump_path`` is set, each dropped group is appended to that JSONL file —
+one line per group with the drop reason, prompt id, rewards, and the full prompt/responses —
+so rejection patterns can be analyzed offline. Off by default.
 
 Note: snooze state is per-process (the rollout driver). Counts decrement per encounter, matching
 the original ``SnoozingDataset`` semantics.
 """
 
+import json
 import os
+import time
 from collections import defaultdict
+from pathlib import Path
 
 import torch
 
 from vime.rollout.filter_hub.base_types import DynamicFilterOutput
 from vime.utils.types import Sample
+from vime_plugins.utils.config_dump import maybe_dump_resolved_config
 
-__all__ = ["snoozing_filter", "reset_snooze_state"]
+__all__ = ["snoozing_filter", "reset_snooze_state", "dump_filtered_group"]
 
 # prompt_id -> number of remaining times to skip this prompt
 _snooze_counts: dict[str, int] = defaultdict(int)
@@ -71,7 +82,39 @@ def _prompt_id(args, sample: Sample) -> str:
     return str(pid)
 
 
+def dump_filtered_group(args, samples: list[Sample], reason: str) -> None:
+    """Append a dropped group to the filtered-out JSONL, if configured (else no-op).
+
+    One line per group: drop reason, prompt id, per-sample rewards/lengths/status and the
+    full prompt/responses — the vime port of ai21-verl's ``_dump_filtered_out_batch``.
+    """
+    path = _cfg(args, "filtered_rollout_dump_path", "AI21_FILTERED_ROLLOUT_DUMP_PATH", None)
+    if not path:
+        return
+    record = {
+        "timestamp": time.time(),
+        "reason": reason,
+        "prompt_id": _prompt_id(args, samples[0]),
+        "prompt": samples[0].prompt,
+        "rewards": [sample.get_reward_value(args) for sample in samples],
+        "responses": [sample.response for sample in samples],
+        "response_lengths": [sample.response_length for sample in samples],
+        "statuses": [sample.status.value for sample in samples],
+        "sample_indices": [sample.index for sample in samples],
+    }
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps(record, default=str) + "\n")
+
+
+def _drop(args, samples, reason: str) -> DynamicFilterOutput:
+    dump_filtered_group(args, samples, reason)
+    return DynamicFilterOutput(keep=False, reason=reason)
+
+
 def snoozing_filter(args, samples, **kwargs) -> DynamicFilterOutput:
+    maybe_dump_resolved_config(args)
     samples = _flatten_group(samples)
     pid = _prompt_id(args, samples[0])
 
@@ -80,7 +123,7 @@ def snoozing_filter(args, samples, **kwargs) -> DynamicFilterOutput:
         _snooze_counts[pid] -= 1
         if _snooze_counts[pid] <= 0:
             _snooze_counts.pop(pid, None)
-        return DynamicFilterOutput(keep=False, reason="snoozed")
+        return _drop(args, samples, "snoozed")
 
     rewards = [sample.get_reward_value(args) for sample in samples]
     std = torch.tensor(rewards, dtype=torch.float64).std()
@@ -96,4 +139,4 @@ def snoozing_filter(args, samples, **kwargs) -> DynamicFilterOutput:
         if mean_reward >= threshold:
             _snooze_counts[pid] += num_times
 
-    return DynamicFilterOutput(keep=False, reason=f"zero_std_{round(rewards[0], 1)}")
+    return _drop(args, samples, f"zero_std_{round(rewards[0], 1)}")

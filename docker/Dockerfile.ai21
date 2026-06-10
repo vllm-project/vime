@@ -37,4 +37,5 @@ RUN --mount=type=cache,target=/root/.cache/pip \
       --extra-index-url https://oauth2accesstoken@us-python.pkg.dev/publishing-337912/agents-python/simple/ \
       --extra-index-url https://oauth2accesstoken@us-python.pkg.dev/publishing-337912/studio-python/simple/ \
       --extra-index-url https://oauth2accesstoken@us-python.pkg.dev/publishing-337912/lm2-python/simple/ \
+      --extra-index-url https://oauth2accesstoken@us-python.pkg.dev/publishing-337912/wordtune-python/simple/ \
       -r /root/requirements_ai21.txt
