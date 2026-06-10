@@ -24,3 +24,4 @@ gcsfs==2025.3.0
 prometheus-client
 pydantic>=2.12.0
 s3fs==2025.3.0
+trafilatura==2.0.0
