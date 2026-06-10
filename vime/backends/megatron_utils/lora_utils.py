@@ -158,12 +158,25 @@ def save_lora_adapter_for_vllm(model: Sequence[torch.nn.Module], args: Namespace
     )
     lora_state_dict: dict[str, torch.Tensor] = {}
     with megatron_bridge_utils.patch_megatron_model(model):
-        for hf_name, weight, _megatron_name in bridge.export_adapter_weights(
+        for hf_name, weight, megatron_name in bridge.export_adapter_weights(
             model,
-            cpu=True,
+            cpu=False,
             show_progress=False,
         ):
-            lora_state_dict[hf_name] = weight
+            try:
+                if weight.is_cuda:
+                    torch.cuda.synchronize(weight.device)
+                lora_state_dict[hf_name] = weight.detach().clone().contiguous().cpu()
+            except Exception:
+                logger.exception(
+                    "Failed to materialize LoRA tensor %s from %s shape=%s dtype=%s device=%s",
+                    hf_name,
+                    megatron_name,
+                    tuple(weight.shape),
+                    weight.dtype,
+                    weight.device,
+                )
+                raise
 
     if is_rank0:
         torch.save(lora_state_dict, save_dir / "adapter_model.bin")

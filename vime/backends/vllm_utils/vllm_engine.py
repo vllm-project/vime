@@ -421,28 +421,35 @@ class VLLMEngine(RayActor):
         if self.node_rank != 0:
             return None
 
-        payload = {
-            "lora_name": adapter_name,
-            "lora_path": adapter_path,
-        }
+        def _parse(response: requests.Response) -> dict:
+            response.raise_for_status()
+            if not response.content or not response.content.strip():
+                return {"ok": True}
+            try:
+                return response.json()
+            except requests.exceptions.JSONDecodeError:
+                return {"ok": True, "text": response.text}
+
+        base_url = f"http://{self.server_host}:{self.server_port}"
         unload_payload = {"lora_name": adapter_name}
         for endpoint in ("v1/unload_lora_adapter", "unload_lora_adapter"):
             try:
-                response = requests.post(f"{self._http_base()}/{endpoint}", json=unload_payload)
+                response = requests.post(f"{base_url}/{endpoint}", json=unload_payload)
                 if response.status_code not in (404, 405):
                     response.raise_for_status()
                     break
             except Exception:
                 logger.debug("Ignoring failed unload_lora_adapter for %s", adapter_name, exc_info=True)
 
+        payload = {"lora_name": adapter_name, "lora_path": adapter_path}
         last_error: Exception | None = None
         for endpoint in ("v1/load_lora_adapter", "load_lora_adapter"):
             try:
-                response = requests.post(f"{self._http_base()}/{endpoint}", json=payload)
-                response.raise_for_status()
+                response = requests.post(f"{base_url}/{endpoint}", json=payload)
+                result = _parse(response)
                 if weight_version is not None:
                     self._weight_version = str(weight_version)
-                return _response_json(response)
+                return result
             except Exception as e:
                 last_error = e
                 status = getattr(getattr(e, "response", None), "status_code", None)

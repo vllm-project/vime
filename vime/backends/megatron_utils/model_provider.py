@@ -113,13 +113,15 @@ def _get_model_provider_func(
 
             if is_lora_enabled(args):
                 lora = create_lora_instance(args)
+                _original_provide = provider.provide
 
-                def _apply_lora_hook(model_chunks):
-                    transformed = lora(model_chunks, training=True)
+                def _actor_lora_provide(pre_process=True, post_process=True, vp_stage=None):
+                    model = _original_provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
+                    transformed = lora(model, training=True)
                     lora.set_params_to_save(transformed)
                     return transformed
 
-                provider.register_pre_wrap_hook(_apply_lora_hook)
+                return _actor_lora_provide
 
         if role == "critic":
             _original_provide = provider.provide

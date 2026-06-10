@@ -36,7 +36,9 @@ def finish_tracking(args):
         return
     try:
         if wandb.run is not None:
-            wandb.finish()
+            wandb.finish(exit_code=0)
+        if hasattr(wandb, "teardown"):
+            wandb.teardown(exit_code=0)
     except Exception:
         logging.getLogger(__name__).exception("Failed to finish wandb run")
 
