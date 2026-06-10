@@ -12,7 +12,6 @@ from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
-import vllm_router  # noqa: F401 — ensures vllm-router is importable on startup
 from tqdm import tqdm
 
 from vime.backends.vllm_utils.server_control import abort_inflight_requests
