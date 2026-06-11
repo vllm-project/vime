@@ -48,15 +48,43 @@ from vime.rollout.filter_hub.base_types import DynamicFilterOutput
 from vime.utils.types import Sample
 from vime_plugins.utils.config_dump import maybe_dump_resolved_config
 
-__all__ = ["snoozing_filter", "reset_snooze_state", "dump_filtered_group"]
+__all__ = [
+    "snoozing_filter",
+    "reset_snooze_state",
+    "dump_filtered_group",
+    "pop_snooze_step_stats",
+]
 
 # prompt_id -> number of remaining times to skip this prompt
 _snooze_counts: dict[str, int] = defaultdict(int)
 
+# Per-rollout counters consumed (and reset) by the rollout-metrics logger to reproduce
+# ai21-verl's ``train/step_newly_snoozed_prompts`` / ``train/step_snooze_skips`` and the
+# snooze-adjusted ("unsnoozed") reward. These live here because the filter is the only
+# place that sees the snooze decisions; see ``vime_plugins/metrics/rollout_metrics.py``.
+_step_newly_snoozed: int = 0
+_step_snooze_skips: int = 0
+
 
 def reset_snooze_state() -> None:
-    """Clear the snooze registry (used by tests)."""
+    """Clear the snooze registry and per-step counters (used by tests)."""
+    global _step_newly_snoozed, _step_snooze_skips
     _snooze_counts.clear()
+    _step_newly_snoozed = 0
+    _step_snooze_skips = 0
+
+
+def pop_snooze_step_stats() -> dict[str, int]:
+    """Return this rollout's snooze counters and reset them for the next rollout.
+
+    ``newly_snoozed`` = prompts newly put to sleep this rollout (mean reward >= threshold);
+    ``snooze_skips`` = groups dropped because their prompt was already snoozed.
+    """
+    global _step_newly_snoozed, _step_snooze_skips
+    stats = {"newly_snoozed": _step_newly_snoozed, "snooze_skips": _step_snooze_skips}
+    _step_newly_snoozed = 0
+    _step_snooze_skips = 0
+    return stats
 
 
 def _cfg(args, attr, env, default):
@@ -114,6 +142,7 @@ def _drop(args, samples, reason: str) -> DynamicFilterOutput:
 
 
 def snoozing_filter(args, samples, **kwargs) -> DynamicFilterOutput:
+    global _step_newly_snoozed, _step_snooze_skips
     maybe_dump_resolved_config(args)
     samples = _flatten_group(samples)
     pid = _prompt_id(args, samples[0])
@@ -121,6 +150,7 @@ def snoozing_filter(args, samples, **kwargs) -> DynamicFilterOutput:
     # 1) Currently snoozed → drop and decrement.
     if _snooze_counts.get(pid, 0) > 0:
         _snooze_counts[pid] -= 1
+        _step_snooze_skips += 1
         if _snooze_counts[pid] <= 0:
             _snooze_counts.pop(pid, None)
         return _drop(args, samples, "snoozed")
@@ -138,5 +168,6 @@ def snoozing_filter(args, samples, **kwargs) -> DynamicFilterOutput:
         mean_reward = sum(rewards) / len(rewards)
         if mean_reward >= threshold:
             _snooze_counts[pid] += num_times
+            _step_newly_snoozed += 1
 
     return _drop(args, samples, f"zero_std_{round(rewards[0], 1)}")

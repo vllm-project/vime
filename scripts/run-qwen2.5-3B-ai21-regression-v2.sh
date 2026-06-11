@@ -145,6 +145,14 @@ ROLLOUT_ARGS=(
    --dynamic-sampling-filter-path vime_plugins.filters.snoozing.snoozing_filter
    --over-sampling-batch-size ${ROLLOUT_BATCH_SIZE}   # ~ verl filter_groups.max_num_gen_batches budget
 
+   # AI21 observability metrics (port of AI21GRPOTrainer's metric layer):
+   #   - capture_prefilter_metrics sees ALL generated groups incl. dropped ones
+   #     -> rollout/score/{mean,max,min}/prefilter, constant-score buckets, unsnoozed reward
+   #   - ai21_rollout_log merges them + kept-batch reward min/max, logs under rollout/step
+   #     (returns False -> additive, vime's default rollout logging still runs)
+   --rollout-all-samples-process-path vime_plugins.metrics.rollout_metrics.capture_prefilter_metrics
+   --custom-rollout-log-function-path vime_plugins.metrics.rollout_metrics.ai21_rollout_log
+
    --num-rollout 15                # verl trainer.total_training_steps=15
    --num-epoch 1                   # verl trainer.total_epochs=1
    --rollout-batch-size ${ROLLOUT_BATCH_SIZE}
