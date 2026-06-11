@@ -3,8 +3,9 @@
   const STORAGE_KEY = 'vime-doc-lang';
   // Default language EN has no URL prefix; Chinese uses '/zh/' inserted after optional repo root.
   function detectCurrent(){
-    const { zhIndex } = analyzePath();
-    return zhIndex !== -1 ? 'zh' : 'en';
+    const { langIndex, parts } = analyzePath();
+    if(langIndex === -1) return 'en';
+    return parts[langIndex] === 'zh' ? 'zh' : 'en';
   }
   function otherLang(lang){ return lang === 'zh' ? 'en' : 'zh'; }
   /**
@@ -12,35 +13,43 @@
    * Supports patterns:
    *  /en/…                (language as first segment)
    *  /vime/en/…          (GitHub Pages project site repo root, language second)
+   *  /projects/vime/en/…  (Read the Docs project prefix, language third)
    *  /vime/ (no lang yet) -> insert /vime/zh/
+   *  /projects/vime/ (no lang yet) -> insert /projects/vime/zh/
    *  / (no lang) -> insert /zh/
    */
   function analyzePath(){
     const rawParts = window.location.pathname.split('/').filter(Boolean);
     const parts = rawParts.slice();
-    let repoRoot = null;
-    if(parts.length > 0 && (window.location.host.endsWith('github.io') || parts[0] === 'vime')){
-      repoRoot = parts[0];
+    let repoRootLen = 0;
+    if(parts[0] === 'projects' && parts[1] === 'vime'){
+      repoRootLen = 2;
+    } else if(parts.length > 0 && (window.location.host.endsWith('github.io') || parts[0] === 'vime')){
+      repoRootLen = 1;
     }
-    let zhIndex = -1;
-    if(parts[0] === 'zh') zhIndex = 0; else if(parts[1] === 'zh') zhIndex = 1;
-    return { parts, repoRoot, zhIndex };
+    let langIndex = -1;
+    for(let i = repoRootLen; i < Math.min(parts.length, repoRootLen + 3); i++){
+      if(parts[i] === 'en' || parts[i] === 'zh'){
+        langIndex = i;
+        break;
+      }
+    }
+    return { parts, repoRootLen, langIndex };
   }
 
   function buildTargetUrl(target){
     const url = new URL(window.location.href);
     const trailingSlash = url.pathname.endsWith('/') || url.pathname === '/';
-    const { parts, repoRoot, zhIndex } = analyzePath();
-    if(target === 'zh'){
-      if(zhIndex === -1){
-        if(repoRoot){
-          if(parts.length === 1) parts.push('zh'); else parts.splice(1,0,'zh');
-        } else {
-          parts.unshift('zh');
-        }
-      }
-    } else { // target en => remove zh if present
-      if(zhIndex !== -1) parts.splice(zhIndex,1);
+    const { parts, repoRootLen, langIndex } = analyzePath();
+    if(langIndex !== -1){
+      parts.splice(langIndex, 1);
+    }
+    if(repoRootLen > 0){
+      parts.splice(repoRootLen, 0, target);
+    } else if(target === 'zh'){
+      parts.unshift('zh');
+    } else if(parts[0] !== 'en'){
+      parts.unshift('en');
     }
     let newPath = '/' + parts.join('/');
     if(newPath === '/') {
