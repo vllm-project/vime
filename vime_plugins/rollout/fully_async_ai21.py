@@ -54,11 +54,11 @@ import time
 
 from vime.rollout.base_types import RolloutFnTrainOutput
 from vime.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
-from vime.utils.async_utils import run
+from vime.utils.async_utils import get_async_loop, run
 from vime.utils.misc import load_function
 from vime.utils.types import Sample
 
-# NOTE: AsyncRolloutWorker is imported lazily inside _get_global_worker —
+# NOTE: AsyncRolloutWorker is imported lazily inside _make_worker —
 # vime.rollout.fully_async_rollout pulls in vllm_rollout (vllm_router, image
 # processing deps) which only exists in the training image, and the collector
 # logic below is unit-tested on CPU without it.
@@ -76,17 +76,51 @@ _global_worker = None
 _worker_lock = threading.Lock()
 
 
-def _get_global_worker(args, data_buffer):
+def _make_worker(args, data_buffer, concurrency: int):
+    """Build an AsyncRolloutWorker whose loop runs on vime's SHARED background
+    event loop (``vime.utils.async_utils``) instead of a private thread+loop.
+
+    The stock worker calls ``asyncio.run`` in its own thread, which binds the
+    ``GenerateState`` singleton's semaphore to that private loop; any later
+    coroutine on the shared loop — eval via the synchronous
+    ``generate_rollout``, most notably — then dies with
+    ``RuntimeError: ... is bound to a different event loop``. Scheduling the
+    worker loop on the shared loop keeps every consumer of GenerateState on one
+    loop, exactly like the synchronous path.
+    """
     from vime.rollout.fully_async_rollout import AsyncRolloutWorker
 
+    class SharedLoopAsyncRolloutWorker(AsyncRolloutWorker):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self._loop_future = None
+
+        def start(self) -> None:
+            if self._loop_future is None or self._loop_future.done():
+                self._loop_future = asyncio.run_coroutine_threadsafe(self._loop(), get_async_loop().loop)
+
+        def stop(self) -> None:
+            self.running = False
+            if self._loop_future is not None:
+                try:
+                    self._loop_future.result(timeout=5)  # same bound as the stock thread join
+                except Exception:  # noqa: BLE001 - still draining, or loop already gone at exit
+                    self._loop_future.cancel()
+                self._loop_future = None
+
+        def is_alive(self) -> bool:
+            return self._loop_future is not None and not self._loop_future.done()
+
+    return SharedLoopAsyncRolloutWorker(args, data_buffer, concurrency=concurrency)
+
+
+def _get_global_worker(args, data_buffer):
     global _global_worker
     with _worker_lock:
-        if _global_worker is None or not _global_worker.worker_thread.is_alive():
-            logger.info("starting AI21 fully-async rollout worker")
+        if _global_worker is None or not _global_worker.is_alive():
+            logger.info("starting AI21 fully-async rollout worker (on the shared event loop)")
             num_engines = max(1, args.rollout_num_gpus // args.rollout_num_gpus_per_engine)
-            _global_worker = AsyncRolloutWorker(
-                args, data_buffer, concurrency=args.vllm_server_concurrency * num_engines
-            )
+            _global_worker = _make_worker(args, data_buffer, concurrency=args.vllm_server_concurrency * num_engines)
             _global_worker.start()
         return _global_worker
 
