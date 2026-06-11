@@ -11,6 +11,5 @@ build:
       - pip install -r docs/requirements.txt
     build:
       html:
-        - cd docs
         - mkdir -p "$READTHEDOCS_OUTPUT/html"
-        - VIME_DOC_LANG=en sphinx-build -b html -D language=en --conf-dir ./ ./en "$READTHEDOCS_OUTPUT/html"
+        - VIME_DOC_LANG=en sphinx-build -b html -D language=en -c docs docs/en "$READTHEDOCS_OUTPUT/html"

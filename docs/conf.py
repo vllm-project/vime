@@ -104,7 +104,7 @@ html_favicon = "_static/image/logo.ico"
 html_title = project
 html_copy_source = True
 html_last_updated_fmt = ""
-html_baseurl = os.environ.get("READTHEDOCS_CANONICAL_URL", "")
+html_baseurl = os.environ.get("READTHEDOCS_CANONICAL_URL")
 
 html_theme_options = {
     "repository_url": "https://github.com/vllm-project/vime",
