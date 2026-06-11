@@ -49,6 +49,8 @@ from __future__ import annotations
 import asyncio
 import atexit
 import logging
+import os
+import queue
 import threading
 import time
 
@@ -80,20 +82,40 @@ def _make_worker(args, data_buffer, concurrency: int):
     """Build an AsyncRolloutWorker whose loop runs on vime's SHARED background
     event loop (``vime.utils.async_utils``) instead of a private thread+loop.
 
-    The stock worker calls ``asyncio.run`` in its own thread, which binds the
-    ``GenerateState`` singleton's semaphore to that private loop; any later
-    coroutine on the shared loop — eval via the synchronous
-    ``generate_rollout``, most notably — then dies with
-    ``RuntimeError: ... is bound to a different event loop``. Scheduling the
-    worker loop on the shared loop keeps every consumer of GenerateState on one
-    loop, exactly like the synchronous path.
+    Two stock behaviors are overridden — both are safe in the stock
+    private-thread design but deadly once everything shares one loop:
+
+    1. **Shared loop instead of a private thread.** The stock worker calls
+       ``asyncio.run`` in its own thread, which binds the ``GenerateState``
+       singleton's semaphore to that private loop; any later coroutine on the
+       shared loop — eval via the synchronous ``generate_rollout``, most
+       notably — then dies with ``RuntimeError: ... is bound to a different
+       event loop``.
+
+    2. **No blocking calls on the loop.** The stock done-callback uses a
+       BLOCKING ``queue.Queue.put`` (maxsize 1000) and the stock loop tops up
+       generation regardless of whether anyone is draining the queue. During a
+       long window with no drainer (eval shares the engines; draining only
+       happens inside the next ``generate()`` call) the queue fills, the
+       callback blocks — and on the shared loop that freezes EVERY coroutine:
+       eval, in-flight generation, the collector. Fixed by (a) a production
+       watermark — stop pulling new prompts while ``output_queue`` already
+       holds ``max_queued_groups`` (default ``2 * rollout_batch_size``,
+       override via ``AI21_ASYNC_MAX_QUEUED_GROUPS``) — which also bounds
+       prompt prefetch and off-policy staleness of queued groups; and (b)
+       ``put_nowait`` with requeue-to-data_buffer on overflow (completed
+       samples short-circuit ``generate_and_rm`` when refetched, so nothing is
+       lost or regenerated).
     """
     from vime.rollout.fully_async_rollout import AsyncRolloutWorker
+    from vime.rollout.vllm_rollout import generate_and_rm_group
 
     class SharedLoopAsyncRolloutWorker(AsyncRolloutWorker):
         def __init__(self, *a, **kw):
             super().__init__(*a, **kw)
             self._loop_future = None
+            default_watermark = max(2 * self.args.rollout_batch_size, 8)
+            self.max_queued_groups = int(os.environ.get("AI21_ASYNC_MAX_QUEUED_GROUPS", default_watermark))
 
         def start(self) -> None:
             if self._loop_future is None or self._loop_future.done():
@@ -110,6 +132,92 @@ def _make_worker(args, data_buffer, concurrency: int):
 
         def is_alive(self) -> bool:
             return self._loop_future is not None and not self._loop_future.done()
+
+        async def _loop(self) -> None:
+            # Stock loop + the production watermark; everything else identical.
+            active_tasks: set[asyncio.Task] = set()
+            gid_counter = 0
+
+            while self.running:
+                try:
+                    if active_tasks:
+                        done = {t for t in active_tasks if t.done()}
+                        for t in done:
+                            try:
+                                t.result()  # results already handled in callback
+                            except Exception as e:  # noqa: BLE001
+                                logger.warning("fully-async task crashed: %r", e)
+                        active_tasks -= done
+
+                    # Top up — but only while the output queue has room. Without
+                    # this, the worker outruns the (possibly busy) collector and
+                    # the queue grows unboundedly during eval / training gaps.
+                    while (
+                        len(active_tasks) < self.concurrency
+                        and self.output_queue.qsize() < self.max_queued_groups
+                        and self.running
+                    ):
+                        groups = self.data_buffer.get_samples(1)
+                        if not groups:
+                            break
+                        for group in groups:
+                            gid = gid_counter
+                            gid_counter += 1
+                            task = asyncio.create_task(
+                                generate_and_rm_group(
+                                    self.args,
+                                    group,
+                                    sampling_params=self.state.sampling_params.copy(),
+                                    evaluation=False,
+                                )
+                            )
+                            task.add_done_callback(self._make_done_cb(gid))
+                            active_tasks.add(task)
+
+                    await asyncio.sleep(1)
+                except Exception as e:  # noqa: BLE001
+                    logger.exception("fully-async loop iteration error: %s", e)
+                    await asyncio.sleep(1)
+
+            if active_tasks:
+                logger.info("fully-async: waiting for %d in-flight tasks to drain", len(active_tasks))
+                try:
+                    await asyncio.wait(active_tasks, timeout=30)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        def _make_done_cb(self, gid: int):
+            def _cb(done_task: asyncio.Task) -> None:
+                try:
+                    result = done_task.result()
+                except Exception:  # noqa: BLE001
+                    logger.exception("fully-async: process task raised")
+                    return
+                if not isinstance(result, list):
+                    logger.warning(
+                        "fully-async: generate_and_rm_group returned %r, expected list[Sample]; dropping",
+                        type(result).__name__,
+                    )
+                    return
+                # Aborted group -> requeue, don't ship to training.
+                if any(getattr(s, "status", None) == Sample.Status.ABORTED for s in result):
+                    try:
+                        self.data_buffer.add_samples([result])
+                    except Exception:  # noqa: BLE001
+                        logger.exception("fully-async: failed to requeue aborted group")
+                    return
+                # NEVER block the shared event loop: on overflow, push the
+                # completed group back to the buffer — completed samples are
+                # returned as-is on refetch, so this is pure back-pressure.
+                try:
+                    self.output_queue.put_nowait((gid, result))
+                except queue.Full:
+                    try:
+                        self.data_buffer.add_samples([result])
+                    except Exception:  # noqa: BLE001
+                        logger.exception("fully-async: failed to requeue group on full queue")
+
+            return _cb
 
     return SharedLoopAsyncRolloutWorker(args, data_buffer, concurrency=concurrency)
 
@@ -198,8 +306,14 @@ async def _collect_filtered(args, rollout_id: int, worker, data_buffer) -> Rollo
             )
             last_log = now
 
+    # Hand leftovers back without ever blocking the shared event loop; on
+    # overflow they go to the data buffer (completed samples are returned
+    # as-is on refetch).
     for item in leftovers:
-        worker.output_queue.put(item)
+        try:
+            worker.output_queue.put_nowait(item)
+        except queue.Full:
+            data_buffer.add_samples([item[1]])
 
     data = sorted(data, key=_group_sort_key)
     all_data = sorted(all_data, key=_group_sort_key)
