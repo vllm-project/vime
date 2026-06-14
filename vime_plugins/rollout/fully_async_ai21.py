@@ -22,6 +22,13 @@ batch handed to ``--rollout-all-samples-process-path`` (ai21-verl's
 pushed back to the worker queue untouched — they are consumed (and filtered)
 by the *next* rollout, so no generated group is dropped or double-filtered.
 
+To bound off-policy staleness, each completed group is stamped with the
+rollout_id (≈ policy version) it finished generating in; the collector drops
+any group more than ``AI21_ASYNC_MAX_POLICY_AGE`` rollouts behind the current
+one (default 2; ``-1`` disables) *before* it can be carried over again, so a
+stale group is never requeued across yet another weight update. Drops are
+counted under ``rollout/dynamic_filter/drop_stale_policy_age``.
+
 Wire with::
 
     --rollout-function-path vime_plugins.rollout.fully_async_ai21.generate_rollout_fully_async_ai21
@@ -78,6 +85,30 @@ _global_worker = None
 _worker_lock = threading.Lock()
 
 
+# Per-group policy-age stamp. The worker writes the rollout_id a group COMPLETED
+# generation in (its policy version, since weights sync per rollout); the
+# collector drops groups older than ``AI21_ASYNC_MAX_POLICY_AGE`` rollouts so a
+# stale completed group is never carried across yet another weight update.
+# Stashed in metadata (not a Sample attribute) so the queue tuple shape stays
+# ``(gid, group)`` — existing collector/tests are unaffected.
+_BORN_KEY = "_ai21_born_rollout_id"
+
+
+def _stamp_group_born(group, rollout_id: int) -> None:
+    for s in group:
+        md = getattr(s, "metadata", None)
+        if isinstance(md, dict):
+            md[_BORN_KEY] = rollout_id
+
+
+def _group_born_rollout_id(group):
+    for s in group:
+        md = getattr(s, "metadata", None)
+        if isinstance(md, dict) and _BORN_KEY in md:
+            return md[_BORN_KEY]
+    return None
+
+
 def _make_worker(args, data_buffer, concurrency: int):
     """Build an AsyncRolloutWorker whose loop runs on vime's SHARED background
     event loop (``vime.utils.async_utils``) instead of a private thread+loop.
@@ -116,6 +147,9 @@ def _make_worker(args, data_buffer, concurrency: int):
             self._loop_future = None
             default_watermark = max(2 * self.args.rollout_batch_size, 8)
             self.max_queued_groups = int(os.environ.get("AI21_ASYNC_MAX_QUEUED_GROUPS", default_watermark))
+            # The rollout currently draining the queue; groups are stamped with
+            # this when they complete so the collector can measure policy age.
+            self.current_rollout_id = 0
 
         def start(self) -> None:
             if self._loop_future is None or self._loop_future.done():
@@ -206,6 +240,10 @@ def _make_worker(args, data_buffer, concurrency: int):
                     except Exception:  # noqa: BLE001
                         logger.exception("fully-async: failed to requeue aborted group")
                     return
+                # Stamp the policy version that generated this group (the
+                # rollout draining the queue right now) so the collector can
+                # drop it once it ages past AI21_ASYNC_MAX_POLICY_AGE.
+                _stamp_group_born(result, self.current_rollout_id)
                 # NEVER block the shared event loop: on overflow, push the
                 # completed group back to the buffer — completed samples are
                 # returned as-is on refetch, so this is pure back-pressure.
@@ -260,10 +298,21 @@ async def _collect_filtered(args, rollout_id: int, worker, data_buffer) -> Rollo
     )
     metric_gatherer = MetricGatherer()
 
+    # Drop completed groups whose generating policy is more than this many
+    # rollouts (≈ weight syncs at --update-weights-interval 1) behind the
+    # current one, so a stale group is never carried across yet another weight
+    # update. -1 disables the cap (stock behavior). Groups generated before the
+    # worker started stamping (or in unit tests) carry no stamp and are never
+    # dropped here.
+    max_policy_age = int(os.environ.get("AI21_ASYNC_MAX_POLICY_AGE", 2))
+    # Tell the worker which policy version to stamp newly-completed groups with.
+    worker.current_rollout_id = rollout_id
+
     target = args.rollout_batch_size
     data: list[list[Sample]] = []
     all_data: list[list[Sample]] = []
     leftovers: list[tuple[int, list[Sample]]] = []
+    num_stale = 0
 
     logger.info(
         "AI21 fully-async rollout %d: target=%d queue_warm=%d",
@@ -281,6 +330,15 @@ async def _collect_filtered(args, rollout_id: int, worker, data_buffer) -> Rollo
         if not drained:
             await asyncio.sleep(0.05)
         for gid, group in drained:
+            # Stale-policy cap: a group generated too many rollouts ago is
+            # discarded outright — its TIS/RS weights would be ~0 anyway, and
+            # carrying it forward only makes it staler. Checked before the
+            # leftover branch so over-age groups are never requeued.
+            born = _group_born_rollout_id(group)
+            if max_policy_age >= 0 and born is not None and (rollout_id - born) > max_policy_age:
+                metric_gatherer.on_dynamic_filter_drop(reason="stale_policy_age")
+                num_stale += 1
+                continue
             if len(data) >= target:
                 # Beyond this step's quota: hand back untouched (unfiltered),
                 # so the next rollout filters it against fresh snooze state.
@@ -327,12 +385,13 @@ async def _collect_filtered(args, rollout_id: int, worker, data_buffer) -> Rollo
         process_func(args, all_data, data_buffer)
 
     logger.info(
-        "AI21 fully-async rollout %d: done in %.1fs, generated=%d kept=%d requeued=%d queue_left=%d",
+        "AI21 fully-async rollout %d: done in %.1fs, generated=%d kept=%d requeued=%d stale_dropped=%d queue_left=%d",
         rollout_id,
         time.time() - started,
         len(all_data),
         len(data),
         len(leftovers),
+        num_stale,
         worker.queue_size(),
     )
     return RolloutFnTrainOutput(samples=data, metrics=metric_gatherer.collect())
