@@ -1,0 +1,22 @@
+# Agent-loop config for the maestro-retool reproduction, merged onto `args` by
+# --custom-config-path (vime/utils/arguments.py setattr's each key onto args, which
+# vime_plugins/rollout/multi_turn_agent.py + retool_agent.py read via _cfg()).
+#
+# Maps exp_regression_maestro_retool.py :: make_multistep_action_agent_loop_config:
+#   max_steps=10            -> agent_max_turns
+#   flow=multistep_action   -> agent_step_path (the retool code-exec loop)
+#   tools.external_tool_timeout=10 -> retool_tool_timeout
+
+agent_step_path: vime_plugins.rollout.retool_agent.agent_step
+agent_max_turns: 10                 # maestro config.max_steps=10
+retool_tool_timeout: 10             # maestro tools.external_tool_timeout=10
+
+# Observation wrapping — MUST match how qwen-25-7b-retool-sft was trained.
+#   tool_response : Qwen <tool_response> role-switch (matches maestro http_tools / function calling)
+#   interpreter   : inline ReTool <code>/<interpreter> blocks (same assistant turn)
+#   auto          : pick by how the model's call was parsed (default)
+retool_observation_format: auto
+
+# Code runner endpoint. Maestro injected CodeRunnerService.get_url() as CODE_RUNNER_URL;
+# set it in the env (see the run script) to your debug-pod or deployed eval-code-runner.
+# code_runner_url: http://localhost:8000/run_code
