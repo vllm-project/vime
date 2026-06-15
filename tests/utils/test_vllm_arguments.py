@@ -340,5 +340,52 @@ def test_parse_args_default_attribute_set_even_without_register(args_mod, monkey
     assert ns.vllm_tensor_parallel_size == 8
 
 
+@pytest.mark.unit
+def test_parse_args_tp_default_with_dp(args_mod, monkeypatch):
+    """TP auto-compute must divide by DP: TP = gpus / (PP * DP)."""
+    monkeypatch.setattr(args_mod, "add_vllm_arguments", lambda p: p)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["train.py", "--rollout-num-gpus-per-engine", "8", "--vllm-data-parallel-size", "4"],
+    )
+    ns = args_mod.vllm_parse_args()
+    assert ns.vllm_tensor_parallel_size == 2  # 8 / (1 * 4) = 2
+
+
+@pytest.mark.unit
+def test_parse_args_tp_default_with_pp_and_dp(args_mod, monkeypatch):
+    """TP = gpus / (PP * DP) when both PP and DP are set."""
+    monkeypatch.setattr(args_mod, "add_vllm_arguments", lambda p: p)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train.py",
+            "--rollout-num-gpus-per-engine",
+            "8",
+            "--vllm-pipeline-parallel-size",
+            "2",
+            "--vllm-data-parallel-size",
+            "2",
+        ],
+    )
+    ns = args_mod.vllm_parse_args()
+    assert ns.vllm_tensor_parallel_size == 2  # 8 / (2 * 2) = 2
+
+
+@pytest.mark.unit
+def test_parse_args_tp_default_dp1_unchanged(args_mod, monkeypatch):
+    """DP=1 (default) must not change existing TP behavior."""
+    monkeypatch.setattr(args_mod, "add_vllm_arguments", lambda p: p)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["train.py", "--rollout-num-gpus-per-engine", "4", "--vllm-data-parallel-size", "1"],
+    )
+    ns = args_mod.vllm_parse_args()
+    assert ns.vllm_tensor_parallel_size == 4  # 4 / (1 * 1) = 4
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
