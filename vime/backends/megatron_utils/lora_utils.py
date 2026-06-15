@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import tempfile
 from argparse import Namespace
 from collections.abc import Sequence
@@ -148,10 +149,12 @@ def save_lora_adapter_for_vllm(model: Sequence[torch.nn.Module], args: Namespace
     from vime.utils import megatron_bridge_utils
 
     save_dir = lora_runtime_dir(args, step)
-    rank = dist.get_rank() if dist.is_initialized() else 0
-    is_rank0 = rank == 0
+    # Save on every node's local rank 0 so that colocated vLLM engines on each
+    # node can read the adapter from their own local filesystem. All ranks hold
+    # the full adapter state dict after export, so this needs no extra comm.
+    is_node_main = int(os.environ.get("LOCAL_RANK", "0")) == 0
 
-    if is_rank0:
+    if is_node_main:
         save_dir.mkdir(parents=True, exist_ok=True)
     if dist.is_initialized():
         dist.barrier(group=get_gloo_group())
@@ -181,7 +184,7 @@ def save_lora_adapter_for_vllm(model: Sequence[torch.nn.Module], args: Namespace
                 )
                 raise
 
-    if is_rank0:
+    if is_node_main:
         torch.save(lora_state_dict, save_dir / "adapter_model.bin")
         config = build_peft_lora_config(args)
         with open(save_dir / "adapter_config.json", "w") as f:
