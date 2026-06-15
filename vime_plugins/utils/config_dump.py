@@ -25,21 +25,14 @@ import os
 import threading
 from pathlib import Path
 
+from vime_plugins.utils.common import cfg as _cfg
+
 logger = logging.getLogger(__name__)
 
 __all__ = ["dump_args", "maybe_dump_resolved_config"]
 
 _dump_lock = threading.Lock()
 _dumped = False
-
-
-def _cfg(args, attr, env, default=None):
-    value = getattr(args, attr, None)
-    if value is not None:
-        return value
-    if env in os.environ:
-        return os.environ[env]
-    return default
 
 
 def _json_safe(value):

@@ -35,13 +35,14 @@ custom post-processor *replaces* the default one. Groups are identified by
 ``sample.group_index`` when set, else by consecutive chunks of ``n_samples_per_prompt``.
 """
 
-import os
 from collections import defaultdict
 from enum import Enum
 
 import torch
 
 from vime.utils.types import Sample
+from vime_plugins.utils.common import cfg as _cfg
+from vime_plugins.utils.common import flatten_samples as _flatten
 from vime_plugins.utils.config_dump import maybe_dump_resolved_config
 
 __all__ = ["LengthRewardMode", "compute_length_rewards", "length_reward_post_process"]
@@ -50,21 +51,6 @@ __all__ = ["LengthRewardMode", "compute_length_rewards", "length_reward_post_pro
 class LengthRewardMode(str, Enum):
     PENALTY_ONLY = "penalty_only"
     BONUS_AND_PENALTY = "bonus_and_penalty"
-
-
-def _cfg(args, attr, env, default):
-    value = getattr(args, attr, None)
-    if value is not None:
-        return value
-    if env in os.environ:
-        return os.environ[env]
-    return default
-
-
-def _flatten(samples) -> list[Sample]:
-    while samples and isinstance(samples[0], list):
-        samples = [s for sub in samples for s in sub]
-    return samples
 
 
 def _group_ids(args, samples: list[Sample]) -> list:

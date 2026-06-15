@@ -95,6 +95,23 @@ N_SAMPLES=8
 GLOBAL_BATCH_SIZE=$((ROLLOUT_BATCH_SIZE * N_SAMPLES))   # 256 at 4 GPUs
 MAX_NUM_BATCHED_TOKENS=$((8192 * NUM_GPUS))
 
+# ---------------------------------------------------------------------------
+# Off-policy staleness control (async-only). The first regression runs showed
+# async grad-norm ~4-5x lower than sync and train/rollout logprob mismatch ~5x
+# higher: stale, off-policy data was being heavily down-weighted/masked by the
+# TIS/RS correction. These knobs keep generated data fresh:
+#   - AI21_ASYNC_MAX_QUEUED_GROUPS: in-flight + leftover prefetch depth (the
+#     fully_async_ai21 worker watermark). Default is 2*rollout_batch_size;
+#     dropping to 1*batch caps how stale queued groups get (lower throughput,
+#     fresher data).
+#   - AI21_ASYNC_MAX_POLICY_AGE: drop any completed group more than N rollouts
+#     (~weight syncs at --update-weights-interval 1) behind the current policy
+#     instead of carrying it across yet another weight update. -1 disables.
+#     Drops surface as rollout/dynamic_filter/drop_stale_policy_age.
+# ---------------------------------------------------------------------------
+export AI21_ASYNC_MAX_QUEUED_GROUPS=${AI21_ASYNC_MAX_QUEUED_GROUPS:-${ROLLOUT_BATCH_SIZE}}
+export AI21_ASYNC_MAX_POLICY_AGE=${AI21_ASYNC_MAX_POLICY_AGE:-2}
+
 CKPT_ARGS=(
    --hf-checkpoint ${HF_CKPT}
    --ref-load ${REF_LOAD}
@@ -128,7 +145,7 @@ ROLLOUT_ARGS=(
    --rollout-all-samples-process-path vime_plugins.metrics.rollout_metrics.capture_prefilter_metrics
    --custom-rollout-log-function-path vime_plugins.metrics.rollout_metrics.ai21_rollout_log
 
-   --num-rollout 15
+   --num-rollout 50
    --num-epoch 1
    --rollout-batch-size ${ROLLOUT_BATCH_SIZE}
    --n-samples-per-prompt ${N_SAMPLES}
@@ -142,8 +159,11 @@ ROLLOUT_ARGS=(
 )
 
 ASYNC_ARGS=(
-   # Push fresh weights to the rollout engines every step (train_async.py).
-   # Raising this trades policy freshness for fewer weight-sync stalls.
+   # Push fresh weights to the rollout engines EVERY step (train_async.py).
+   # Lowered from 2 -> 1 after the first regression runs: async grad-norm was
+   # ~4-5x below sync and logprob mismatch ~5x higher, i.e. the rollout policy
+   # was too stale. 1 = freshest possible (at the cost of more weight-sync
+   # stalls). Raise it again only if rollout GPUs sit idle on weight syncs.
    --update-weights-interval 1
 )
 
@@ -207,7 +227,7 @@ if [ -n "${WANDB_KEY:-}" ]; then
    WANDB_ARGS+=(
       --use-wandb
       --wandb-key ${WANDB_KEY}
-      --wandb-project ${WANDB_PROJECT:-regression}
+      --wandb-project ${WANDB_PROJECT:-vime}
       --wandb-group ${WANDB_GROUP:-qwen2.5-3B-ai21-async}
    )
 fi
@@ -235,7 +255,9 @@ RUNTIME_ENV_JSON="{
     \"AI21_SNOOZE_MEAN_SCORE_THRESHOLD\": \"${AI21_SNOOZE_MEAN_SCORE_THRESHOLD}\",
     \"AI21_SNOOZE_ID_KEY\": \"${AI21_SNOOZE_ID_KEY}\",
     \"AI21_FILTERED_ROLLOUT_DUMP_PATH\": \"${AI21_FILTERED_ROLLOUT_DUMP_PATH}\",
-    \"AI21_CONFIG_DUMP_PATH\": \"${AI21_CONFIG_DUMP_PATH}\"
+    \"AI21_CONFIG_DUMP_PATH\": \"${AI21_CONFIG_DUMP_PATH}\",
+    \"AI21_ASYNC_MAX_QUEUED_GROUPS\": \"${AI21_ASYNC_MAX_QUEUED_GROUPS}\",
+    \"AI21_ASYNC_MAX_POLICY_AGE\": \"${AI21_ASYNC_MAX_POLICY_AGE}\"
   }
 }"
 

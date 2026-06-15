@@ -32,11 +32,11 @@ plus extra fields (score, status, do_exclude) so the rest can be logged.
 """
 
 import asyncio
-import os
 import threading
 from typing import Any
 
 from vime.utils.types import Sample
+from vime_plugins.utils.common import cfg as _cfg
 from vime_plugins.utils.config_dump import maybe_dump_resolved_config
 
 _init_lock = threading.Lock()
@@ -55,16 +55,6 @@ def _ensure_initialized() -> None:
 
         initialize_ai21_evaluators()
         _initialized = True
-
-
-def _cfg(args, attr: str, env: str, default: Any) -> Any:
-    """Resolve config from args, then env var, then default."""
-    value = getattr(args, attr, None)
-    if value is not None:
-        return value
-    if env in os.environ:
-        return os.environ[env]
-    return default
 
 
 def _completion_from_sample(args, sample: Sample) -> str:

@@ -239,7 +239,7 @@ if [ -n "${WANDB_KEY:-}" ]; then
    WANDB_ARGS+=(
       --use-wandb
       --wandb-key ${WANDB_KEY}
-      --wandb-project ${WANDB_PROJECT:-regression}
+      --wandb-project ${WANDB_PROJECT:-vime}
       --wandb-group ${WANDB_GROUP:-qwen2.5-3B-ai21-regression-v2}
    )
 fi

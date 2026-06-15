@@ -42,14 +42,14 @@ means). The rollout-vs-actor log-prob divergence (``training/rollout_actor_logpr
 is already covered natively by vime's mismatch (``mis_*``) metrics.
 """
 
-import os
-
 import numpy as np
 
 from vime.utils import logging_utils
 from vime.utils.metric_utils import compute_rollout_step
 from vime.utils.misc import group_by
 from vime.utils.types import Sample
+from vime_plugins.utils.common import cfg as _cfg
+from vime_plugins.utils.common import flatten_samples as _flatten
 
 __all__ = [
     "capture_prefilter_metrics",
@@ -68,28 +68,6 @@ _PENDING: dict = {}
 def reset_pending() -> None:
     """Clear stashed prefilter metrics (used by tests)."""
     _PENDING.clear()
-
-
-def _cfg(args, attr, env, default):
-    value = getattr(args, attr, None)
-    if value is not None:
-        return value
-    if env in os.environ:
-        return os.environ[env]
-    return default
-
-
-def _flatten(groups) -> list[Sample]:
-    """Flatten ``list[list[Sample]]`` (or nested compact/fanout groups) into a flat list."""
-    out: list[Sample] = []
-    stack = list(groups)
-    while stack:
-        item = stack.pop()
-        if isinstance(item, list):
-            stack.extend(item)
-        else:
-            out.append(item)
-    return out
 
 
 def _is_aborted(sample: Sample) -> bool:

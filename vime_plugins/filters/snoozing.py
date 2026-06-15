@@ -37,7 +37,6 @@ the original ``SnoozingDataset`` semantics.
 """
 
 import json
-import os
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -46,6 +45,8 @@ import torch
 
 from vime.rollout.filter_hub.base_types import DynamicFilterOutput
 from vime.utils.types import Sample
+from vime_plugins.utils.common import cfg as _cfg
+from vime_plugins.utils.common import flatten_samples as _flatten_group
 from vime_plugins.utils.config_dump import maybe_dump_resolved_config
 
 __all__ = [
@@ -85,22 +86,6 @@ def pop_snooze_step_stats() -> dict[str, int]:
     _step_newly_snoozed = 0
     _step_snooze_skips = 0
     return stats
-
-
-def _cfg(args, attr, env, default):
-    value = getattr(args, attr, None)
-    if value is not None:
-        return value
-    if env in os.environ:
-        return os.environ[env]
-    return default
-
-
-def _flatten_group(group: list) -> list[Sample]:
-    # The standard rollout path passes list[Sample]; compact/fanout passes list[list[Sample]].
-    if group and isinstance(group[0], list):
-        return [s for sub in group for s in sub]
-    return group
 
 
 def _prompt_id(args, sample: Sample) -> str:

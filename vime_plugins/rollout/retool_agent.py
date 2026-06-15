@@ -41,9 +41,10 @@ picks the wrapping that matches how the *call* was parsed.
 """
 
 import json
-import os
 import re
 from typing import Any
+
+from vime_plugins.utils.common import cfg as _cfg
 
 # ---- code-call extraction ---------------------------------------------------
 # OpenAI/Qwen function-call envelope: <tool_call>{"name": ..., "arguments": {...}}</tool_call>
@@ -54,15 +55,6 @@ _CODE_TAG_RE = re.compile(r"<code>\s*(.*?)\s*</code>", re.DOTALL)
 _BOXED_RE = re.compile(r"\\boxed\{")
 
 _TOOL_NAME = "execute_python_code"
-
-
-def _cfg(args, attr, env, default):
-    value = getattr(args, attr, None)
-    if value is not None:
-        return value
-    if env in os.environ:
-        return os.environ[env]
-    return default
 
 
 def _extract_code(text: str) -> tuple[str | None, str]:

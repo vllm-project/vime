@@ -34,7 +34,6 @@ Return value: a single ``Sample`` (extend to return ``list[Sample]`` for fan-out
 sibling the same ``sample.rollout_id`` so loss aggregation averages within the rollout).
 """
 
-import os
 from argparse import Namespace
 from typing import Any
 
@@ -42,15 +41,7 @@ from vime.rollout.vllm_rollout import GenerateState, _build_inference_sampling_p
 from vime.utils.http_utils import post
 from vime.utils.misc import load_function
 from vime.utils.types import Sample
-
-
-def _cfg(args, attr, env, default):
-    value = getattr(args, attr, None)
-    if value is not None:
-        return value
-    if env in os.environ:
-        return os.environ[env]
-    return default
+from vime_plugins.utils.common import cfg as _cfg
 
 
 async def _default_agent_step(args, sample, assistant_text, turn_index) -> dict[str, Any]:
