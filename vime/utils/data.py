@@ -105,11 +105,18 @@ def filter_long_prompt(origin_samples: list[Sample], tokenizer, processor, max_l
                 if len(input_ids) <= max_length:
                     filtered_samples.append(sample)
         if multimodal:
-            from vime.utils.processing_utils import process_vision_info
+            from vime.utils.processing_utils import build_processor_kwargs
 
             for sample in multimodal:
-                multimodal_inputs = process_vision_info(sample.prompt, processor)
-                processor_output = processor(text=sample.prompt, **multimodal_inputs)
+                # Reuse the multimodal inputs already extracted during dataset
+                # construction. When apply_chat_template is set, sample.prompt is
+                # the rendered *string*, not a conversation list, so re-running
+                # process_vision_info on it would crash (it expects a list of
+                # message dicts). build_processor_kwargs mirrors how the rollout
+                # path (vllm_rollout) tokenizes multimodal prompts, so the length
+                # measured here matches the real pipeline.
+                processor_kwargs = build_processor_kwargs(sample.multimodal_inputs)
+                processor_output = processor(text=sample.prompt, **processor_kwargs)
                 input_ids = processor_output["input_ids"][0]
                 if len(input_ids) <= max_length:
                     filtered_samples.append(sample)
