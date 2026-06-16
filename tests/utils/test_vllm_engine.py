@@ -300,9 +300,8 @@ def test_update_weights_from_tensor_posts_ipc_payload_and_records_version(vllm_e
         weight_version="42",
     )
 
-    assert posted[0][0] == "collective_rpc"
-    assert posted[0][1]["method"] == "update_weights_chunk"
-    sent = posted[0][1]["kwargs"]["update_info"]
+    assert posted[0][0] == "update_weights"
+    sent = posted[0][1]["update_info"]
     # ipc_handles got cloudpickle'd into ipc_handles_pickled
     assert "ipc_handles" not in sent
     assert isinstance(sent["ipc_handles_pickled"], str)
