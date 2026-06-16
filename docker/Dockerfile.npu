@@ -62,7 +62,9 @@ RUN python3 -c 'import importlib.metadata as m; names = ["numpy", "ray", "torch"
 
 # Vime: latest npu branch at build time.
 RUN git clone --depth 1 --branch npu \
-      https://github.com/vllm-project/vime.git /root/vime
+      https://github.com/vllm-project/vime.git /root/vime && \
+    VLLM_COMMIT=$(cat /root/vllm-ascend/.github/vllm-main-verified.commit) && \
+      git -C /root/vllm checkout $VLLM_COMMIT
 
 # Training source dependencies.
 RUN git clone https://github.com/NVIDIA/Megatron-LM.git /root/Megatron-LM && \
