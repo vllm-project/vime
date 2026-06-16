@@ -1,0 +1,122 @@
+# syntax=docker/dockerfile:1.7
+
+ARG BASE_IMAGE=quay.io/ascend/vllm-ascend:nightly-main-a3
+FROM ${BASE_IMAGE}
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+WORKDIR /root
+
+ARG VLLM_COMMIT=9090368b650896bf5fc990c921df7eb4c20355a5
+ARG MEGATRON_COMMIT=3714d81d418c9f1bca4594fc35f9e8289f652862
+ARG MEGATRON_BRIDGE_COMMIT=3fd3768045422d0aa5c97e90a4e6c659aea9acb9
+ARG MINDSPEED_COMMIT=fc63de5c48426dd019c3b3f39e65f5bdf56e4086
+ARG MBRIDGE_COMMIT=89eb10887887bc74853f89a4de258c0702932a1c
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    ASCEND_TOOLKIT_HOME=/usr/local/Ascend/ascend-toolkit/latest \
+    ASCEND_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp \
+    ASCEND_AICPU_PATH=/usr/local/Ascend/ascend-toolkit/latest \
+    ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest \
+    VLLM_ASCEND_ENABLE_NZ=0 \
+    RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1 \
+    HCCL_HOST_SOCKET_PORT_RANGE=60000-60050 \
+    HCCL_NPU_SOCKET_PORT_RANGE=61000-61050 \
+    PYTORCH_NPU_ALLOC_CONF=expandable_segments:True \
+    HYDRA_FULL_ERROR=1 \
+    PYTHONPATH=/root/Megatron-Bridge/src:/root/Megatron-LM:/root/vime
+
+# System and pip dependencies.
+RUN sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' \
+      /etc/apt/sources.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential cmake curl git libnuma-dev ninja-build patch rsync wget && \
+    rm -rf /var/lib/apt/lists/* && \
+    pip config set global.index-url \
+      https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple && \
+    pip config set global.extra-index-url \
+      "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi" && \
+    git config --global http.version HTTP/1.1
+
+# vLLM: fixed, verified commit.
+RUN pip uninstall -y \
+      vllm vllm-ascend megatron-bridge megatron-core mindspeed mbridge vime || true && \
+    git clone https://github.com/vllm-project/vllm.git /root/vllm && \
+    git -C /root/vllm checkout "${VLLM_COMMIT}" && \
+    VLLM_TARGET_DEVICE=empty \
+      pip install -v -e /root/vllm
+
+# vLLM Ascend: latest main at build time.
+RUN git clone --depth 1 --branch main \
+      https://github.com/vllm-project/vllm-ascend.git /root/vllm-ascend && \
+    git -C /root/vllm-ascend submodule update --init --recursive && \
+      pip install -v -e /root/vllm-ascend
+
+# Protect the serving stack while installing Vime dependencies.
+RUN python3 -c 'import importlib.metadata as m; names = ["numpy", "ray", "torch", "torch-npu", "torchvision", "transformers", "triton-ascend", "vllm", "vllm-ascend"]; open("/tmp/vime-npu-constraints.txt", "w").write("\n".join(f"{name}=={m.version(name)}" for name in names) + "\n")'
+
+# Vime: latest npu branch at build time.
+RUN git clone --depth 1 --branch npu \
+      https://github.com/vllm-project/vime.git /root/vime
+
+# Training source dependencies.
+RUN git clone https://github.com/NVIDIA/Megatron-LM.git /root/Megatron-LM && \
+    git -C /root/Megatron-LM checkout "${MEGATRON_COMMIT}"
+
+RUN git clone --branch bridge https://github.com/radixark/Megatron-Bridge.git \
+      /root/Megatron-Bridge && \
+    git -C /root/Megatron-Bridge checkout "${MEGATRON_BRIDGE_COMMIT}"
+
+RUN git clone https://gitcode.com/Ascend/MindSpeed.git /root/MindSpeed && \
+    git -C /root/MindSpeed checkout "${MINDSPEED_COMMIT}"
+
+RUN git clone https://github.com/ISEEKYAN/mbridge.git /root/mbridge && \
+    git -C /root/mbridge checkout "${MBRIDGE_COMMIT}"
+
+# Apply the NPU dependency patches shipped by Vime.
+RUN for patch_file in /root/vime/docker/npu_patch/*.patch; do \
+      if [[ "$(tail -c 1 "${patch_file}" | od -An -t x1 | tr -d ' \n')" != "0a" ]]; then \
+        printf '\n' >> "${patch_file}"; \
+      fi; \
+    done && \
+    git -C /root/Megatron-LM apply --whitespace=nowarn \
+      /root/vime/docker/npu_patch/meagtron_comm.patch && \
+    git -C /root/Megatron-LM apply --whitespace=nowarn \
+      /root/vime/docker/npu_patch/megatron.patch && \
+    git -C /root/Megatron-Bridge apply --whitespace=nowarn \
+      /root/vime/docker/npu_patch/megatron-bridge.patch && \
+    git -C /root/MindSpeed apply --whitespace=nowarn \
+      /root/vime/docker/npu_patch/mindspeed.patch
+
+# Megatron-Bridge is used directly from PYTHONPATH. Installing its package
+# metadata would pull CUDA-only dependencies into the Ascend environment.
+RUN pip install --no-build-isolation "nvidia-modelopt[torch]>=0.37.0" && \
+    pip install --no-deps --no-build-isolation -e /root/mbridge && \
+    pip install --no-deps --no-build-isolation -e /root/Megatron-LM && \
+    pip install --no-deps --no-build-isolation -e /root/MindSpeed
+
+# ring_flash_attn is a CUDA extension and is not used on Ascend.
+RUN pip install \
+      --constraint /tmp/vime-npu-constraints.txt \
+      --requirement /root/vime/requirements.txt && \
+    pip install --no-deps --no-build-isolation -e /root/vime
+
+# Vime currently imports torch_memory_saver from its training actor.
+RUN git clone --depth 1 --branch 2026.6.0 \
+      https://github.com/sgl-project/sgl-kernel-npu.git /root/sgl-kernel-npu && \
+    cd /root/sgl-kernel-npu && \
+    bash build.sh -a kernels && \
+    bash build.sh -a memory-saver && \
+    pip install --no-deps \
+      output/torch_memory_saver-0.0.8-cp312-cp312-linux_aarch64.whl && \
+    cd /root && \
+    rm -rf /root/sgl-kernel-npu
+
+# Minimal import check.
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    python3 -c 'import megatron, mindspeed, torch_memory_saver, vime, vllm, vllm_ascend; from megatron.bridge import AutoBridge'
+
+WORKDIR /root/vime
+ENTRYPOINT []
+CMD ["/bin/bash"]

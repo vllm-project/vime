@@ -32,6 +32,7 @@ from vime.utils.types import Sample
 from ..utils.metric_utils import has_repetition
 from .rollout_validation import validate_server_group_gpu_indices
 from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock
+from vime.utils.common import is_npu
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -105,6 +106,7 @@ class ServerGroup:
         RolloutRayActor = ray.remote(VLLMEngine)
 
         rollout_engines = []
+        device_name = "NPU" if is_npu() else "GPU"
         for i in range(len(self.all_engines)):
             if self.all_engines[i] is not None:
                 continue
@@ -126,11 +128,11 @@ class ServerGroup:
             env_vars = {name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST}
             rollout_engine = RolloutRayActor.options(
                 num_cpus=num_cpus,
-                num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
                 runtime_env={
                     "env_vars": env_vars,
                 },
+                resources={device_name:num_gpus}
             ).remote(
                 self.args,
                 rank=global_rank,
@@ -381,7 +383,8 @@ class RolloutManager:
             self.servers = start_rollout_servers(args, pg)
 
         init_tracking(args, primary=False)
-        self.rollout_engine_lock = Lock.options(num_cpus=1, num_gpus=0).remote()
+        device_name = "NPU" if is_npu() else "GPU"
+        self.rollout_engine_lock = Lock.options(num_cpus=1, num_gpus=0, resources={device_name:0}).remote()
         self.rollout_id = -1
 
         self._health_monitors = []
