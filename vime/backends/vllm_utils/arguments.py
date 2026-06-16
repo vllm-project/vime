@@ -275,9 +275,6 @@ def vllm_parse_args():
     add_vllm_arguments(parser)
 
     # Compute default vllm_tensor_parallel_size from CLI args.
-    # TP = gpus_per_engine / (PP * DP), matching _resolve_vllm_parallel_sizes
-    # in vllm_engine.py. Without the DP divisor the default is too large when
-    # --vllm-data-parallel-size > 1 (needed for expert parallelism).
     temp_parser = argparse.ArgumentParser(add_help=False)
     temp_parser.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
     temp_parser.add_argument("--vllm-pipeline-parallel-size", type=int, default=1)
