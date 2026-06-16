@@ -103,8 +103,10 @@ def _get_model_provider_func(
             provider.num_layers_in_first_pipeline_stage = args.decoder_first_pipeline_num_layers
         if getattr(args, "decoder_last_pipeline_num_layers", None) is not None:
             provider.num_layers_in_last_pipeline_stage = args.decoder_last_pipeline_num_layers
-        # provider.gradient_accumulation_fusion = args.gradient_accumulation_fusion
-        provider.gradient_accumulation_fusion = False
+        provider.moe_aux_loss_coeff = args.moe_aux_loss_coeff
+        provider.freeze_language_model = False
+        provider.freeze_vision_model = False
+        provider.moe_permute_fusion = args.moe_permute_fusion
         provider.recompute_granularity = args.recompute_granularity
         provider.recompute_method = args.recompute_method
         provider.recompute_num_layers = args.recompute_num_layers
