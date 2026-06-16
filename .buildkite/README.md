@@ -13,7 +13,7 @@ run on every build (PR and push to `main`):
 | `pre-commit` | `pre-commit` gate | `small_cpu_queue_premerge` (r6in.large) |
 | `plugin-contracts` | `e2e-test-plugin-contracts` (19 files) | `medium_cpu_queue_premerge` (r6in.4xlarge) |
 | `agent-adapter` | `agent-adapter-test` (3 files) | `small_cpu_queue_premerge` |
-| `unit` | `e2e-test-unit` (`pytest tests/unit tests/utils`) | `medium_cpu_queue_premerge` |
+| `unit` | `e2e-test-unit` (`pytest tests/utils`) | `medium_cpu_queue_premerge` |
 
 The three test steps `depends_on` the pre-commit gate, matching the GHA
 `needs: pre-commit`. Each suite runs its files sequentially inside one step

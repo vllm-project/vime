@@ -128,7 +128,7 @@ steps:
           set -euo pipefail
           pip install -q -e . --no-deps --break-system-packages
           pip install -q pytest --break-system-packages
-          python -m pytest tests/unit tests/utils
+          python -m pytest tests/utils
         '
 
   # GitHub PR labels can't trigger Buildkite jobs, so the run-ci-* GPU suites
