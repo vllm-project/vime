@@ -200,6 +200,7 @@ def add_vllm_arguments(parser):
         action="store_false",
         help="Disable packed sync; send weights per bucket via in-process NCCL (non-packed mode).",
     )
+
     parser.set_defaults(vllm_weight_sync_packed=True)
 
     old_parser_add_argument = parser.add_argument
@@ -263,6 +264,40 @@ def validate_args(args):
     ), "vllm_config and prefill_num_servers are mutually exclusive. Use server_groups in the YAML config instead."
 
 
+def _sanitize_non_primitive_defaults(args, user_provided: set[str]) -> None:
+    """Replace non-primitive default values with None.
+
+    vllm's ``AsyncEngineArgs.add_cli_args`` registers parameters whose defaults
+    are complex dataclass/config instances (e.g. ``EPLBConfig()``,
+    ``CompilationConfig()``).  When ``parse_known_args`` resolves those defaults
+    they become live Python objects on the returned Namespace.
+
+    The main ``parse_args`` in ``slime/utils/arguments.py`` later merges
+    *every* attribute from this Namespace into the global ``args`` via
+    ``setattr``.  Downstream code (megatron-bridge, model_provider, …) may
+    iterate ``vars(args)`` and choke on unrecognised types.
+
+    This function walks the parsed Namespace and replaces any non-primitive
+    *default* value (i.e. a dest the user did NOT explicitly provide) with
+    ``None``.  User-provided values are intentionally left intact — they are
+    forwarded to the vllm subprocess via ``_vllm_raw_values`` and do not need
+    the parsed object representation in the main args namespace.
+    """
+    _PRIMITIVE = (str, int, float, bool, type(None))
+
+    for key, value in list(vars(args).items()):
+        if key.startswith("_"):
+            continue
+        if key in user_provided:
+            continue
+        if isinstance(value, _PRIMITIVE):
+            continue
+        if isinstance(value, (list, tuple)):
+            if all(isinstance(v, _PRIMITIVE) for v in value):
+                continue
+        setattr(args, key, None)
+
+
 def vllm_parse_args():
     """Parse vLLM flags via an independent ArgumentParser + parse_known_args.
 
@@ -285,6 +320,7 @@ def vllm_parse_args():
 
     args, _ = parser.parse_known_args()
     user_provided, raw_values = _detect_user_provided_dests(parser, sys.argv[1:])
+    _sanitize_non_primitive_defaults(args, user_provided)
     args._vllm_user_provided = user_provided
     args._vllm_raw_values = raw_values
     return args
