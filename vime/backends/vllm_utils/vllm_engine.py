@@ -398,6 +398,9 @@ def build_vllm_cmd_and_env(server_args: dict[str, Any]) -> tuple[list[str], dict
     if getattr(args, "use_rollout_routing_replay", False):
         cmd += ["--enable-return-routed-experts"]
 
+    if getattr(args, "vllm_enable_prefix_caching", True) is not False:
+        cmd += ["--enable-prefix-caching"]
+
     # gpu_memory_utilization: no vime-forced default. In colocate, training and rollout do not
     # occupy the GPU simultaneously (sleep/offload cycles), so vLLM's own default is fine. A user
     # value passed via --vllm-gpu-memory-utilization is auto-forwarded by _forward_vllm_cli_args.
