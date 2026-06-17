@@ -28,12 +28,12 @@ class RoutingReplay:
     def pop_forward(self):
         top_indices = self.top_indices_list[self.forward_index]
         self.forward_index += 1
-        return top_indices.to(torch.npu.current_device())
+        return top_indices.to(torch.cuda.current_device())
 
     def pop_backward(self):
         top_indices = self.top_indices_list[self.backward_index]
         self.backward_index += 1
-        return top_indices.to(torch.npu.current_device())
+        return top_indices.to(torch.cuda.current_device())
 
     def clear(self):
         self.forward_index = 0

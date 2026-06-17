@@ -6,7 +6,7 @@ datasets
 e2b
 httpx[http2]
 mcp[cli]
-memray
+memray  # needed for debugging (but is lightweight), we can put it to dev mode when using pyproject.toml
 numba
 omegaconf
 openai
@@ -14,11 +14,11 @@ openai-agents
 pillow
 pylatexenc
 pyyaml
-qwen_vl_utils
+qwen_vl_utils # for VLM
 ray[default]
 ring_flash_attn
 safetensors
 tensorboard
 transformers
-vllm-ascend
+vllm-router>=0.1.14
 wandb

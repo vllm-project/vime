@@ -30,8 +30,8 @@ def ray_noset_visible_devices(env_vars=os.environ):
 
 
 def get_physical_gpu_id():
-    device = torch.npu.current_device()
-    props = torch.npu.get_device_properties(device)
+    device = torch.cuda.current_device()
+    props = torch.cuda.get_device_properties(device)
     return str(props.uuid)
 
 

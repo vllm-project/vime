@@ -6,10 +6,7 @@ import os
 from typing import Any
 
 import yaml
-try:
-    from vllm_router.launch_router import RouterArgs
-except ImportError:
-    RouterArgs = None
+from vllm_router.launch_router import RouterArgs
 
 from vime.backends.vllm_utils.arguments import validate_args as vllm_validate_args
 from vime.backends.vllm_utils.arguments import vllm_parse_args
@@ -101,7 +98,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
 
-            reset_arg(parser, "--distributed-backend", type=str, default="hccl")
+            reset_arg(parser, "--distributed-backend", type=str, default="nccl")
             reset_arg(parser, "--distributed-timeout-minutes", type=int, default=10)
 
             return parser
@@ -1035,8 +1032,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
             # retries, health-check, …) under `--router-*` prefix (collision-safe).
             # exclude_host_port=True because vime owns `--vllm-router-ip / --vllm-router-port`
             # (defined in vime/backends/vllm_utils/arguments.py:add_vllm_router_arguments).
-            if RouterArgs is not None:
-                RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
+            RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
             return parser
 
         # wandb

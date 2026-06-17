@@ -9,24 +9,24 @@ logger = logging.getLogger(__name__)
 
 
 def clear_memory(clear_host_memory: bool = False):
-    torch.npu.synchronize()
+    torch.cuda.synchronize()
     gc.collect()
-    torch.npu.empty_cache()
+    torch.cuda.empty_cache()
     if clear_host_memory:
         torch._C._host_emptyCache()
 
 
 def available_memory():
-    device = torch.npu.current_device()
-    free, total = torch.npu.mem_get_info(device)
+    device = torch.cuda.current_device()
+    free, total = torch.cuda.mem_get_info(device)
     vm = psutil.virtual_memory()
     return {
-        "npu": str(device),
+        "gpu": str(device),
         "total_GB": _byte_to_gb(total),
         "free_GB": _byte_to_gb(free),
         "used_GB": _byte_to_gb(total - free),
-        "allocated_GB": _byte_to_gb(torch.npu.memory_allocated(device)),
-        "reserved_GB": _byte_to_gb(torch.npu.memory_reserved(device)),
+        "allocated_GB": _byte_to_gb(torch.cuda.memory_allocated(device)),
+        "reserved_GB": _byte_to_gb(torch.cuda.memory_reserved(device)),
         "host_total_GB": _byte_to_gb(vm.total),
         "host_available_GB": _byte_to_gb(vm.available),
         "host_used_GB": _byte_to_gb(vm.used),

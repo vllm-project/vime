@@ -4,17 +4,12 @@ import random
 from argparse import Namespace
 from contextlib import nullcontext
 
-import vime.backends.megatron_utils.npu_attention_patch
-import mindspeed.megatron_adaptor
 import numpy as np
 import ray
 import torch
 import torch.distributed as dist
 from megatron.core import mpu
-try:
-    from torch_memory_saver import torch_memory_saver
-except ImportError:
-    torch_memory_saver = None
+from torch_memory_saver import torch_memory_saver
 from transformers import AutoConfig, AutoTokenizer
 
 from vime.ray.train_actor import TrainRayActor
@@ -81,7 +76,7 @@ class MegatronTrainRayActor(TrainRayActor):
         if args.offload_train:
             if (x := args.train_memory_margin_bytes) > 0:
                 logger.info(f"Set torch_memory_saver.memory_margin_bytes to {x}")
-                if torch_memory_saver is not None: torch_memory_saver.memory_margin_bytes = x
+                torch_memory_saver.memory_margin_bytes = x
 
         self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id = initialize_model_and_optimizer(
             args, role
@@ -186,8 +181,7 @@ class MegatronTrainRayActor(TrainRayActor):
             self.weight_updater.disconnect_rollout_engines()
         destroy_process_groups()
 
-        if torch_memory_saver is not None:
-            torch_memory_saver.pause()
+        torch_memory_saver.pause()
 
         print_memory("after offload model")
 
@@ -196,8 +190,7 @@ class MegatronTrainRayActor(TrainRayActor):
         assert self.args.offload_train
         print_memory("before wake_up model")
 
-        if torch_memory_saver is not None:
-            torch_memory_saver.resume()
+        torch_memory_saver.resume()
 
         clear_memory()
         reload_process_groups()
@@ -217,10 +210,10 @@ class MegatronTrainRayActor(TrainRayActor):
         # TODO: this is ugly, move to somewhere else?
         # move tokens to GPU in advance
         rollout_data["tokens"] = [
-            torch.tensor(t, dtype=torch.long, device=torch.npu.current_device()) for t in rollout_data["tokens"]
+            torch.tensor(t, dtype=torch.long, device=torch.cuda.current_device()) for t in rollout_data["tokens"]
         ]
         rollout_data["loss_masks"] = [
-            torch.tensor(t, dtype=torch.int, device=torch.npu.current_device()) for t in rollout_data["loss_masks"]
+            torch.tensor(t, dtype=torch.int, device=torch.cuda.current_device()) for t in rollout_data["loss_masks"]
         ]
         if "rollout_mask_sums" in rollout_data:
             # Promote precomputed per-rollout mask totals to GPU tensors here
@@ -234,9 +227,9 @@ class MegatronTrainRayActor(TrainRayActor):
                 (
                     {
                         key: (
-                            torch.from_numpy(v.copy()).to(device=torch.npu.current_device())
+                            torch.from_numpy(v.copy()).to(device=torch.cuda.current_device())
                             if isinstance(v, np.ndarray)
-                            else v.to(device=torch.npu.current_device())
+                            else v.to(device=torch.cuda.current_device())
                         )
                         for key, v in mm_dict.items()
                     }
@@ -268,7 +261,7 @@ class MegatronTrainRayActor(TrainRayActor):
                         self.args.qkv_format,
                         rollout_data["max_seq_lens"][i] if self.args.qkv_format == "bshd" else None,
                     ),
-                    device=torch.npu.current_device(),
+                    device=torch.cuda.current_device(),
                     dtype=torch.float32,
                 )
                 for i, (log_prob, total_length, response_length) in enumerate(
@@ -623,7 +616,7 @@ class MegatronTrainRayActor(TrainRayActor):
             if dist.get_rank() == 0:
                 ray.get(self.rollout_manager.clear_updatable_num_new_engines.remote())
 
-        with torch_memory_saver.disable() if (self.args.offload_train and torch_memory_saver is not None) else nullcontext():
+        with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
             print_memory("before update_weights")
             self.weight_updater.update_weights()
             print_memory("after update_weights")

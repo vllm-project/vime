@@ -65,7 +65,7 @@ def get_responses(
     """
     qkv_format = args.qkv_format
 
-    logits = logits.float()  # NPU: cast bfloat16 to float32
+    assert logits.dtype == torch.float32, f"{logits.dtype}"
     assert len(logits.shape) == 3, f"{logits.shape}"
 
     if qkv_format == "thd":
@@ -406,7 +406,7 @@ def get_log_probs_and_entropy(
     assert non_loss_data
     qkv_format = args.qkv_format
 
-    logits = logits.float()  # NPU: cast bfloat16 to float32
+    assert logits.dtype == torch.float32, f"{logits.dtype}"
     assert len(logits.shape) == 3, f"{logits.shape}"
 
     if qkv_format == "thd":

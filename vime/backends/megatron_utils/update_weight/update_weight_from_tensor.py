@@ -36,8 +36,8 @@ from .update_weight_from_distributed import (
 
 
 def _current_gpu_uuid() -> str:
-    device_index = torch.npu.current_device()
-    props = torch.npu.get_device_properties(device_index)
+    device_index = torch.cuda.current_device()
+    props = torch.cuda.get_device_properties(device_index)
     return str(props.uuid)
 
 
@@ -291,9 +291,16 @@ class UpdateWeightFromTensor:
         for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(megatron_local_weights):
             refs, long_lived_tensors = self._send_hf_params(hf_named_tensors)
             ray.get(refs)
+            # Free GPU tensors so the caching allocator can reuse the blocks,
+            # then release CUDA IPC cache entries whose consumers (vLLM engines)
+            # have already closed their IPC handles.
             del long_lived_tensors, hf_named_tensors
+            torch.cuda.ipc_collect()
 
         dist.barrier(group=get_gloo_group())
+        # After the barrier all engines have returned, so every rank's last-chunk
+        # IPC handles are now released by the consumers.  Clean them up.
+        torch.cuda.ipc_collect()
 
         # vLLM #39212: exit weight-update mode.
         if self._ipc_engine is not None and rank == self._ipc_gather_src:
@@ -411,13 +418,6 @@ class vLLMColocateWorkerExtension:
     # Mirrors SkyRL's NewInferenceWorkerWrap. Callable via /collective_rpc from
     # VLLMEngine.update_weights_chunk / update_weights_chunk on the trainer side.
 
-    def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
-        self._weight_update_active = True
-        self._is_checkpoint_format = is_checkpoint_format
-
-    def finish_weight_update(self) -> None:
-        self._weight_update_active = False
-
     def update_weights_chunk(self, update_info: dict) -> None:
         """Receive and load a single chunk of weights via CUDA IPC.
 
@@ -455,8 +455,8 @@ class vLLMColocateWorkerExtension:
         shapes: list[list[int]] = inner["shapes"]
         ipc_handles: list[dict] = inner["ipc_handles"]
 
-        device_index = torch.npu.current_device()
-        physical_gpu_id = str(torch.npu.get_device_properties(device_index).uuid)
+        device_index = torch.cuda.current_device()
+        physical_gpu_id = str(torch.cuda.get_device_properties(device_index).uuid)
 
         # Reconstruct weights from per-tensor IPC handles (one handle per
         # parameter — the vLLM IPCWeightTransferEngine.trainer_send_weights

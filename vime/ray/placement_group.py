@@ -12,10 +12,10 @@ from .rollout import RolloutManager
 logger = logging.getLogger(__name__)
 
 
-@ray.remote(num_gpus=0, resources={"NPU": 1})
+@ray.remote(num_gpus=1)
 class InfoActor:
     def get_ip_and_gpu_id(self):
-        return ray.util.get_node_ip_address(), ray.get_runtime_context().get_accelerator_ids()["NPU"][0]
+        return ray.util.get_node_ip_address(), ray.get_gpu_ids()[0]
 
 
 def sort_key(x):
@@ -41,7 +41,7 @@ def sort_key(x):
 
 def _create_placement_group(num_gpus):
     """Create a placement group with the specified number of GPUs."""
-    bundles = [{"NPU": 1, "CPU": 1} for _ in range(num_gpus)]
+    bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_gpus)]
     pg = placement_group(bundles, strategy="PACK")
     num_bundles = len(bundles)
 
@@ -94,7 +94,7 @@ def create_placement_groups(args):
         num_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node + args.rollout_num_gpus
         rollout_offset = args.actor_num_nodes * args.actor_num_gpus_per_node
 
-    logger.info(f"Creating placement group with {num_gpus} NPUs...")
+    logger.info(f"Creating placement group with {num_gpus} GPUs...")
     pg, actor_pg_reordered_bundle_indices, actor_pg_reordered_gpu_ids = _create_placement_group(num_gpus)
     rollout_pg_reordered_bundle_indices = actor_pg_reordered_bundle_indices[rollout_offset:]
     rollout_pg_reordered_gpu_ids = actor_pg_reordered_gpu_ids[rollout_offset:]
@@ -188,7 +188,6 @@ def create_rollout_manager(args, pg):
     rollout_manager = RolloutManager.options(
         num_cpus=1,
         num_gpus=0,
-        resources={"NPU": 0},
     ).remote(args, pg)
 
     # calculate num_rollout from num_epoch

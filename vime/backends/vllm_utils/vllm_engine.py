@@ -25,7 +25,6 @@ import requests
 from vime.backends.vllm_utils.arguments import SKIPPED_DESTS, get_vllm_cli_action_table
 from vime.ray.ray_actor import RayActor
 from vime.utils.http_utils import get_host_info
-from vime.utils.common import is_npu
 
 logger = logging.getLogger(__name__)
 
@@ -77,21 +76,6 @@ def get_base_gpu_id(args, rank):
             num_critic_gpus = args.critic_num_gpus_per_node * args.critic_num_nodes
             start_index = (num_actor_gpus + num_critic_gpus + rank * num_gpus) % args.num_gpus_per_node
     return start_index
-
-
-def _to_local_gpu_id(physical_gpu_id: int) -> int:
-    arvd = os.environ.get("ASCEND_RT_VISIBLE_DEVICES")
-    if not arvd:
-        return physical_gpu_id
-    visible = [int(x) for x in arvd.split(",") if x.strip() != ""]
-    if physical_gpu_id in visible:
-        return visible.index(physical_gpu_id)
-    if 0 <= physical_gpu_id < len(visible):
-        return physical_gpu_id
-    raise RuntimeError(
-        f"NPU id {physical_gpu_id} is not valid under ASCEND_RT_VISIBLE_DEVICES={arvd}. "
-        f"Expected one of {visible} (physical) or 0..{len(visible)-1} (local)."
-    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -348,9 +332,9 @@ def build_vllm_subprocess_env(server_args: dict[str, Any]) -> dict[str, str]:
     """Child-process environment for ``vllm serve``."""
     args = server_args["args"]
     env = os.environ.copy()
-    env.pop("PYTORCH_NPU_ALLOC_CONF", None)
-    env.setdefault("HCCL_CUMEM_ENABLE", "0")
-    env["ASCEND_RT_VISIBLE_DEVICES"] = server_args["visible_devices"]
+    env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+    env.setdefault("NCCL_CUMEM_ENABLE", "0")
+    env["CUDA_VISIBLE_DEVICES"] = server_args["visible_devices"]
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")
     if getattr(args, "vllm_enable_deterministic_inference", False):
         env["VLLM_BATCH_INVARIANT"] = "1"
@@ -443,7 +427,7 @@ def build_vllm_cmd_and_env(server_args: dict[str, Any]) -> tuple[list[str], dict
     elif getattr(args, "colocate", False):
         cmd += ["--weight-transfer-config", '{"backend":"ipc"}']
     else:
-        cmd += ["--weight-transfer-config", is_npu() and '{"backend":"hccl"}' or '{"backend":"nccl"}']
+        cmd += ["--weight-transfer-config", '{"backend":"nccl"}']
 
     if getattr(args, "colocate", False) and "--worker-extension-cls" not in cmd:
         cmd += [
@@ -880,24 +864,17 @@ class VLLMEngine(RayActor):
         raise RuntimeError(f"vLLM init_weight_transfer_engine failed: {last_error}") from last_error
 
     def start_weight_update(self, is_checkpoint_format: bool = False) -> dict:
-        """Enter IPC weight-update mode via ``/collective_rpc`` (vLLM 0.20.x colocate path)."""
-        try:
-            return self._make_request(
-                "collective_rpc",
-                {"method": "start_weight_update", "kwargs": {"is_checkpoint_format": is_checkpoint_format}},
-            )
-        except Exception:
-            return {"ok": True, "noop": True, "note": "start_weight_update collective_rpc failed"}
+        """``POST /start_weight_update`` — signals vLLM to enter IPC weight-update mode."""
+        return self._make_request("start_weight_update", {"is_checkpoint_format": is_checkpoint_format})
 
     def finish_weight_update(self) -> dict:
-        """Exit IPC weight-update mode via ``/collective_rpc``."""
-        try:
-            return self._make_request(
-                "collective_rpc",
-                {"method": "finish_weight_update"},
-            )
-        except Exception:
-            return {"ok": True, "noop": True, "note": "finish_weight_update collective_rpc failed"}
+        """``POST /finish_weight_update`` — signals vLLM to exit IPC weight-update mode.
+
+        Purely a state-machine bookend now; ``_weight_version`` is recorded by
+        ``update_weights_from_tensor`` (the IPC data-carrying RPC), matching vime's
+        single-RPC version-with-data semantics.
+        """
+        return self._make_request("finish_weight_update", {})
 
     def check_weights(self, action: str):
         """No vLLM ``weights_checker`` route; return a placeholder dict."""
@@ -960,7 +937,6 @@ class VLLMEngine(RayActor):
             "dtype_names": dtype_names,
             "shapes": [list(s) for s in shapes],
             "packed": bool(packed),
-            "is_checkpoint_format": False,
         }
         return self._post_vllm_update_weights_http(update_info)
 

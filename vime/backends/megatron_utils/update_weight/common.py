@@ -42,7 +42,6 @@ def all_gather_param(name: str, param: torch.nn.Parameter) -> torch.Tensor:
     if "linear_fc1.weight" in name or "linear_fc1.bias" in name:
         param_partitions = [p.chunk(2, dim=0) for p in param_partitions]
         param_partitions = [p[0] for p in param_partitions] + [p[1] for p in param_partitions]
-        partition_dim = 0
     # this is bug in megatron's grouped moe.
     if "linear_fc2.weight" in name:
         if partition_dim == 0:
@@ -105,7 +104,6 @@ def all_gather_params_async(
             if "linear_fc1.weight" in info.name or "linear_fc1.bias" in info.name:
                 param_partitions = [p.chunk(2, dim=0) for p in param_partitions]
                 param_partitions = [p[0] for p in param_partitions] + [p[1] for p in param_partitions]
-                partition_dim = 0
             # this is bug in megatron's grouped moe.
             if "linear_fc2.weight" in info.name:
                 if partition_dim == 0:
@@ -135,12 +133,9 @@ def named_params_and_buffers(
 
 
 def _maybe_get_cpu_backup(x: torch.Tensor):
-    try:
-        from torch_memory_saver import torch_memory_saver
-    except ImportError:
-        torch_memory_saver = None
+    from torch_memory_saver import torch_memory_saver
 
-    if torch_memory_saver is not None and (cpu_tensor := torch_memory_saver.get_cpu_backup(x, zero_copy=True)) is not None:
+    if (cpu_tensor := torch_memory_saver.get_cpu_backup(x, zero_copy=True)) is not None:
         return cpu_tensor
 
     return x

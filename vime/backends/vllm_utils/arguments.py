@@ -274,8 +274,7 @@ def vllm_parse_args():
     parser = FlexibleArgumentParser(add_help=False)
     add_vllm_arguments(parser)
 
-    _sanitize_non_primitive_defaults(parser)
-
+    # Compute default vllm_tensor_parallel_size from CLI args
     temp_parser = argparse.ArgumentParser(add_help=False)
     temp_parser.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
     temp_parser.add_argument("--vllm-pipeline-parallel-size", type=int, default=1)
@@ -289,14 +288,6 @@ def vllm_parse_args():
     args._vllm_user_provided = user_provided
     args._vllm_raw_values = raw_values
     return args
-
-
-def _sanitize_non_primitive_defaults(parser):
-    for action in parser._actions:
-        if action.default is None:
-            continue
-        if not isinstance(action.default, (str, int, float, bool, type(None))):
-            action.default = None
 
 
 # Dests that are vime orchestration flags (not part of `vllm serve` CLI) — excluded

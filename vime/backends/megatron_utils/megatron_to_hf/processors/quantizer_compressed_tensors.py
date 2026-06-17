@@ -90,7 +90,7 @@ class WQLinear_GEMM(nn.Module):
             awq_linear.bias = linear.bias.clone().half()
 
         pack_num = 32 // awq_linear.w_bit
-        device = torch.device(f"npu:{torch.npu.current_device()}")
+        device = torch.device(f"cuda:{torch.cuda.current_device()}")
 
         repeat_scales = scales.to(device).t().repeat_interleave(group_size, 1)
         if isinstance(zeros, torch.Tensor):

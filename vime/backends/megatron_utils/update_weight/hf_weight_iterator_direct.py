@@ -5,6 +5,7 @@ from collections.abc import Sequence
 import torch
 import torch.distributed as dist
 from megatron.core import mpu
+from tqdm import tqdm
 
 from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.types import ParamInfo
@@ -22,7 +23,9 @@ class HfWeightIteratorDirect(HfWeightIteratorBase):
     def get_hf_weight_chunks(self, megatron_local_weights, progress_desc: str = "Update weights"):
         rank = dist.get_rank()
 
-        for megatron_local_param_infos in self.megatron_local_param_info_buckets:
+        for megatron_local_param_infos in tqdm(
+            self.megatron_local_param_info_buckets, disable=rank != 0, desc=progress_desc
+        ):
             megatron_full_params = _get_megatron_full_params(megatron_local_param_infos, megatron_local_weights)
             hf_named_tensors = self._convert_to_hf_named_tensors(megatron_full_params, megatron_local_param_infos)
             yield hf_named_tensors
@@ -50,13 +53,13 @@ def _get_megatron_full_params(
         if dist.get_rank() == info.src_rank:
             params.append(
                 torch.nn.Parameter(
-                    megatron_local_weights[info.name].to(device=torch.npu.current_device(), non_blocking=True),
+                    megatron_local_weights[info.name].to(device=torch.cuda.current_device(), non_blocking=True),
                     requires_grad=False,
                 )
             )
         else:
-            params.append(torch.empty(info.shape, dtype=info.dtype, device=torch.npu.current_device()))
-    torch.npu.synchronize()
+            params.append(torch.empty(info.shape, dtype=info.dtype, device=torch.cuda.current_device()))
+    torch.cuda.synchronize()
 
     # broadcast params across pp ranks
     if pp_size > 1:
