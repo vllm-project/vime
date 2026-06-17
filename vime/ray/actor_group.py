@@ -5,6 +5,7 @@ from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from vime.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
+from vime.utils.common import is_npu
 
 
 class RayTrainGroup:
@@ -89,7 +90,8 @@ class RayTrainGroup:
 
         actor_impl = MegatronTrainRayActor
 
-        TrainRayActor = ray.remote(num_gpus=1, runtime_env={"env_vars": env_vars})(actor_impl)
+        TrainRayActor = ray.remote(runtime_env={"env_vars": env_vars})(actor_impl)
+        device_name = "NPU" if is_npu() else "GPU"
 
         # Create worker actors
         self._actor_handlers = []
@@ -97,11 +99,11 @@ class RayTrainGroup:
         for rank in range(world_size):
             actor = TrainRayActor.options(
                 num_cpus=num_gpus_per_actor,
-                num_gpus=num_gpus_per_actor,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg,
                     placement_group_bundle_index=reordered_bundle_indices[rank],
                 ),
+                resources={device_name:num_gpus_per_actor}
             ).remote(world_size, rank, master_addr, master_port)
             if rank == 0:
                 master_addr, master_port = ray.get(actor.get_master_addr_and_port.remote())
