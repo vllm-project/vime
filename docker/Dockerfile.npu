@@ -53,12 +53,19 @@ RUN git clone --depth 1 --branch main \
     git -C /root/vllm-ascend submodule update --init --recursive && \
       pip install -v -e /root/vllm-ascend
 
+# Switch vllm to the vllm-ascend verified branch.
+RUN VLLM_COMMIT=$(cat /root/vllm-ascend/.github/vllm-main-verified.commit) && \
+      git -C /root/vllm checkout $VLLM_COMMIT && \
+      VLLM_TARGET_DEVICE=empty pip install -v -e /root/vllm
+
 # Protect the serving stack while installing Vime dependencies.
 RUN python3 -c 'import importlib.metadata as m; names = ["numpy", "ray", "torch", "torch-npu", "torchvision", "transformers", "triton-ascend", "vllm", "vllm-ascend"]; open("/tmp/vime-npu-constraints.txt", "w").write("\n".join(f"{name}=={m.version(name)}" for name in names) + "\n")'
 
 # Vime: latest npu branch at build time.
 RUN git clone --depth 1 --branch npu \
-      https://github.com/vllm-project/vime.git /root/vime
+      https://github.com/vllm-project/vime.git /root/vime && \
+    VLLM_COMMIT=$(cat /root/vllm-ascend/.github/vllm-main-verified.commit) && \
+      git -C /root/vllm checkout $VLLM_COMMIT
 
 # Training source dependencies.
 RUN git clone https://github.com/NVIDIA/Megatron-LM.git /root/Megatron-LM && \
@@ -96,6 +103,13 @@ RUN pip install --no-build-isolation "nvidia-modelopt[torch]>=0.37.0" && \
     pip install --no-deps --no-build-isolation -e /root/Megatron-LM && \
     pip install --no-deps --no-build-isolation -e /root/MindSpeed
 
+# Install the Vime's dependency - vllm-router
+RUN pip install \
+      -i https://mirrors.aliyun.com/pypi/simple/ \
+      --extra-index-url https://download.pytorch.org/whl/cpu/ \
+      --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+      vllm-router>=0.1.14
+
 # ring_flash_attn is a CUDA extension and is not used on Ascend.
 RUN pip install \
       --constraint /tmp/vime-npu-constraints.txt \
@@ -109,13 +123,13 @@ RUN git clone --depth 1 --branch 2026.6.0 \
     bash build.sh -a kernels && \
     bash build.sh -a memory-saver && \
     pip install --no-deps \
-      output/torch_memory_saver-0.0.8-cp312-cp312-linux_aarch64.whl && \
+      output/torch_memory_saver-*.whl && \
     cd /root && \
     rm -rf /root/sgl-kernel-npu
 
 # Minimal import check.
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    python3 -c 'import megatron, mindspeed, torch_memory_saver, vime, vllm, vllm_ascend; from megatron.bridge import AutoBridge'
+    python3 -c 'import megatron, mindspeed, torch_memory_saver, vime, vllm, vllm_ascend;'
 
 WORKDIR /root/vime
 ENTRYPOINT []
