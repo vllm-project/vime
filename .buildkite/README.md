@@ -13,15 +13,14 @@ run on every build (PR and push to `main`):
 | `pre-commit` | `pre-commit` gate | `small_cpu_queue_premerge` (r6in.large) |
 | `plugin-contracts` | `e2e-test-plugin-contracts` (19 files) | `medium_cpu_queue_premerge` (r6in.4xlarge) |
 | `agent-adapter` | `agent-adapter-test` (3 files) | `small_cpu_queue_premerge` |
-| `unit` | `e2e-test-unit` (`pytest tests/utils`) | `medium_cpu_queue_premerge` |
+| `utils` | `utils tests` (`pytest tests/utils`) | `medium_cpu_queue_premerge` |
 
 The three test steps `depends_on` the pre-commit gate, matching the GHA
 `needs: pre-commit`. Each suite runs its files sequentially inside one step
 because these queues boot a fresh EC2 instance per job — a per-file matrix
-would be mostly boot + pip-install time. The `unit` step pulls
-`inferactinc/public:vime-latest` on every build (no local image cache on
-ephemeral instances); if pull time becomes a problem, mirror the image to ECR
-(the premerge queues already have read-only ECR access).
+would be mostly boot + pip-install time. All always-on CPU steps use the
+standard `python:3.10` image and install their lightweight dependencies at
+runtime.
 
 ## Creating the pipeline (one-time, Buildkite UI)
 

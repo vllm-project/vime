@@ -110,8 +110,8 @@ steps:
           python tests/test_agent_sdk_adapters.py
         '
 
-  - label: ":pytest: unit & utils tests (in-image)"
-    key: unit
+  - label: ":pytest: utils tests"
+    key: utils
     depends_on: pre-commit
     agents:
       queue: medium_cpu_queue_premerge
@@ -124,10 +124,11 @@ steps:
       docker run --rm --network host --ipc=host \
         -e GIT_CONFIG_PARAMETERS="'safe.directory=/workspace'" \
         -v "$$PWD:/workspace" -w /workspace \
-        inferactinc/public:vime-latest bash -lc '
+        python:3.10 bash -lc '
           set -euo pipefail
-          pip install -q -e . --no-deps --break-system-packages
-          pip install -q pytest --break-system-packages
+          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors
+          pip install -q -e . --no-deps
           python -m pytest tests/utils
         '
 
