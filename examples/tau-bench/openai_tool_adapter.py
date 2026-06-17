@@ -46,11 +46,13 @@ class OpenAICompatibleToolCallAdapter:
 
         openai_tool_calls = []
         for i, call in enumerate(calls):
-            openai_tool_calls.append(OpenAIToolCall(
-                id=f"call_{i}_{call.get('name', 'unknown')}",
-                type="function",
-                function={"name": call.get("name", ""), "arguments": call.get("parameters", "{}")},
-            ))
+            openai_tool_calls.append(
+                OpenAIToolCall(
+                    id=f"call_{i}_{call.get('name', 'unknown')}",
+                    type="function",
+                    function={"name": call.get("name", ""), "arguments": call.get("parameters", "{}")},
+                )
+            )
 
         return OpenAIAssistantMessage(
             role="assistant",

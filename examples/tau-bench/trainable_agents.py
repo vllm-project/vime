@@ -233,9 +233,7 @@ class TauBenchEnv:
 def build_env(sample: Sample | None = None, args: Any | None = None, **_: Any) -> TauBenchEnv:
     tau_bench_config = getattr(args, "tau_bench_config", None)
     if tau_bench_config is None:
-        raise RuntimeError(
-            "args.tau_bench_config is missing; generate_with_tau.generate must set it from TAU_CONFIGS"
-        )
+        raise RuntimeError("args.tau_bench_config is missing; generate_with_tau.generate must set it from TAU_CONFIGS")
 
     task_index = None
     if sample is not None and sample.prompt is not None:

@@ -65,7 +65,7 @@ def _parse_qwen25_tools(response: str) -> dict[str, Any]:
             "calls": calls,
         }
 
-    cleaned = re.sub(r'<\|im_end\|>', '', response).strip()
+    cleaned = re.sub(r"<\|im_end\|>", "", response).strip()
     parsed_call = _try_parse_json_tool_call(cleaned)
     if parsed_call:
         return {
@@ -82,8 +82,8 @@ def _parse_qwen25_tools(response: str) -> dict[str, Any]:
             if parsed_call:
                 calls.append(parsed_call)
         if calls:
-            normal_text = json_pattern.sub('', response).strip()
-            normal_text = re.sub(r'<\|im_end\|>', '', normal_text).strip()
+            normal_text = json_pattern.sub("", response).strip()
+            normal_text = re.sub(r"<\|im_end\|>", "", normal_text).strip()
             return {
                 "normal_text": normal_text,
                 "calls": calls,
