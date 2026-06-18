@@ -57,8 +57,7 @@ def install_rollout_optional_stubs() -> None:
     """Stub rollout-side optional imports when not installed."""
     ensure_ray_stub()
 
-    if not real_module_available("vllm_router"):
-        sys.modules["vllm_router"] = types.ModuleType("vllm_router")
+    install_vllm_router_stub()
 
     if not real_module_available("PIL"):
         pil = types.ModuleType("PIL")
@@ -96,6 +95,48 @@ def install_rollout_optional_stubs() -> None:
         pylatexenc.latex2text = latex2text
         sys.modules["pylatexenc"] = pylatexenc
         sys.modules["pylatexenc.latex2text"] = latex2text
+
+    install_wandb_stub()
+
+
+def install_vllm_router_stub() -> None:
+    if real_module_available("vllm_router"):
+        return
+
+    class RouterArgs:
+        @classmethod
+        def add_cli_args(cls, parser, *args, **kwargs):  # noqa: ARG003
+            return parser
+
+        @classmethod
+        def from_cli_args(cls, args, *unused_args, **unused_kwargs):  # noqa: ARG003
+            return types.SimpleNamespace()
+
+    router_mod = types.ModuleType("vllm_router")
+    router_mod.__path__ = []
+    launch_router_mod = types.ModuleType("vllm_router.launch_router")
+    router_args_mod = types.ModuleType("vllm_router.router_args")
+    launch_router_mod.RouterArgs = RouterArgs
+    router_args_mod.RouterArgs = RouterArgs
+    router_mod.launch_router = launch_router_mod
+    router_mod.router_args = router_args_mod
+    sys.modules["vllm_router"] = router_mod
+    sys.modules["vllm_router.launch_router"] = launch_router_mod
+    sys.modules["vllm_router.router_args"] = router_args_mod
+
+
+def install_wandb_stub() -> None:
+    if real_module_available("wandb"):
+        return
+    wandb_mod = types.ModuleType("wandb")
+    wandb_mod.run = None
+    wandb_mod.log = MagicMock()
+    wandb_mod.finish = MagicMock()
+    wandb_mod.login = MagicMock()
+    wandb_mod.init = MagicMock()
+    wandb_mod.Settings = MagicMock()
+    wandb_mod.util = types.SimpleNamespace(generate_id=lambda: "unit-test")
+    sys.modules["wandb"] = wandb_mod
 
 
 def save_sys_modules(names: Iterable[str]) -> dict[str, Any]:

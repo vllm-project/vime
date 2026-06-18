@@ -52,7 +52,8 @@ click it in the Buildkite UI, multi-select the suites (`short`,
 `vllm-config`, `megatron`, `precision`, `ckpt`), and the follow-up step
 generates one job per test via [`gpu_suites.py`](./gpu_suites.py) — the same
 `gpu_lock_exec.py` + `docker run` invocations used by the GPU jobs, including
-the per-test `USE_DEEPEP` / `USE_FP8_ROLLOUT` / `ENABLE_EVAL` combos.
+the per-test `VIME_TEST_USE_DEEPEP` / `VIME_TEST_USE_FP8_ROLLOUT` /
+`VIME_TEST_ENABLE_EVAL` combos.
 
 The block uses `blocked_state: passed`, so a build whose CPU steps are green
 reports a passing commit status even if nobody unblocks the GPU gate.
