@@ -8,6 +8,16 @@ sleep 3
 pkill -9 ray
 pkill -9 python
 
+GPU_PIDs=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits)
+if [ -z "$GPU_PIDs" ]; then
+    echo "No active GPU processes found."
+else
+    for pid in $GPU_PIDs; do
+        echo "Killing GPU processes pid number: $pid"
+        kill -9 "$pid"
+    done
+fi
+
 set -ex
 
 # will prevent ray from buffering stdout/stderr
@@ -130,10 +140,11 @@ MISC_ARGS=(
    --train-memory-margin-bytes 2147483648
 )
 
+NUM_CPUS=${NUM_CPUS:-8}  
+echo "NUM_CPUS: $NUM_CPUS"
 # launch the master node of ray in container
 export MASTER_ADDR=$(hostname -I | awk '{print $1}')
-ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus ${NUM_GPUS} --num-cpus 8 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
-#--num-cpus 8 
+ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus ${NUM_GPUS} --num-cpus ${NUM_CPUS} --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 # Build the runtime environment JSON with proper variable substitution
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
