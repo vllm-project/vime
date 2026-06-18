@@ -131,9 +131,9 @@ MISC_ARGS=(
 )
 
 # launch the master node of ray in container
-export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
-ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus ${NUM_GPUS} --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
-
+export MASTER_ADDR=$(hostname -I | awk '{print $1}')
+ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus ${NUM_GPUS} --num-cpus 8 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+#--num-cpus 8 
 # Build the runtime environment JSON with proper variable substitution
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
@@ -143,7 +143,7 @@ RUNTIME_ENV_JSON="{
   }
 }"
 
-ray job submit --address="http://127.0.0.1:8265" \
+ray job submit --address="http://${MASTER_ADDR}:8265" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
    -- python3 train.py \
    --train-backend megatron \

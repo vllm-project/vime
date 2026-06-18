@@ -27,13 +27,54 @@ Please execute the following commands to pull the latest image and start an inte
 ```shell
 # Pull the latest image
 docker pull inferactinc/public:vime-latest
+```
+#### Option A: Standard Startup (Recommended):
 
+```shell
 # Start the container
 docker run --rm --gpus all --ipc=host --shm-size=16g \
   --ulimit memlock=-1 --ulimit stack=67108864 \
   -it inferactinc/public:vime-latest /bin/bash
 ```
 
+#### Option B: Docker / Podman Manual Mapping Fallback:
+Use this command if the automated container device (nvidia-ctk cdi generate)
+```shell
+
+docker run --rm --ipc=host \
+   --ulimit memlock=-1 --ulimit stack=67108864 \
+   --pids-limit 8192 \
+   --device /dev/nvidia0 \
+   --device /dev/nvidia1 \
+   --device /dev/nvidia2 \
+   --device /dev/nvidia3 \
+   --device /dev/nvidiactl \
+   --device /dev/nvidia-uvm \
+   --device /dev/nvidia-uvm-tools \
+   -v ~/vime:/root/vime \
+   -v /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro \
+   -v /usr/lib64/libcuda.so.1:/usr/lib/x86_64-linux-gnu/libcuda.so.1:ro \
+   -v /usr/lib64/libnvidia-ml.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro \
+   -v /usr/lib64/libnvidia-ml.so.610.43.02:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.610.43.02:ro \
+   -v /usr/lib64/libcuda.so.610.43.02:/usr/lib/x86_64-linux-gnu/libcuda.so.610.43.02:ro \
+   -it inferactinc/public:vime-latest /bin/bash
+```
+Notes: 
+
+1. make sure `nvidia-smi`, and `nvcc --version` works on host, and verify that the exact library version strings (e.g., 610.43.02) and source paths in the -v flags match your actual host driver configuration.
+2. if you have more than 4GPUs or less you will need to modify the `--device /dev/nvidia*` as needed.
+3. **Increase PID limit with `--pids-limit 8192`**: Ray + vLLM workers create many threads during initialization. The default Docker PID limit (check with `cat /sys/fs/cgroup/pids/pids.max` inside container) may be too low, causing `pthread_create failed: Resource temporarily unavailable` errors.
+4. **Refresh the linker cache after starting the container:**
+
+```bash
+# Inside the container, run this once after starting
+ldconfig
+
+# Verify CUDA libraries are found
+ldconfig -p | grep libcuda
+```
+
+This ensures that Triton (used by vLLM for GPU kernel compilation) can find the manually mounted CUDA libraries. Without this, you'll see `AssertionError: libcuda.so cannot found!` errors during model compilation.                                                                                                            
 ### Install vime
 
 vime is already installed in the docker image. To update to the latest verison, please execute the following command:
@@ -51,7 +92,7 @@ You can download required models and datasets from platforms like Hugging Face, 
 
 ```bash
 # Download model weights (Qwen3-4B)
-hf download zai-org/Qwen3-4B --local-dir /root/Qwen3-4B
+hf download Qwen/Qwen3-4B --local-dir /root/Qwen3-4B
 
 # Download training dataset (dapo-math-17k)
 hf download --repo-type dataset zhuzilin/dapo-math-17k \
@@ -94,8 +135,8 @@ You can use the following script to convert the saved Megatron checkpoints back 
 
 ```bash
 PYTHONPATH=/root/Megatron-LM python tools/convert_torch_dist_to_hf.py \
-  --input-dir /path/to/torch_dist_ckpt/iter_xxx/ \
-  --output-dir /root/Qwen3-4B-iter_xxx \
+  --input-dir /root/Qwen3-4B_torch_dist/release/iter_0000001/ \
+  --output-dir /root/Qwen3-4B-iter_0000001/ \
   --origin-hf-dir /root/Qwen3-4B
 ```
 
