@@ -2,9 +2,7 @@
 """Emit Buildkite steps for the GPU suites selected at the gpu-gate block step.
 
 Piped into `buildkite-agent pipeline upload` by the gpu-suites-upload step in
-pipeline.yml. The suites and their env-var combinations mirror the label-gated
-GPU jobs in .github/workflows/pr-test.yml.j2 (run-ci-short / vllm-config /
-megatron / precision / ckpt); keep them in sync until the GHA jobs are retired.
+pipeline.yml. The suites and their env-var combinations are defined here.
 
 GPU jobs run on the shared `mithril-h100-pool` queue the same way vllm-omni
 uses it: one Kubernetes pod per job via the agent-stack-k8s `kubernetes`
@@ -39,9 +37,7 @@ NODE_INSTANCE_TYPE = "gpu-h100-sxm"
 #     diverges ~12% on ~11% of rollout data (bimodal: most <1.5%, outliers
 #     10-20%). Confirmed same behavior in slime — Megatron FP reduction-order
 #     non-invariance, not a vime bug.
-# soft_fail keeps them running and visible (orange) without failing the
-# build; the GHA label jobs on the self-hosted boxes remain their
-# authoritative gate.
+# soft_fail keeps them running and visible (orange) without failing the build.
 SOFT_FAIL_ON_H100 = {
     "test_qwen3_0.6B_parallel_check.py",
 }
@@ -114,8 +110,7 @@ def gpu_step(suite: str, test_file: str, num_gpus: int, extra_args: str, env: di
     ]
     # anything else in env is passed to the pod verbatim (e.g. allocator knobs)
     pod_env += [{"name": k, "value": v} for k, v in env.items() if k not in vime_flags]
-    # GITHUB_COMMIT_NAME mirrors GHA (<sha>_<pr-number|non-pr>); computed in the
-    # command because it needs shell expansion of BUILDKITE_* at run time.
+    # Set a stable commit identifier for downstream tooling.
     command = "\n".join(
         [
             'PR="${BUILDKITE_PULL_REQUEST:-false}"',
