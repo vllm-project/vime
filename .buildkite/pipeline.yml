@@ -1,0 +1,163 @@
+# Buildkite CI for vime — always-on (CPU) jobs.
+#
+# This pipeline runs the always-on CPU jobs plus a manual block-step gate for
+# the GPU suites. See .buildkite/README.md for one-time setup.
+#
+# Notes that explain the otherwise-cryptic bits below:
+#   * Steps run inside containers (python:3.11 for the CPU suites) because the
+#     elastic-stack agent host's python is not pinned to 3.11.
+#   * $$PWD is escaped so the buildkite-agent expands it at run time instead of
+#     Buildkite interpolating it (to empty) at pipeline-upload time.
+#   * GIT_CONFIG_PARAMETERS marks the host-owned checkout as a safe directory so
+#     git (invoked by pre-commit) doesn't abort with "dubious ownership" when
+#     the container runs as root over a tree owned by the buildkite-agent user.
+#   * Each non-gate step depends_on the pre-commit gate, so a failing lint run
+#     skips the heavier test steps.
+#   * Test files are listed one per line on purpose: with `set -e` the run stops
+#     at the first failure and the log names it.
+
+steps:
+  - label: ":lint-roller: pre-commit"
+    key: pre-commit
+    agents:
+      queue: small_cpu_queue_premerge
+    timeout_in_minutes: 15
+    retry:
+      automatic:
+        - exit_status: -1  # agent lost (fresh instance failed to boot)
+          limit: 2
+    command: |
+      docker run --rm \
+        -e GIT_CONFIG_PARAMETERS="'safe.directory=/workspace'" \
+        -v "$$PWD:/workspace" -w /workspace \
+        python:3.11 bash -c '
+          set -euo pipefail
+          pip install -q pre-commit
+          pre-commit run --all-files --show-diff-on-failure --color=always
+        '
+
+  - label: ":python: plugin contracts & CPU tests"
+    key: plugin-contracts
+    depends_on: pre-commit
+    agents:
+      queue: medium_cpu_queue_premerge
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: -1
+          limit: 2
+    command: |
+      # GLOO/TP_SOCKET_IFNAME=lo: the torch.distributed tests (e.g.
+      # test_metric_report_dist) rendezvous over localhost; inside a
+      # bridge-network container gloo sometimes picks the wrong interface and
+      # hangs until the step times out (build #4). Pin it to loopback.
+      docker run --rm --shm-size=2g \
+        -e GIT_CONFIG_PARAMETERS="'safe.directory=/workspace'" \
+        -e GLOO_SOCKET_IFNAME=lo -e TP_SOCKET_IFNAME=lo \
+        -v "$$PWD:/workspace" -w /workspace \
+        python:3.11 bash -c '
+          set -euo pipefail
+          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle
+          pip install -q -e . --no-deps
+          python tests/test_megatron_argument_validation.py
+          python tests/test_value_temperature.py
+          python tests/test_rollout_validation.py
+          python tests/plugin_contracts/test_plugin_rollout_contracts.py
+          python tests/plugin_contracts/test_plugin_runtime_hook_contracts.py
+          python tests/plugin_contracts/test_plugin_path_loading_contracts.py
+          python tests/plugin_contracts/test_plugin_generate_contracts.py
+          python tests/test_rm_deepscaler.py
+          python tests/test_rm_f1.py
+          python tests/test_rm_gpqa.py
+          python tests/test_rm_math.py
+          python tests/test_rm_math_dapo.py
+          python tests/test_dp_schedule.py
+          python tests/test_cp_utils.py
+          python tests/test_metric_report.py
+          python tests/test_metric_report_dist.py
+          python tests/test_loss_cp_invariance.py
+          python tests/test_sample.py
+          python tests/utils/test_hf_checkpoint_saver.py
+        '
+
+  - label: ":robot_face: agent adapter tests"
+    key: agent-adapter
+    depends_on: pre-commit
+    agents:
+      queue: small_cpu_queue_premerge
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: -1
+          limit: 2
+    command: |
+      docker run --rm --shm-size=2g \
+        -e GIT_CONFIG_PARAMETERS="'safe.directory=/workspace'" \
+        -v "$$PWD:/workspace" -w /workspace \
+        python:3.11 bash -c '
+          set -euo pipefail
+          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle
+          pip install -q openai openai-agents anthropic
+          pip install -q -e . --no-deps
+          python tests/test_agent_trajectory.py
+          python tests/test_agent_adapters.py
+          python tests/test_agent_sdk_adapters.py
+        '
+
+  - label: ":pytest: utils tests"
+    key: utils
+    depends_on: pre-commit
+    agents:
+      queue: medium_cpu_queue_premerge
+    timeout_in_minutes: 45
+    retry:
+      automatic:
+        - exit_status: -1
+          limit: 2
+    command: |
+      docker run --rm --network host --ipc=host \
+        -e GIT_CONFIG_PARAMETERS="'safe.directory=/workspace'" \
+        -v "$$PWD:/workspace" -w /workspace \
+        python:3.11 bash -lc '
+          set -euo pipefail
+          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle
+          pip install -q -e . --no-deps
+          python -m pytest tests/utils
+        '
+
+  # The GPU suites are launched from this manual gate: unblocking presents a
+  # multi-select of suites, and the follow-up step uploads only the selected
+  # ones (see gpu_suites.py). `blocked_state: passed` keeps the build green
+  # when nobody needs GPU suites on a PR.
+  - block: ":rocket: Run GPU test suites?"
+    key: gpu-gate
+    depends_on: pre-commit
+    blocked_state: passed
+    prompt: "Select the suites to run."
+    fields:
+      - select: "GPU suites"
+        key: gpu-suites
+        multiple: true
+        required: true
+        options:
+          - label: "run-ci-short — 4 GPU, 4 tests"
+            value: short
+          - label: "run-ci-vllm-config — 8 GPU, 4 tests"
+            value: vllm-config
+          - label: "run-ci-megatron — 8 GPU, 14 runs"
+            value: megatron
+          - label: "run-ci-precision — 8 GPU, 1 test"
+            value: precision
+          - label: "run-ci-ckpt — 8 GPU, 2 runs"
+            value: ckpt
+
+  - label: ":pipeline: upload selected GPU suites"
+    key: gpu-suites-upload
+    depends_on: gpu-gate
+    agents:
+      queue: small_cpu_queue_premerge
+    timeout_in_minutes: 10
+    command: python3 .buildkite/gpu_suites.py | buildkite-agent pipeline upload
