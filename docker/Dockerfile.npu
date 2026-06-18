@@ -47,6 +47,7 @@ RUN pip uninstall -y \
       vllm vllm-ascend megatron-bridge megatron-core mindspeed mbridge vime || true && \
     git clone https://github.com/vllm-project/vllm.git /root/vllm && \
     git -C /root/vllm checkout "${VLLM_COMMIT}" && \
+    git -C /root/vllm apply --whitespace=nowarn /tmp/npu_patch/vllm.patch && \
     VLLM_TARGET_DEVICE=empty \
       pip install -v -e /root/vllm
 
@@ -82,7 +83,7 @@ RUN git clone https://github.com/ISEEKYAN/mbridge.git /root/mbridge && \
 RUN for patch_file in /root/vime/docker/npu_patch/*.patch; do \
       base="$(basename "${patch_file}")"; \
       case "${base}" in \
-        vllm-ascend.patch) continue ;; \
+        vllm-ascend.patch|vllm.patch) continue ;; \
       esac; \
       if [[ "$(tail -c 1 "${patch_file}" | od -An -t x1 | tr -d ' \n')" != "0a" ]]; then \
         printf '\n' >> "${patch_file}"; \

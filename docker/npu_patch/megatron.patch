@@ -535,3 +535,19 @@ index 9b855effb..90c37c8db 100644
  
  try:
      import wandb  # pylint: disable=unused-import
+
+diff --git a/megatron/training/utils.py b/megatron/training/utils.py
+index 95ad20382..c4d5e6f78 100644
+--- a/megatron/training/utils.py
++++ b/megatron/training/utils.py
+@@ -445,6 +445,8 @@ def is_first_or_last_pipeline_stage(vp_stage):
+ 
+ 
+ def get_device_arch_version():
+     """Returns GPU arch version (8: Ampere, 9: Hopper, 10: Blackwell, ...)"""
++    if hasattr(torch, 'npu') and torch.npu.is_available():
++        return 10  # NPU: treat as Blackwell to avoid CUDA restrictions
+     return torch.cuda.get_device_properties(torch.device("cuda:0")).major
+ 
+ 
+ def append_to_progress_log(string, barrier=True):
