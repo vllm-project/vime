@@ -143,7 +143,9 @@ MISC_ARGS=(
 NUM_CPUS=${NUM_CPUS:-8}  
 echo "NUM_CPUS: $NUM_CPUS"
 # launch the master node of ray in container
-export MASTER_ADDR=$(hostname -I | awk '{print $1}')
+export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"} 
+# If initialization fails, replace 127.0.0.1 with your local network IP
+# export MASTER_ADDR=$(hostname -I | awk '{print $1}')
 ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus ${NUM_GPUS} --num-cpus ${NUM_CPUS} --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 # Build the runtime environment JSON with proper variable substitution
 RUNTIME_ENV_JSON="{
