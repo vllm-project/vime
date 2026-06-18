@@ -4,8 +4,8 @@
 # the GPU suites. See .buildkite/README.md for one-time setup.
 #
 # Notes that explain the otherwise-cryptic bits below:
-#   * Steps run inside containers (python:3.10 for the CPU suites) because the
-#     elastic-stack agent host's python is not pinned to 3.10.
+#   * Steps run inside containers (python:3.11 for the CPU suites) because the
+#     elastic-stack agent host's python is not pinned to 3.11.
 #   * $$PWD is escaped so the buildkite-agent expands it at run time instead of
 #     Buildkite interpolating it (to empty) at pipeline-upload time.
 #   * GIT_CONFIG_PARAMETERS marks the host-owned checkout as a safe directory so
@@ -30,7 +30,7 @@ steps:
       docker run --rm \
         -e GIT_CONFIG_PARAMETERS="'safe.directory=/workspace'" \
         -v "$$PWD:/workspace" -w /workspace \
-        python:3.10 bash -c '
+        python:3.11 bash -c '
           set -euo pipefail
           pip install -q pre-commit
           pre-commit run --all-files --show-diff-on-failure --color=always
@@ -55,7 +55,7 @@ steps:
         -e GIT_CONFIG_PARAMETERS="'safe.directory=/workspace'" \
         -e GLOO_SOCKET_IFNAME=lo -e TP_SOCKET_IFNAME=lo \
         -v "$$PWD:/workspace" -w /workspace \
-        python:3.10 bash -c '
+        python:3.11 bash -c '
           set -euo pipefail
           pip install -q torch --index-url https://download.pytorch.org/whl/cpu
           pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle
@@ -95,7 +95,7 @@ steps:
       docker run --rm --shm-size=2g \
         -e GIT_CONFIG_PARAMETERS="'safe.directory=/workspace'" \
         -v "$$PWD:/workspace" -w /workspace \
-        python:3.10 bash -c '
+        python:3.11 bash -c '
           set -euo pipefail
           pip install -q torch --index-url https://download.pytorch.org/whl/cpu
           pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle
@@ -120,7 +120,7 @@ steps:
       docker run --rm --network host --ipc=host \
         -e GIT_CONFIG_PARAMETERS="'safe.directory=/workspace'" \
         -v "$$PWD:/workspace" -w /workspace \
-        python:3.10 bash -lc '
+        python:3.11 bash -lc '
           set -euo pipefail
           pip install -q torch --index-url https://download.pytorch.org/whl/cpu
           pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle

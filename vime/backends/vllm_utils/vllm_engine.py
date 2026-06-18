@@ -56,16 +56,7 @@ def _response_json(response: requests.Response) -> dict:
     try:
         response.raise_for_status()
     except requests.exceptions.HTTPError as e:
-        note = f"{response.text=}"
-        add_note = getattr(e, "add_note", None)
-        if add_note is not None:
-            add_note(note)
-        else:
-            notes = getattr(e, "__notes__", None)
-            if notes is None:
-                e.__notes__ = [note]
-            else:
-                notes.append(note)
+        e.add_note(f"{response.text=}")
         raise
     # vLLM sleep/wake endpoints may return 200 with an empty body.
     if not response.content or not response.content.strip():

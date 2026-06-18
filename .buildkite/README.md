@@ -15,7 +15,7 @@ build (PR and push to `main`):
 The three test steps depend on the pre-commit gate. Each suite runs its files
 sequentially inside one step because these queues boot a fresh EC2 instance
 per job — a per-file matrix would be mostly boot + pip-install time. All
-always-on CPU steps use the standard `python:3.10` image and install their
+always-on CPU steps use the standard `python:3.11` image and install their
 lightweight dependencies at runtime.
 
 ## Creating the pipeline (one-time, Buildkite UI)
