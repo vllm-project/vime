@@ -12,7 +12,6 @@ https://docs.vllm.ai/en/stable/examples/rl/rlhf_ipc/
 
 from __future__ import annotations
 
-import logging
 import os
 from argparse import Namespace
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -20,8 +19,6 @@ from typing import Any
 
 import ray
 import torch
-
-logger = logging.getLogger(__name__)
 import torch.distributed as dist
 from megatron.core import mpu
 from ray import ObjectRef
@@ -388,7 +385,7 @@ def _send_to_colocated_engine(
 
 
 # ---------------------------------------------------------------------------
-# vLLM worker extension (loaded by ``--worker-extension-cls`` in colocate mode)
+# vLLM worker extension (loaded by ``--worker-extension-cls``)
 # ---------------------------------------------------------------------------
 
 
@@ -403,9 +400,6 @@ class _VLLMHijack:
       (mindspeed/megatron backends introduce flash_attn as a dummy module,
       but vllm_ascend does not use it).
     """
-
-    _npu_worker_patched = False
-    _npu_rotary_patched = False
 
     @staticmethod
     def hijack() -> None:
@@ -422,20 +416,15 @@ class _VLLMHijack:
         IPCWeightTransferEngine.receive_weights = _vime_receive_weights
         IPCWeightTransferEngine._vime_receive_patched = True  # type: ignore[attr-defined]
 
-        _VLLMHijack._patch_npu_worker()
-        _VLLMHijack._patch_npu_rotary_emb()
-
     @staticmethod
     def _patch_npu_worker() -> None:
-        if _VLLMHijack._npu_worker_patched or not is_npu():
+        from vllm_ascend.worker.worker import NPUWorker
+
+        if getattr(NPUWorker, "_npu_worker_patched", False):
             return
-        try:
-            from vllm_ascend.worker.worker import NPUWorker
-        except ImportError:
-            return
+
         _VLLMHijack._patch_one_worker(NPUWorker)
-        _VLLMHijack._npu_worker_patched = True
-        logger.info("vime MoE weight_loader patch: patched NPUWorker")
+        NPUWorker._npu_worker_patched = True
 
     @staticmethod
     def _patch_one_worker(worker_cls: type) -> None:
@@ -470,7 +459,6 @@ class _VLLMHijack:
             if inner_model is None or not hasattr(inner_model, "layers"):
                 return
 
-        patched = False
         for layer in inner_model.layers:
             mlp = getattr(layer, "mlp", None) or getattr(layer, "block_sparse_moe", None)
             if mlp is None:
@@ -482,17 +470,12 @@ class _VLLMHijack:
                 if "w13_weight" in name or "w2_weight" in name:
                     if not hasattr(param, "weight_loader"):
                         param.weight_loader = experts.weight_loader  # type: ignore[attr-defined]
-                        patched = True
-        if patched:
-            logger.info("vime MoE weight_loader patch applied")
 
     @staticmethod
     def _patch_npu_rotary_emb() -> None:
-        if _VLLMHijack._npu_rotary_patched or not is_npu():
-            return
-        try:
-            from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
-        except ImportError:
+        from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+        
+        if getattr(ApplyRotaryEmb, "_npu_rotary_patched", False):
             return
 
         def _npu_rotary_emb_init(
@@ -507,8 +490,7 @@ class _VLLMHijack:
             self.apply_rotary_emb_flash_attn = None
 
         ApplyRotaryEmb.__init__ = _npu_rotary_emb_init  # type: ignore[attr-defined]
-        _VLLMHijack._npu_rotary_patched = True
-        logger.info("vime NPU patch: ApplyRotaryEmb.__init__ patched to skip flash_attn")
+        ApplyRotaryEmb._npu_rotary_patched = True
 
 
 class vLLMColocateWorkerExtension:
@@ -595,3 +577,12 @@ class vLLMColocateWorkerExtension:
         # Ensure the receiver has finished consuming the IPC tensors before
         # the sender drops its reference on the next barrier.
         torch.accelerator.synchronize()
+
+class vLLMWorkerExtension:
+    """vLLM ``--worker-extension-cls`` entry for general bugfix."""
+
+    def __new__(cls, **kwargs):
+        if is_npu():
+            _VLLMHijack._patch_npu_worker()
+            _VLLMHijack._patch_npu_rotary_emb()
+        return super().__new__(cls)
