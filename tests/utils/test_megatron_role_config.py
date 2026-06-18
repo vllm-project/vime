@@ -1,10 +1,20 @@
 """Unit tests for Megatron role config parsing and application."""
 
+import sys
 import tempfile
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 import yaml
+
+_tests_root = Path(__file__).resolve().parents[1]
+if str(_tests_root) not in sys.path:
+    sys.path.insert(0, str(_tests_root))
+
+import _unit_stubs
+
+_unit_stubs.install_rollout_optional_stubs()
 
 
 def _write_yaml(data: dict) -> str:
