@@ -15,7 +15,7 @@ unset http_proxy
 unset https_proxy
 
 
-SCRIPT_DIR="/root/vime/scripts/"
+SCRIPT_DIR="/root/vime/scripts"
 source "${SCRIPT_DIR}/models/qwen3-30B-A3B-npu.sh"
 MODEL_ROOT="${MODEL_ROOT:-/root}"
 
@@ -39,6 +39,7 @@ python /root/vime/train.py \
   --rollout-backend vllm \
   --vllm-weight-sync-mode native \
   --vllm-gpu-memory-utilization 0.7 \
+  --vllm-enable-expert-parallel \
   --vllm-enable-sleep-mode \
   --vllm-max-model-len $((1024 * 20)) \
   \

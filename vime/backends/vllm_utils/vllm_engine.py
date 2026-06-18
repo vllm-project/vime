@@ -457,7 +457,7 @@ def build_vllm_cmd_and_env(server_args: dict[str, Any]) -> tuple[list[str], dict
     else:
         cmd += ["--weight-transfer-config", '{"backend":"nccl"}']
 
-    if getattr(args, "colocate", False) and "--worker-extension-cls" not in cmd:
+    if "--worker-extension-cls" not in cmd:
         cmd += [
             "--worker-extension-cls",
             "vime.backends.megatron_utils.update_weight.update_weight_from_tensor.vLLMColocateWorkerExtension",

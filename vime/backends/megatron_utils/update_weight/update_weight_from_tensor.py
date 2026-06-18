@@ -12,6 +12,7 @@ https://docs.vllm.ai/en/stable/examples/rl/rlhf_ipc/
 
 from __future__ import annotations
 
+import logging
 import os
 from argparse import Namespace
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -19,11 +20,14 @@ from typing import Any
 
 import ray
 import torch
+
+logger = logging.getLogger(__name__)
 import torch.distributed as dist
 from megatron.core import mpu
 from ray import ObjectRef
 from ray.actor import ActorHandle
 
+from vime.utils.common import is_npu
 from vime.utils.distributed_utils import get_gloo_group
 
 from .hf_weight_iterator_base import HfWeightIteratorBase
@@ -389,7 +393,19 @@ def _send_to_colocated_engine(
 
 
 class _VLLMHijack:
-    """Monkey-patch vLLM IPC receive so CUDA IPC handles deserialize on the correct GPU."""
+    """Monkey-patch vLLM IPC receive so CUDA IPC handles deserialize on the correct GPU.
+
+    On NPU only:
+    - Patches NPUWorker.load_model and NPUWorker.start_weight_update to fix
+      MoE weight_loader missing on EP (a vLLM bug where w13_weight/w2_weight
+      params lack weight_loader attr when EP is enabled).
+    - Patches ApplyRotaryEmb.__init__ to skip flash_attn import
+      (mindspeed/megatron backends introduce flash_attn as a dummy module,
+      but vllm_ascend does not use it).
+    """
+
+    _npu_worker_patched = False
+    _npu_rotary_patched = False
 
     @staticmethod
     def hijack() -> None:
@@ -405,6 +421,94 @@ class _VLLMHijack:
 
         IPCWeightTransferEngine.receive_weights = _vime_receive_weights
         IPCWeightTransferEngine._vime_receive_patched = True  # type: ignore[attr-defined]
+
+        _VLLMHijack._patch_npu_worker()
+        _VLLMHijack._patch_npu_rotary_emb()
+
+    @staticmethod
+    def _patch_npu_worker() -> None:
+        if _VLLMHijack._npu_worker_patched or not is_npu():
+            return
+        try:
+            from vllm_ascend.worker.worker import NPUWorker
+        except ImportError:
+            return
+        _VLLMHijack._patch_one_worker(NPUWorker)
+        _VLLMHijack._npu_worker_patched = True
+        logger.info("vime MoE weight_loader patch: patched NPUWorker")
+
+    @staticmethod
+    def _patch_one_worker(worker_cls: type) -> None:
+        import inspect
+        _orig_load_model = worker_cls.load_model
+        _orig_start_weight_update = worker_cls.start_weight_update
+        has_dummy_kw = "load_dummy_weights" in inspect.signature(_orig_load_model).parameters
+
+        if has_dummy_kw:
+            def _patched_load_model(self, *, load_dummy_weights: bool = False, _orig=_orig_load_model) -> None:
+                _orig(self, load_dummy_weights=load_dummy_weights)
+                _VLLMHijack.patch_moe_weight_loader(self.model_runner.model)
+        else:
+            def _patched_load_model(self, _orig=_orig_load_model) -> None:
+                _orig(self)
+                _VLLMHijack.patch_moe_weight_loader(self.model_runner.model)
+
+        def _patched_start_weight_update(self, is_checkpoint_format: bool = True, _orig=_orig_start_weight_update) -> None:
+            _VLLMHijack.patch_moe_weight_loader(self.model_runner.model)
+            _orig(self, is_checkpoint_format=is_checkpoint_format)
+
+        worker_cls.load_model = _patched_load_model  # type: ignore[attr-defined]
+        worker_cls.start_weight_update = _patched_start_weight_update  # type: ignore[attr-defined]
+
+    @staticmethod
+    def patch_moe_weight_loader(model: torch.nn.Module) -> None:
+        inner_model = getattr(model, "model", None) or getattr(model, "language_model", None)
+        if inner_model is None:
+            return
+        if not hasattr(inner_model, "layers"):
+            inner_model = getattr(inner_model, "model", None)
+            if inner_model is None or not hasattr(inner_model, "layers"):
+                return
+
+        patched = False
+        for layer in inner_model.layers:
+            mlp = getattr(layer, "mlp", None) or getattr(layer, "block_sparse_moe", None)
+            if mlp is None:
+                continue
+            experts = getattr(mlp, "experts", None)
+            if experts is None or not hasattr(experts, "weight_loader"):
+                continue
+            for name, param in mlp.named_parameters():
+                if "w13_weight" in name or "w2_weight" in name:
+                    if not hasattr(param, "weight_loader"):
+                        param.weight_loader = experts.weight_loader  # type: ignore[attr-defined]
+                        patched = True
+        if patched:
+            logger.info("vime MoE weight_loader patch applied")
+
+    @staticmethod
+    def _patch_npu_rotary_emb() -> None:
+        if _VLLMHijack._npu_rotary_patched or not is_npu():
+            return
+        try:
+            from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+        except ImportError:
+            return
+
+        def _npu_rotary_emb_init(
+            self,
+            enforce_enable: bool = False,
+            is_neox_style: bool = True,
+            enable_fp32_compute: bool = False,
+        ) -> None:
+            super(ApplyRotaryEmb, self).__init__(enforce_enable=enforce_enable)
+            self.is_neox_style = is_neox_style
+            self.enable_fp32_compute = enable_fp32_compute
+            self.apply_rotary_emb_flash_attn = None
+
+        ApplyRotaryEmb.__init__ = _npu_rotary_emb_init  # type: ignore[attr-defined]
+        _VLLMHijack._npu_rotary_patched = True
+        logger.info("vime NPU patch: ApplyRotaryEmb.__init__ patched to skip flash_attn")
 
 
 class vLLMColocateWorkerExtension:
