@@ -23,11 +23,11 @@ export WORKSPACE=/root
 cd "${WORKSPACE}"
 ```
 
-Vime's Ascend NPU adaptation lives on the **`npu`** branch, so clone that
+Vime's Ascend NPU adaptation lives on the **`ascend`** branch, so clone that
 branch (not `main`):
 
 ```bash
-git clone --branch npu https://github.com/vllm-project/vime.git "${WORKSPACE}/vime"
+git clone --branch ascend https://github.com/vllm-project/vime.git "${WORKSPACE}/vime"
 export PATCH_DIR="${WORKSPACE}/vime/docker/npu_patch"
 ```
 
@@ -39,7 +39,7 @@ Used via `PYTHONPATH` (no editable install); it requires `nvidia-modelopt`.
 ```bash
 export MEGATRON_BRIDGE_COMMIT=3fd3768045422d0aa5c97e90a4e6c659aea9acb9
 export MBRIDGE_COMMIT=89eb10887887bc74853f89a4de258c0702932a1c
-pip install "git+https://ghproxy.com/https://github.com/ISEEKYAN/mbridge.git@${MBRIDGE_COMMIT}" --no-deps
+pip install "git+https://github.com/ISEEKYAN/mbridge.git@${MBRIDGE_COMMIT}" --no-deps
 git clone --branch bridge https://github.com/radixark/Megatron-Bridge.git "${WORKSPACE}/Megatron-Bridge"
 git -C "${WORKSPACE}/Megatron-Bridge" checkout "${MEGATRON_BRIDGE_COMMIT}"
 

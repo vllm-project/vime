@@ -26,7 +26,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HYDRA_FULL_ERROR=1 \
     PYTHONPATH=/root/Megatron-Bridge/src:/root/Megatron-LM:/root/vime
 
-# Patches copied early; vllm-ascend colocate patch is applied after clone, before pip install.
+# Patches copied from build context; always apply from /tmp/npu_patch so local/PR
+# builds use the same files as the build context (not the later git-cloned vime tree).
 COPY docker/npu_patch /tmp/npu_patch
 
 # System and pip dependencies.
@@ -79,8 +80,8 @@ RUN git clone https://gitcode.com/Ascend/MindSpeed.git /root/MindSpeed && \
 RUN git clone https://github.com/ISEEKYAN/mbridge.git /root/mbridge && \
     git -C /root/mbridge checkout "${MBRIDGE_COMMIT}"
 
-# Apply NPU training-stack patches shipped by Vime.
-RUN for patch_file in /root/vime/docker/npu_patch/*.patch; do \
+# Apply NPU training-stack patches from build context (/tmp/npu_patch).
+RUN for patch_file in /tmp/npu_patch/*.patch; do \
       base="$(basename "${patch_file}")"; \
       case "${base}" in \
         vllm-ascend.patch|vllm.patch) continue ;; \
@@ -90,13 +91,13 @@ RUN for patch_file in /root/vime/docker/npu_patch/*.patch; do \
       fi; \
     done && \
     git -C /root/Megatron-LM apply --whitespace=nowarn \
-      /root/vime/docker/npu_patch/meagtron_comm.patch && \
+      /tmp/npu_patch/meagtron_comm.patch && \
     git -C /root/Megatron-LM apply --whitespace=nowarn \
-      /root/vime/docker/npu_patch/megatron.patch && \
+      /tmp/npu_patch/megatron.patch && \
     git -C /root/Megatron-Bridge apply --whitespace=nowarn \
-      /root/vime/docker/npu_patch/megatron-bridge.patch && \
+      /tmp/npu_patch/megatron-bridge.patch && \
     git -C /root/MindSpeed apply --whitespace=nowarn \
-      /root/vime/docker/npu_patch/mindspeed.patch
+      /tmp/npu_patch/mindspeed.patch
 
 # Megatron-Bridge is used directly from PYTHONPATH. Installing its package
 # metadata would pull CUDA-only dependencies into the Ascend environment.
@@ -118,7 +119,7 @@ RUN git clone --depth 1 --branch 2026.6.0 \
     bash build.sh -a kernels && \
     bash build.sh -a memory-saver && \
     pip install --no-deps \
-      output/torch_memory_saver-0.0.8-cp312-cp312-linux_aarch64.whl && \
+      output/torch_memory_saver-*.whl && \
     cd /root && \
     rm -rf /root/sgl-kernel-npu
 

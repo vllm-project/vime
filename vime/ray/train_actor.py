@@ -10,10 +10,10 @@ import torch.distributed as dist
 
 import vime.utils.eval_config
 from vime.ray.ray_actor import RayActor
+from vime.utils.common import is_npu
 from vime.utils.distributed_utils import init_gloo_group
 from vime.utils.logging_utils import configure_logger
 from vime.utils.memory_utils import clear_memory, print_memory
-from vime.utils.common import is_npu
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ def get_local_gpu_id():
         return device_ids[0]
     else:
         return cvd.split(",").index(str(device_ids[0]))
+
 
 class TrainRayActor(RayActor):
     def __init__(self, world_size, rank, master_addr, master_port):

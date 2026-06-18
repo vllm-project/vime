@@ -21,6 +21,7 @@ GPU_MEMORY_TYPE_WEIGHTS = "weights"
 GPU_MEMORY_TYPE_CUDA_GRAPH = "cuda_graph"
 from vime.rollout.base_types import call_rollout_fn
 from vime.utils import logging_utils
+from vime.utils.common import is_npu
 from vime.utils.dp_schedule import build_dp_schedule
 from vime.utils.health_monitor import RolloutHealthMonitor
 from vime.utils.http_utils import _wrap_ipv6, find_available_port, get_host_info, init_http_client
@@ -32,7 +33,6 @@ from vime.utils.types import Sample
 from ..utils.metric_utils import has_repetition
 from .rollout_validation import validate_server_group_gpu_indices
 from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock
-from vime.utils.common import is_npu
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -132,7 +132,7 @@ class ServerGroup:
                 runtime_env={
                     "env_vars": env_vars,
                 },
-                resources={device_name:num_gpus}
+                resources={device_name: num_gpus},
             ).remote(
                 self.args,
                 rank=global_rank,
@@ -384,7 +384,7 @@ class RolloutManager:
 
         init_tracking(args, primary=False)
         device_name = "NPU" if is_npu() else "GPU"
-        self.rollout_engine_lock = Lock.options(num_cpus=1, num_gpus=0, resources={device_name:0}).remote()
+        self.rollout_engine_lock = Lock.options(num_cpus=1, num_gpus=0, resources={device_name: 0}).remote()
         self.rollout_id = -1
 
         self._health_monitors = []

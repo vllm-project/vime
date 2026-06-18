@@ -18,13 +18,12 @@ from tqdm import tqdm
 from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerSendWeightsArgs, NCCLWeightTransferEngine
 from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerSendWeightsArgs, HCCLWeightTransferEngine
 
+from vime.utils.common import is_npu
 from vime.utils.distributed_utils import get_gloo_group
 
 from ..megatron_to_hf import convert_to_hf
 from .common import all_gather_param, named_params_and_buffers
 from .hf_weight_iterator_base import HfWeightIteratorBase
-
-from vime.utils.common import is_npu
 
 logger = logging.getLogger(__name__)
 
@@ -392,6 +391,7 @@ def connect_rollout_engines_from_distributed(
         )
         # 使用HCCLWeightTransferEngine
         from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLWeightTransferEngine
+
         model_update_groups = HCCLWeightTransferEngine.trainer_init(
             {
                 "master_address": master_address,

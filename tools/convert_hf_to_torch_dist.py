@@ -14,9 +14,9 @@ from mbridge import AutoBridge
 from vime.backends.megatron_utils.arguments import set_default_megatron_args
 from vime.backends.megatron_utils.initialize import init
 from vime.backends.megatron_utils.model_provider import get_model_provider_func
+from vime.utils.common import is_npu
 from vime.utils.logging_utils import configure_logger
 from vime.utils.memory_utils import print_memory
-from vime.utils.common import is_npu
 
 
 def add_convertion_args(parser):

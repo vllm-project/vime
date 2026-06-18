@@ -5,8 +5,8 @@ from contextlib import contextmanager
 import torch
 import torch.distributed as dist
 
-from vime.utils.memory_utils import available_memory, clear_memory, print_memory
 from vime.utils.common import is_npu
+from vime.utils.memory_utils import available_memory, clear_memory, print_memory
 
 logger = logging.getLogger(__name__)
 

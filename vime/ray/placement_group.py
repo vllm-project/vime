@@ -6,10 +6,10 @@ import ray
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+from vime.utils.common import is_npu
+
 from .actor_group import RayTrainGroup
 from .rollout import RolloutManager
-
-from vime.utils.common import is_npu
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ def _create_placement_group(num_gpus):
                     placement_group=pg,
                     placement_group_bundle_index=i,
                 ),
-                resources={device_name:1}
+                resources={device_name: 1},
             ).remote()
         )
     gpu_ids = ray.get([actor.get_ip_and_gpu_id.remote() for actor in info_actors])
@@ -197,7 +197,7 @@ def create_rollout_manager(args, pg):
     rollout_manager = RolloutManager.options(
         num_cpus=1,
         # num_gpus=0,
-        resources={device_name:0}
+        resources={device_name: 0},
     ).remote(args, pg)
 
     # calculate num_rollout from num_epoch

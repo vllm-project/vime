@@ -9,8 +9,8 @@ import ray
 import torch
 import torch.distributed as dist
 from vime.utils.common import is_npu
+
 if is_npu():
-    import mindspeed.megatron_adaptor
     from mindspeed.megatron_adaptor import repatch
 from megatron.core import mpu
 from torch_memory_saver import torch_memory_saver
@@ -216,9 +216,7 @@ class MegatronTrainRayActor(TrainRayActor):
         # TODO: this is ugly, move to somewhere else?
         # move tokens to GPU in advance
         device = torch.npu.current_device() if is_npu() else torch.cuda.current_device()
-        rollout_data["tokens"] = [
-            torch.tensor(t, dtype=torch.long, device=device) for t in rollout_data["tokens"]
-        ]
+        rollout_data["tokens"] = [torch.tensor(t, dtype=torch.long, device=device) for t in rollout_data["tokens"]]
         rollout_data["loss_masks"] = [
             torch.tensor(t, dtype=torch.int, device=device) for t in rollout_data["loss_masks"]
         ]

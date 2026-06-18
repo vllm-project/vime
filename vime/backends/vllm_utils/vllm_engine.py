@@ -24,8 +24,8 @@ import requests
 
 from vime.backends.vllm_utils.arguments import SKIPPED_DESTS, get_vllm_cli_action_table
 from vime.ray.ray_actor import RayActor
-from vime.utils.http_utils import get_host_info
 from vime.utils.common import is_npu
+from vime.utils.http_utils import get_host_info
 
 logger = logging.getLogger(__name__)
 
@@ -773,7 +773,7 @@ class VLLMEngine(RayActor):
         if weight_version is not None:
             self._weight_version = str(weight_version)
         return response
-    
+
     def update_weights_chunk(self, update_info: dict) -> dict:
         """POST ``/update_weights_chunk`` with a single named-tensor chunk.
 
@@ -906,7 +906,7 @@ class VLLMEngine(RayActor):
         last_error = None
         for attempt in range(1, 4):
             try:
-                return self._make_request("init_weight_transfer_engine", payload, timeout=init_timeout_s)
+                return self._make_request("init_weight_transfer_engine", payload)
             except Exception as e:
                 last_error = e
                 if attempt < 3:
