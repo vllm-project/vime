@@ -38,7 +38,7 @@ docker run --rm --gpus all --ipc=host --shm-size=16g \
 ```
 
 #### Option B: Docker / Podman Manual Mapping Fallback:
-Use this command if the automated container device (nvidia-ctk cdi generate)
+Use this command if the automated container device generation (nvidia-ctk cdi generate) fails or is not supported:
 ```shell
 
 docker run --rm --ipc=host \
