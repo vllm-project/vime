@@ -216,6 +216,7 @@ def install_vllm_cli_stubs() -> None:
     vllm_mod.__path__ = []
 
     utils_mod = types.ModuleType("vllm.utils")
+    utils_mod.__path__ = []
     argparse_utils = types.ModuleType("vllm.utils.argparse_utils")
 
     import argparse
