@@ -17,18 +17,19 @@ Two helpers:
   - ``grpo_normalize_by_group_index``: replaces the default
     ``_post_process_rewards`` reshape-by-shape logic with a proper
     ``group_index``-keyed grouping. The default at
-    ``vime/ray/rollout.py:_post_process_rewards`` assumes every prompt
-    produced exactly ``n_samples_per_prompt`` samples and reshapes by
-    that constant; when compact/fanout makes the per-prompt count uneven,
-    the reshape fails and the fallback ``view(-1, total)`` collapses
-    everything into ONE group, destroying per-prompt centering.
-    ``group_index`` (set by the data source per-prompt, preserved through
-    ``deepcopy``) is the right key here.
+    ``vime/ray/rollout.py:618`` assumes every prompt produced exactly
+    ``n_samples_per_prompt`` samples and reshapes by that constant; when
+    compact/fanout makes the per-prompt count uneven, the reshape fails
+    and the fallback ``view(-1, total)`` collapses everything into ONE
+    group, destroying per-prompt centering. ``group_index`` (set by the
+    data source per-prompt, preserved through ``deepcopy``) is the right
+    key here.
 """
 
 import copy
 import os
 from collections import defaultdict
+
 
 MAX_FANOUT = 3
 
@@ -41,7 +42,7 @@ COUNTER_FILE_ENV = "VIME_FANOUT_TEST_COUNTER_FILE"
 async def compact_generate(args, sample, sampling_params):
     """One prompt → N siblings, deterministic N = 1 + (index % MAX_FANOUT).
 
-    Strategy: call vLLM once, deepcopy N-1 times. Bounded GPU cost —
+    Strategy: call vllm once, deepcopy N-1 times. Bounded GPU cost —
     we're pinning the framework's per-rollout handling, not generation
     diversity.
     """
@@ -75,7 +76,7 @@ async def compact_generate(args, sample, sampling_params):
 def grpo_normalize_by_group_index(args, samples):
     """Drop-in ``--custom-reward-post-process-path`` for compact/fanout.
 
-    The default ``_post_process_rewards`` (``vime/ray/rollout.py``)
+    The default ``_post_process_rewards`` (``vime/ray/rollout.py:618``)
     reshapes the flat reward tensor as ``(-1, n_samples_per_prompt)``
     when ``total == n_samples_per_prompt * rollout_batch_size``, falling
     back to ``view(-1, total)`` (= one giant group) otherwise. With

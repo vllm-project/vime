@@ -11,7 +11,7 @@ per-sample reward via ``--custom-rm-path`` — the worker calls vime's stock
 :func:`generate_and_rm_group` which dispatches to those.
 
 Concurrency is sourced from ``args.vllm_server_concurrency`` and scaled by
-the number of vLLM engines (``rollout_num_gpus // rollout_num_gpus_per_engine``)
+the number of vllm engines (``rollout_num_gpus // rollout_num_gpus_per_engine``)
 to match the per-sample semaphore cap in :mod:`vime.rollout.vllm_rollout`.
 
 The worker is intentionally oblivious to vime's higher-level pause /
@@ -249,7 +249,7 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> list[li
 
 
 def generate_rollout_fully_async(args, rollout_id, data_buffer, evaluation: bool = False):
-    """vime ``--rollout-function-path`` entrypoint."""
+    """Vime ``--rollout-function-path`` entrypoint."""
 
     if evaluation:
         raise ValueError("fully-async rollout doesn't support evaluation mode")

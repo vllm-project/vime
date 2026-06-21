@@ -555,7 +555,8 @@ class MegatronTrainRayActor(TrainRayActor):
                     logger.info(f"Updating ref model at rollout_id {rollout_id}")
                 self.weights_backuper.backup("ref")
 
-        log_perf_data(rollout_id, self.args)
+        pop_metrics = getattr(self.weight_updater, "pop_metrics", None)
+        log_perf_data(rollout_id, self.args, extra_metrics=pop_metrics() if pop_metrics else None)
 
     @timer
     def save_model(self, rollout_id: int, force_sync: bool = False) -> None:

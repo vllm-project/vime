@@ -12,7 +12,7 @@ def train(args):
     pgs = create_placement_groups(args)
     init_tracking(args)
 
-    # create the rollout manager, with vLLM engines inside.
+    # create the rollout manager, with vllm engines inside.
     # need to initialize rollout manager first to calculate num_rollout
     rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
 

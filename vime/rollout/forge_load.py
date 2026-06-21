@@ -1,5 +1,5 @@
 """Load a forged rollout dump from disk so memory-test runs can keep
-vLLM alive while bypassing real generation.
+vllm alive while bypassing real generation.
 
 Plug in by setting:
   --rollout-function-path vime.rollout.forge_load.generate_rollout
@@ -20,7 +20,7 @@ Unlike --load-debug-rollout-data, this path does NOT set
 skip_vllm=True / debug_train_only=True (see
 vime/utils/arguments.py: skip_vllm computation in _pre_parse_mode and
 the debug_train_only flip when load_debug_rollout_data is set), so
-vLLM servers, router, weight_update and the full colocate
+vllm servers, router, weight_update and the full colocate
 offload/onload dance still run. That is exactly what we want when
 measuring real GPU memory.
 """

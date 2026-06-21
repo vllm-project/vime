@@ -1,7 +1,6 @@
 accelerate
 anthropic
 blobfile
-cloudpickle
 datasets
 e2b
 httpx[http2]
@@ -20,5 +19,5 @@ ring_flash_attn
 safetensors
 tensorboard
 transformers
-vllm-router>=0.1.14
+vllm-router>=0.2.3
 wandb
