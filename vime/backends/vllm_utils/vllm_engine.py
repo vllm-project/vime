@@ -459,7 +459,9 @@ def build_vllm_cmd_and_env(server_args: dict[str, Any]) -> tuple[list[str], dict
 
     if "--worker-extension-cls" not in cmd:
         if getattr(args, "colocate", False):
-            _ext_cls = "vime.backends.megatron_utils.update_weight.update_weight_from_tensor.vLLMColocateWorkerExtension"
+            _ext_cls = (
+                "vime.backends.megatron_utils.update_weight.update_weight_from_tensor.vLLMColocateWorkerExtension"
+            )
         else:
             _ext_cls = "vime.backends.megatron_utils.update_weight.update_weight_from_tensor.vLLMWorkerExtension"
         cmd += [

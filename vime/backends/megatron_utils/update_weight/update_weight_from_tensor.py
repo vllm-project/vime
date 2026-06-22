@@ -429,20 +429,26 @@ class _VLLMHijack:
     @staticmethod
     def _patch_one_worker(worker_cls: type) -> None:
         import inspect
+
         _orig_load_model = worker_cls.load_model
         _orig_start_weight_update = worker_cls.start_weight_update
         has_dummy_kw = "load_dummy_weights" in inspect.signature(_orig_load_model).parameters
 
         if has_dummy_kw:
+
             def _patched_load_model(self, *, load_dummy_weights: bool = False, _orig=_orig_load_model) -> None:
                 _orig(self, load_dummy_weights=load_dummy_weights)
                 _VLLMHijack.patch_moe_weight_loader(self.model_runner.model)
+
         else:
+
             def _patched_load_model(self, _orig=_orig_load_model) -> None:
                 _orig(self)
                 _VLLMHijack.patch_moe_weight_loader(self.model_runner.model)
 
-        def _patched_start_weight_update(self, is_checkpoint_format: bool = True, _orig=_orig_start_weight_update) -> None:
+        def _patched_start_weight_update(
+            self, is_checkpoint_format: bool = True, _orig=_orig_start_weight_update
+        ) -> None:
             _VLLMHijack.patch_moe_weight_loader(self.model_runner.model)
             _orig(self, is_checkpoint_format=is_checkpoint_format)
 
@@ -474,7 +480,7 @@ class _VLLMHijack:
     @staticmethod
     def _patch_npu_rotary_emb() -> None:
         from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
-        
+
         if getattr(ApplyRotaryEmb, "_npu_rotary_patched", False):
             return
 
@@ -577,6 +583,7 @@ class vLLMColocateWorkerExtension:
         # Ensure the receiver has finished consuming the IPC tensors before
         # the sender drops its reference on the next barrier.
         torch.accelerator.synchronize()
+
 
 class vLLMWorkerExtension:
     """vLLM ``--worker-extension-cls`` entry for general bugfix."""
