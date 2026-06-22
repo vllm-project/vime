@@ -6,7 +6,6 @@ FROM ${BASE_IMAGE}
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 WORKDIR /root
 
-ARG VLLM_COMMIT=9090368b650896bf5fc990c921df7eb4c20355a5
 ARG MEGATRON_COMMIT=3714d81d418c9f1bca4594fc35f9e8289f652862
 ARG MEGATRON_BRIDGE_COMMIT=3fd3768045422d0aa5c97e90a4e6c659aea9acb9
 ARG MINDSPEED_COMMIT=fc63de5c48426dd019c3b3f39e65f5bdf56e4086
@@ -43,19 +42,21 @@ RUN sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' \
       "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi" && \
     git config --global http.version HTTP/1.1
 
-# vLLM: fixed, verified commit.
+# Clone vllm and vllm-ascend sources.
 RUN pip uninstall -y \
       vllm vllm-ascend megatron-bridge megatron-core mindspeed mbridge vime || true && \
     git clone https://github.com/vllm-project/vllm.git /root/vllm && \
-    git -C /root/vllm checkout "${VLLM_COMMIT}" && \
-    git -C /root/vllm apply --whitespace=nowarn /tmp/npu_patch/vllm.patch && \
-    VLLM_TARGET_DEVICE=empty \
-      pip install -v -e /root/vllm
+    git clone --depth 1 --branch main \
+      https://github.com/vllm-project/vllm-ascend.git /root/vllm-ascend
 
-# vLLM Ascend: same as npu branch, then apply colocate patch before install.
-RUN git clone --depth 1 --branch main \
-      https://github.com/vllm-project/vllm-ascend.git /root/vllm-ascend && \
-    git -C /root/vllm-ascend submodule update --init --recursive && \
+# Switch vllm to the vllm-ascend verified commit, apply the NPU patch, install.
+RUN VLLM_COMMIT=$(cat /root/vllm-ascend/.github/vllm-main-verified.commit) && \
+      git -C /root/vllm checkout "${VLLM_COMMIT}" && \
+      git -C /root/vllm apply --whitespace=nowarn /tmp/npu_patch/vllm.patch && \
+      VLLM_TARGET_DEVICE=empty pip install -v -e /root/vllm
+
+# vLLM Ascend: apply colocate patch before install.
+RUN git -C /root/vllm-ascend submodule update --init --recursive && \
     git -C /root/vllm-ascend apply --whitespace=nowarn /tmp/npu_patch/vllm-ascend.patch && \
     pip install -v -e /root/vllm-ascend
 
@@ -106,6 +107,11 @@ RUN pip install --no-build-isolation "nvidia-modelopt[torch]>=0.37.0" && \
     pip install --no-deps --no-build-isolation -e /root/Megatron-LM && \
     pip install --no-deps --no-build-isolation -e /root/MindSpeed
 
+# Install the Vime's dependency - vllm-router
+RUN pip install \
+      -i https://mirrors.aliyun.com/pypi/simple/ \
+      vllm-router>=0.1.14
+
 # ring_flash_attn is a CUDA extension and is not used on Ascend.
 RUN pip install \
       --constraint /tmp/vime-npu-constraints.txt \
@@ -125,7 +131,7 @@ RUN git clone --depth 1 --branch 2026.6.0 \
 
 # Minimal import check.
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    python3 -c 'import megatron, mindspeed, torch_memory_saver, vime, vllm, vllm_ascend; from megatron.bridge import AutoBridge'
+    python3 -c 'import megatron, mindspeed, torch_memory_saver, vime, vllm, vllm_ascend;'
 
 WORKDIR /root/vime
 ENTRYPOINT []
