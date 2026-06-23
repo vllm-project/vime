@@ -14,6 +14,9 @@ if str(_tests_root) not in sys.path:
 import _unit_stubs
 import pytest
 
+_real_vllm = _unit_stubs.real_module_available("vllm")
+requires_vllm = pytest.mark.skipif(not _real_vllm, reason="requires real vllm install")
+
 _unit_stubs.install_vllm_cli_stubs()
 
 NUM_GPUS = 0
@@ -155,6 +158,7 @@ def _patch_device_config(monkeypatch):
 
 
 @pytest.mark.unit
+@requires_vllm
 def test_add_vllm_arguments_prefixes_regular_engine_flags(args_mod, monkeypatch):
     _patch_device_config(monkeypatch)
     parser = argparse.ArgumentParser(add_help=False)
@@ -183,6 +187,7 @@ def test_add_vllm_arguments_skips_orchestrator_owned_fields(args_mod, monkeypatc
 
 
 @pytest.mark.unit
+@requires_vllm
 def test_add_vllm_arguments_parses_prefixed_engine_values(args_mod, monkeypatch):
     _patch_device_config(monkeypatch)
     parser = argparse.ArgumentParser(add_help=False)

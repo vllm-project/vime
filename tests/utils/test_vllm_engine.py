@@ -23,6 +23,12 @@ from vime.backends.vllm_utils import vllm_engine as mod
 NUM_GPUS = 0
 
 
+@pytest.fixture(autouse=True)
+def _patch_vllm_server_fields(monkeypatch):
+    """Stub _VLLM_SERVER_FIELDS so tests don't need a real vllm install."""
+    monkeypatch.setattr(mod, "_VLLM_SERVER_FIELDS", frozenset())
+
+
 @pytest.fixture
 def vllm_args() -> SimpleNamespace:
     return SimpleNamespace(

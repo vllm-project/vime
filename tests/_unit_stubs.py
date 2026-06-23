@@ -237,14 +237,57 @@ def install_vllm_cli_stubs() -> None:
 
     arg_utils.AsyncEngineArgs = AsyncEngineArgs
     engine_mod.arg_utils = arg_utils
+    system_utils_mod = types.ModuleType("vllm.utils.system_utils")
+    system_utils_mod.kill_process_tree = lambda pid, include_parent=True: None  # noqa: ARG005
+    utils_mod.system_utils = system_utils_mod
+
+    # vllm.entrypoints stubs (used by arguments.add_vllm_arguments and vllm_engine._vllm_server_field_names)
+    entrypoints_mod = types.ModuleType("vllm.entrypoints")
+    entrypoints_mod.__path__ = []
+    openai_mod = types.ModuleType("vllm.entrypoints.openai")
+    openai_mod.__path__ = []
+    cli_args_mod = types.ModuleType("vllm.entrypoints.openai.cli_args")
+
+    import dataclasses as _dc
+
+    @_dc.dataclass
+    class FrontendArgs:
+        @classmethod
+        def add_cli_args(cls, parser):  # noqa: ARG003
+            return parser
+
+    cli_args_mod.FrontendArgs = FrontendArgs
+    cli_args_mod.make_arg_parser = lambda parser=None: parser
+    cli_args_mod.validate_parsed_serve_args = lambda args: args
+    openai_mod.cli_args = cli_args_mod
+    entrypoints_mod.openai = openai_mod
+    vllm_mod.entrypoints = entrypoints_mod
+
+    cli_mod = types.ModuleType("vllm.entrypoints.cli")
+    cli_mod.__path__ = []
+    serve_mod = types.ModuleType("vllm.entrypoints.cli.serve")
+
+    class ServeSubcommand:
+        pass
+
+    serve_mod.ServeSubcommand = ServeSubcommand
+    cli_mod.serve = serve_mod
+    entrypoints_mod.cli = cli_mod
+
     vllm_mod.engine = engine_mod
     vllm_mod.utils = utils_mod
 
     sys.modules["vllm"] = vllm_mod
     sys.modules["vllm.utils"] = utils_mod
     sys.modules["vllm.utils.argparse_utils"] = argparse_utils
+    sys.modules["vllm.utils.system_utils"] = system_utils_mod
     sys.modules["vllm.engine"] = engine_mod
     sys.modules["vllm.engine.arg_utils"] = arg_utils
+    sys.modules["vllm.entrypoints"] = entrypoints_mod
+    sys.modules["vllm.entrypoints.openai"] = openai_mod
+    sys.modules["vllm.entrypoints.openai.cli_args"] = cli_args_mod
+    sys.modules["vllm.entrypoints.cli"] = cli_mod
+    sys.modules["vllm.entrypoints.cli.serve"] = serve_mod
 
 
 def install_triton_stub() -> None:
