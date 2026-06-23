@@ -108,13 +108,6 @@ def filter_long_prompt(origin_samples: list[Sample], tokenizer, processor, max_l
             from vime.utils.processing_utils import build_processor_kwargs
 
             for sample in multimodal:
-                # Reuse the multimodal inputs already extracted during dataset
-                # construction. When apply_chat_template is set, sample.prompt is
-                # the rendered *string*, not a conversation list, so re-running
-                # process_vision_info on it would crash (it expects a list of
-                # message dicts). build_processor_kwargs mirrors how the rollout
-                # path (vllm_rollout) tokenizes multimodal prompts, so the length
-                # measured here matches the real pipeline.
                 processor_kwargs = build_processor_kwargs(sample.multimodal_inputs)
                 processor_output = processor(text=sample.prompt, **processor_kwargs)
                 input_ids = processor_output["input_ids"][0]
