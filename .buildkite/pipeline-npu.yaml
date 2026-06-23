@@ -1,0 +1,46 @@
+# buildkite-agent pipeline upload .buildkite/pipeline-npu.yaml
+
+# This pipeline is for running NPU tests on PRs . 
+steps:
+  - group: ":card_index_dividers: npu test"
+    key: npu-test-steps
+    steps:
+      - label: ":pytest: NPU tests"
+        key: npu-tests
+        agents:
+          queue: "ascend-a3"
+          resource_class: "npu-2"
+        plugins:
+          - kubernetes:
+              podSpec:
+                containers:
+                  - image: "quay.io/ascend/vime:vime-latest"
+                    volumeMounts:
+                      - name: devshm
+                        mountPath: /dev/shm
+                      - name: hf-cache
+                        mountPath: /root/.cache/huggingface
+                    env:
+                      - name: HF_HOME
+                        value: /root/.cache/huggingface
+                      - name: VIME_TEST_ENABLE_INFINITE_RUN
+                        value: "false"
+                      # Expand additional pod_env variables here as needed, e.g.:
+                      # - name: VIME_TEST_USE_DEEPEP
+                      #   value: "0"
+                volumes:
+                  - name: devshm
+                    emptyDir:
+                      medium: Memory
+                  - name: hf-cache
+                    hostPath:
+                      path: /mnt/hf-cache
+                      type: DirectoryOrCreate
+        timeout_in_minutes: 60
+        # The npu test cases to be executed have not been determined yet.
+        command: |
+            PR="${BUILDKITE_PULL_REQUEST:-false}"
+            [ "$PR" = "false" ] && PR="non-pr"
+            export GITHUB_COMMIT_NAME="${BUILDKITE_COMMIT}_${PR}"
+            pip install -e . --no-deps --break-system-packages
+            python -c "print('test-npu')"
