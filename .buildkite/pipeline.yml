@@ -127,6 +127,15 @@ steps:
           pip install -q -e . --no-deps
           python -m pytest tests/utils
         '
+  - label: ":pipeline: npu tests"
+    key: npu
+    depends_on: pre-commit
+    agents:
+      queue: "ascend-a3"
+      resource_class: "npu-1"
+    timeout_in_minutes: 45
+    command: 
+      buildkite-agent pipeline upload .buildkite/pipeline-npu.yaml
 
   # The GPU suites are launched from this manual gate: unblocking presents a
   # multi-select of suites, and the follow-up step uploads only the selected

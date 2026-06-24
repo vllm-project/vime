@@ -2,29 +2,8 @@
 
 # This pipeline is for running NPU tests on PRs . 
 steps:
-  - label: ":lint-roller: pre-commit"
-    key: pre-commit
-    agents:
-      queue: ascend-a3
-      resource_class: "npu-1"
-    timeout_in_minutes: 15
-    retry:
-      automatic:
-        - exit_status: -1  # agent lost (fresh instance failed to boot)
-          limit: 2
-    command: |
-      docker run --rm \
-        -e GIT_CONFIG_PARAMETERS="'safe.directory=/workspace'" \
-        -v "$$PWD:/workspace" -w /workspace \
-        python:3.11 bash -c '
-          set -euo pipefail
-          pip install -q pre-commit
-          pre-commit run --all-files --show-diff-on-failure --color=always
-        '
-
   - label: ":pipeline: Run NPU test"
     key: npu-tests
-    depends_on: pre-commit
     agents:
       queue: "ascend-a3"
       resource_class: "npu-8"
