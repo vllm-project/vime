@@ -13,7 +13,7 @@ export VLLM_ASCEND_ENABLE_NZ=0
 SCRIPT_DIR="/root/vime/scripts/"
 source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 LOG_FILE="/root/vime/train_qwen3_4b_vllm.log"
-MODEL_ROOT="${MODEL_ROOT:-/root}"
+MODEL_ROOT="${HF_HOME:-/root}"
 
 python /root/vime/train.py \
   --train-backend megatron \

@@ -2,45 +2,66 @@
 
 # This pipeline is for running NPU tests on PRs . 
 steps:
-  - group: ":card_index_dividers: npu test"
-    key: npu-test-steps
-    steps:
-      - label: ":pytest: NPU tests"
-        key: npu-tests
-        agents:
-          queue: "ascend-a3"
-          resource_class: "npu-2"
-        plugins:
-          - kubernetes:
-              podSpec:
-                containers:
-                  - image: "quay.io/ascend/vime:vime-latest"
-                    volumeMounts:
-                      - name: devshm
-                        mountPath: /dev/shm
-                      - name: hf-cache
-                        mountPath: /root/.cache/huggingface
-                    env:
-                      - name: HF_HOME
-                        value: /root/.cache/huggingface
-                      - name: VIME_TEST_ENABLE_INFINITE_RUN
-                        value: "false"
-                      # Expand additional pod_env variables here as needed, e.g.:
-                      # - name: VIME_TEST_USE_DEEPEP
-                      #   value: "0"
-                volumes:
-                  - name: devshm
-                    emptyDir:
-                      medium: Memory
-                  - name: hf-cache
-                    hostPath:
-                      path: /mnt/hf-cache
-                      type: DirectoryOrCreate
-        timeout_in_minutes: 60
-        # The npu test cases to be executed have not been determined yet.
-        command: |
-            PR="${BUILDKITE_PULL_REQUEST:-false}"
-            [ "$PR" = "false" ] && PR="non-pr"
-            export GITHUB_COMMIT_NAME="${BUILDKITE_COMMIT}_${PR}"
-            pip install -e . --no-deps --break-system-packages
-            python -c "print('test-npu')"
+  - label: ":lint-roller: pre-commit"
+    key: pre-commit
+    agents:
+      queue: ascend-a3
+      resource_class: "npu-1"
+    timeout_in_minutes: 15
+    retry:
+      automatic:
+        - exit_status: -1  # agent lost (fresh instance failed to boot)
+          limit: 2
+    command: |
+      docker run --rm \
+        -e GIT_CONFIG_PARAMETERS="'safe.directory=/workspace'" \
+        -v "$$PWD:/workspace" -w /workspace \
+        python:3.11 bash -c '
+          set -euo pipefail
+          pip install -q pre-commit
+          pre-commit run --all-files --show-diff-on-failure --color=always
+        '
+
+  - label: ":pipeline: Run NPU test"
+    key: npu-tests
+    depends_on: pre-commit
+    agents:
+      queue: "ascend-a3"
+      resource_class: "npu-8"
+    timeout_in_minutes: 60
+    command: |
+      set -euo pipefail
+      docker info || (echo "Docker not running" && exit 1)
+      mkdir -p /mnt/hf-cache
+      docker run --rm \
+        --name "vime-test-${BUILDKITE_BUILD_NUMBER}" \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /dev/shm:/dev/shm \
+        -v /mnt/hf-cache:/root/.cache/huggingface \
+        -e HF_HOME=/root/.cache/huggingface \
+        -e VIME_TEST_ENABLE_INFINITE_RUN=false \
+        -e BUILDKITE_PULL_REQUEST="${BUILDKITE_PULL_REQUEST:-false}" \
+        -e BUILDKITE_COMMIT="${BUILDKITE_COMMIT}" \
+        -e GITHUB_COMMIT_NAME="${BUILDKITE_COMMIT}_${BUILDKITE_PULL_REQUEST:-non-pr}" \
+        --network host \
+        quay.io/ascend/vime:vime-latest \
+        bash -c "
+          set -euo pipefail
+          cd /root/vime
+          if [ -n \"${BUILDKITE_COMMIT}\" ]; then
+            git fetch origin ${BUILDKITE_COMMIT}
+            git checkout ${BUILDKITE_COMMIT}
+            pip install -e . --no-deps --break-system-packages || pip install -e . --no-deps
+          fi
+          hf download Qwen/Qwen3-4B
+          hf download --repo-type dataset zhuzilin/dapo-math-17k
+          bash scripts/run-qwen3-4B-npu.sh
+        "
+
