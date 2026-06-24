@@ -132,7 +132,7 @@ steps:
     depends_on: pre-commit
     agents:
       queue: "ascend-a3"
-      resource_class: "npu-1"
+      resource_class: "npu-2"
     timeout_in_minutes: 45
     command: 
       buildkite-agent pipeline upload .buildkite/pipeline-npu.yaml
