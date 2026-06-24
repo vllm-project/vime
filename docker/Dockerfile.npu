@@ -98,7 +98,7 @@ RUN for patch_file in /tmp/npu_patch/*.patch; do \
       fi; \
     done && \
     git -C /root/Megatron-LM apply --whitespace=nowarn \
-      /tmp/npu_patch/meagtron_comm.patch && \
+      /tmp/npu_patch/megatron_comm.patch && \
     git -C /root/Megatron-LM apply --whitespace=nowarn \
       /tmp/npu_patch/megatron.patch && \
     git -C /root/Megatron-Bridge apply --whitespace=nowarn \

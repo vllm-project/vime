@@ -41,15 +41,14 @@ export RAY_DISABLE_SIGINT_OVERRIDE=1
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/nnal/atb/latest/atb/cxx_abi_1/lib:/usr/local/Ascend/cann/lib64:${LD_LIBRARY_PATH}
 
-# SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 SCRIPT_DIR="/root/vime/scripts/"
 source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 
 CKPT_ARGS=(
    --hf-checkpoint /root/Qwen3-4B
    --ref-load /root/Qwen3-4B
-   --load /root/Qwen3-4B_vime_npu/
-   --save /root/Qwen3-4B_vime_npu/
+   --load /root/Qwen3-4B/
+   --save /root/Qwen3-4B/
    --save-interval 20
    --no-load-optim
    --megatron-to-hf-mode bridge
@@ -83,7 +82,6 @@ PERF_ARGS=(
    --recompute-num-layers 1
    --use-dynamic-batch-size
    --max-tokens-per-gpu 8192
-   --load /root/Qwen3-4B
    --megatron-to-hf-mode bridge
 )
 

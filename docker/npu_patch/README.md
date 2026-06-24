@@ -56,7 +56,7 @@ export MEGATRON_COMMIT=3714d81d418c9f1bca4594fc35f9e8289f652862
 git clone https://github.com/NVIDIA/Megatron-LM.git "${WORKSPACE}/Megatron-LM"
 git -C "${WORKSPACE}/Megatron-LM" checkout "${MEGATRON_COMMIT}"
 
-git -C "${WORKSPACE}/Megatron-LM" apply --whitespace=nowarn "${PATCH_DIR}/meagtron_comm.patch"
+git -C "${WORKSPACE}/Megatron-LM" apply --whitespace=nowarn "${PATCH_DIR}/megatron_comm.patch"
 git -C "${WORKSPACE}/Megatron-LM" apply --whitespace=nowarn "${PATCH_DIR}/megatron.patch"
 
 pip install --no-deps --no-build-isolation -e "${WORKSPACE}/Megatron-LM"
