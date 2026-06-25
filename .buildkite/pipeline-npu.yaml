@@ -61,7 +61,7 @@ steps:
             echo "Installing buildctl..."
             mkdir -p /tmp/buildkit
             BUILDKIT_VERSION="v0.29.0"
-            wget -q "https://github.com/moby/buildkit/releases/download/$${BUILDKIT_VERSION}/buildkit-$${BUILDKIT_VERSION}.linux-arm64.tar.gz" -O /tmp/buildkit.tar.gz
+            wget -q "https://gh-proxy.test.osinfra.cn/https://github.com/moby/buildkit/releases/download/$${BUILDKIT_VERSION}/buildkit-$${BUILDKIT_VERSION}.linux-arm64.tar.gz" -O /tmp/buildkit.tar.gz
             tar -xzf /tmp/buildkit.tar.gz -C /tmp/buildkit
             cp /tmp/buildkit/bin/buildctl /usr/local/bin/
           fi
@@ -89,7 +89,7 @@ steps:
         depends_on: image-build-npu
         agents:
           queue: "ascend-a3"
-          resource_class: "npu-8"
+          resource_class: "npu-2"
         image: "swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/vime-ci-npu:${BUILDKITE_COMMIT}"
         timeout_in_minutes: 60
         plugins:
