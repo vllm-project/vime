@@ -330,7 +330,9 @@ class VLLMEngine(RayActor):
     def set_weight_version(self, new_version: str):
         self._weight_version = str(new_version)
 
-    def release_memory_occupation(self, level: int = 2):
+    def release_memory_occupation(self, level: int | None = None):
+        if level is None:
+            level = 1 if getattr(self.args, "lora_rank", 0) > 0 else 2
         self.flush_cache()
         response = requests.post(f"http://{self.server_host}:{self.server_port}/sleep", params={"level": level})
         response.raise_for_status()
