@@ -9,7 +9,7 @@ steps:
         key: image-build
         agents:
           queue: "ascend-a3"
-          resource_class: "npu-1"
+          resource_class: "npu-2"
         plugins:
           - kubernetes:
               metadata:
