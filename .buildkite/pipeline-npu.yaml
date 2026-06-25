@@ -26,15 +26,15 @@ steps:
           BUILDKITE_COMMIT: "${BUILDKITE_COMMIT}"
           GITHUB_COMMIT_NAME: "${BUILDKITE_COMMIT}_${BUILDKITE_PULL_REQUEST:-non-pr}"
           HF_TOKEN: "${HF_TOKEN}"
-    command: |
-      set -euo pipefail
-      cd /root/vime
-      if [ -n \"${BUILDKITE_COMMIT}\" ]; then
-        git fetch origin ${BUILDKITE_COMMIT}
-        git checkout ${BUILDKITE_COMMIT}
-        pip install -e . --no-deps --break-system-packages || pip install -e . --no-deps
-      fi
-      hf download Qwen/Qwen3-4B
-      hf download --repo-type dataset zhuzilin/dapo-math-17k
-      bash scripts/run-qwen3-4B-npu.sh
+        command: |
+          set -euo pipefail
+          cd /root/vime
+          if [ -n \"${BUILDKITE_COMMIT}\" ]; then
+            git fetch origin ${BUILDKITE_COMMIT}
+            git checkout ${BUILDKITE_COMMIT}
+            pip install -e . --no-deps --break-system-packages || pip install -e . --no-deps
+          fi
+          hf download Qwen/Qwen3-4B
+          hf download --repo-type dataset zhuzilin/dapo-math-17k
+          bash scripts/run-qwen3-4B-npu.sh
 
