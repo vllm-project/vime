@@ -6,7 +6,7 @@ steps:
     key: npu-tests
     steps:
       - label: ":buildkit: Build and Push NPU Test Image - A3"
-        key: image-build
+        key: image-build-npu
         agents:
           queue: "ascend-a3"
           resource_class: "npu-2"
@@ -86,6 +86,7 @@ steps:
 
       - label: "qwen3-4B-npu test"
         key: qwen3-4B-npu
+        depends_on: image-build-npu
         agents:
           queue: "ascend-a3"
           resource_class: "npu-8"
