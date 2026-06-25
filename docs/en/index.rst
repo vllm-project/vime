@@ -41,6 +41,7 @@ vime is built on `slime <https://github.com/THUDM/slime>`_, the RL framework beh
    advanced/reproducibility.md
    advanced/fault-tolerance.md
    advanced/pd-disaggregation.md
+   advanced/mooncake-store-transfer.md
    advanced/vllm-config.md
    advanced/megatron-config.md
    advanced/arch-support-beyond-megatron.md

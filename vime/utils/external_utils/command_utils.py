@@ -6,6 +6,7 @@ import datetime
 import json
 import os
 import random
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,11 @@ from vime.utils.misc import exec_command
 _ = exec_command, dataclass_cli
 
 repo_base_dir = Path(os.path.abspath(__file__)).resolve().parents[3]
+
+
+def _ray_cli() -> str:
+    """Use ``python -m ray`` so broken venv entrypoint shebangs do not break CI scripts."""
+    return f"{sys.executable} -m ray.scripts.scripts"
 
 
 def convert_checkpoint(
@@ -73,6 +79,20 @@ def hf_download_dataset(full_name: str):
     exec_command(f"hf download --repo-type dataset {full_name} --local-dir /root/datasets/{partial_name}")
 
 
+def ms_download_model(model_id: str, local_dir: str):
+    exec_command(
+        "python -c "
+        f"\"from modelscope import snapshot_download; snapshot_download('{model_id}', local_dir='{local_dir}')\""
+    )
+
+
+def ms_download_dataset(dataset_id: str, local_dir: str | None = None):
+    partial_name = dataset_id.split("/")[-1]
+    local_dir = local_dir or f"/root/datasets/{partial_name}"
+    exec_command(f"mkdir -p {local_dir}")
+    exec_command(f"modelscope download --dataset {dataset_id} --local_dir {local_dir}")
+
+
 def fp8_cast_bf16(path_src, path_dst):
     if Path(path_dst).exists():
         print(f"fp8_cast_bf16 skip {path_dst} since exists")
@@ -112,7 +132,7 @@ def execute_train(
         # the renamed children too; the [v]/[M] brackets avoid matching pkill itself.
         "pkill -9 vllm; "
         "sleep 3; "
-        f"{'' if external_ray else 'ray stop --force; '}"
+        f"{'' if external_ray else f'{_ray_cli()} stop --force; '}"
         f"{'' if external_ray else 'pkill -9 ray; '}"
         "pkill -9 vime; "
         "sleep 3; "
@@ -126,7 +146,7 @@ def execute_train(
         exec_command(
             # will prevent ray from buffering stdout/stderr
             f"export PYTHONUNBUFFERED=1 && "
-            f"ray start --head --node-ip-address {master_addr} --num-gpus {num_gpus_per_node} --disable-usage-stats"
+            f"{_ray_cli()} start --head --node-ip-address {master_addr} --num-gpus {num_gpus_per_node} --port 6380 --disable-usage-stats"
         )
 
     if (f := before_ray_job_submit) is not None:
@@ -166,9 +186,9 @@ def execute_train(
         exec_command(
             f"export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && "
             f"{cmd_megatron_model_source}"
-            f'ray job submit --address="http://127.0.0.1:8265" '
+            f'{_ray_cli()} job submit --address="http://127.0.0.1:8265" '
             f"--runtime-env-json='{runtime_env_json}' "
-            f"-- python3 {train_script} "
+            f"-- {sys.executable} {train_script} "
             f"{'${MODEL_ARGS[@]}' if megatron_model_type is not None else ''} "
             f"{train_args}"
         )
