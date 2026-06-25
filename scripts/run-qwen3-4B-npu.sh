@@ -1,3 +1,12 @@
+# Sort NPU devices
+if [ -n "$ASCEND_VISIBLE_DEVICES" ]; then
+    SORTED_DEVICES=$(echo "$ASCEND_VISIBLE_DEVICES" | tr ',' '\n' | sort -n | tr '\n' ',')
+    SORTED_DEVICES=${SORTED_DEVICES%,}
+    export ASCEND_VISIBLE_DEVICES="$SORTED_DEVICES"
+    export ASCEND_RT_VISIBLE_DEVICES="$SORTED_DEVICES"
+    echo "Sorted ASCEND_VISIBLE_DEVICES: $ASCEND_VISIBLE_DEVICES"
+fi
+
 export SLIME_SCRIPT_TRAIN_BACKEND=megatron
 export PYTHONPATH="/root/Megatron-Bridge/src:/root/Megatron-LM/:$PYTHONPATH"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
@@ -9,13 +18,45 @@ export HYDRA_FULL_ERROR=1
 export MASTER_PORT=$(shuf -i 20000-65000 -n 1)  # or any free port
 export DISABLE_L2_CACHE=1
 export VLLM_ASCEND_ENABLE_NZ=0
+export VLLM_DISABLE_COMPILE_CACHE=1
 
 SCRIPT_DIR="/root/vime/scripts/"
 source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 LOG_FILE="/root/vime/train_qwen3_4b_vllm.log"
-MODEL_ROOT="${HF_HOME:-/root}"
+MODEL_ROOT="${MODEL_ROOT:-/root}"
 
-python /root/vime/train.py \
+python <<'PYEOF'
+import os, json
+env_vars = {
+    'ASCEND_VISIBLE_DEVICES': os.environ['ASCEND_VISIBLE_DEVICES'],
+    'ASCEND_RT_VISIBLE_DEVICES': os.environ['ASCEND_RT_VISIBLE_DEVICES'],
+    'LD_LIBRARY_PATH': os.environ.get('LD_LIBRARY_PATH', ''),
+    'PYTHONPATH': os.environ.get('PYTHONPATH', ''),
+    'ASCEND_OPP_PATH': os.environ.get('ASCEND_OPP_PATH', ''),
+    'ASCEND_AICPU_PATH': os.environ.get('ASCEND_AICPU_PATH', ''),
+    'ASCEND_HOME_PATH': os.environ.get('ASCEND_HOME_PATH', ''),
+    'ASCEND_TOOLKIT_HOME': os.environ.get('ASCEND_TOOLKIT_HOME', ''),
+    'HCCL_EXEC_TIMEOUT': os.environ.get('HCCL_EXEC_TIMEOUT', '1800'),
+    'RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES': '1',
+    'HCCL_HOST_SOCKET_PORT_RANGE': '60000-60050',
+    'HCCL_NPU_SOCKET_PORT_RANGE': '61000-61050',
+    'HCCL_CONNECT_TIMEOUT': '7200',
+    'VLLM_DISABLE_COMPILE_CACHE': '1',
+}
+with open('/tmp/ray_runtime_env.json', 'w') as f:
+    json.dump({'env_vars': env_vars}, f)
+PYEOF
+
+echo 'INFO: start ray head'
+cat /tmp/ray_runtime_env.json
+ray stop --force 2>/dev/null || true
+rm -rf /tmp/ray
+NPU_COUNT=$(echo "$ASCEND_VISIBLE_DEVICES" | tr ',' '\n' | wc -l)
+ray start --head --port=6379 --dashboard-port=8265 --num-gpus=0 --resources="{\"NPU\": $NPU_COUNT}"  --node-ip-address=127.0.0.1 --dashboard-host=0.0.0.0
+
+ray job submit --address="http://127.0.0.1:8265" \
+--runtime-env /tmp/ray_runtime_env.json \
+-- python /root/vime/train.py \
   --train-backend megatron \
   --actor-num-nodes 1 \
   --actor-num-gpus-per-node 4 \

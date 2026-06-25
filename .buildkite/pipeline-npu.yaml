@@ -5,11 +5,92 @@ steps:
   - group: ":pipeline: Run NPU test"
     key: npu-tests
     steps:
-      - label: ":buildkit: Build and Push NPU Test Image - A3"
-        key: image-build-npu
+#      - label: ":buildkit: Build and Push NPU Test Image - A3"
+#        key: image-build-npu
+#        agents:
+#          queue: "ascend-a3"
+#          resource_class: "npu-8"
+#        plugins:
+#          - kubernetes:
+#              metadata:
+#                annotations:
+#                  vault.hashicorp.com/agent-init-first: "true"
+#                  vault.hashicorp.com/agent-inject: "true"
+#                  vault.hashicorp.com/agent-inject-perms-ca.pem: "0400"
+#                  vault.hashicorp.com/agent-inject-perms-cert.pem: "0400"
+#                  vault.hashicorp.com/agent-inject-perms-config.json: "0400"
+#                  vault.hashicorp.com/agent-inject-perms-key.pem: "0400"
+#                  vault.hashicorp.com/agent-inject-secret-ca.pem: internal/data/ascend/buildkitd
+#                  vault.hashicorp.com/agent-inject-secret-cert.pem: internal/data/ascend/buildkitd
+#                  vault.hashicorp.com/agent-inject-secret-config.json: internal/data/ascend/buildkitd
+#                  vault.hashicorp.com/agent-inject-secret-key.pem: internal/data/ascend/buildkitd
+#                  vault.hashicorp.com/agent-inject-template-ca.pem: "{{- with secret \"internal/data/ascend/buildkitd\" -}}\n{{ .Data.data.RootCA }}\n{{- end }}"
+#                  vault.hashicorp.com/agent-inject-template-cert.pem: "{{- with secret \"internal/data/ascend/buildkitd\" -}}\n{{ .Data.data.ClientCaCert }}\n{{- end }}"
+#                  vault.hashicorp.com/agent-inject-template-config.json: "{{- with secret \"internal/data/ascend/buildkitd\" -}}\n{{ .Data.data.dockerConfig }}\n{{- end }}"
+#                  vault.hashicorp.com/agent-inject-template-key.pem: "{{- with secret \"internal/data/ascend/buildkitd\" -}}\n{{ .Data.data.ClientCaKey }}\n{{- end }}"
+#                  vault.hashicorp.com/agent-pre-populate-only: "true"
+#                  vault.hashicorp.com/agent-run-as-group: "1000"
+#                  vault.hashicorp.com/agent-run-as-user: "1000"
+#                  vault.hashicorp.com/agent-service-account-token-volume-name: token-vol
+#                  vault.hashicorp.com/role: ascend-gha-runners
+#                  vault.hashicorp.com/secret-volume-path: /home/user/.docker/
+#                  vault.hashicorp.com/tls-skip-verify: "true"
+#              podSpecPatch:
+#                volumes:
+#                - name: token-vol
+#                  projected:
+#                    defaultMode: 420
+#                    sources:
+#                    - serviceAccountToken:
+#                        audience: api
+#                        expirationSeconds: 600
+#                        path: token
+#        env:
+#          VIME_IMAGE_TAG: "${BUILDKITE_COMMIT}"
+#          IMAGE_NAME: "vime-ci-npu"
+#          IMAGE_REGISTRY: "swr.cn-southwest-2.myhuaweicloud.com/modelfoundry"
+#          BUILDKITD_ADDR: "tcp://buildkitd-service.buildkitd:1234"
+#        command: |
+#          set -ex
+#     
+#          echo "--- Building and pushing NPU Test Image"
+#          echo "Image: $${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG}"
+#          echo "buildkitd address: $${BUILDKITD_ADDR}"
+#     
+#          if ! command -v buildctl &> /dev/null; then
+#            echo "Installing buildctl..."
+#            mkdir -p /tmp/buildkit
+#            BUILDKIT_VERSION="v0.29.0"
+#            wget -q "https://gh-proxy.test.osinfra.cn/https://github.com/moby/buildkit/releases/download/$${BUILDKIT_VERSION}/buildkit-$${BUILDKIT_VERSION}.linux-arm64.tar.gz" -O /tmp/buildkit.tar.gz
+#            tar -xzf /tmp/buildkit.tar.gz -C /tmp/buildkit
+#            cp /tmp/buildkit/bin/buildctl /usr/local/bin/
+#          fi
+#    
+#          export DOCKER_CONFIG=/home/user/.docker
+#          buildctl \
+#            --addr="$${BUILDKITD_ADDR}" \
+#            --tlscacert=/home/user/.docker/ca.pem \
+#            --tlscert=/home/user/.docker/cert.pem \
+#            --tlskey=/home/user/.docker/key.pem \
+#            build \
+#            --frontend dockerfile.v0 \
+#            --local context=. \
+#            --local dockerfile=./docker \
+#            --opt filename=Dockerfile.npu \
+#            --secret id=dockerconfig,src=/home/user/.docker/config.json \
+#            --output type=image,name=$${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG},push=true \
+#            --progress=plain
+#    
+#          echo "--- Image pushed successfully"
+#          echo "$${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG}"
+
+      - label: "qwen3-4B-npu test"
+        key: qwen3-4B-npu
         agents:
           queue: "ascend-a3"
-          resource_class: "npu-2"
+          resource_class: "npu-8"
+        timeout_in_minutes: 180
+        image: quay.io/ascend/vime:vime-latest
         plugins:
           - kubernetes:
               metadata:
@@ -45,76 +126,46 @@ steps:
                         audience: api
                         expirationSeconds: 600
                         path: token
-        env:
-          VIME_IMAGE_TAG: "${BUILDKITE_COMMIT}"
-          IMAGE_NAME: "vime-ci-npu"
-          IMAGE_REGISTRY: "swr.cn-southwest-2.myhuaweicloud.com/modelfoundry"
-          BUILDKITD_ADDR: "tcp://buildkitd-service.buildkitd:1234"
-        command: |
-          set -ex
-     
-          echo "--- Building and pushing NPU Test Image"
-          echo "Image: $${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG}"
-          echo "buildkitd address: $${BUILDKITD_ADDR}"
-     
-          if ! command -v buildctl &> /dev/null; then
-            echo "Installing buildctl..."
-            mkdir -p /tmp/buildkit
-            BUILDKIT_VERSION="v0.29.0"
-            wget -q "https://gh-proxy.test.osinfra.cn/https://github.com/moby/buildkit/releases/download/$${BUILDKIT_VERSION}/buildkit-$${BUILDKIT_VERSION}.linux-arm64.tar.gz" -O /tmp/buildkit.tar.gz
-            tar -xzf /tmp/buildkit.tar.gz -C /tmp/buildkit
-            cp /tmp/buildkit/bin/buildctl /usr/local/bin/
-          fi
-    
-          export DOCKER_CONFIG=/home/user/.docker
-          buildctl \
-            --addr="$${BUILDKITD_ADDR}" \
-            --tlscacert=/home/user/.docker/ca.pem \
-            --tlscert=/home/user/.docker/cert.pem \
-            --tlskey=/home/user/.docker/key.pem \
-            build \
-            --frontend dockerfile.v0 \
-            --local context=. \
-            --local dockerfile=./docker \
-            --opt filename=Dockerfile.npu \
-            --secret id=dockerconfig,src=/home/user/.docker/config.json \
-            --output type=image,name=$${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG},push=true \
-            --progress=plain
-    
-          echo "--- Image pushed successfully"
-          echo "$${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG}"
-
-      - label: "qwen3-4B-npu test"
-        key: qwen3-4B-npu
-        depends_on: image-build-npu
-        agents:
-          queue: "ascend-a3"
-          resource_class: "npu-2"
-        image: "swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/vime-ci-npu:${BUILDKITE_COMMIT}"
-        timeout_in_minutes: 60
-        plugins:
-          - kubernetes:
-              working_dir: /root 
-              podSpecPatch:
                 imagePullSecrets:
                   - name: swr-secret
         env:
-          export WORKSPACE: /root
-          HF_HOME: /root/.cache/huggingface
           VIME_TEST_ENABLE_INFINITE_RUN: false
           BUILDKITE_PULL_REQUEST: "${BUILDKITE_PULL_REQUEST:-false}"
           BUILDKITE_COMMIT: "${BUILDKITE_COMMIT}"
           GITHUB_COMMIT_NAME: "${BUILDKITE_COMMIT}_${BUILDKITE_PULL_REQUEST:-non-pr}"
           HF_TOKEN: "${HF_TOKEN}"
+          HF_ENDPOINT: https://hf-mirror.com
         command: |
-          set -euo pipefail
-          cd /root/vime
-          if [ -n \"${BUILDKITE_COMMIT}\" ]; then
-            git fetch origin ${BUILDKITE_COMMIT}
-            git checkout ${BUILDKITE_COMMIT}
-            pip install -e . --no-deps --break-system-packages || pip install -e . --no-deps
-          fi
-          hf download Qwen/Qwen3-4B
-          hf download --repo-type dataset zhuzilin/dapo-math-17k
-          bash scripts/run-qwen3-4B-npu.sh
+          bash -c "
+            cd /root/vime
+            if [ -n \"${BUILDKITE_COMMIT}\" ]; then
+              git fetch origin ${BUILDKITE_COMMIT}
+              git checkout ${BUILDKITE_COMMIT}
+              pip install -e . --no-deps --break-system-packages || pip install -e . --no-deps
+            fi
+
+            source /usr/local/Ascend/driver/bin/setenv.bash
+            source /usr/local/Ascend/ascend-toolkit/set_env.sh
+            source /usr/local/Ascend/nnal/atb/set_env.sh
+
+            echo 'INFO: download Qwen3-4B model and dapo-math-17k dataset'
+            pip install modelscope -q
+            modelscope download --model 'Qwen/Qwen3-4B' --local_dir /root/.cache/huggingface/models/Qwen3-4B
+            hf download --repo-type dataset zhuzilin/dapo-math-17k --local-dir /root/.cache/huggingface/datasets/dapo-math-17k
+  
+            echo 'INFO: start training Qwen3-4B on NPU'
+            ls -l /dev/davinci* 
+            npu-smi info
+            export MODEL_ROOT=/root/.cache/huggingface
+            sed -i 's/--num-rollout [0-9]\+/--num-rollout 3/' scripts/run-qwen3-4B-npu.sh
+            bash scripts/run-qwen3-4B-npu.sh
+            sleep 3
+
+            echo 'INFO: check training log'
+            if ! grep -q 'succeeded' /root/vime/train_qwen3_4b_vllm.log; then
+              echo 'ERROR: train log does not contain Ray job succeeded message'
+              exit 1
+            fi
+            echo 'INFO: train log contains Ray job succeeded message'
+          "
 

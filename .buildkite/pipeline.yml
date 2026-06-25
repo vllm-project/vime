@@ -127,12 +127,12 @@ steps:
           pip install -q -e . --no-deps
           python -m pytest tests/utils
         '
+
   - label: ":pipeline: npu tests"
     key: npu
     depends_on: pre-commit
     agents:
       queue: small_cpu_queue_premerge
-    timeout_in_minutes: 45
     command: 
       buildkite-agent pipeline upload .buildkite/pipeline-npu.yaml
 
