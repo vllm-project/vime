@@ -46,7 +46,7 @@ steps:
                         expirationSeconds: 600
                         path: token
         env:
-          VLLM_IMAGE_TAG: "${BUILDKITE_COMMIT}"
+          VIME_IMAGE_TAG: "${BUILDKITE_COMMIT}"
           IMAGE_NAME: "vime-ci-npu"
           IMAGE_REGISTRY: "swr.cn-southwest-2.myhuaweicloud.com/modelfoundry"
           BUILDKITD_ADDR: "tcp://buildkitd-service.buildkitd:1234"
@@ -54,7 +54,7 @@ steps:
           set -ex
      
           echo "--- Building and pushing NPU Test Image"
-          echo "Image: $${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VLLM_IMAGE_TAG}"
+          echo "Image: $${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG}"
           echo "buildkitd address: $${BUILDKITD_ADDR}"
      
           if ! command -v buildctl &> /dev/null; then
@@ -78,13 +78,12 @@ steps:
             --local dockerfile=./docker \
             --opt filename=Dockerfile.npu \
             --secret id=dockerconfig,src=/home/user/.docker/config.json \
-            --output type=image,name=$${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VLLM_IMAGE_TAG},push=true \
+            --output type=image,name=$${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG},push=true \
             --progress=plain
     
           echo "--- Image pushed successfully"
-          echo "$${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VLLM_IMAGE_TAG}"
+          echo "$${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG}"
 
-    steps:
       - label: "qwen3-4B-npu test"
         key: qwen3-4B-npu
         agents:
