@@ -10,7 +10,7 @@ steps:
         agents:
           queue: "ascend-a3"
           resource_class: "npu-8"
-        images:  "quay.io/ascend/vime:vime-latest"
+        image:  "quay.io/ascend/vime:vime-latest"
         timeout_in_minutes: 60
         plugins:
           - kubernetes:
