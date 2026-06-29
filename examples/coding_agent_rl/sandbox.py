@@ -20,7 +20,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from vime.agent.sandbox import E2BSandbox, Sandbox
+from vime.agent.sandbox import E2BSandbox, ModalSandbox, Sandbox
 
 
 logger = logging.getLogger(__name__)
@@ -55,12 +55,28 @@ CC_PROMPT = os.environ.get(
 _BOOT_SEM: asyncio.Semaphore | None = None
 
 
+def make_sandbox(image: str) -> Sandbox:
+    """Construct the configured sandbox backend for ``image``.
+
+    Backend is chosen by ``VIME_AGENT_SANDBOX_BACKEND`` (read per call so run.sh
+    / tests can set it): ``e2b`` (default, unchanged behavior) or ``modal``.
+    Both backends satisfy the same :class:`Sandbox` Protocol, so the work-sandbox
+    and eval-sandbox call sites below stay backend-agnostic.
+    """
+    backend = os.environ.get("VIME_AGENT_SANDBOX_BACKEND", "e2b").strip().lower()
+    if backend == "modal":
+        return ModalSandbox(image)
+    if backend in ("", "e2b"):
+        return E2BSandbox(image)
+    raise ValueError(f"unknown VIME_AGENT_SANDBOX_BACKEND={backend!r} (expected 'e2b' or 'modal')")
+
+
 # ---------------------------------------------------------------------------
 # Sandbox bootstrap (Node + Claude Code + agent user)
 # ---------------------------------------------------------------------------
 @asynccontextmanager
-async def boot_agent_sandbox(image: str) -> AsyncIterator[E2BSandbox]:
-    """Boot a fresh E2B sandbox and install the Claude Code toolchain.
+async def boot_agent_sandbox(image: str) -> AsyncIterator[Sandbox]:
+    """Boot a fresh sandbox (E2B or Modal) and install the Claude Code toolchain.
 
     This is the provisioning wrapper for the work sandbox: create the sandbox
     from the dataset image, install Node 22 + Claude Code CLI from host
@@ -74,7 +90,7 @@ async def boot_agent_sandbox(image: str) -> AsyncIterator[E2BSandbox]:
     sb = None
     last_err: Exception | None = None
     for attempt in range(SWE_BOOT_RETRIES):
-        cand = E2BSandbox(image)
+        cand = make_sandbox(image)
         try:
             async with _BOOT_SEM:
                 await cand.__aenter__()
@@ -301,6 +317,7 @@ async def evaluate(
     diff_text: str,
     swepro: dict | None = None,
     eval_cmd: str | None = None,
+    swebench_metadata: dict | None = None,
     pre_commands: list[str] | str | None = None,
     timeout_sec: int = 600,
 ) -> tuple[float, bool, bool]:
@@ -308,11 +325,11 @@ async def evaluate(
 
     No-test-cheating guarantee: the eval sandbox is built from the same image
     but starts CLEAN, so only the model-produced diff affects reward."""
-    if not (swepro or eval_cmd):
-        logger.warning("[e2b.evaluate] no swepro/eval_cmd; reward=0")
+    if not (swepro or eval_cmd or swebench_metadata):
+        logger.warning("[e2b.evaluate] no swepro/eval_cmd/swebench_metadata; reward=0")
         return 0.0, False, True
 
-    async with E2BSandbox(image) as ev:
+    async with make_sandbox(image) as ev:
         await ensure_agent_user(ev, workdir)
         if swepro:
             await _setup_swepro_assets(ev, swepro)
@@ -326,6 +343,9 @@ async def evaluate(
 
         if swepro:
             r, s = await _run_swepro(ev, workdir, swepro, timeout_sec)
+            return r, s, True
+        if swebench_metadata:
+            r, s = await _run_swebench_eval(ev, workdir, swebench_metadata, timeout_sec)
             return r, s, True
         r, s = await _run_eval_cmd(ev, workdir, eval_cmd, timeout_sec)
         return r, s, True
@@ -392,6 +412,19 @@ async def _run_swepro(ev: Sandbox, workdir: str, swepro: dict, timeout: int) -> 
     passed = {t["name"] for t in parsed.get("tests", []) if t.get("status") == "PASSED"}
     required = set(swepro.get("fail_to_pass") or []) | set(swepro.get("pass_to_pass") or [])
     solved = bool(required) and required.issubset(passed)
+    return (1.0 if solved else 0.0), solved
+
+
+async def _run_swebench_eval(ev: Sandbox, workdir: str, metadata: dict, timeout: int) -> tuple[float, bool]:
+    """SWE-bench harness grading — delegates to uni_agent.reward.swe_bench."""
+    import re as _re
+    from uni_agent.reward.swe_bench import make_eval_script, parse_eval_output
+
+    eval_script = make_eval_script(metadata, workdir)
+    await ev.write_file("/tmp/_swebench_eval.sh", eval_script, user="root")
+    _, stdout, _ = await ev.exec("bash /tmp/_swebench_eval.sh 2>&1", user="root", check=False, timeout=timeout)
+    output = _re.sub(r"\x1b\[[0-9;]*m|\r", "", stdout or "")
+    solved, _ = parse_eval_output(metadata, output)
     return (1.0 if solved else 0.0), solved
 
 

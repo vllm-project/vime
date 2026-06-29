@@ -123,6 +123,12 @@ RUN git clone https://github.com/vllm-project/vime.git /root/vime && \
 RUN cd /root/vime/vime/backends/megatron_utils/kernels/int4_qat && \
     pip install . --no-build-isolation
 
+# ====================================== Agentic rollout dependencies ================================
+
+# uni-agent: reward specs (swe_bench.py) used by coding_agent_rl
+ARG UNIAGENT_COMMIT=main
+RUN pip install "git+https://github.com/verl-project/uni-agent.git@${UNIAGENT_COMMIT}"
+
 # ====================================== Build-time smoke ============================================
 
 # Fail-fast import smoke + flashinfer version pin check. Catches ABI / version

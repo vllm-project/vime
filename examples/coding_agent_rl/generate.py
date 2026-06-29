@@ -13,8 +13,8 @@ Wire-up:
        delegating segment-to-``Sample`` fan-out to ``vime.agent.trajectory``.
 
 All sandbox-side details live in ``sandbox.py``; the LLM plumbing
-(Anthropic <-> vLLM /inference/v1/generate, token capture, 3-kind segment split) uses
-``vime.agent.adapters.AnthropicAdapter``.
+(Anthropic <-> vLLM ``/inference/v1/generate``, token capture, 3-kind segment
+split) uses ``vime.agent.adapters.AnthropicAdapter``.
 
 Dataset row ``metadata`` schema::
 
@@ -90,16 +90,24 @@ class _State(metaclass=SingletonMeta):
         self.reasoning_parser = getattr(args, "vllm_reasoning_parser", None) or None
         vllm_url = f"http://{args.vllm_router_ip}:{args.vllm_router_port}"
         public_host = os.environ.get("VIME_HEAD_HOST")
-        if not public_host:
+        # ADAPTER_URL_OVERRIDE lets a reverse tunnel (e.g. cloudflared) supply a
+        # ready-made public adapter URL when the head has no directly routable
+        # host:port -- e.g. Modal sandboxes on a private cluster. When set it
+        # fully replaces the VIME_HEAD_HOST + SHIM_PORT construction below.
+        adapter_url_override = os.environ.get("ADAPTER_URL_OVERRIDE")
+        if not public_host and not adapter_url_override:
             raise RuntimeError(
-                "VIME_HEAD_HOST is not set. Export it to the host IP that "
-                "sandboxes can reach for reverse-connection to the Anthropic adapter. "
-                "Without it the sandbox cannot dial back and the rollout will "
-                "silently abort."
+                "Neither VIME_HEAD_HOST nor ADAPTER_URL_OVERRIDE is set. Export "
+                "VIME_HEAD_HOST to the host IP that sandboxes can reach for "
+                "reverse-connection to the Anthropic adapter, or set "
+                "ADAPTER_URL_OVERRIDE to a full public adapter URL (e.g. a "
+                "cloudflared tunnel). Without one the sandbox cannot dial back "
+                "and the rollout will silently abort."
             )
         self.adapter = AnthropicAdapter(
             tokenizer=self.tokenizer,
             vllm_url=vllm_url,
+            model=args.hf_checkpoint,
             tool_parser=self.tool_parser,
             reasoning_parser=self.reasoning_parser,
         )
@@ -114,7 +122,7 @@ class _State(metaclass=SingletonMeta):
             thread_name="anthropic-adapter",
             runner_kwargs={"handler_cancellation": True},
         )
-        self.adapter_url = f"http://{public_host}:{self.app_handle.port}"
+        self.adapter_url = adapter_url_override or f"http://{public_host}:{self.app_handle.port}"
         logger.info(
             "[coding_agent_rl] tokenizer=%s adapter=%s max_context_len=%s tool_parser=%s reasoning_parser=%s",
             args.hf_checkpoint,
@@ -219,6 +227,8 @@ async def generate(args, sample: Sample, sampling_params: dict[str, Any]):
     state = _State(args)
     md = _metadata(sample)
     if not md["image"] or not md["workdir"]:
+        logger.warning("[coding_agent_rl] ABORT missing_image_or_workdir: image=%s workdir=%s label=%s",
+                       md.get("image"), md.get("workdir"), sample.label)
         return _abort_result(sample, "missing_image_or_workdir")
 
     instance_id = md["instance_id"]
@@ -226,7 +236,10 @@ async def generate(args, sample: Sample, sampling_params: dict[str, Any]):
     t0 = time.time()
     try:
         async with asyncio.timeout(SWE_GENERATE_GUARD_SEC):
+            logger.info("[coding_agent_rl] %s: booting sandbox image=%s ...", instance_id, md["image"])
             async with sandbox.boot_agent_sandbox(md["image"]) as sb:
+                sb_id = getattr(sb, 'sandbox_id', 'unknown')
+                logger.info("[coding_agent_rl] %s: sandbox booted (id=%s), running claude-code ...", instance_id, sb_id)
                 await sandbox.run_claude_code(
                     sb,
                     workdir=md["workdir"],
@@ -237,14 +250,19 @@ async def generate(args, sample: Sample, sampling_params: dict[str, Any]):
                     swepro=md["swepro"],
                     pre_commands=md["pre_commands"],
                 )
+                logger.info("[coding_agent_rl] %s: claude-code done, capturing diff ...", instance_id)
                 diff_text = await sandbox.git_diff(sb, md["workdir"])
+                logger.info("[coding_agent_rl] %s: diff captured (%d chars), sandbox=%s",
+                           instance_id, len(diff_text or ""), sb_id)
 
+            logger.info("[coding_agent_rl] %s: evaluating diff ...", instance_id)
             reward, is_solved, applied_cleanly = await sandbox.evaluate(
                 image=md["image"],
                 workdir=md["workdir"],
                 diff_text=diff_text,
                 swepro=md["swepro"],
                 eval_cmd=md["eval_cmd"],
+                swebench_metadata=md.get("swebench_metadata"),
                 pre_commands=md["pre_commands"],
                 timeout_sec=SWE_EVAL_TIMEOUT_SEC,
             )
@@ -254,7 +272,9 @@ async def generate(args, sample: Sample, sampling_params: dict[str, Any]):
                 applied_cleanly=bool(applied_cleanly),
             )
             segments = await state.adapter.finish_session(session_id)
-            return _merge_samples(
+            logger.info("[coding_agent_rl] %s: adapter returned %d segments, merging ...",
+                       instance_id, len(segments))
+            result = _merge_samples(
                 sample=sample,
                 state=state,
                 segments=segments,
@@ -262,15 +282,24 @@ async def generate(args, sample: Sample, sampling_params: dict[str, Any]):
                 elapsed_sec=time.time() - t0,
                 instance_id=instance_id,
             )
+            if isinstance(result, list):
+                for i, s in enumerate(result):
+                    logger.info("[coding_agent_rl] %s: fanned[%d] tokens=%d rollout_log_probs=%s loss_mask=%d",
+                               instance_id, i, len(s.tokens or []),
+                               "None" if s.rollout_log_probs is None else f"len={len(s.rollout_log_probs)}",
+                               len(s.loss_mask or []))
+            return result
 
     except asyncio.TimeoutError:
+        logger.error("[coding_agent_rl] %s: ABORT wall_clock_timeout after %.1fs", instance_id, time.time() - t0)
         _log_timeout_diagnostic(t0)
         return _abort_result(sample, "wall_clock_timeout")
     except Exception as e:
         logger.error(
-            "[coding_agent_rl] %s: rollout failed: %s\n%s",
+            "[coding_agent_rl] %s: ABORT exception:%s after %.1fs\n%s",
             instance_id,
-            e,
+            type(e).__name__,
+            time.time() - t0,
             traceback.format_exc(),
         )
         return _abort_result(sample, f"exception:{type(e).__name__}")
@@ -328,6 +357,7 @@ def _metadata(sample: Sample) -> dict[str, Any]:
         "problem_statement": m.get("problem_statement") or _coerce_prompt(sample.prompt),
         "swepro": m.get("swepro"),
         "eval_cmd": m.get("eval_cmd") or _wrap_f2p_script(rem.get("f2p_script")),
+        "swebench_metadata": m.get("swebench_metadata"),
         "pre_commands": m.get("pre_commands") or rem.get("pre_commands"),
     }
 
@@ -351,6 +381,7 @@ def _abort(sample: Sample, reason: str) -> Sample:
     sample.response = ""
     sample.response_length = 1
     sample.loss_mask = [0]
+    sample.rollout_log_probs = [0.0]
     sample.reward = 0.0
     sample.status = Sample.Status.ABORTED
     sample.metadata = {**(sample.metadata or {}), "abort_reason": reason}
