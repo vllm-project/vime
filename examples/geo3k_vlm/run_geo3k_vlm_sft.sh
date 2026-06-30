@@ -36,7 +36,7 @@ else
 fi
 
 # Cleanup
-pkill -9 vllm
+pkill -9 -f '[v]llm serve|VLL[M]::'
 sleep 3
 if [ "$USE_EXTERNAL_RAY" = "0" ]; then
    ray stop --force

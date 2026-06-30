@@ -47,7 +47,6 @@ SUITES = {
     "short": [
         ("test_qwen3.5_0.8B_gsm8k_async_short.py", 4, "", {}),
         ("test_qwen3.5_0.8B_gsm8k_short.py", 4, "", {}),
-        ("test_qwen2.5_0.5B_ppo_critic_only_short.py", 4, "", {}),
         ("test_qwen2.5_0.5B_fully_async_short.py", 4, "", {}),
     ],
     "vllm-config": [

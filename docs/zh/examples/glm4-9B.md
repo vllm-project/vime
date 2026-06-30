@@ -2,7 +2,7 @@
 
 ## 环境准备
 
-拉取 `vimerl/vime:latest` 镜像后，用如下方式初始化镜像环境：
+拉取 `vllm/vime:latest` 镜像后，用如下方式初始化镜像环境：
 
 ```bash
 cd /root/

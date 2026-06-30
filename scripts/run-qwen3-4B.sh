@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # for rerun the task
-pkill -9 vllm
+pkill -9 -f '[v]llm serve|VLL[M]::'
 sleep 3
 ray stop --force
 pkill -9 ray
@@ -116,7 +116,7 @@ WANDB_ARGS=(
 
 VLLM_ARGS=(
    --rollout-num-gpus-per-engine 2
-   --vllm-mem-fraction-static 0.7
+   --vllm-gpu-memory-utilization 0.7
 )
 
 MISC_ARGS=(

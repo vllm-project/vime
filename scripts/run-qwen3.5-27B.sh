@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # for rerun the task
-pkill -9 vllm
+pkill -9 -f '[v]llm serve|VLL[M]::'
 sleep 3
 ray stop --force
 pkill -9 ray
@@ -151,7 +151,7 @@ if [ -n "${HOSTFILE}" ]; then
     fi
     echo "Starting Ray worker on ${WORKER_IP}"
     ssh root@"${WORKER_IP}" \
-      "pkill -9 vllm ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus ${ACTOR_NUM_GPUS_PER_NODE} --node-ip-address ${WORKER_IP} --disable-usage-stats" &
+      "pkill -9 -f '[v]llm serve|VLL[M]::' ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus ${ACTOR_NUM_GPUS_PER_NODE} --node-ip-address ${WORKER_IP} --disable-usage-stats" &
   done
   wait
 fi

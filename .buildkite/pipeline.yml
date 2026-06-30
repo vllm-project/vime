@@ -78,6 +78,8 @@ steps:
           python tests/test_metric_report_dist.py
           python tests/test_loss_cp_invariance.py
           python tests/test_sample.py
+          python tests/test_cispo_loss.py
+          python tests/test_logprob_response_spans.py
           python tests/utils/test_hf_checkpoint_saver.py
         '
 
@@ -101,9 +103,10 @@ steps:
           pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle
           pip install -q openai openai-agents anthropic
           pip install -q -e . --no-deps
-          python tests/test_agent_trajectory.py
-          python tests/test_agent_adapters.py
-          python tests/test_agent_sdk_adapters.py
+          python tests/test_agent/test_adapters.py
+          python tests/test_agent/test_harness.py
+          python tests/test_agent/test_trajectory_manager_branching.py
+          python tests/test_agent/test_agent_rollout_cpu.py
         '
 
   - label: ":pytest: utils tests"

@@ -5,7 +5,7 @@ if grep -q $'\r' "$0" 2>/dev/null; then
 fi
 
 # for rerun the task
-pkill -9 vllm 2>/dev/null || true
+pkill -9 -f '[v]llm serve|VLL[M]::' 2>/dev/null || true
 sleep 3
 ray stop --force 2>/dev/null || true
 pkill -9 ray 2>/dev/null || true

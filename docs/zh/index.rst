@@ -32,6 +32,9 @@ vime 构建于 `slime <https://github.com/THUDM/slime>`_ 之上，slime 正是 G
    :caption: MoE
 
    examples/qwen3-30B-A3B.md
+   examples/glm5.2-744B-A40B.md
+   examples/glm4.7-355B-A32B.md
+   examples/deepseek-r1.md
 
 .. toctree::
    :maxdepth: 1
@@ -40,7 +43,10 @@ vime 构建于 `slime <https://github.com/THUDM/slime>`_ 之上，slime 正是 G
    advanced/speculative-decoding.md
    advanced/reproducibility.md
    advanced/fault-tolerance.md
+   advanced/observability.md
    advanced/pd-disaggregation.md
+   advanced/external-rollout-engines.md
+   advanced/delta-weight-sync.md
    advanced/vllm-config.md
    advanced/megatron-config.md
    advanced/arch-support-beyond-megatron.md

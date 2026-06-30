@@ -65,6 +65,7 @@ class UpdateWeightFromDistributed:
         self.quantization_config = quantization_config
         self.weight_version = 0
         self._model_update_groups = None
+        self.update_weight_metrics: dict[str, float] = {}
         self._hf_weight_iterator = (
             HfWeightIteratorBase.create(
                 args=args,
@@ -119,6 +120,13 @@ class UpdateWeightFromDistributed:
             self.args, self._group_name, self._model_update_groups, self.rollout_engines
         )
         self._model_update_groups = None
+
+    def pop_metrics(self) -> dict[str, float]:
+        """
+        Return and clear ``update_weight_metrics``. Drained by the actor onto the rollout/step log.
+        """
+        out, self.update_weight_metrics = self.update_weight_metrics, {}
+        return out
 
     @torch.no_grad()
     def update_weights(self) -> None:

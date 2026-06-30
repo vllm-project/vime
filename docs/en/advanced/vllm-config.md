@@ -174,18 +174,27 @@ from vime.rollout.vllm_rollout import get_model_url
 from vime.utils.http_utils import post
 
 async def my_generate(args, sample, sampling_params):
-    # Route to the actor model (default)
-    actor_url = get_model_url(args, "actor", "/generate")
-    output = await post(actor_url, {"text": sample.prompt, "sampling_params": sampling_params})
-    
+    # Route to the actor model (default endpoint is /inference/v1/generate)
+    actor_url = get_model_url(args, "actor")
+    output = await post(actor_url, {
+        "model": args.hf_checkpoint,
+        "token_ids": sample.tokens,
+        "sampling_params": {"max_tokens": 1024, "temperature": 1.0, "top_p": 1.0, "logprobs": 1},
+    })
+    # output["choices"][0] carries token_ids, logprobs.content[i].logprob, and finish_reason
+
     # Route to the reference model
-    ref_url = get_model_url(args, "ref", "/generate")
-    ref_output = await post(ref_url, {"text": sample.prompt, "sampling_params": sampling_params})
-    
+    ref_url = get_model_url(args, "ref")
+    ref_output = await post(ref_url, {
+        "model": args.hf_checkpoint,
+        "token_ids": sample.tokens,
+        "sampling_params": {"max_tokens": 1024, "temperature": 1.0, "top_p": 1.0, "logprobs": 1},
+    })
+
     # Route to the reward model (e.g., OpenAI-compatible API)
     reward_url = get_model_url(args, "reward", "/v1/chat/completions")
     reward_output = await post(reward_url, {...})
-    
+
     ...
 ```
 
@@ -232,9 +241,9 @@ vllm:
         num_gpus: 2                   # reserve 2 GPUs (no engines created)
 ```
 
-### 6. Per-Group ServerArgs Overrides
+### 6. Per-Group EngineArgs Overrides
 
-Use `overrides` to apply vLLM `ServerArgs` fields to specific server groups without affecting others:
+Use `overrides` to apply vLLM `EngineArgs` fields to specific server groups without affecting others:
 
 ```yaml
 vllm:
@@ -257,7 +266,7 @@ Overrides take **highest priority**, overriding both the base `--vllm-*` CLI arg
 
 ### 7. Standalone vLLM Launcher
 
-While `--vllm-config` is designed for vime's training pipeline, it also works as a powerful launcher for pure inference scenarios using the `--rollout-external` pattern or by configuring vime to focus solely on serving.
+While `--vllm-config` is designed for vime's training pipeline, it also works as a powerful launcher for pure inference scenarios using external engine addresses or by configuring vime to focus solely on serving.
 
 **Using external engines with a pre-launched topology:**
 
@@ -270,12 +279,19 @@ vllm serve /path/to/model --port 10091 ...
 
 # Step 2: Connect vime to external engines
 python train.py \
-  --rollout-external \
   --rollout-external-engine-addrs host1:10090 host2:10091 \
   ...
 ```
 
-> **Note:** `--vllm-config` and `--rollout-external` are mutually exclusive. Use `--vllm-config` when you want vime to manage the full engine lifecycle; use `--rollout-external` when engines are pre-deployed.
+vime queries each external engine's `/server_info` endpoint to infer
+`rollout_num_gpus`, per-engine GPU counts, vLLM parallel sizes, and
+prefill/decode worker types. If no `--vllm-router-ip/--vllm-router-port`
+is provided, vime launches its own router and registers the external engines
+to it.
+
+> **Note:** `--vllm-config` and `--rollout-external-engine-addrs` are mutually exclusive. Use `--vllm-config` when you want vime to manage the full engine lifecycle; use `--rollout-external-engine-addrs` when engines are pre-deployed.
+
+For external-engine selection, update from disk, and delta disk transport, see [External Rollout Engines Roadmap](external-rollout-engines.md).
 
 ---
 
@@ -332,7 +348,7 @@ When the config is loaded, vime applies the following resolution cascade:
 | Flag | Conflict Reason |
 |------|----------------|
 | `--prefill-num-servers` | PD disaggregation is configured via `server_groups` in the YAML |
-| `--rollout-external` | External engines have their own topology; config manages the lifecycle internally |
+| `--rollout-external-engine-addrs` | External engines have their own topology; config manages the lifecycle internally |
 
 ---
 
@@ -398,27 +414,29 @@ from vime.utils.http_utils import post
 async def generate_with_models(args, sample, sampling_params):
     """Generate using actor, score with reward model, compare with reference."""
     
-    # Generate from actor
-    actor_url = get_model_url(args, "actor", "/generate")
+    # Generate from actor (default endpoint is /inference/v1/generate)
+    actor_url = get_model_url(args, "actor")
     actor_output = await post(actor_url, {
-        "text": sample.prompt,
-        "sampling_params": sampling_params,
-        "return_logprob": True,
+        "model": args.hf_checkpoint,
+        "token_ids": sample.tokens,
+        "sampling_params": {"max_tokens": 1024, "temperature": 1.0, "top_p": 1.0, "logprobs": 1},
     })
-    
-    # Get reference logprobs for KL penalty
-    ref_url = get_model_url(args, "ref", "/generate")
+    response_ids = actor_output["choices"][0]["token_ids"]
+
+    # Get reference logprobs over the prompt+response. max_tokens=1 + prompt_logprobs scores
+    # the submitted token_ids; read them from the top-level "prompt_logprobs" field.
+    ref_url = get_model_url(args, "ref")
     ref_output = await post(ref_url, {
-        "text": sample.prompt + actor_output["text"],
-        "sampling_params": {"max_new_tokens": 0, "temperature": 0},
-        "return_logprob": True,
+        "model": args.hf_checkpoint,
+        "token_ids": sample.tokens + response_ids,
+        "sampling_params": {"max_tokens": 1, "temperature": 0.0, "prompt_logprobs": 1},
     })
-    
-    # Score with reward model
+
+    # Score with reward model (OpenAI-compatible)
     reward_url = get_model_url(args, "reward", "/v1/chat/completions")
     reward_output = await post(reward_url, {
         "model": "reward",
-        "messages": [{"role": "user", "content": sample.prompt + actor_output["text"]}],
+        "messages": [{"role": "user", "content": sample.prompt}],
     })
     
     # ... process outputs and return Sample
@@ -446,7 +464,7 @@ Use `get_model_url(args, "model_name", "/endpoint")` from `vime.rollout.vllm_rol
 
 ### Q: Can I use `--vllm-config` without training (inference only)?
 
-While `--vllm-config` is designed for vime's training loop, you can effectively use it for inference-only scenarios by configuring a rollout-only run. For fully standalone vLLM serving, consider using vLLM's native `vllm serve` directly or the `--rollout-external` mode for connecting to pre-deployed engines.
+While `--vllm-config` is designed for vime's training loop, you can effectively use it for inference-only scenarios by configuring a rollout-only run. For fully standalone vLLM serving, consider using vLLM's native `_run_vllm_server` directly or `--rollout-external-engine-addrs` for connecting to pre-deployed engines.
 
 ### Q: What is the relationship between `--vllm-config` and `--prefill-num-servers`?
 

@@ -28,7 +28,7 @@ else
 fi
 
 # Cleanup
-pkill -9 vllm
+pkill -9 -f '[v]llm serve|VLL[M]::'
 sleep 3
 if [ "$USE_EXTERNAL_RAY" = "0" ]; then
    ray stop --force
@@ -164,8 +164,6 @@ BACKEND_ARGS=(
    --attention-softmax-in-fp32
    --attention-backend flash
 
-   # Packing is not supported for GDN currently
-   --qkv-format bshd
    --micro-batch-size 1
 )
 

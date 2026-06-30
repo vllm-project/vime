@@ -18,14 +18,14 @@ There are four main parameters for cluster resource allocation:
 
   - `--actor-num-nodes`: The number of nodes required for RL actor training.
   - `--actor-num-gpus-per-node`: The number of GPUs per node for RL actor training.
-  - `--rollout-num-gpus`: The total number of GPUs required for rollout (inference).
+  - `--rollout-num-gpus`: The total number of GPUs required for rollout (inference). Set it to `0` to still parse vLLM arguments and launch the router without launching local vLLM servers.
   - `--rollout-num-gpus-per-engine`: The number of GPUs per inference engine. This parameter is similar to vLLM's `tp_size`. When performing multi-node serving, this value should be the total number of GPUs. For example, if serving one model with 2 nodes and 16 GPUs, this value should be 16.
 
 With the default configuration, we use these parameters to allocate `actor_num_nodes * actor_num_gpus_per_node` GPUs for training and `rollout_num_gpus` GPUs for inference via Ray, thus achieving a separation of training and inference resources.
 
 For co-located training and inference, you also need to configure:
 
-  - `--colocate`: Enables co-located training and inference. When enabled, it ignores `--rollout-num-gpus` and makes the number of GPUs for training and inference equal.
+  - `--colocate`: Enables co-located training and inference. By default, this makes the number of GPUs for training and inference equal. You can explicitly set a different positive `--rollout-num-gpus`, for example to use more rollout GPUs than actor GPUs; the extra GPUs are used as rollout-only resources. If `--rollout-num-gpus 0` is set explicitly, vime launches only the router and no local vLLM servers.
 
 Additionally, vime supports Prefill and Decode disaggregation (PD Disaggregation). You can set the number of servers used for Prefill by setting the `--prefill-num-servers` argument.
 
@@ -145,6 +145,7 @@ Note:
   - By default, vLLM reads the maximum context length from the `config.json` in the Hugging Face checkpoint. You can use the `--vllm-max-model-len` parameter to override this value to support longer inference.
   - During co-located training and inference, although Megatron and vLLM will offload sequentially, they still need to leave some memory for each other. You need to adjust vLLM's total VRAM usage by reducing `--vllm-gpu-memory-utilization`.
   - vime supports passing through vllm-router parameters by adding a `router` prefix to the original parameter name. For example, vllm-router's `--balance-abs-threshold` parameter should be set as `--router-balance-abs-threshold`. vime uses `consistent_hash` routing by default. cache-aware routing is not supported for now. You can set `--router-balance-abs-threshold 0` to force balanced distribution, but this may affect prefix cache hit rate in multi-turn conversation scenarios.
+  - If vLLM engines are pre-launched by an external system, connect to them with `--rollout-external-engine-addrs host1:port host2:port`. When the trainer and engines cannot form an NCCL weight-update group, use `--update-weight-mode full --update-weight-transport disk --update-weight-disk-dir /shared/fs/updates`; vime writes a complete HF checkpoint and asks vLLM to hot-load it through `update_weights_from_disk`. For large models or cross-cluster deployments, use `--update-weight-mode delta --update-weight-transport disk` instead. See [External Rollout Engines Roadmap](../advanced/external-rollout-engines.md) and [Delta Weight Sync](../advanced/delta-weight-sync.md).
 
 For details on some of vLLM's customizations and the principles behind how vime incorporates vLLM, please see the "How to Use vLLM" section.
 
@@ -181,6 +182,7 @@ Additionally, we provide a `metadata_key`, which defaults to `"metadata"`. When 
 - `--advantage-estimator`: Specifies the RL algorithm for the training process. Currently supported algorithms include:
     - `grpo` ([https://arxiv.org/abs/2402.03300](https://arxiv.org/abs/2402.03300))
     - `gspo` ([https://arxiv.org/abs/2507.18071](https://arxiv.org/abs/2507.18071))
+    - `cispo` ([https://arxiv.org/abs/2506.13585](https://arxiv.org/abs/2506.13585))
     - `reinforce_plus_plus` and `reinforce_plus_plus_baseline` ([https://arxiv.org/abs/2501.03262](https://arxiv.org/abs/2501.03262))
     - `ppo` ([https://arxiv.org/abs/1707.06347](https://arxiv.org/abs/1707.06347))
 - `--calculate-per-token-loss`: By default, vime calculates loss on a per-sample basis, i.e., `mean(sum(sample_i) / len(sample_i))`. Enable this flag to calculate loss on a per-token basis, i.e., `sum(sum(sample_i)) / sum(len(sample_i))`.

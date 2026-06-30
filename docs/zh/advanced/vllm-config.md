@@ -58,7 +58,7 @@ vllm:
 | `worker_type` | `str` | **必填** | 引擎类型：`regular`（标准）、`prefill`（PD prefill worker）、`decode`（PD decode worker）或 `placeholder`（占位，不启动引擎）。 |
 | `num_gpus` | `int` | **必填** | 该组的 GPU 总数。必须 > 0。 |
 | `num_gpus_per_engine` | `int` | 模型的 `num_gpus_per_engine` | TP 大小覆盖。每个引擎实例的 GPU 数量。 |
-| `overrides` | `dict` | `{}` | vLLM `ServerArgs` 字段覆盖。优先级最高，覆盖 `--vllm-*` CLI 参数和模型级默认值。 |
+| `overrides` | `dict` | `{}` | vLLM `EngineArgs` 字段覆盖。优先级最高，覆盖 `--vllm-*` CLI 参数和模型级默认值。 |
 
 ### Worker 类型
 
@@ -125,7 +125,7 @@ python train.py \
 - 为 decode 使用更大的 TP（降低延迟）
 - 独立扩展 prefill 和 decode 的容量
 
-> **注意：** PD 分离使用 vllm-router (vllm-router)，并设置 `pd_disaggregation=True`。
+> **注意：** PD 分离使用 vllm-router，并设置 `pd_disaggregation=True`。
 
 ### 3. 多模型服务
 
@@ -174,18 +174,27 @@ from vime.rollout.vllm_rollout import get_model_url
 from vime.utils.http_utils import post
 
 async def my_generate(args, sample, sampling_params):
-    # 路由到 actor 模型（默认）
-    actor_url = get_model_url(args, "actor", "/generate")
-    output = await post(actor_url, {"text": sample.prompt, "sampling_params": sampling_params})
-    
+    # 路由到 actor 模型（默认端点为 /inference/v1/generate）
+    actor_url = get_model_url(args, "actor")
+    output = await post(actor_url, {
+        "model": args.hf_checkpoint,
+        "token_ids": sample.tokens,
+        "sampling_params": {"max_tokens": 1024, "temperature": 1.0, "top_p": 1.0, "logprobs": 1},
+    })
+    # output["choices"][0] 含 token_ids、logprobs.content[i].logprob 及 finish_reason
+
     # 路由到 reference 模型
-    ref_url = get_model_url(args, "ref", "/generate")
-    ref_output = await post(ref_url, {"text": sample.prompt, "sampling_params": sampling_params})
-    
+    ref_url = get_model_url(args, "ref")
+    ref_output = await post(ref_url, {
+        "model": args.hf_checkpoint,
+        "token_ids": sample.tokens,
+        "sampling_params": {"max_tokens": 1024, "temperature": 1.0, "top_p": 1.0, "logprobs": 1},
+    })
+
     # 路由到 reward 模型（如 OpenAI 兼容 API）
     reward_url = get_model_url(args, "reward", "/v1/chat/completions")
     reward_output = await post(reward_url, {...})
-    
+
     ...
 ```
 
@@ -232,9 +241,9 @@ vllm:
         num_gpus: 2                   # 预留 2 个 GPU（不创建引擎）
 ```
 
-### 6. 按组覆盖 ServerArgs
+### 6. 按组覆盖 EngineArgs
 
-使用 `overrides` 将 vLLM `ServerArgs` 字段应用到特定服务器组，而不影响其他组：
+使用 `overrides` 将 vLLM `EngineArgs` 字段应用到特定服务器组，而不影响其他组：
 
 ```yaml
 vllm:
@@ -257,7 +266,7 @@ vllm:
 
 ### 7. 独立 vLLM 启动器
 
-虽然 `--vllm-config` 是为 vime 的训练流水线设计的，但它也可以作为纯推理场景的强大启动器，通过 `--rollout-external` 模式或配置 vime 仅关注推理服务。
+虽然 `--vllm-config` 是为 vime 的训练流水线设计的，但它也可以作为纯推理场景的强大启动器，通过外部 engine 地址或配置 vime 仅关注推理服务。
 
 **使用预启动的外部引擎：**
 
@@ -270,12 +279,18 @@ vllm serve /path/to/model --port 10091 ...
 
 # 步骤 2：将 vime 连接到外部引擎
 python train.py \
-  --rollout-external \
   --rollout-external-engine-addrs host1:10090 host2:10091 \
   ...
 ```
 
-> **注意：** `--vllm-config` 和 `--rollout-external` 互斥。当你希望 vime 管理完整的引擎生命周期时，使用 `--vllm-config`；当引擎已预部署时，使用 `--rollout-external`。
+vime 会请求每个外部引擎的 `/server_info`，自动推断
+`rollout_num_gpus`、单个 engine 的 GPU 数、vLLM 并行参数，以及
+prefill/decode worker 类型。如果没有提供 `--vllm-router-ip/--vllm-router-port`，
+vime 会自己启动 router，并把这些外部引擎注册进去。
+
+> **注意：** `--vllm-config` 和 `--rollout-external-engine-addrs` 互斥。当你希望 vime 管理完整的引擎生命周期时，使用 `--vllm-config`；当引擎已预部署时，使用 `--rollout-external-engine-addrs`。
+
+关于 external engine 的选择、update from disk 和 delta disk transport，见 [External Rollout Engines 配置路线图](external-rollout-engines.md)。
 
 ---
 
@@ -332,7 +347,7 @@ vime 自动为每个 sample 分配一个唯一的 `session_id`（存储在 `samp
 | 选项 | 冲突原因 |
 |------|----------|
 | `--prefill-num-servers` | PD 分离通过 YAML 中的 `server_groups` 配置 |
-| `--rollout-external` | 外部引擎有自己的拓扑；config 在内部管理生命周期 |
+| `--rollout-external-engine-addrs` | 外部引擎有自己的拓扑；config 在内部管理生命周期 |
 
 ---
 
@@ -398,27 +413,29 @@ from vime.utils.http_utils import post
 async def generate_with_models(args, sample, sampling_params):
     """使用 actor 生成，用 reward 模型打分，与 reference 比较。"""
     
-    # 从 actor 生成
-    actor_url = get_model_url(args, "actor", "/generate")
+    # 从 actor 生成（默认端点为 /inference/v1/generate）
+    actor_url = get_model_url(args, "actor")
     actor_output = await post(actor_url, {
-        "text": sample.prompt,
-        "sampling_params": sampling_params,
-        "return_logprob": True,
+        "model": args.hf_checkpoint,
+        "token_ids": sample.tokens,
+        "sampling_params": {"max_tokens": 1024, "temperature": 1.0, "top_p": 1.0, "logprobs": 1},
     })
-    
-    # 获取 reference logprobs 用于 KL penalty
-    ref_url = get_model_url(args, "ref", "/generate")
+    response_ids = actor_output["choices"][0]["token_ids"]
+
+    # 获取 reference logprobs 用于 KL penalty。max_tokens=1 + prompt_logprobs 对提交的
+    # token_ids 打分；从顶层 "prompt_logprobs" 字段读取。
+    ref_url = get_model_url(args, "ref")
     ref_output = await post(ref_url, {
-        "text": sample.prompt + actor_output["text"],
-        "sampling_params": {"max_new_tokens": 0, "temperature": 0},
-        "return_logprob": True,
+        "model": args.hf_checkpoint,
+        "token_ids": sample.tokens + response_ids,
+        "sampling_params": {"max_tokens": 1, "temperature": 0.0, "prompt_logprobs": 1},
     })
-    
-    # 用 reward 模型打分
+
+    # 用 reward 模型打分（OpenAI 兼容）
     reward_url = get_model_url(args, "reward", "/v1/chat/completions")
     reward_output = await post(reward_url, {
         "model": "reward",
-        "messages": [{"role": "user", "content": sample.prompt + actor_output["text"]}],
+        "messages": [{"role": "user", "content": sample.prompt}],
     })
     
     # ... 处理输出并返回 Sample
@@ -446,7 +463,7 @@ async def generate_with_models(args, sample, sampling_params):
 
 ### Q: 可以不训练，只用 `--vllm-config` 做推理吗？
 
-虽然 `--vllm-config` 是为 vime 的训练循环设计的，但你可以通过配置仅 rollout 的运行来实现纯推理场景。对于完全独立的 vLLM 推理服务，建议直接使用 vLLM 原生的 `launch_server`，或使用 `--rollout-external` 模式连接预部署的引擎。
+虽然 `--vllm-config` 是为 vime 的训练循环设计的，但你可以通过配置仅 rollout 的运行来实现纯推理场景。对于完全独立的 vLLM 推理服务，建议直接使用 vLLM 原生的 `_run_vllm_server`，或使用 `--rollout-external-engine-addrs` 连接预部署的引擎。
 
 ### Q: `--vllm-config` 和 `--prefill-num-servers` 是什么关系？
 

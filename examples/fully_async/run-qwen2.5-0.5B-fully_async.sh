@@ -9,7 +9,7 @@
 #   /root/datasets/dapo-math-17k/dapo-math-17k.jsonl
 
 # clean any leftover ray/vllm
-pkill -9 vllm 2>/dev/null || true
+pkill -9 -f '[v]llm serve|VLL[M]::' 2>/dev/null || true
 sleep 3
 ray stop --force 2>/dev/null || true
 pkill -9 ray python 2>/dev/null || true

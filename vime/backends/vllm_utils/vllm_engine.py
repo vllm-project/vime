@@ -13,6 +13,7 @@ import cloudpickle
 import requests
 from vllm.utils.system_utils import kill_process_tree
 
+from vime.backends.vllm_utils.external import get_server_info
 from vime.ray.ray_actor import RayActor
 from vime.utils.http_utils import get_host_info
 
@@ -192,35 +193,46 @@ class VLLMEngine(RayActor):
                     actual_value == expect_value
                 ), f"{name=} {expect_value=} {actual_value=} {expect_server_args=} {actual_server_args=}"
 
-        _wait_server_healthy(
-            f"http://{self.server_host}:{self.server_port}",
-            is_process_alive=lambda: True,
-        )
-
-        response = requests.get(
-            f"http://{self.server_host}:{self.server_port}/server_info",
-            params={"config_format": "json"},
-        )
-        body = response.json()
-        actual_server_args = body.get("vllm_config", {}).get("parallel_config", {})
+        actual_server_args = get_server_info(f"http://{self.server_host}:{self.server_port}")
         _sanity_check_server_args(actual_server_args, expect_server_args)
+        self._register_to_router(expect_server_args)
 
     def _init_normal(self, server_args_dict):
         logger.info(f"Launch vLLM api_server at: {self.server_host}:{self.server_port}")
         self.process = launch_server_process(server_args_dict)
+        self._register_to_router(server_args_dict)
 
+    def _register_to_router(self, server_args_dict):
         if self.worker_type == "encoder":
             return
 
         if self.node_rank == 0 and self.router_ip and self.router_port:
-            payload = {
-                "url": f"http://{self.server_host}:{self.server_port}",
-                "worker_type": self.worker_type,
-            }
-            response = requests.post(
-                f"http://{self.router_ip}:{self.router_port}/workers",
-                json=payload,
-            )
+            import vllm_router
+            from packaging.version import parse
+
+            worker_url = f"http://{self.server_host}:{self.server_port}"
+            if parse(vllm_router.__version__) <= parse("0.2.1"):
+                assert self.worker_type == "regular", "pd disaggregation is not supported in old router."
+                response = requests.post(
+                    f"http://{self.router_ip}:{self.router_port}/add_worker?url={worker_url}",
+                )
+            else:
+                payload = {
+                    "url": worker_url,
+                    "worker_type": self.worker_type,
+                }
+                if self.worker_type == "prefill":
+                    bootstrap_port = server_args_dict.get("disaggregation_bootstrap_port")
+                    if bootstrap_port is None:
+                        raise RuntimeError(
+                            f"Prefill worker {worker_url} does not have disaggregation_bootstrap_port; "
+                            "cannot register it to the PD router."
+                        )
+                    payload["bootstrap_port"] = bootstrap_port
+                response = requests.post(
+                    f"http://{self.router_ip}:{self.router_port}/workers",
+                    json=payload,
+                )
             response.raise_for_status()
 
     def _make_request(self, endpoint: str, payload: dict | None = None):
@@ -631,6 +643,10 @@ def _compute_server_args(
 
 
 def _vllm_server_field_names() -> frozenset[str]:
+    """Valid vLLM server-arg field names: ``AsyncEngineArgs`` ∪ ``FrontendArgs``. vLLM has no
+    single ``ServerArgs`` class (sglang does); their union is the faithful translation. Single
+    source of truth for ``--vllm-*`` flag generation and ``--vllm-config`` override validation.
+    """
     from vllm.engine.arg_utils import AsyncEngineArgs
     from vllm.entrypoints.openai.cli_args import FrontendArgs
 
