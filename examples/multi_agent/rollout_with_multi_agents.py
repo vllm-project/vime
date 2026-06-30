@@ -28,6 +28,21 @@ async def generate_with_multi_agents(args, sample: Sample, sampling_params, eval
     custom_multi_agent_func = load_function(args.custom_multi_agent_function_path)
     samples = await custom_multi_agent_func(args, sample)
 
+    # VIME compact rollouts return multiple training samples from one source
+    # sample. Newer VIME requires all siblings to share a rollout_id so loss
+    # reduction counts the source rollout once instead of over-counting agents.
+    compact_rollout_id = (
+        sample.rollout_id
+        if sample.rollout_id is not None
+        else sample.index
+        if sample.index is not None
+        else sample.group_index
+        if sample.group_index is not None
+        else id(sample)
+    )
+    for sibling in samples:
+        sibling.rollout_id = compact_rollout_id
+
     random.shuffle(samples)
 
     return samples

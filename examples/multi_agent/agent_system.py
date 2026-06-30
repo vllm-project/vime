@@ -5,11 +5,27 @@ import traceback
 from copy import deepcopy
 
 from vime.rollout.rm_hub import batched_async_rm
-from vime.rollout.vllm_rollout import _build_inference_sampling_params, _inference_generate_tokens_and_logprobs
+from vime.rollout.vllm_rollout import _build_inference_sampling_params
 from vime.utils.http_utils import post
 from vime.utils.types import Sample
 
 from .prompts import SOLVER_PROMPT_TEMPLATE, generate_rewriter_template, generate_select_template
+
+
+def _inference_generate_tokens_and_logprobs(choice):
+    """Compatibility helper for current VIME vLLM rollout responses."""
+    new_response_tokens = choice.get("token_ids") or []
+    new_response_log_probs = []
+    lp = choice.get("logprobs")
+    if isinstance(lp, dict):
+        content_items = lp.get("content") or []
+        new_response_log_probs = [
+            float(item.get("logprob", 0.0)) if isinstance(item, dict) else 0.0
+            for item in content_items
+        ]
+    if not new_response_log_probs:
+        new_response_log_probs = [0.0] * len(new_response_tokens)
+    return new_response_tokens, new_response_log_probs
 
 
 async def generate_response(args, prompt, key):
