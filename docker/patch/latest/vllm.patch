@@ -95,3 +95,16 @@ diff --git a/vllm/entrypoints/serve/dev/rlhf/api_router.py b/vllm/entrypoints/se
  @router.get("/is_paused")
  async def is_paused(raw_request: Request) -> JSONResponse:
      """Return the current pause status."""
+diff --git a/vllm/entrypoints/serve/disagg/protocol.py b/vllm/entrypoints/serve/disagg/protocol.py
+index 60d2a64..67f3f98 100644
+--- a/vllm/entrypoints/serve/disagg/protocol.py
++++ b/vllm/entrypoints/serve/disagg/protocol.py
+@@ -203,6 +203,8 @@ class GenerateResponse(BaseModel):
+     )
+     choices: list[GenerateResponseChoice]
+ 
++    usage: UsageInfo | None = Field(default=None)
++
+     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
+ 
+     kv_transfer_params: dict[str, Any] | None = Field(
