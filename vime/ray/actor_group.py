@@ -53,9 +53,7 @@ class RayTrainGroup:
         pg, reordered_bundle_indices, _reordered_gpu_ids = pg
 
         env_vars = {
-            # Default NCCL_CUMEM_ENABLE to "0" to prevent intermittent NCCL
-            # init errors observed when the vLLM side disables CUMEM.
-            "NCCL_CUMEM_ENABLE": os.environ.get("NCCL_CUMEM_ENABLE", "0"),
+            "NCCL_CUMEM_ENABLE": os.environ.get("NCCL_CUMEM_ENABLE", "1"),
             "NVTE_FP8_BLOCK_SCALING_FP32_SCALES": os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "1"),
             **{name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST},
             **self.args.train_env_vars,
@@ -65,6 +63,7 @@ class RayTrainGroup:
             import torch_memory_saver
 
             for path in [
+                "torch_memory_saver_hook_mode_preload_cu13.abi3.so",
                 "torch_memory_saver_hook_mode_preload_cu12.abi3.so",
                 "torch_memory_saver_hook_mode_preload.abi3.so",
             ]:
