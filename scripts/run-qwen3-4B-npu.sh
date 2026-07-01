@@ -138,7 +138,7 @@ MISC_ARGS=(
 # Start Ray with isolated temp-dir and ports
 unset ASCEND_RT_VISIBLE_DEVICES https_proxy http_proxy proxy
 NPU_COUNT=$(echo "$ASCEND_VISIBLE_DEVICES" | tr ',' '\n' | wc -l)
-ray start --head     --temp-dir="${RAY_TMPDIR}"     --port="${RAY_PORT}"     --dashboard-port="${RAY_DASHBOARD_PORT}"     --dashboard-agent-listen-port="${RAY_AGENT_PORT}" --node-ip-address 127.0.0.1     --num-gpus 0     --resources '{"NPU": $NPU_COUNT}'     --disable-usage-stats     --dashboard-host=0.0.0.0
+ray start --head     --temp-dir="${RAY_TMPDIR}"     --port="${RAY_PORT}"     --dashboard-port="${RAY_DASHBOARD_PORT}"     --dashboard-agent-listen-port="${RAY_AGENT_PORT}" --node-ip-address 127.0.0.1     --num-gpus 0     --resources '{"NPU": '"$NPU_COUNT"'}'     --disable-usage-stats     --dashboard-host=0.0.0.0
 
 RUNTIME_ENV_JSON=$(cat << 'EOF'
 {
@@ -151,7 +151,7 @@ RUNTIME_ENV_JSON=$(cat << 'EOF'
     "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:False",
     "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
     "LD_LIBRARY_PATH": "/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/ascend-toolkit/latest/compiler/lib64/plugin/opskernel:/usr/local/Ascend/ascend-toolkit/latest/compiler/lib64/plugin/nnengine:/usr/local/Ascend/ascend-toolkit/latest/opp/built-in/op_impl/ai_core/tbe/op_tiling/lib/:/usr/local/Ascend/nnal/atb/latest/atb/cxx_abi_1/lib:/usr/local/Ascend/cann/lib64:/usr/local/Ascend/cann/aarch64-linux/devlib",
-    "VLLM_DISABLE_COMPILE_CACHE": "1",
+    "VLLM_DISABLE_COMPILE_CACHE": "1"
   }
 }
 EOF

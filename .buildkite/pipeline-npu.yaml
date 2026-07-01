@@ -144,10 +144,6 @@ steps:
               pip install -e . --no-deps --break-system-packages || pip install -e . --no-deps
             fi
 
-            source /usr/local/Ascend/driver/bin/setenv.bash
-            source /usr/local/Ascend/ascend-toolkit/set_env.sh
-            source /usr/local/Ascend/nnal/atb/set_env.sh
-
             echo 'INFO: download Qwen3-4B model and dapo-math-17k dataset'
             pip install modelscope -q
             modelscope download --model 'Qwen/Qwen3-4B' --local_dir /root/.cache/huggingface/models/Qwen3-4B
