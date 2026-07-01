@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-ARG BASE_IMAGE=quay.io/ascend/vllm-ascend:nightly-main-a3
+ARG BASE_IMAGE=quay.io/ascend/vllm-ascend:v0.22.1rc1-a3
 FROM ${BASE_IMAGE}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -44,27 +44,12 @@ RUN sed -i '/ports\.ubuntu\.com/ {h;s|ports\.ubuntu\.com|mirrors.tuna.tsinghua.e
       "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi" && \
     git config --global http.version HTTP/1.1
 
-# Clone vllm and vllm-ascend sources.
-RUN pip uninstall -y \
-      vllm vllm-ascend megatron-bridge megatron-core mindspeed mbridge vime || true && \
-    git clone https://github.com/vllm-project/vllm.git /root/vllm && \
-    git clone --depth 1 --branch main \
-      https://github.com/vllm-project/vllm-ascend.git /root/vllm-ascend
-
-# Switch vllm to the vllm-ascend verified commit, apply the NPU patch, install.
-RUN VLLM_COMMIT=$(cat /root/vllm-ascend/.github/vllm-main-verified.commit) && \
-      git -C /root/vllm checkout "${VLLM_COMMIT}" && \
-      git -C /root/vllm apply --whitespace=nowarn /tmp/npu_patch/vllm.patch && \
-      VLLM_TARGET_DEVICE=empty pip install -v -e /root/vllm --trusted-host download.pytorch.org \
-      --trusted-host download-r2.pytorch.org
-
-# vLLM Ascend: apply colocate patch before install.
-RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    git -C /root/vllm-ascend submodule update --init --recursive && \
-    git -C /root/vllm-ascend apply --whitespace=nowarn /tmp/npu_patch/vllm-ascend.patch && \
-    pip install -v -e /root/vllm-ascend --trusted-host download.pytorch.org \
-    --trusted-host download-r2.pytorch.org
+# vllm and vllm-ascend are installed editable (-e) in the base image; apply the
+# NPU colocate patches directly to their source trees.
+RUN git -C /vllm-workspace/vllm apply --whitespace=nowarn \
+      /tmp/npu_patch/vllm.patch && \
+    git -C /vllm-workspace/vllm-ascend apply --whitespace=nowarn \
+      /tmp/npu_patch/vllm-ascend.patch
 
 # Protect the serving stack while installing Vime dependencies.
 RUN python3 -c 'import importlib.metadata as m; names = ["numpy", "ray", "torch", "torch-npu", "torchvision", "transformers", "triton-ascend", "vllm", "vllm-ascend"]; open("/tmp/vime-npu-constraints.txt", "w").write("\n".join(f"{name}=={m.version(name)}" for name in names) + "\n")'
