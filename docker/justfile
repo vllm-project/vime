@@ -7,9 +7,14 @@
 # built on its own native host and pushed BY DIGEST (no tag lands in the hub),
 # then the two digests are fused into the final tag with `just manifest`.
 #
+# CUDA 12.9 is the default, so it carries NO cu marker in the tag. Only the
+# non-default cu13 variant is suffixed.
+#
 # Tag scheme:
-#   vllm/vime:<version>        immutable, multi-arch
-#   vllm/vime:latest           rolling,   multi-arch
+#   vllm/vime:<version>             immutable, multi-arch (cu12.9)
+#   vllm/vime:latest                rolling,   multi-arch (cu12.9)
+#   vllm/vime:cu13-<version>        immutable, multi-arch (cu13 variant)
+#   vllm/vime:cu13-latest           rolling,   multi-arch (cu13 variant)
 # <version> comes from docker/version.txt.
 
 IMAGE := "vllm/vime"
@@ -17,8 +22,14 @@ BUILDER := "vime-builder"
 
 # ---- per-arch build, pushed BY DIGEST (run once on an amd64 host, once on an arm64 host) ----
 
+# Default — cu12.9 base.
 build:
     ARG_TAG_SUFFIX="" ARG_BUILD_EXTRA_ARGS="--build-arg INSTALL_FLASHQLA=1" just _build-digest
+
+# cu13 variant — vLLM latest (cu130) base; ENABLE_CUDA_13 builds TE from source
+# and installs the cu13 Triton fork on top.
+build-cu13:
+    ARG_TAG_SUFFIX="-cu13" ARG_BUILD_EXTRA_ARGS='--build-arg BASE_IMAGE=vllm/vllm-openai:latest-ubuntu2404 --build-arg ENABLE_CUDA_13=1' just _build-digest
 
 _build-digest:
     #!/bin/bash
@@ -37,15 +48,19 @@ _build-digest:
     jq -r '."containerimage.digest"' "$META"
 
 # ---- fuse the two per-arch digests into one multi-arch tag ----
-# Run once after `build` has pushed on BOTH hosts, passing the digests it printed:
-#   just manifest sha256:<amd64> sha256:<arm64>     -> vime-<version> + vime-latest
-manifest AMD_DIGEST ARM_DIGEST:
+# Run once after `build` (or `build-cu13`) has pushed on BOTH hosts, passing the
+# digests it printed. For the default cu12.9 image leave VARIANT empty:
+#   just manifest "" sha256:<amd64> sha256:<arm64>     -> vime:<version> + vime:latest
+#   just manifest cu13 sha256:<amd64> sha256:<arm64>   -> vime:cu13-<version> + vime:cu13-latest
+manifest VARIANT AMD_DIGEST ARM_DIGEST:
     #!/bin/bash
     set -euxo pipefail
     cd ..
 
     VERSION="$(cat docker/version.txt | tr -d '\n')"
-    docker buildx imagetools create -t "{{IMAGE}}:${VERSION}" -t "{{IMAGE}}:latest" "{{IMAGE}}@{{AMD_DIGEST}}" "{{IMAGE}}@{{ARM_DIGEST}}"
+    PREFIX=""
+    [ -n "{{VARIANT}}" ] && PREFIX="{{VARIANT}}-"
+    docker buildx imagetools create -t "{{IMAGE}}:${PREFIX}${VERSION}" -t "{{IMAGE}}:${PREFIX}latest" "{{IMAGE}}@{{AMD_DIGEST}}" "{{IMAGE}}@{{ARM_DIGEST}}"
 
 # ---- single-arch test/debug image for the run-ci-image validation job ----
 # The e2e-test-image runner is x86, so this is amd64-only and

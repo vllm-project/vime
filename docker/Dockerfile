@@ -6,19 +6,30 @@ FROM ${BASE_IMAGE}
 ARG PATCH_VERSION=latest
 ARG MEGATRON_COMMIT=1dcf0dafa884ad52ffb243625717a3471643e087
 
+ARG ENABLE_CUDA_13=0
+
 # ======================================== Setup =============================================
 
 WORKDIR /root/
 
 # ======================================== Apt dependencies =============================================
 
-# vllm/vllm-openai base is an inference image — add cu12 dev headers + cmake/git
+# vllm/vllm-openai base is an inference image — add CUDA dev headers + cmake/git
 # so TE / apex / flash-attn source builds find cusparse.h etc.
+# Dev packages must match the base toolkit: -12-9 for cu129, -13-0 for cu130.
 RUN apt-get update && apt-get install -y \
-    nvtop rsync dnsutils prometheus git cmake \
-    cuda-nvrtc-dev-12-9 cuda-nvml-dev-12-9 cuda-profiler-api-12-9 cuda-nvtx-12-9 \
-    libcusparse-dev-12-9 libcusolver-dev-12-9 libcufft-dev-12-9 libcurand-dev-12-9 \
-    libcudnn9-dev-cuda-12 && \
+    nvtop rsync dnsutils prometheus git cmake && \
+    if [ "${ENABLE_CUDA_13}" = "1" ]; then \
+      apt-get install -y \
+        cuda-nvrtc-dev-13-0 cuda-nvml-dev-13-0 cuda-profiler-api-13-0 cuda-nvtx-13-0 \
+        libcusparse-dev-13-0 libcusolver-dev-13-0 libcufft-dev-13-0 libcurand-dev-13-0 \
+        libcudnn9-dev-cuda-13; \
+    else \
+      apt-get install -y \
+        cuda-nvrtc-dev-12-9 cuda-nvml-dev-12-9 cuda-profiler-api-12-9 cuda-nvtx-12-9 \
+        libcusparse-dev-12-9 libcusolver-dev-12-9 libcufft-dev-12-9 libcurand-dev-12-9 \
+        libcudnn9-dev-cuda-12; \
+    fi && \
     rm -rf /var/lib/apt/lists/*
 
 # vllm/vllm-openai base only ships python3; subsequent source builds invoke `python`.
@@ -52,9 +63,22 @@ RUN if [ "${INSTALL_FLASHQLA}" = "1" ]; then \
 RUN pip install tilelang -f https://tile-ai.github.io/whl/nightly/cu128/
 
 # cublas dev header for TE CMake (arm64 base ships runtime .so but not the header).
-RUN apt-get update && apt-get install -y libcublas-dev-12-9 && rm -rf /var/lib/apt/lists/*
+# cu13 also needs the -13-0 headers that TE's nvcc build expects.
+RUN apt-get update && \
+    if [ "${ENABLE_CUDA_13}" = "1" ]; then \
+      apt-get install -y libcublas-dev-13-0; \
+    else \
+      apt-get install -y libcublas-dev-12-9; \
+    fi && \
+    rm -rf /var/lib/apt/lists/*
 
-RUN pip -v install --no-build-isolation "transformer_engine[pytorch]==2.10.0"
+# TE does not publish a cu13 wheel; build from source when ENABLE_CUDA_13=1.
+RUN if [ "${ENABLE_CUDA_13}" = "1" ]; then \
+      pip install nvidia-mathdx pybind11 ninja wheel packaging && \
+      pip -v install --no-build-isolation git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.10; \
+    else \
+      pip -v install --no-build-isolation "transformer_engine[pytorch]==2.10.0"; \
+    fi
 
 RUN NVCC_APPEND_FLAGS="--threads 4" \
   pip -v install --disable-pip-version-check --no-cache-dir \
@@ -65,8 +89,11 @@ RUN git clone https://github.com/NVIDIA/Megatron-LM.git --recursive && \
     cd Megatron-LM && git checkout ${MEGATRON_COMMIT}
 
 # torch_memory_saver pinned to a193d9dd (upstream slime #1916).
-# TMS_CUDA_MAJOR is required by this pin's build backend for CUDA wheels; base is cu129 -> 12.
-RUN TMS_CUDA_MAJOR=12 pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@a193d9dd1b877d33c64a41cfb3db9f867df2d926 --no-cache-dir --force-reinstall
+# TMS_CUDA_MAJOR is required by this pin's build backend for CUDA wheels;
+# auto-detect from the running torch's CUDA major (12 for cu129, 13 for cu130).
+RUN TMS_CUDA_MAJOR="$(python -c 'import torch; print(torch.version.cuda.split(".")[0])')" && \
+    export TMS_CUDA_MAJOR && \
+    pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@a193d9dd1b877d33c64a41cfb3db9f867df2d926 --no-cache-dir --force-reinstall
 RUN pip install git+https://github.com/radixark/Megatron-Bridge.git@bridge --no-deps --no-build-isolation
 RUN pip install nvidia-modelopt[torch]>=0.37.0 --no-build-isolation
 
@@ -75,7 +102,10 @@ RUN pip install --ignore-installed PyJWT && \
     pip install -r /tmp/requirements.txt
 
 # https://github.com/pytorch/pytorch/issues/168167
-RUN pip install nvidia-cudnn-cu12==9.16.0.29
+# cu130 base already ships nvidia-cudnn-cu13 9.19.0; only cu129 needs the pin.
+RUN if [ "${ENABLE_CUDA_13}" != "1" ]; then \
+      pip install nvidia-cudnn-cu12==9.16.0.29; \
+    fi
 
 # reinstall numpy 1.x for megatron; pin scipy<1.18 alongside it. vime's vllm/vllm-openai
 # base ships NO scipy, so unpinned it pulls scipy>=1.18, which hard-requires numpy>=2 and
@@ -100,15 +130,12 @@ RUN cd Megatron-LM && \
     rm megatron.patch && \
     pip install -e .
 
-# Patch vLLM: skip execute_dummy_batch while the engine is asleep / being put to sleep, so a
-# colocate DP+EP rollout's staged sleep/wake weight-sync doesn't run a forward against freed KV
-# (illegal memory access at update_weights / the post-rollout sleep offload). vLLM PR #44483
-# lineage, broadened to guard on EngineCore.is_sleeping() (covers the cuMem offload window).
-# vLLM is a pip install (not a git checkout) so apply with plain `git apply` (no --3way).
+# Patch vLLM: reserved for future fixes. Apply with plain `git apply` (no --3way)
+# since vLLM is a pip install, not a git checkout. Empty patch = no-op.
 COPY docker/patch/${PATCH_VERSION}/vllm.patch /tmp/vllm.patch
 RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirname(vllm.__file__)))')" && \
     cd "$VLLM_SITE" && \
-    git apply -v /tmp/vllm.patch && \
+    git apply -v --allow-empty /tmp/vllm.patch && \
     rm /tmp/vllm.patch
 
 # ====================================== Install main package ============================================

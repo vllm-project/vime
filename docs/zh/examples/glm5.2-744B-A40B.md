@@ -1,6 +1,6 @@
-# 256xH100 训练 GLM-5.2 744B-A40B
+# 18xGB300 训练 GLM-5.2 744B-A40B
 
-这里是使用 32 节点、256 张 H100 训练 [GLM-5.2](https://z.ai/blog/glm-5.2) 的推荐配置示例。
+这里是使用 18 个 tray、72 张 GB300 训练 [GLM-5.2](https://z.ai/blog/glm-5.2) 的推荐配置示例。
 
 这个配置使用 GLM-5.2 的 BF16 checkpoint 做 Megatron 训练，使用 FP8 checkpoint 做 vLLM rollout。下面假设 Hugging Face 上会提供两个地址：
 
@@ -9,7 +9,7 @@
 
 ## 环境准备
 
-搭建环境与下载数据的方法可以参考 [示例：Qwen3-4B](qwen3-4B.md)。多机启动前，请确保所有节点都能访问同一个 `$BASE_DIR` 路径。
+搭建环境与下载数据的方法可以参考 [示例：Qwen3-4B](qwen3-4B.md)。多机启动前，请确保所有节点都能访问同一个模型根目录和数据根目录。
 
 ### 下载模型
 
@@ -24,22 +24,22 @@ hf download zai-org/GLM-5.2-FP8 --local-dir $BASE_DIR/GLM-5.2-FP8
 
 训练侧需要把 BF16 Hugging Face checkpoint 转换为 Megatron 可加载的 torch_dist 格式。torch_dist 格式支持重新切分，所以转换时的并行布局**不需要**与训练一致；我们使用一个能满足 Megatron expert group 约束（在转换的节点数下成立）的布局即可。
 
-可以在 4 台机器 / 32 卡上分别执行：
+可以在 4 台机器 / 16 卡上分别执行：
 
 ```bash
-cd /root/vime
+cd /mnt/weka/aoshen/vime/projects/vime-pr286
 pip install -e . --no-deps
 source scripts/models/glm5.2-744B-A40B.sh
 PYTHONPATH=/root/Megatron-LM/ torchrun \
-   --nproc-per-node 8 \
+   --nproc-per-node 4 \
    --master-addr ${MASTER_ADDR} --master-port 12345 \
    --nnodes=4 --node-rank ${NODE_RANK} \
    tools/convert_hf_to_torch_dist.py \
    ${MODEL_ARGS[@]} \
-   --tensor-model-parallel-size 8 \
+   --tensor-model-parallel-size 4 \
    --pipeline-model-parallel-size 2 \
    --decoder-last-pipeline-num-layers 40 \
-   --expert-model-parallel-size 16 \
+   --expert-model-parallel-size 8 \
    --expert-tensor-parallel-size 1 \
    --hf-checkpoint $BASE_DIR/GLM-5.2/ \
    --save $BASE_DIR/GLM-5.2_torch_dist/
@@ -54,10 +54,11 @@ PYTHONPATH=/root/Megatron-LM/ torchrun \
 从 node0 执行：
 
 ```bash
-cd /root/vime
-export BASE_DIR=/shared/path
+cd /mnt/weka/aoshen/vime/projects/vime-pr286
+export MODEL_ROOT=/mnt/weka/models
+export DATA_ROOT=/mnt/weka/aoshen/data/dapo-math-17k-hf
 export MASTER_ADDR=<node0-ip>
-export HOSTFILE=$BASE_DIR/hostfile  # 每行一个 worker IP，共 32 个节点
+export HOSTFILE=$MODEL_ROOT/hostfile  # 每行一个 worker IP，共 18 个节点
 bash scripts/run-glm5.2-744B-A40B.sh
 ```
 
@@ -79,24 +80,24 @@ DSA index sharing 的 schedule（例如 `index_topk_freq=4`、`index_skip_topk_o
 
 #### 训练并行
 
-默认脚本按 32 节点 256 卡配置：
+默认脚本按 18 个 tray、72 卡配置：
 
 ```bash
 PERF_ARGS=(
    --tensor-model-parallel-size 4
-   --pipeline-model-parallel-size 8
-   --decoder-first-pipeline-num-layers 14
-   --decoder-last-pipeline-num-layers 16
-   --context-parallel-size 8
-   --expert-model-parallel-size 32
+   --pipeline-model-parallel-size 9
+   --decoder-first-pipeline-num-layers 10
+   --decoder-last-pipeline-num-layers 12
+   --context-parallel-size 2
+   --expert-model-parallel-size 8
    --expert-tensor-parallel-size 1
    ...
 )
 ```
 
-`TP=4 * PP=8 * CP=8 = 256` 卡构成一个训练组（`DP=1`）。expert group 约束 `expert_tp(1) * EP(32) * PP(8) = 256` 正好整除 world size（`expert_dp=1`）。
+`TP=4 * PP=9 * CP=2 = 72` 卡构成一个训练组（`DP=1`）。expert group 约束 `expert_tp(1) * EP(8) * PP(9) = 72` 正好整除 world size（`expert_dp=1`）。
 
-DSA cross-layer index sharing 要求每个 pipeline stage 都必须**从 computing layer 开始**。在 `index_topk_freq=4` / `index_skip_topk_offset=3` 下，computing layer 是第 1、2、3、7、11、...、75 层。如果直接 `78/8` 均分，stage 会从 skip layer 开始，触发 `get_glm5_spec` 里的 index-share 断言。因此我们使用 `--decoder-first-pipeline-num-layers 14` 和 `--decoder-last-pipeline-num-layers 16`，中间 6 个 stage 各 `(78-14-16)/6 = 8` 层。各 stage 的起始全局层为 1、15、23、31、39、47、55、63，全部是 computing layer。
+DSA cross-layer index sharing 要求每个 pipeline stage 都必须**从 computing layer 开始**。在 `index_topk_freq=4` / `index_skip_topk_offset=3` 下，computing layer 是第 1、2、3、7、11、...、75 层。如果直接 `78/9` 均分，stage 会从 skip layer 开始，触发 `get_glm5_spec` 里的 index-share 断言。因此我们使用 `--decoder-first-pipeline-num-layers 10` 和 `--decoder-last-pipeline-num-layers 12`，中间 7 个 stage 各 `(78-10-12)/7 = 8` 层。各 stage 的起始全局层为 1、11、19、27、35、43、51、59、67，全部是 computing layer。
 
 #### BF16 训练 + FP8 Rollout
 
@@ -121,55 +122,33 @@ ROLLOUT_ARGS=(
 
 #### vLLM 配置
 
-rollout 侧采用 **prefill/decode (PD) 分离**:1 个 prefill engine(64 卡)+ 3 个 decode engine(192 卡)= 256 卡(必须等于 colocate 的 `rollout_num_gpus`)。每个 engine 64 卡,开 DP attention、`EP=64`(DeepEP 的 dispatch config map 只支持到 160 个 EP rank,所以单个 256 卡 engine 非法)。prefill 用 `auto` DeepEP 路径,decode 用 `low_latency` + `deep_gemm`。切分通过 `--vllm-config` YAML 配置:
+rollout 侧每个 engine 跨 2 个 tray（8 张 GPU，TP=8），prefill 和 decode 共卡。72 张 GPU 共 9 个 engine，全部开启 expert parallel 和 MTP speculative decoding。切分通过 `--vllm-config` YAML 配置:
 
 ```yaml
 vllm:
   - name: default
     server_groups:
-      - worker_type: prefill
-        num_gpus: 64
-        num_gpus_per_engine: 64
-        overrides: { deepep_mode: auto, ... }
-      - worker_type: decode
-        num_gpus: 192
-        num_gpus_per_engine: 64
-        overrides: { deepep_mode: low_latency, moe_runner_backend: deep_gemm, ... }
+      - worker_type: regular
+        num_gpus: 72
+        num_gpus_per_engine: 8
 ```
 
-PD 传输走 RDMA/IB,使用 mooncake backend:
-
-```bash
---vllm-disaggregation-transfer-backend mooncake
---vllm-disaggregation-ib-device mlx5_100,...,mlx5_107
-```
-
-其余 rollout 配置使用 FP8 KV cache 和 NSA + DeepEP backend:
+rollout 配置使用 FP8 权重、MTP4 speculative decoding:
 
 ```bash
 VLLM_ARGS=(
-   --vllm-enable-dp-attention
-   --vllm-ep-size 64
-   --vllm-dp-size 64
-   --vllm-kv-cache-dtype fp8_e4m3
-   --vllm-nsa-decode-backend flashmla_kv
-   --vllm-nsa-prefill-backend flashmla_sparse
-   --vllm-attention-backend nsa
+   --rollout-num-gpus-per-engine 8
+   --vllm-gpu-memory-utilization 0.85
+   --vllm-max-model-len 131072
+   --vllm-enable-expert-parallel
+   --vllm-enable-ep-weight-filter
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":4}'
    ...
 )
 ```
 
-MTP / EAGLE speculative decoding 直接使用模型自带的 next-token-prediction 层（GLM-5.2 checkpoint 自带 MTP 层），因此不需要单独的 draft model：
-
-```bash
---vllm-speculative-algorithm EAGLE
---vllm-speculative-num-steps 4
---vllm-speculative-eagle-topk 1
---vllm-speculative-num-draft-tokens 5
-```
-
-`VLLM_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK` 需要覆盖最大的 decode batch:`max cuda_graph_max_bs (decode 组 = 12) * speculative_num_draft_tokens (5) = 60`,向上取整到 `64`。低于该值会在 decode 组 CUDA graph capture 时触发 DeepEP low-latency dispatch buffer 的断言。
+MTP speculative decoding 直接使用模型自带的 next-token-prediction 层（GLM-5.2 checkpoint 自带 MTP 层），因此不需要单独的 draft model。独立 benchmark 测试中 MTP4 相比无 MTP 基线，输出吞吐提升 76.7%，TPOT 从 28.59 ms 降至 13.10 ms，acceptance rate 70.16%。
 
 #### 网络
 
-DeepEP/NVSHMEM 的跨节点通信需要在 Ray runtime env 中配置 IB 相关的 NCCL 参数（`NCCL_SOCKET_IFNAME`、`NCCL_IB_*`、`NCCL_NET_GDR_LEVEL`、`NCCL_P2P_LEVEL=NVL`、`NCCL_NVLS_ENABLE=0`、`MC_IB_PCI_RELAXED_ORDERING` 等）。脚本默认使用 `SOCKET_IFNAME=eth0`，如环境不同可在启动前设置 `SOCKET_IFNAME`，它会同时写入 `GLOO_SOCKET_IFNAME`、`TP_SOCKET_IFNAME` 和 `NCCL_SOCKET_IFNAME`。DeepEP 还要求设置 `NVSHMEM_DISABLE_NCCL=1`。
+rollout 的跨节点通信使用 Ray runtime env 里的网络接口配置。脚本默认使用 `SOCKET_IFNAME=bond0.225`，如环境不同可在启动前设置 `SOCKET_IFNAME`，它会同时写入 `GLOO_SOCKET_IFNAME`、`TP_SOCKET_IFNAME` 和 `NCCL_SOCKET_IFNAME`。
