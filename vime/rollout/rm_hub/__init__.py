@@ -1,13 +1,9 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import random
-
-import aiohttp
-
-logger = logging.getLogger(__name__)
-
-from vime.utils.misc import load_function
-from vime.utils.types import Sample
+from typing import TYPE_CHECKING
 
 from .deepscaler import get_deepscaler_rule_based_reward
 from .f1 import f1_score
@@ -16,10 +12,19 @@ from .math_dapo_utils import compute_score as compute_score_dapo
 from .math_utils import extract_answer as extract_boxed_answer
 from .math_utils import grade_answer_verl
 
+if TYPE_CHECKING:
+    import aiohttp
+
+    from vime.utils.types import Sample
+
+logger = logging.getLogger(__name__)
+
 _shared_session: aiohttp.ClientSession | None = None
 
 
 def _get_shared_session() -> aiohttp.ClientSession:
+    import aiohttp
+
     global _shared_session
     if _shared_session is None or _shared_session.closed:
         connector = aiohttp.TCPConnector(
@@ -53,6 +58,8 @@ async def remote_rm(args, sample: Sample, max_retries: int = 10):
 
 
 async def async_rm(args, sample: Sample, **kwargs):
+    from vime.utils.misc import load_function
+
     # Per-sample custom_rm_path (from eval dataset config) takes priority
     if sample.custom_rm_path:
         rm_function = load_function(sample.custom_rm_path)
@@ -103,6 +110,8 @@ async def batched_async_rm(
 ) -> list[int | float]:
     if args.custom_rm_path is not None:
         # Ensure the custom reward function is implemented in batch mode
+        from vime.utils.misc import load_function
+
         rm_function = load_function(args.custom_rm_path)
         return await rm_function(args, samples, **kwargs)
     tasks = [async_rm(args, sample, **kwargs) for sample in samples]

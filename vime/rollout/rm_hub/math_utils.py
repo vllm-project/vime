@@ -6,10 +6,6 @@ Call grade_answer(given_answer: str, ground_truth: str).
 """
 import re
 
-import sympy
-from pylatexenc import latex2text
-from sympy.parsing import sympy_parser
-
 
 # Dan Hendrycks' code
 def mathd_normalize_answer(answer: str | None) -> str | None:
@@ -167,6 +163,9 @@ TUPLE_CHARS = "()[]"
 
 def _sympy_parse(expr: str):
     """Parses an expression with sympy."""
+    import sympy
+    from sympy.parsing import sympy_parser
+
     py_expr = expr.replace("^", "**")
     # We allow basic SymPy names but no builtins to prevent arbitrary code execution
     # This whitelist approach ensures SymPy's internal transformations (like Integer) still work
@@ -181,6 +180,8 @@ def _sympy_parse(expr: str):
 
 def _parse_latex(expr: str) -> str:
     """Attempts to parse latex to an expression sympy can read."""
+    from pylatexenc import latex2text
+
     expr = expr.replace("\\tfrac", "\\frac")
     expr = expr.replace("\\dfrac", "\\frac")
     expr = expr.replace("\\frac", " \\frac")  # Play nice with mixed numbers.
@@ -351,6 +352,8 @@ def should_allow_eval(expr: str):
 def are_equal_under_sympy(ground_truth_normalized: str, given_normalized: str):
     are_equal = False
     try:
+        import sympy
+
         expr = f"({ground_truth_normalized})-({given_normalized})"
         if should_allow_eval(expr):
             sympy_diff = _sympy_parse(expr)

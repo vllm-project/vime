@@ -16,6 +16,8 @@ holds.
 
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
 
 from vime.rollout.rm_hub.math_utils import (
@@ -32,6 +34,11 @@ from vime.rollout.rm_hub.math_utils import (
 
 
 NUM_GPUS = 0
+
+requires_sympy = pytest.mark.skipif(
+    any(importlib.util.find_spec(mod) is None for mod in ("sympy", "pylatexenc")),
+    reason="sympy/pylatexenc not installed",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -197,12 +204,14 @@ def test_grade_answer_mathd_rejects_different():
 
 
 @pytest.mark.unit
+@requires_sympy
 def test_grade_answer_sympy_equivalent_expressions():
     """Symbolically equal expressions should compare equal under sympy."""
     assert grade_answer_sympy("x+1", "1+x") is True
 
 
 @pytest.mark.unit
+@requires_sympy
 def test_grade_answer_sympy_fraction_must_match_exactly():
     """Reducible fractions are intentionally NOT considered equal — pinning
     the explicit ``_is_frac`` short-circuit at math_utils.py:453-456."""
