@@ -40,16 +40,7 @@ export RAY_DISABLE_SIGINT_OVERRIDE=1
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/nnal/atb/latest/atb/cxx_abi_1/lib:/usr/local/Ascend/cann/lib64:${LD_LIBRARY_PATH}
 export VLLM_DISABLE_COMPILE_CACHE=1
-export ASCEND_VISIBLE_DEVICES="${ASCEND_VISIBLE_DEVICES:-$ASCEND_RT_VISIBLE_DEVICES}"
 export TRANSFORMERS_VERBOSITY=error
-
-# Sort NPU devices
-if [ -n "$ASCEND_VISIBLE_DEVICES" ]; then
-    SORTED_DEVICES=$(echo "$ASCEND_VISIBLE_DEVICES" | tr ',' '\n' | sort -n | tr '\n' ',')
-    SORTED_DEVICES=${SORTED_DEVICES%,}
-    export ASCEND_VISIBLE_DEVICES="$SORTED_DEVICES"
-    echo "Sorted ASCEND_VISIBLE_DEVICES: $ASCEND_VISIBLE_DEVICES"
-fi
 
 SCRIPT_DIR="/root/vime/scripts/"
 source "${SCRIPT_DIR}/models/qwen3-4B.sh"

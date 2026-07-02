@@ -84,8 +84,28 @@ steps:
 #          echo "--- Image pushed successfully"
 #          echo "$${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG}"
 
+#     - label: ":lint-roller: pre-commit"
+#       key: pre-commit-npu
+#       agents:
+#         queue: small_cpu_queue_premerge
+#       timeout_in_minutes: 15
+#       retry:
+#         automatic:
+#           - exit_status: -1  # agent lost (fresh instance failed to boot)
+#             limit: 2
+#       command: |
+#         docker run --rm \
+#           -e GIT_CONFIG_PARAMETERS="'safe.directory=/workspace'" \
+#           -v "$$PWD:/workspace" -w /workspace \
+#         python:3.11 bash -c '
+#           set -euo pipefail
+#           pip install -q pre-commit
+#           pre-commit run --all-files --show-diff-on-failure --color=always
+#         '
+
       - label: "qwen3-4B-npu test"
         key: qwen3-4B-npu
+#        depends_on: pre-commit-npu
         agents:
           queue: "ascend-a3"
           resource_class: "npu-8"
@@ -135,24 +155,25 @@ steps:
           GITHUB_COMMIT_NAME: "${BUILDKITE_COMMIT}_${BUILDKITE_PULL_REQUEST:-non-pr}"
           HF_TOKEN: "${HF_TOKEN}"
           HF_ENDPOINT: https://hf-mirror.com
+          ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
         command: |
           bash -c "
-            cd /root/vime
+            echo 'INFO: update NPU environment'
+            export ASCEND_VISIBLE_DEVICES='${ASCEND_VISIBLE_DEVICES:-$ASCEND_RT_VISIBLE_DEVICES}'
             if [ -n \"${BUILDKITE_COMMIT}\" ]; then
-              git fetch origin ${BUILDKITE_COMMIT}
-              git checkout ${BUILDKITE_COMMIT}
-              pip install -e . --no-deps --break-system-packages || pip install -e . --no-deps
+              source /workspace/build/buildkite/.buildkite/scripts/update-npu-environment.sh
             fi
 
             echo 'INFO: download Qwen3-4B model and dapo-math-17k dataset'
             pip install modelscope -q
             modelscope download --model 'Qwen/Qwen3-4B' --local_dir /root/.cache/huggingface/models/Qwen3-4B
             hf download --repo-type dataset zhuzilin/dapo-math-17k --local-dir /root/.cache/huggingface/datasets/dapo-math-17k
-  
+
             echo 'INFO: start training Qwen3-4B on NPU'
             ls -l /dev/davinci* 
             npu-smi info
             export MODEL_ROOT=/root/.cache/huggingface
+            cd /root/vime
             sed -i 's/--num-rollout [0-9]\+/--num-rollout 3/' scripts/run-qwen3-4B-npu.sh
             bash scripts/run-qwen3-4B-npu.sh
             sleep 3
@@ -160,8 +181,10 @@ steps:
             echo 'INFO: check training log'
             if ! grep -q 'succeeded' /root/vime/train_qwen3_4b_vllm.log; then
               echo 'ERROR: train log does not contain Ray job succeeded message'
+              sleep 3600
               exit 1
             fi
             echo 'INFO: train log contains Ray job succeeded message'
+            sleep 3600
           "
 
