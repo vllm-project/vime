@@ -41,6 +41,8 @@ export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64:/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/nnal/atb/latest/atb/cxx_abi_1/lib:/usr/local/Ascend/cann/lib64:${LD_LIBRARY_PATH}
 export VLLM_DISABLE_COMPILE_CACHE=1
 export ASCEND_VISIBLE_DEVICES="${ASCEND_VISIBLE_DEVICES:-$ASCEND_RT_VISIBLE_DEVICES}"
+export TRANSFORMERS_VERBOSITY=error
+
 # Sort NPU devices
 if [ -n "$ASCEND_VISIBLE_DEVICES" ]; then
     SORTED_DEVICES=$(echo "$ASCEND_VISIBLE_DEVICES" | tr ',' '\n' | sort -n | tr '\n' ',')
@@ -151,9 +153,11 @@ RUNTIME_ENV_JSON=$(cat << 'EOF'
     "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:False",
     "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
     "LD_LIBRARY_PATH": "/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/ascend-toolkit/latest/compiler/lib64/plugin/opskernel:/usr/local/Ascend/ascend-toolkit/latest/compiler/lib64/plugin/nnengine:/usr/local/Ascend/ascend-toolkit/latest/opp/built-in/op_impl/ai_core/tbe/op_tiling/lib/:/usr/local/Ascend/nnal/atb/latest/atb/cxx_abi_1/lib:/usr/local/Ascend/cann/lib64:/usr/local/Ascend/cann/aarch64-linux/devlib",
-    "VLLM_DISABLE_COMPILE_CACHE": "1"
+    "VLLM_DISABLE_COMPILE_CACHE": "1",
+    "TRANSFORMERS_VERBOSITY": "error"
   }
 }
+
 EOF
 )
 

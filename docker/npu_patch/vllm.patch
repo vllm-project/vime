@@ -1,5 +1,18 @@
+diff --git a/vllm/model_executor/layers/rotary_embedding/common.py b/vllm/model_executor/layers/rotary_embedding/common.py
+index 2e407ae..5e4c5de 100644
+--- a/vllm/model_executor/layers/rotary_embedding/common.py
++++ b/vllm/model_executor/layers/rotary_embedding/common.py
+@@ -135,7 +135,7 @@ class ApplyRotaryEmb(CustomOp):
+         self.enable_fp32_compute = enable_fp32_compute
+ 
+         self.apply_rotary_emb_flash_attn = None
+-        if not current_platform.is_cpu() and find_spec("flash_attn") is not None:
++        if not current_platform.is_cpu() and find_spec("flash_attn") is not None and not hasattr(current_platform, "is_npu"):
+             from flash_attn.ops.triton.rotary import apply_rotary
+ 
+             self.apply_rotary_emb_flash_attn = apply_rotary
 diff --git a/vllm/v1/core/sched/async_scheduler.py b/vllm/v1/core/sched/async_scheduler.py
-index cb61bcabd..5c076d521 100644
+index cb61bca..5c076d5 100644
 --- a/vllm/v1/core/sched/async_scheduler.py
 +++ b/vllm/v1/core/sched/async_scheduler.py
 @@ -51,7 +51,7 @@ class AsyncScheduler(Scheduler):
@@ -11,16 +24,3 @@ index cb61bcabd..5c076d521 100644
  
          # Cache the new tokens. Preempted requests should be skipped.
          if status_before_update == RequestStatus.RUNNING:
-diff --git a/vllm/model_executor/layers/rotary_embedding/common.py b/vllm/model_executor/layers/rotary_embedding/common.py
-index 0000000..0000000 100644
---- a/vllm/model_executor/layers/rotary_embedding/common.py
-+++ b/vllm/model_executor/layers/rotary_embedding/common.py
-@@ -135,7 +135,9 @@ class ApplyRotaryEmb(CustomOp):
-         self.enable_fp32_compute = enable_fp32_compute
- 
-         self.apply_rotary_emb_flash_attn = None
--        if not current_platform.is_cpu() and find_spec("flash_attn") is not None:
-+        if not current_platform.is_cpu() and find_spec("flash_attn") is not None and not hasattr(current_platform, "is_npu"):
-             from flash_attn.ops.triton.rotary import apply_rotary
- 
-             self.apply_rotary_emb_flash_attn = apply_rotary
