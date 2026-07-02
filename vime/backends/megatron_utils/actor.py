@@ -592,7 +592,7 @@ class MegatronTrainRayActor(TrainRayActor):
         )
 
         reconnect_rollout_engines = self.args.offload_train and self.args.use_critic and not self.args.colocate
-        wake_for_lora_update = self.args.offload_train and getattr(self.args, "lora_rank", 0) > 0
+        wake_for_lora_update = self.args.offload_train and self.args.lora_rank > 0
 
         if not rollout_engines and not reconnect_rollout_engines:
             if dist.get_rank() == 0:
@@ -675,5 +675,5 @@ class MegatronTrainRayActor(TrainRayActor):
         self._active_model_tag = model_tag
 
     def dispose(self) -> None:
-        if hasattr(self, "args") and is_megatron_main_rank():
+        if is_megatron_main_rank():
             finish_tracking(self.args)

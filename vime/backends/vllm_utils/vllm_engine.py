@@ -72,7 +72,7 @@ def _build_subprocess_env(server_args_dict: dict[str, Any]) -> dict[str, str]:
         if vime_root not in {p for p in existing_pp.split(os.pathsep) if p}:
             env["PYTHONPATH"] = os.pathsep.join(filter(None, [vime_root, existing_pp]))
         env.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    if getattr(args, "lora_rank", 0) > 0:
+    if args.lora_rank > 0:
         env.setdefault("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "1")
 
     worker_type = server_args_dict.get("_worker_type", "regular")
@@ -332,7 +332,10 @@ class VLLMEngine(RayActor):
 
     def release_memory_occupation(self, level: int | None = None):
         if level is None:
-            level = 1 if getattr(self.args, "lora_rank", 0) > 0 else 2
+            # LoRA updates only reload the adapter, never the base weights, so
+            # sleep level 1 (offload weights) is required instead of level 2
+            # (discard weights).
+            level = 1 if self.args.lora_rank > 0 else 2
         self.flush_cache()
         response = requests.post(f"http://{self.server_host}:{self.server_port}/sleep", params={"level": level})
         response.raise_for_status()
@@ -423,41 +426,20 @@ class VLLMEngine(RayActor):
         if self.node_rank != 0:
             return None
 
-        def _parse(response: requests.Response) -> dict:
-            response.raise_for_status()
-            if not response.content or not response.content.strip():
-                return {"ok": True}
-            try:
-                return response.json()
-            except requests.exceptions.JSONDecodeError:
-                return {"ok": True, "text": response.text}
-
         base_url = f"http://{self.server_host}:{self.server_port}"
-        unload_payload = {"lora_name": adapter_name}
-        for endpoint in ("v1/unload_lora_adapter", "unload_lora_adapter"):
-            try:
-                response = requests.post(f"{base_url}/{endpoint}", json=unload_payload)
-                if response.status_code not in (404, 405):
-                    response.raise_for_status()
-                    break
-            except Exception:
-                logger.debug("Ignoring failed unload_lora_adapter for %s", adapter_name, exc_info=True)
+        # vLLM rejects loading an adapter name that is already registered, so
+        # unload first; 404 means the adapter is not loaded yet (first update).
+        response = requests.post(f"{base_url}/v1/unload_lora_adapter", json={"lora_name": adapter_name})
+        if response.status_code != 404:
+            response.raise_for_status()
 
-        payload = {"lora_name": adapter_name, "lora_path": adapter_path}
-        last_error: Exception | None = None
-        for endpoint in ("v1/load_lora_adapter", "load_lora_adapter"):
-            try:
-                response = requests.post(f"{base_url}/{endpoint}", json=payload)
-                result = _parse(response)
-                if weight_version is not None:
-                    self._weight_version = str(weight_version)
-                return result
-            except Exception as e:
-                last_error = e
-                status = getattr(getattr(e, "response", None), "status_code", None)
-                if status not in (404, 405):
-                    break
-        raise RuntimeError(f"vLLM load_lora_adapter failed for {adapter_path}: {last_error}") from last_error
+        response = requests.post(
+            f"{base_url}/v1/load_lora_adapter",
+            json={"lora_name": adapter_name, "lora_path": adapter_path},
+        )
+        response.raise_for_status()
+        if weight_version is not None:
+            self._weight_version = str(weight_version)
 
     def pause_generation(self):
         response = requests.post(

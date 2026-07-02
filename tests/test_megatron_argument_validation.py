@@ -304,6 +304,7 @@ def make_vime_validate_args(**overrides):
         update_weight_disk_dir=None,
         update_weight_delta_dir=None,
         update_weight_mode="full",
+        lora_rank=0,
     )
     values.update(overrides)
     return types.SimpleNamespace(**values)

@@ -27,7 +27,7 @@ from ray.actor import ActorHandle
 
 from vime.utils.distributed_utils import get_gloo_group
 
-from ..lora_utils import is_lora_enabled, lora_adapter_name, save_lora_adapter_for_vllm
+from ..lora_utils import is_lora_enabled, save_lora_adapter_for_vllm
 from .hf_weight_iterator_base import HfWeightIteratorBase
 from .update_weight_from_distributed import (
     connect_rollout_engines_from_distributed,
@@ -371,7 +371,7 @@ class UpdateWeightFromTensor:
             try:
                 refs = [
                     engine.load_lora_adapter.remote(
-                        lora_adapter_name(self.args),
+                        self.args.lora_adapter_name,
                         adapter_path,
                         weight_version=str(self.weight_version),
                     )

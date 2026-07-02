@@ -2,8 +2,8 @@ from argparse import Namespace
 
 from vime.backends.megatron_utils.lora_utils import (
     build_peft_lora_config,
-    convert_target_modules_to_hf,
     convert_target_modules_to_megatron,
+    infer_hf_target_modules,
     normalize_target_modules,
 )
 
@@ -24,23 +24,27 @@ def test_target_module_name_conversion_deduplicates_fused_layers():
         "linear_qkv",
         "linear_proj",
     ]
-    assert convert_target_modules_to_hf(["linear_qkv", "linear_proj"]) == [
-        "q_proj",
-        "k_proj",
-        "v_proj",
-        "o_proj",
+
+
+def test_infer_hf_target_modules_covers_fused_siblings():
+    names = [
+        "model.layers.0.self_attn.q_proj.lora_A.weight",
+        "model.layers.0.self_attn.q_proj.lora_B.weight",
+        "model.layers.0.self_attn.k_proj.lora_A.weight",
+        "model.layers.1.mlp.down_proj.lora_B.weight",
+        "model.layers.1.mlp.down_proj.bias",  # non-adapter tensor is ignored
     ]
+    assert infer_hf_target_modules(names) == ["down_proj", "k_proj", "q_proj"]
 
 
-def test_build_peft_lora_config_uses_hf_target_names():
+def test_build_peft_lora_config_uses_inferred_target_modules():
     args = Namespace(
         lora_rank=8,
         lora_alpha=16,
         lora_dropout=0.05,
-        target_modules=["linear_qkv", "linear_fc2"],
     )
 
-    assert build_peft_lora_config(args) == {
+    assert build_peft_lora_config(args, ["q_proj", "k_proj", "v_proj", "down_proj"]) == {
         "peft_type": "LORA",
         "task_type": "CAUSAL_LM",
         "r": 8,

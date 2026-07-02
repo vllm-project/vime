@@ -52,6 +52,7 @@ def vllm_args() -> SimpleNamespace:
         vllm_pipeline_parallel_size=1,
         vllm_data_parallel_size=1,
         vllm_dp_size=1,
+        lora_rank=0,
     )
 
 
@@ -71,7 +72,7 @@ class _MockResponse:
         self._json_data = json_data
         self.text = text
         self.status_code = status_code
-        # Model requests.Response.content (raw body bytes) so _response_json's empty-body
+        # Model requests.Response.content (raw body bytes) so _make_request's empty-body
         # handling (empty 200 -> {"ok": True}) is actually exercised. A JSON body is non-empty;
         # text-only/empty bodies use the given text (b"" when empty).
         self.content = json.dumps(json_data).encode() if json_data is not None else text.encode()

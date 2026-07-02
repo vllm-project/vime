@@ -108,6 +108,7 @@ def _rollout_args(**overrides) -> Namespace:
         multimodal_keys=None,
         eval_reward_key=None,
         reward_key=None,
+        lora_rank=0,
     )
     base.update(overrides)
     return Namespace(**base)

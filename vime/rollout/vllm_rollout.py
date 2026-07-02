@@ -102,10 +102,8 @@ def get_model_url(args: Namespace, model_name: str, endpoint: str = "/inference/
 
 
 def _rollout_model_name(args: Namespace) -> str:
-    if getattr(args, "lora_rank", 0) > 0:
-        from vime.backends.megatron_utils.lora_utils import lora_adapter_name
-
-        return lora_adapter_name(args)
+    if args.lora_rank > 0:
+        return args.lora_adapter_name
     return args.hf_checkpoint
 
 

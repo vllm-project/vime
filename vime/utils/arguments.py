@@ -1815,28 +1815,29 @@ def _validate_update_weight_args(args) -> None:
 def vime_validate_args(args):
     args.eval_datasets = _resolve_eval_datasets(args)
 
-    if getattr(args, "lora_rank", 0) < 0:
+    if args.lora_rank < 0:
         raise ValueError("--lora-rank must be non-negative.")
 
-    if getattr(args, "lora_rank", 0) > 0:
-        from vime.backends.megatron_utils.lora_utils import is_lora_enabled, normalize_target_modules
+    if args.lora_rank > 0:
+        from vime.backends.megatron_utils.lora_utils import normalize_target_modules
 
-        if is_lora_enabled(args):
-            if args.megatron_to_hf_mode != "bridge":
-                raise ValueError("--lora-rank requires --megatron-to-hf-mode bridge.")
-            if not args.colocate:
-                raise ValueError("--lora-rank currently requires colocated vLLM rollout (--colocate).")
-            if args.custom_model_provider_path is not None:
-                raise ValueError("--lora-rank is only supported by the built-in Bridge model provider.")
-            args.target_modules = normalize_target_modules(args.target_modules, args.exclude_modules)
-            if not args.target_modules:
-                raise ValueError("--target-modules is empty after applying --exclude-modules.")
-            if hasattr(args, "vllm_enable_lora"):
-                args.vllm_enable_lora = True
-            if hasattr(args, "vllm_max_lora_rank"):
-                args.vllm_max_lora_rank = max(int(args.vllm_max_lora_rank or 0), int(args.lora_rank))
-            if hasattr(args, "vllm_max_loras"):
-                args.vllm_max_loras = max(int(args.vllm_max_loras or 0), 1)
+        if args.megatron_to_hf_mode != "bridge":
+            raise ValueError("--lora-rank requires --megatron-to-hf-mode bridge.")
+        if not args.colocate:
+            raise ValueError("--lora-rank currently requires colocated vLLM rollout (--colocate).")
+        if args.custom_model_provider_path is not None:
+            raise ValueError("--lora-rank is only supported by the built-in Bridge model provider.")
+        args.target_modules = normalize_target_modules(args.target_modules, args.exclude_modules)
+        if not args.target_modules:
+            raise ValueError("--target-modules is empty after applying --exclude-modules.")
+        # The vllm_* args are introspected from the installed vLLM version, so
+        # their presence is genuinely version-dependent.
+        if hasattr(args, "vllm_enable_lora"):
+            args.vllm_enable_lora = True
+        if hasattr(args, "vllm_max_lora_rank"):
+            args.vllm_max_lora_rank = max(int(args.vllm_max_lora_rank or 0), int(args.lora_rank))
+        if hasattr(args, "vllm_max_loras"):
+            args.vllm_max_loras = max(int(args.vllm_max_loras or 0), 1)
 
     if args.kl_coef != 0 or args.use_kl_loss:
         if not os.path.exists(args.ref_load):
