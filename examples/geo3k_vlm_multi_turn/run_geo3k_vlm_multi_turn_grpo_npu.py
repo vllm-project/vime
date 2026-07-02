@@ -82,7 +82,7 @@ def execute():
         "--use-precision-aware-optimizer "
     )
 
-    vllm_args = "--rollout-num-gpus-per-engine 1 " "--vllm-gpu-memory-utilization 0.6 "
+    vllm_args = "--rollout-num-gpus-per-engine 1 " "--vllm-gpu-memory-utilization 0.6 " "--vllm-max-model-len 16384 " 
 
     megatron_args = (
         "--train-backend megatron "
@@ -97,9 +97,11 @@ def execute():
         "--recompute-granularity full "
         "--recompute-method uniform "
         "--recompute-num-layers 1 "
-        "--use-dynamic-batch-size "
-        "--max-tokens-per-gpu 16384 "
-        "--balance-data "
+        # P8 workaround: bypass the broken THD/varlen attention path by using bshd.
+        # bshd asserts use_dynamic_batch_size is False, so use a fixed micro-batch
+        # instead of --use-dynamic-batch-size/--max-tokens-per-gpu/--balance-data.
+        "--qkv-format bshd "
+        "--micro-batch-size 1 "
         "--attention-dropout 0.0 "
         "--hidden-dropout 0.0 "
         "--accumulate-allreduce-grads-in-fp32 "

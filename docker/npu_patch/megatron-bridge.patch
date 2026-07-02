@@ -5,6 +5,7 @@ index a0421273..7f9203ab 100644
 @@ -1097,15 +1097,19 @@ class AutoMapping(MegatronParamMapping[torch.Tensor]):
              "LinearCrossEntropyModule",
              "TEColumnParallelLinear",
++            "MindSpeedTEColumnParallelLinear",
              "TELayerNormColumnParallelLinear",
 +            "MindSpeedTELayerNormColumnParallelLinear",
              "TEColumnParallelGroupedLinear",
@@ -298,3 +299,43 @@ index 60cc091c..1dd5c808 100644
  from megatron.core.models.gpt.gpt_layer_specs import (
      get_gpt_decoder_block_spec,
      get_gpt_layer_local_spec,
+diff --git a/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py b/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py
+index 7775c11c..88630881 100644
+--- a/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py
++++ b/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py
+@@ -26,6 +26,7 @@ from megatron.core.packed_seq_params import PackedSeqParams
+ from megatron.core.process_groups_config import ProcessGroupCollection
+ from megatron.core.transformer import MegatronModule
+ from megatron.core.transformer.spec_utils import ModuleSpec
++from megatron.core.utils import nvtx_range_pop, nvtx_range_push
+ from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig as Qwen3VLConfigHF
+ 
+ from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.attention import Qwen3VLSelfAttention
+@@ -294,7 +295,7 @@ class Qwen3VLModel(MegatronModule):
+         # position ids is computed within the model
+         position_ids = None
+ 
+-        torch.cuda.nvtx.range_push("Qwen3VLModel.forward.pre_process")
++        nvtx_range_push(msg="Qwen3VLModel.forward.pre_process")
+ 
+         cp_rank = self.pg_collection.cp.rank()
+         cp_size = self.pg_collection.cp.size()
+@@ -499,8 +500,8 @@ class Qwen3VLModel(MegatronModule):
+                 attention_mask = None
+                 self.language_model.rotary_pos_emb.is_thd_format = True
+ 
+-        torch.cuda.nvtx.range_pop()
+-        torch.cuda.nvtx.range_push("Qwen3VLModel.forward.language_model")
++        nvtx_range_pop(msg="Qwen3VLModel.forward.pre_process")
++        nvtx_range_push(msg="Qwen3VLModel.forward.language_model")
+ 
+         output = self.language_model(
+             input_ids=lm_input_ids,
+@@ -516,6 +517,6 @@ class Qwen3VLModel(MegatronModule):
+             **(extra_block_kwargs or {}),
+             **kwargs,
+         )
+-        torch.cuda.nvtx.range_pop()
++        nvtx_range_pop(msg="Qwen3VLModel.forward.language_model")
+ 
+         return output
