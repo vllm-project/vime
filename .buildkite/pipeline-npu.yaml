@@ -84,33 +84,15 @@ steps:
 #          echo "--- Image pushed successfully"
 #          echo "$${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG}"
 
-#     - label: ":lint-roller: pre-commit"
-#       key: pre-commit-npu
-#       agents:
-#         queue: small_cpu_queue_premerge
-#       timeout_in_minutes: 15
-#       retry:
-#         automatic:
-#           - exit_status: -1  # agent lost (fresh instance failed to boot)
-#             limit: 2
-#       command: |
-#         docker run --rm \
-#           -e GIT_CONFIG_PARAMETERS="'safe.directory=/workspace'" \
-#           -v "$$PWD:/workspace" -w /workspace \
-#         python:3.11 bash -c '
-#           set -euo pipefail
-#           pip install -q pre-commit
-#           pre-commit run --all-files --show-diff-on-failure --color=always
-#         '
-
       - label: "qwen3-4B-npu test"
         key: qwen3-4B-npu
-#        depends_on: pre-commit-npu
+        if: >-
+          build.branch == "ascend"
         agents:
           queue: "ascend-a3"
           resource_class: "npu-8"
         timeout_in_minutes: 180
-        image: quay.io/ascend/vime:vime-latest
+        image: quay.io/ascend/vime:0.3.0-a3-vllm0.22.1rc1
         plugins:
           - kubernetes:
               metadata:
@@ -159,7 +141,7 @@ steps:
         command: |
           bash -c "
             echo 'INFO: update NPU environment'
-            export ASCEND_VISIBLE_DEVICES='${ASCEND_VISIBLE_DEVICES:-$ASCEND_RT_VISIBLE_DEVICES}'
+
             if [ -n \"${BUILDKITE_COMMIT}\" ]; then
               source /workspace/build/buildkite/.buildkite/scripts/update-npu-environment.sh
             fi
@@ -181,10 +163,8 @@ steps:
             echo 'INFO: check training log'
             if ! grep -q 'succeeded' /root/vime/train_qwen3_4b_vllm.log; then
               echo 'ERROR: train log does not contain Ray job succeeded message'
-              sleep 3600
               exit 1
             fi
             echo 'INFO: train log contains Ray job succeeded message'
-            sleep 3600
           "
 

@@ -5,13 +5,13 @@
 #          - Applies all new patches to corresponding components
 #          - Sorts ASCEND_VISIBLE_DEVICES for consistent device ordering
 # Usage: Called by Buildkite pipeline during NPU test runs
-# set -e
+set -e
 
 VIME_DIR="/root/vime"
 
 declare -A PATCH_CONFIGS=(
-    ["vllm.patch"]="/root/vllm"
-    ["vllm-ascend.patch"]="/root/vllm-ascend"
+#    ["vllm.patch"]="/vllm-workspace/vllm"
+#    ["vllm-ascend.patch"]="/vllm-workspace/vllm-ascend"
     ["megatron_comm.patch"]="/root/Megatron-LM"
     ["megatron.patch"]="/root/Megatron-LM"
     ["megatron-bridge.patch"]="/root/Megatron-Bridge"
@@ -33,6 +33,8 @@ update_vime_code() {
 }
 
 sort_ascend_visible_devices() {
+    export ASCEND_VISIBLE_DEVICES="${ASCEND_VISIBLE_DEVICES:-$ASCEND_RT_VISIBLE_DEVICES}"
+    echo "Value: ${ASCEND_VISIBLE_DEVICES}"
     if [ -n "${ASCEND_VISIBLE_DEVICES}" ]; then
         SORTED_DEVICES=$(echo "${ASCEND_VISIBLE_DEVICES}" | tr ',' '\n' | sort -n | tr '\n' ',')
         SORTED_DEVICES=${SORTED_DEVICES%,}
@@ -85,7 +87,6 @@ apply_patch() {
         echo "INFO: Successfully applied $patch_name"
     else
         echo "ERROR: Failed to apply $patch_name to $component_dir"
-        sleep 3600
         exit 1
     fi
 }
@@ -93,16 +94,16 @@ apply_patch() {
 save_old_patches() {
     local backup_dir="${VIME_DIR}/.old_patches"
 
-    echo "INFO: Saving old patches to $backup_dir..."
+    echo "INFO: Saving old patches to $backup_dir..." >&2
     mkdir -p "$backup_dir"
 
     for patch_name in "${!PATCH_CONFIGS[@]}"; do
         local patch_path="${VIME_DIR}/docker/npu_patch/$patch_name"
         if [ -f "$patch_path" ]; then
             cp "$patch_path" "$backup_dir/$patch_name"
-            echo "INFO: Saved old $patch_name"
+            echo "INFO: Saved old $patch_name" >&2
         else
-            echo "WARNING: Patch file $patch_path not found, skipping backup"
+            echo "WARNING: Patch file $patch_path not found, skipping backup" >&2
         fi
     done
 
@@ -143,22 +144,22 @@ apply_all_patches() {
 }
 
 main() {
-    echo "=== Step 1: Save all old patches before code update ==="
+    echo "=== Step 1: Sort ASCEND_VISIBLE_DEVICES ==="
+    sort_ascend_visible_devices
+
+    echo "=== Step 2: Save all old patches before code update ==="
     local old_patch_dir=$(save_old_patches)
 
-    echo "=== Step 2: Update VIME code ==="
+    echo "=== Step 3: Update VIME code ==="
     update_vime_code
 
-    echo "=== Step 3: Revert all already applied patches ==="
+    echo "=== Step 4: Revert all already applied patches ==="
     revert_all_patches "$old_patch_dir"
 
-    echo "=== Step 4: Apply all patches ==="
+    echo "=== Step 5: Apply all patches ==="
     apply_all_patches
 
     echo "INFO: NPU environment update completed successfully"
-
-    echo "=== Step 5: Sort ASCEND_VISIBLE_DEVICES ==="
-    sort_ascend_visible_devices
 }
 
 main
