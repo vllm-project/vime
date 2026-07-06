@@ -16,7 +16,7 @@ from vime.ray.train_actor import TrainRayActor
 from vime.utils import train_dump_utils
 from vime.utils.data import process_rollout_data
 from vime.utils.distributed_utils import get_gloo_group
-from vime.utils.logging_utils import finish_tracking, init_tracking
+from vime.utils.logging_utils import init_tracking
 from vime.utils.memory_utils import clear_memory, print_memory
 from vime.utils.misc import Box
 from vime.utils.reloadable_process_group import destroy_process_groups, monkey_patch_torch_dist, reload_process_groups
@@ -673,7 +673,3 @@ class MegatronTrainRayActor(TrainRayActor):
 
         self.weights_backuper.backup(model_tag)
         self._active_model_tag = model_tag
-
-    def dispose(self) -> None:
-        if is_megatron_main_rank():
-            finish_tracking(self.args)

@@ -1,5 +1,4 @@
 import logging
-import sys
 
 import wandb
 
@@ -32,18 +31,12 @@ def init_tracking(args, primary: bool = True, **kwargs):
         wandb_utils.init_wandb_secondary(args, **kwargs)
 
 
-def finish_tracking(args, exit_code: int | None = None):
+def finish_tracking(args):
     if not args.use_wandb:
         return
-    # When called from a `finally` block that is unwinding an exception, mark the
-    # run as failed instead of forcing a successful "Finished" status.
-    if exit_code is None:
-        exit_code = 1 if sys.exc_info()[0] is not None else 0
     try:
         if wandb.run is not None:
-            wandb.finish(exit_code=exit_code)
-        if hasattr(wandb, "teardown"):
-            wandb.teardown(exit_code=exit_code)
+            wandb.finish()
     except Exception:
         logging.getLogger(__name__).exception("Failed to finish wandb run")
 
