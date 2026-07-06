@@ -1,15 +1,63 @@
-# buildkite-agent pipeline upload .buildkite/pipeline-npu.yaml
+# Usage:  buildkite-agent pipeline upload .buildkite/pipeline-npu.yaml
+#
+# This pipeline is for running NPU tests on PRs.
+# Before execution, it checks:
+#   1. Trigger type: PR trigger or scheduled trigger
+#   2. Changed files: whether docker/Dockerfile.npu is modified (PR trigger only)
+# Based on the check results:
+#   - Image build decision: scheduled trigger always builds; PR trigger builds only if Dockerfile.npu is modified
+#   - Test image selection: uses newly built image ($IMAGE_REGISTRY/$IMAGE_NAME:$VIME_IMAGE_TAG) when build is required,
+#     otherwise uses pre-built default image (quay.io/ascend/vime:0.3.0-a3-vllm0.22.1rc1) 
 
-# This pipeline is for running NPU tests on PRs . 
 steps:
   - group: ":pipeline: Run NPU test"
     key: npu-tests
     steps:
+      # Before run any test, check pre-commit
+      - label: ":lint-roller: pre-commit-npu"
+        key: pre-commit-npu
+        agents:
+          queue: small_cpu_queue_premerge
+        timeout_in_minutes: 15
+        retry:
+          automatic:
+            - exit_status: -1  # agent lost (fresh instance failed to boot)
+              limit: 2
+        command: |
+          docker run --rm \
+            -e GIT_CONFIG_PARAMETERS="'safe.directory=/workspace'" \
+            -v "$$PWD:/workspace" -w /workspace \
+            python:3.11 bash -c '
+              set -euo pipefail
+              pip install -q pre-commit
+              pre-commit run --all-files --show-diff-on-failure --color=always
+            '
+
+      - block: ":rocket: Run NPU test suites?"
+        key: npu-gate
+        depends_on: pre-commit-npu
+        if: build.source != "schedule"
+        blocked_state: passed
+        prompt: "Select the npu suites to run."
+        fields:
+          - select: "NPU suites"
+            key: npu-suites
+            multiple: true
+            required: true
+            options:
+              - label: "run-npu-ci-smk"
+                value: smk
+              - label: "run-npu-ci-nightly"
+                value: nightly
+
 #      - label: ":buildkit: Build and Push NPU Test Image - A3"
 #        key: image-build-npu
+#        depends_on: pre-commit-npu
+#        if: __IMAGE_BUILD_IF__ == true
+#        timeout_in_minutes: 240
 #        agents:
 #          queue: "ascend-a3"
-#          resource_class: "npu-8"
+#          resource_class: "npu-2"
 #        plugins:
 #          - kubernetes:
 #              metadata:
@@ -52,11 +100,11 @@ steps:
 #          BUILDKITD_ADDR: "tcp://buildkitd-service.buildkitd:1234"
 #        command: |
 #          set -ex
-#     
+#
 #          echo "--- Building and pushing NPU Test Image"
 #          echo "Image: $${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG}"
 #          echo "buildkitd address: $${BUILDKITD_ADDR}"
-#     
+#
 #          if ! command -v buildctl &> /dev/null; then
 #            echo "Installing buildctl..."
 #            mkdir -p /tmp/buildkit
@@ -65,7 +113,10 @@ steps:
 #            tar -xzf /tmp/buildkit.tar.gz -C /tmp/buildkit
 #            cp /tmp/buildkit/bin/buildctl /usr/local/bin/
 #          fi
-#    
+#
+#          sed -i '/^RUN git config --global http.sslVerify false/i RUN git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf "https://github.com/"' docker/Dockerfile.npu
+#          sed -i '/^# syntax=docker\/dockerfile:1\.7$$/d' docker/Dockerfile.npu
+#
 #          export DOCKER_CONFIG=/home/user/.docker
 #          buildctl \
 #            --addr="$${BUILDKITD_ADDR}" \
@@ -77,94 +128,25 @@ steps:
 #            --local context=. \
 #            --local dockerfile=./docker \
 #            --opt filename=Dockerfile.npu \
+#            --opt build-arg:APTMIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081 \
+#            --opt build-arg:PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple \
 #            --secret id=dockerconfig,src=/home/user/.docker/config.json \
 #            --output type=image,name=$${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG},push=true \
 #            --progress=plain
-#    
+#
 #          echo "--- Image pushed successfully"
 #          echo "$${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG}"
 
-      - label: "qwen3-4B-npu test"
-        key: qwen3-4B-npu
-        if: >-
-          build.branch == "ascend"
+      - label: ":pipeline: upload NPU suites"
+        key: upload-npu-suites
+        depends_on: 
+          - pre-commit-npu
         agents:
           queue: "ascend-a3"
-          resource_class: "npu-8"
+          resource_class: "npu-2"
         timeout_in_minutes: 180
-        image: quay.io/ascend/vime:0.3.0-a3-vllm0.22.1rc1
-        plugins:
-          - kubernetes:
-              metadata:
-                annotations:
-                  vault.hashicorp.com/agent-init-first: "true"
-                  vault.hashicorp.com/agent-inject: "true"
-                  vault.hashicorp.com/agent-inject-perms-ca.pem: "0400"
-                  vault.hashicorp.com/agent-inject-perms-cert.pem: "0400"
-                  vault.hashicorp.com/agent-inject-perms-config.json: "0400"
-                  vault.hashicorp.com/agent-inject-perms-key.pem: "0400"
-                  vault.hashicorp.com/agent-inject-secret-ca.pem: internal/data/ascend/buildkitd
-                  vault.hashicorp.com/agent-inject-secret-cert.pem: internal/data/ascend/buildkitd
-                  vault.hashicorp.com/agent-inject-secret-config.json: internal/data/ascend/buildkitd
-                  vault.hashicorp.com/agent-inject-secret-key.pem: internal/data/ascend/buildkitd
-                  vault.hashicorp.com/agent-inject-template-ca.pem: "{{- with secret \"internal/data/ascend/buildkitd\" -}}\n{{ .Data.data.RootCA }}\n{{- end }}"
-                  vault.hashicorp.com/agent-inject-template-cert.pem: "{{- with secret \"internal/data/ascend/buildkitd\" -}}\n{{ .Data.data.ClientCaCert }}\n{{- end }}"
-                  vault.hashicorp.com/agent-inject-template-config.json: "{{- with secret \"internal/data/ascend/buildkitd\" -}}\n{{ .Data.data.dockerConfig }}\n{{- end }}"
-                  vault.hashicorp.com/agent-inject-template-key.pem: "{{- with secret \"internal/data/ascend/buildkitd\" -}}\n{{ .Data.data.ClientCaKey }}\n{{- end }}"
-                  vault.hashicorp.com/agent-pre-populate-only: "true"
-                  vault.hashicorp.com/agent-run-as-group: "1000"
-                  vault.hashicorp.com/agent-run-as-user: "1000"
-                  vault.hashicorp.com/agent-service-account-token-volume-name: token-vol
-                  vault.hashicorp.com/role: ascend-gha-runners
-                  vault.hashicorp.com/secret-volume-path: /home/user/.docker/
-                  vault.hashicorp.com/tls-skip-verify: "true"
-              podSpecPatch:
-                volumes:
-                - name: token-vol
-                  projected:
-                    defaultMode: 420
-                    sources:
-                    - serviceAccountToken:
-                        audience: api
-                        expirationSeconds: 600
-                        path: token
-                imagePullSecrets:
-                  - name: swr-secret
-        env:
-          VIME_TEST_ENABLE_INFINITE_RUN: false
-          BUILDKITE_PULL_REQUEST: "${BUILDKITE_PULL_REQUEST:-false}"
-          BUILDKITE_COMMIT: "${BUILDKITE_COMMIT}"
-          GITHUB_COMMIT_NAME: "${BUILDKITE_COMMIT}_${BUILDKITE_PULL_REQUEST:-non-pr}"
-          HF_TOKEN: "${HF_TOKEN}"
-          HF_ENDPOINT: https://hf-mirror.com
-          ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
-        command: |
-          bash -c "
-            echo 'INFO: update NPU environment'
-
-            if [ -n \"${BUILDKITE_COMMIT}\" ]; then
-              source /workspace/build/buildkite/.buildkite/scripts/update-npu-environment.sh
-            fi
-
-            echo 'INFO: download Qwen3-4B model and dapo-math-17k dataset'
-            pip install modelscope -q
-            modelscope download --model 'Qwen/Qwen3-4B' --local_dir /root/.cache/huggingface/models/Qwen3-4B
-            hf download --repo-type dataset zhuzilin/dapo-math-17k --local-dir /root/.cache/huggingface/datasets/dapo-math-17k
-
-            echo 'INFO: start training Qwen3-4B on NPU'
-            ls -l /dev/davinci* 
-            npu-smi info
-            export MODEL_ROOT=/root/.cache/huggingface
-            cd /root/vime
-            sed -i 's/--num-rollout [0-9]\+/--num-rollout 3/' scripts/run-qwen3-4B-npu.sh
-            bash scripts/run-qwen3-4B-npu.sh
-            sleep 3
-
-            echo 'INFO: check training log'
-            if ! grep -q 'succeeded' /root/vime/train_qwen3_4b_vllm.log; then
-              echo 'ERROR: train log does not contain Ray job succeeded message'
-              exit 1
-            fi
-            echo 'INFO: train log contains Ray job succeeded message'
-          "
-
+        command:  |
+          export IMAGE_BUILD="quay.io/ascend/vime:0.3.0-a3-vllm0.22.1rc1"
+          echo "IMAGE_BUILD: $${IMAGE_BUILD}"
+          python .buildkite/npu_suites.py | buildkite-agent pipeline upload
+          

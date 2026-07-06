@@ -128,14 +128,6 @@ steps:
           python -m pytest tests/utils
         '
 
-  - label: ":pipeline: npu tests"
-    key: npu
-    depends_on: pre-commit
-    agents:
-      queue: small_cpu_queue_premerge
-    command: 
-      buildkite-agent pipeline upload .buildkite/pipeline-npu.yaml
-
   # The GPU suites are launched from this manual gate: unblocking presents a
   # multi-select of suites, and the follow-up step uploads only the selected
   # ones (see gpu_suites.py). `blocked_state: passed` keeps the build green

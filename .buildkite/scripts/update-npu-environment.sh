@@ -10,8 +10,8 @@ set -e
 VIME_DIR="/root/vime"
 
 declare -A PATCH_CONFIGS=(
-#    ["vllm.patch"]="/vllm-workspace/vllm"
-#    ["vllm-ascend.patch"]="/vllm-workspace/vllm-ascend"
+    ["vllm.patch"]="/vllm-workspace/vllm"
+    ["vllm-ascend.patch"]="/vllm-workspace/vllm-ascend"
     ["megatron_comm.patch"]="/root/Megatron-LM"
     ["megatron.patch"]="/root/Megatron-LM"
     ["megatron-bridge.patch"]="/root/Megatron-Bridge"
