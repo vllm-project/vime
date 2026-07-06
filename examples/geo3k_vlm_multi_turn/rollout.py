@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -74,7 +75,16 @@ def _build_initial_messages(sample: Sample) -> list[dict]:
     for image in images:
         content.append({"type": "image", "image": image})
     # Backward-compatible fallback for old runs that pass a raw text prompt containing <image>.
-    text_prompt = str(sample.prompt).replace("<image>", "").lstrip()
+    # The image is re-attached above as a structured {"type": "image"} part, so render expands it
+    # exactly once. We must therefore strip BOTH placeholder forms from the text, otherwise render
+    # passes any literal placeholder through verbatim and we get a double placeholder (the +1 stray
+    # <|image_pad|> render "bug"): the raw `<image>` marker AND the chat-template-expanded
+    # `<|vision_start|><|image_pad|>...<|vision_end|>` (present when sample.prompt was already run
+    # through tokenizer.apply_chat_template). See _validate_multimodal_train_inputs / docs P3/4.
+    text_prompt = str(sample.prompt).replace("<image>", "")
+    text_prompt = re.sub(
+        r"<\|vision_start\|>(?:<\|image_pad\|>)+<\|vision_end\|>", "", text_prompt
+    ).lstrip()
     content.append({"type": "text", "text": text_prompt})
     return [{"role": "user", "content": content}]
 
@@ -150,12 +160,83 @@ def _validate_multimodal_train_inputs(sample: Sample, tokenizer: Any, processor:
     grid = grid.reshape(-1, 3)
     image_processor = getattr(processor, "image_processor", processor)
     merge_size = int(getattr(image_processor, "merge_size", 1) or 1)
+    # Megatron's Qwen3-VL vision tower emits exactly prod(grid)//merge**2 embeddings and
+    # reorganize_inputs() hard-asserts (#image_pad)*merge**2 == prod(grid), so the rendered
+    # prompt MUST carry exactly this many <|image_pad|> tokens or training crashes. This is a
+    # permanent fail-fast guard (NOT a stopgap): it loudly catches any rollout/train placeholder
+    # mismatch — e.g. a regression that double-sends the image placeholder to render (a literal
+    # <|image_pad|> in the text PLUS a separate image_url => N+1, the old Problem 3/4) — instead
+    # of silently corrupting the step. See QWEN3VL_P34_EXPLAINER.md.
     expected = int((grid.prod(dim=1) // (merge_size * merge_size)).sum().item())
     if image_tokens != expected:
+        # Report the contiguous <|image_pad|> run lengths so a mismatch is diagnosable
+        # (e.g. a double-send splitting the block as [target] + a stray separated placeholder).
+        runs: list[int] = []
+        tid = int(image_token_id)
+        k = 0
+        toks = sample.tokens
+        while k < len(toks):
+            if toks[k] == tid:
+                m = k
+                while m < len(toks) and toks[m] == tid:
+                    m += 1
+                runs.append(m - k)
+                k = m
+            else:
+                k += 1
         raise RuntimeError(
             "Image token count does not match multimodal render features: "
-            f"image_tokens={image_tokens}, expected_image_tokens={expected}, image_grid_thw={grid.tolist()}"
+            f"image_tokens={image_tokens}, expected_image_tokens={expected}, image_grid_thw={grid.tolist()}, "
+            f"image_pad_run_lengths={runs}"
         )
+
+
+_DELTA_SENTINEL = "\x00vime_assistant_sentinel\x00"
+
+
+def _observation_delta_token_ids(
+    tokenizer: Any, observation_message: dict, last_token_is_im_end: bool
+) -> list[int]:
+    """Tokenize ONLY the new observation turn's template fragment, to append to the token stream.
+
+    Why not re-render the whole conversation: re-tokenizing already-emitted turns triggers a BPE
+    re-merge at the ``<|im_start|>assistant\\n`` + generated-content seam (the model's first token
+    is often ``\\n\\n``; ``assistant\\n`` + ``\\n\\n`` re-tokenizes ``\\n\\n\\n`` into a single
+    token), which shifts every later token by one and silently desyncs train/infer token streams.
+    Keeping the incrementally-built stream as the single source of truth and only tokenizing the
+    new delta avoids that entirely (see QWEN3VL_NPU_GRPO_DEBUG.md Problem 6).
+
+    The fragment is the assistant-turn closer + the observation user turn + the next generation
+    prompt, derived faithfully from the chat template via a sentinel so we never re-tokenize real
+    assistant content:
+        <|im_end|>\\n<|im_start|>user\\n{obs}<|im_end|>\\n<|im_start|>assistant\\n
+    When the model already emitted its closing ``<|im_end|>`` (the normal multi-turn case), we drop
+    the leading ``<|im_end|>`` so the stream carries exactly one (no double ``<|im_end|>``). The
+    fragment then begins with ``\\n`` immediately after an atomic special token, so tokenizing it in
+    isolation and concatenating is bit-identical to the canonical in-context tokenization.
+    """
+    # The delta path only handles text observations: an image in the observation would need feature
+    # re-rendering (and image-pad expansion) that this incremental path deliberately avoids.
+    content = observation_message.get("content")
+    if isinstance(content, list) and any(
+        (part.get("type") in ("image", "video")) or ("image" in part) or ("image_url" in part) or ("video" in part)
+        for part in content
+        if isinstance(part, dict)
+    ):
+        raise NotImplementedError(
+            "Incremental multi-turn rollout only supports text observations; "
+            "an observation carried multimodal content."
+        )
+
+    probe = tokenizer.apply_chat_template(
+        [{"role": "assistant", "content": _DELTA_SENTINEL}, observation_message],
+        add_generation_prompt=True,
+        tokenize=False,
+    )
+    fragment = probe.split(_DELTA_SENTINEL, 1)[1]
+    if last_token_is_im_end and fragment.startswith("<|im_end|>"):
+        fragment = fragment[len("<|im_end|>") :]
+    return _coerce_flat_int_token_ids(tokenizer.encode(fragment, add_special_tokens=False))
 
 
 async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
@@ -224,35 +305,30 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
 
     try:
         env.reset()
-        latest_features = None
-        pending_obs_offset: int | None = None
-        rendered_body = await render()
-        prompt_ids = _coerce_flat_int_token_ids(rendered_body.get("token_ids"))
+        # Render ONCE. The image lives only in the first user message and never moves, and
+        # observations are text, so sample.tokens[:len(prompt_ids)] (which carries the image-pad
+        # block + the render features' mm_placeholders) is never mutated. We therefore reuse this
+        # body's features for every turn and feed the incrementally-built sample.tokens directly as
+        # the prompt, instead of re-rendering the whole conversation each turn (which re-tokenizes
+        # the assistant seam and desyncs the stream — see QWEN3VL_NPU_GRPO_DEBUG.md Problem 6).
+        initial_body = await render()
+        latest_features = initial_body.get("features")
+        prompt_ids = _coerce_flat_int_token_ids(initial_body.get("token_ids"))
         if not sample.tokens:
             sample.tokens = list(prompt_ids)
         if args.rollout_max_context_len is not None:
             max_response_budget = max(0, args.rollout_max_context_len - len(sample.tokens))
 
+        eos_token_id = getattr(state.tokenizer, "eos_token_id", None)
+
         for turn_idx in range(args.max_turns):
-            input_ids = _coerce_flat_int_token_ids(rendered_body.get("token_ids"))
-            latest_features = rendered_body.get("features")
-
-            if pending_obs_offset is not None:
-                obs_tokens = input_ids[pending_obs_offset:]
-                remaining = remaining_budget()
-                if remaining is not None and len(obs_tokens) > remaining:
-                    append_response_window(obs_tokens[: max(remaining, 0)], [0] * max(remaining, 0))
-                    sample.status = Sample.Status.TRUNCATED
-                    break
-                append_response_window(obs_tokens, [0] * len(obs_tokens))
-                pending_obs_offset = None
-
             current_sampling_params = sampling_params_for_turn()
             if current_sampling_params is None:
                 sample.status = Sample.Status.TRUNCATED
                 break
 
-            body = dict(rendered_body)
+            body = dict(initial_body)
+            body["token_ids"] = list(sample.tokens)
             body["sampling_params"] = current_sampling_params
             output = await post(f"{base_url}/inference/v1/generate", body, headers=headers)
             choice = output["choices"][0]
@@ -269,7 +345,6 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
             train_logprobs = list(new_logprobs)
             train_loss_mask = [1] * len(train_tokens)
             stop = current_sampling_params.get("stop")
-            eos_token_id = getattr(state.tokenizer, "eos_token_id", None)
             append_stop_eos = (
                 stop
                 and eos_token_id is not None
@@ -292,8 +367,6 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
             append_response_window(train_tokens, train_loss_mask, train_logprobs)
             _apply_vllm_routed_experts(args, sample, choice)
 
-            messages.append({"role": "assistant", "content": response_text})
-
             if finish_reason == "length":
                 sample.status = Sample.Status.TRUNCATED
                 break
@@ -310,24 +383,21 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
                 sample.status = Sample.Status.TRUNCATED
                 break
 
+            # Append ONLY the new observation turn's tokens to the incremental stream (no re-render).
             next_user_message = env.format_observation(observation)
-            messages.append(next_user_message)
-            render_prefix_len = len(input_ids) + len(new_tokens)
-            pending_obs_offset = render_prefix_len
-            rendered_body = await render()
-            rendered_ids = _coerce_flat_int_token_ids(rendered_body.get("token_ids"))
-            is_prefix_stable = rendered_ids[:pending_obs_offset] == sample.tokens[:pending_obs_offset]
+            last_token_is_im_end = bool(sample.tokens and eos_token_id is not None and sample.tokens[-1] == eos_token_id)
+            obs_tokens = _observation_delta_token_ids(state.tokenizer, next_user_message, last_token_is_im_end)
+            remaining = remaining_budget()
+            if remaining is not None and len(obs_tokens) > remaining:
+                append_response_window(obs_tokens[: max(remaining, 0)], [0] * max(remaining, 0))
+                sample.status = Sample.Status.TRUNCATED
+                break
+            append_response_window(obs_tokens, [0] * len(obs_tokens))
             sample.metadata["multiturn_render"] = {
-                "prefix_stable": is_prefix_stable,
-                "prefix_len": pending_obs_offset,
+                "turns": turn_idx + 1,
                 "sample_len": len(sample.tokens),
-                "rendered_len": len(rendered_ids),
+                "last_obs_tokens": len(obs_tokens),
             }
-            if not is_prefix_stable:
-                raise RuntimeError(
-                    "Full conversation render is not prefix-stable with the generated token stream: "
-                    f"{sample.metadata['multiturn_render']}"
-                )
 
         multimodal_train_inputs = _multimodal_train_inputs_from_features(latest_features)
         _validate_multimodal_train_inputs(sample, state.tokenizer, state.processor, multimodal_train_inputs)
