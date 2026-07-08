@@ -2,21 +2,9 @@
 
 ## 环境准备
 
-搭建环境、模型下载与 ckpt 转换均与 Qwen3-4B 相同，可参考 [示例：Qwen3-4B](qwen3-4B.md)，将文中 Qwen3-4B 替换为 Qwen3-30B-A3B 即可。
+搭建环境、下载模型、数据与 ckpt 转换均与 Qwen3-4B 模型相同，可以参考 [示例：Qwen3-4B](qwen3-4B.md)，将文中 Qwen3-4B 的部分转换为 Qwen3-30B-A3B 即可。
 
-训练与评测数据（与 Qwen3-4B 一致）：
-
-```bash
-# 训练数据
-hf download --repo-type dataset zhuzilin/dapo-math-17k \
-  --local-dir /root/dapo-math-17k
-
-# eval 数据
-hf download --repo-type dataset zhuzilin/aime-2024 \
-  --local-dir /root/aime-2024
-```
-
-把 huggingface checkpoint 转化为 torch_dist 格式：
+可以用如下方法把 huggingface checkpoint 转化为 torch_dist 格式：
 
 ```bash
 cd vime/

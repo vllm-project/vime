@@ -3,21 +3,9 @@
 
 ## Environment Preparation
 
-Environment setup, model download, and checkpoint conversion are the same as for the Qwen3-4B model; see [Example: Qwen3-4B Model](qwen3-4B.md) and replace mentions of Qwen3-4B with Qwen3-30B-A3B.
+The environment setup, model download, data, and checkpoint conversion are the same as for the Qwen3-4B model. You can refer to [Example: Qwen3-4B Model](qwen3-4B.md), replacing mentions of Qwen3-4B with Qwen3-30B-A3B.
 
-Train and eval data (identical to Qwen3-4B):
-
-```bash
-# train data
-hf download --repo-type dataset zhuzilin/dapo-math-17k \
-  --local-dir /root/dapo-math-17k
-
-# eval data
-hf download --repo-type dataset zhuzilin/aime-2024 \
-  --local-dir /root/aime-2024
-```
-
-To convert the huggingface checkpoint to torch_dist, please try:
+To convert huggingface checkpoint to torch_dist, please try:
 
 ```bash
 cd vime/
