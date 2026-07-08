@@ -108,7 +108,7 @@ The following uses **2 nodes × 8 GPUs (16 GPUs total) in colocate mode** as the
    ray start --address=${MASTER_ADDR}:6379 --num-gpus 8
    ```
 
-   Wait until `ray status` reports 16 GPUs before submitting. Since the cluster is already up, remove the `ray start --head ...` line at the top of the script so it goes straight to `ray job submit`.
+   Wait until `ray status` reports 16 GPUs before submitting. Because you started the cluster manually, make the script skip its process-management preamble — remove (or comment out) **both** the initial cleanup block (`ray stop --force`, `pkill -9 ray`, `pkill -9 python`, `pkill -9 redis`) **and** the `ray start --head ...` line. Otherwise running the script tears down the head you just started (and orphans the workers), so `ray job submit` to `http://127.0.0.1:8265` fails. Keep the rest of the script — it still sources the model args and runs `ray job submit`.
 
 3. **Adjust script arguments** (`scripts/run-qwen3-30B-A3B.sh`):
    - Change `--actor-num-nodes` for `train.py` from `1` to `2` (keep `--actor-num-gpus-per-node` at 8). Under colocate, `--rollout-num-gpus` is auto-set to `actor_num_gpus_per_node × actor_num_nodes = 16`, so you don't set it manually.

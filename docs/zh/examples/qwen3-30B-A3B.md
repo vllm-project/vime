@@ -107,7 +107,7 @@ hf download Qwen/Qwen3-30B-A3B-FP8 --local-dir /root/Qwen3-30B-A3B-FP8
    ray start --address=${MASTER_ADDR}:6379 --num-gpus 8
    ```
 
-   等 `ray status` 显示 16 GPU 后再提交。由于集群已手动起好，运行前请去掉脚本开头的 `ray start --head ...` 一行，让脚本直接走 `ray job submit`。
+   等 `ray status` 显示 16 GPU 后再提交。由于集群是你手动起好的，运行前需让脚本跳过它开头的进程管理逻辑——把开头的**清理块**（`ray stop --force`、`pkill -9 ray`、`pkill -9 python`、`pkill -9 redis`）**和** `ray start --head ...` 一行都删掉（或注释掉）。否则脚本会先把你刚起的 head 杀掉（并让 worker 变孤儿），导致 `ray job submit` 连 `http://127.0.0.1:8265` 失败。脚本其余部分保留——它仍会 source 模型参数并执行 `ray job submit`。
 
 3. **调整脚本参数**（`scripts/run-qwen3-30B-A3B.sh`）：
    - 把 `train.py` 的 `--actor-num-nodes` 由 `1` 改为 `2`（`--actor-num-gpus-per-node` 保持 8）。colocate 下 `--rollout-num-gpus` 会自动取 `actor_num_gpus_per_node × actor_num_nodes = 16`，无需手设。
