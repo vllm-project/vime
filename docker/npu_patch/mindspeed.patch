@@ -114,7 +114,7 @@ index f14b231d..4615590e 100644
          setattr(full_args, k, v)
      MindSpeedFeaturesManager.apply_features_pre_patches(full_args)
 diff --git a/mindspeed/te/pytorch/attention/dot_product_attention/dot_product_attention.py b/mindspeed/te/pytorch/attention/dot_product_attention/dot_product_attention.py
-index ac4eabe5..78c5866d 100644
+index ac4eabe5..061377cc 100644
 --- a/mindspeed/te/pytorch/attention/dot_product_attention/dot_product_attention.py
 +++ b/mindspeed/te/pytorch/attention/dot_product_attention/dot_product_attention.py
 @@ -330,6 +330,8 @@ class DotProductAttention(torch.nn.Module):
@@ -126,18 +126,52 @@ index ac4eabe5..78c5866d 100644
      ) -> torch.Tensor:
          """
          Dot Product Attention Layer.
-@@ -659,7 +661,9 @@ class MindSpeedTEDotProductAttention(DotProductAttention):
+@@ -653,18 +655,39 @@ class MindSpeedTEDotProductAttention(DotProductAttention):
+         packed_seq_params: PackedSeqParams = None,
+         ):
+         """Forward."""
++        packed_seq_kwargs = (
++            {key: getattr(packed_seq_params, key) for key in self.kept_packed_seq_params}
++            if packed_seq_params is not None
++            else {}
++        )
++
++        # Honor the per-call attn_mask_type. Megatron passes AttnMaskType.no_mask for the
++        # (bidirectional) vision tower and AttnMaskType.causal for the causal LM decoder.
++        # The previous code unconditionally built a triu(2048) causal mask and forwarded
++        # config.attention_mask_type, forcing CAUSAL attention even for no_mask -> the
++        # Qwen3-VL vision tower's full attention was computed causally (wrong image embeds).
++        if attn_mask_type == AttnMaskType.no_mask:
++            # Full (bidirectional) attention: no causal mask; per-image segmentation is
++            # handled by cu_seqlens in packed_seq_params (sparse_mode=0 via 'no_mask').
++            core_attn_out = super().forward(
++                query,
++                key,
++                value,
++                None,
++                attn_mask_type='no_mask',
++                **packed_seq_kwargs,
++            )
++            return core_attn_out
++
+         if (
+             attention_mask is None and
+             self.attn_mask_type == AttnMaskType.causal
          ) and not getattr(self.config, 'is_llava', False):
              self.config.sparse_mode = 2
              attention_mask = get_attention_mask(self.config)
 -
+-        packed_seq_kwargs = (
+-            {key: getattr(packed_seq_params, key) for key in self.kept_packed_seq_params}
+-            if packed_seq_params is not None
+-            else {}
+-        )
 +        attention_mask = torch.triu(
 +            torch.ones((2048, 2048),
-+                       device=query.device, dtype=torch.bool), diagonal=1) 
-         packed_seq_kwargs = (
-             {key: getattr(packed_seq_params, key) for key in self.kept_packed_seq_params}
-             if packed_seq_params is not None
-
++                       device=query.device, dtype=torch.bool), diagonal=1)
+ 
+         core_attn_out = super().forward(
+             query,
 diff --git a/mindspeed/core/fusions/fused_rope.py b/mindspeed/core/fusions/fused_rope.py
 index 70f7cb08..15189c2d 100644
 --- a/mindspeed/core/fusions/fused_rope.py
