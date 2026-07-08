@@ -1,3 +1,19 @@
+diff --git a/mindspeed/core/fusions/fused_moe_permute.py b/mindspeed/core/fusions/fused_moe_permute.py
+index bb007b44..98708a5b 100644
+--- a/mindspeed/core/fusions/fused_moe_permute.py
++++ b/mindspeed/core/fusions/fused_moe_permute.py
+@@ -100,9 +100,9 @@ def sort_chunks_by_idxs_wrapper(fn):
+ def moe_alltoall_token_dispatcher_init_wrapper(fn):
+     @wraps(fn)
+     def wrapper(
+-            self, num_local_experts, local_expert_indices, config, model_comm_pgs=None
++            self, num_local_experts, local_expert_indices, config, pg_collection=None
+     ) -> None:
+-        fn(self, num_local_experts, local_expert_indices, config, model_comm_pgs)
++        fn(self, num_local_experts, local_expert_indices, config, pg_collection)
+         # Since fused_sort_chunks_by_index is not currently supported, set self.permute_idx_device to None
+         self.permute_idx_device = None
+         input_chunk_idxs = torch.arange(
 diff --git a/mindspeed/core/megatron_basic/arguments_basic.py b/mindspeed/core/megatron_basic/arguments_basic.py
 index 8ea25b9f..04ad9663 100644
 --- a/mindspeed/core/megatron_basic/arguments_basic.py
