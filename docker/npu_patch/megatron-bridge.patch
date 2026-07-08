@@ -300,7 +300,7 @@ index 60cc091c..1dd5c808 100644
      get_gpt_decoder_block_spec,
      get_gpt_layer_local_spec,
 diff --git a/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py b/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py
-index 7775c11c..88630881 100644
+index 7775c11c..c7b094cf 100644
 --- a/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py
 +++ b/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py
 @@ -26,6 +26,7 @@ from megatron.core.packed_seq_params import PackedSeqParams
@@ -320,6 +320,24 @@ index 7775c11c..88630881 100644
  
          cp_rank = self.pg_collection.cp.rank()
          cp_size = self.pg_collection.cp.size()
+@@ -387,7 +388,7 @@ class Qwen3VLModel(MegatronModule):
+                 combined_embeddings = split_data_cp_rank(combined_embeddings, cp_size, 0, cp_rank)
+             if packed_seq_params is not None:
+                 if attention_mask is None:
+-                    attention_mask = torch.ones_like(input_ids, dtype=torch.int32, device=input_ids.device)
++                    attention_mask = torch.ones_like(input_ids, dtype=torch.bool, device=input_ids.device)
+                 input_ids_thd, _ = preprocess_packed_seqs(
+                     input_ids, attention_mask, pre_process=True, pg_collection=self.pg_collection
+                 )
+@@ -443,7 +444,7 @@ class Qwen3VLModel(MegatronModule):
+             # convert lm_input_ids to THD format so it matches position_ids.
+             if packed_seq_params is not None:
+                 if attention_mask is None:
+-                    attention_mask = torch.ones_like(input_ids, dtype=torch.int32, device=input_ids.device)
++                    attention_mask = torch.ones_like(input_ids, dtype=torch.bool, device=input_ids.device)
+                 lm_input_ids, _ = preprocess_packed_seqs(
+                     input_ids, attention_mask, pre_process=True, pg_collection=self.pg_collection
+                 )
 @@ -499,8 +500,8 @@ class Qwen3VLModel(MegatronModule):
                  attention_mask = None
                  self.language_model.rotary_pos_emb.is_thd_format = True
@@ -339,3 +357,19 @@ index 7775c11c..88630881 100644
 +        nvtx_range_pop(msg="Qwen3VLModel.forward.language_model")
  
          return output
+diff --git a/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/utils.py b/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/utils.py
+index b714d0f7..42fcab74 100644
+--- a/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/utils.py
++++ b/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/utils.py
+@@ -668,6 +668,11 @@ def preprocess_packed_seqs(
+     """
+     batch_size = input_ids.shape[0]
+ 
++    # Ensure boolean dtype for correct advanced indexing (bool → mask select,
++    # int → fancy index which silently corrupts data when values are 0/1).
++    if attention_mask.dtype != torch.bool:
++        attention_mask = attention_mask.bool()
++
+     seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
+     if pg_collection is not None:
+         tp_size = pg_collection.tp.size()

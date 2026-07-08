@@ -82,9 +82,7 @@ def _build_initial_messages(sample: Sample) -> list[dict]:
     # `<|vision_start|><|image_pad|>...<|vision_end|>` (present when sample.prompt was already run
     # through tokenizer.apply_chat_template). See _validate_multimodal_train_inputs / docs P3/4.
     text_prompt = str(sample.prompt).replace("<image>", "")
-    text_prompt = re.sub(
-        r"<\|vision_start\|>(?:<\|image_pad\|>)+<\|vision_end\|>", "", text_prompt
-    ).lstrip()
+    text_prompt = re.sub(r"<\|vision_start\|>(?:<\|image_pad\|>)+<\|vision_end\|>", "", text_prompt).lstrip()
     content.append({"type": "text", "text": text_prompt})
     return [{"role": "user", "content": content}]
 
@@ -194,9 +192,7 @@ def _validate_multimodal_train_inputs(sample: Sample, tokenizer: Any, processor:
 _DELTA_SENTINEL = "\x00vime_assistant_sentinel\x00"
 
 
-def _observation_delta_token_ids(
-    tokenizer: Any, observation_message: dict, last_token_is_im_end: bool
-) -> list[int]:
+def _observation_delta_token_ids(tokenizer: Any, observation_message: dict, last_token_is_im_end: bool) -> list[int]:
     """Tokenize ONLY the new observation turn's template fragment, to append to the token stream.
 
     Why not re-render the whole conversation: re-tokenizing already-emitted turns triggers a BPE
@@ -385,7 +381,9 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
 
             # Append ONLY the new observation turn's tokens to the incremental stream (no re-render).
             next_user_message = env.format_observation(observation)
-            last_token_is_im_end = bool(sample.tokens and eos_token_id is not None and sample.tokens[-1] == eos_token_id)
+            last_token_is_im_end = bool(
+                sample.tokens and eos_token_id is not None and sample.tokens[-1] == eos_token_id
+            )
             obs_tokens = _observation_delta_token_ids(state.tokenizer, next_user_message, last_token_is_im_end)
             remaining = remaining_budget()
             if remaining is not None and len(obs_tokens) > remaining:

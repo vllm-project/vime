@@ -136,6 +136,7 @@ def _inference_generate_tokens_and_logprobs(choice: dict[str, Any]) -> tuple[lis
 
     return [], []
 
+
 def _prepare_prompt_ids(sample: Sample, tokenizer, processor: Any) -> list[int]:
     raw_multimodal_inputs = sample.multimodal_inputs or {}
     has_multimodal_inputs = any(value is not None for value in raw_multimodal_inputs.values())

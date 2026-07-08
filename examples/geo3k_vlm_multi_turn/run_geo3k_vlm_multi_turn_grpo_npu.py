@@ -82,7 +82,7 @@ def execute():
         "--use-precision-aware-optimizer "
     )
 
-    vllm_args = "--rollout-num-gpus-per-engine 1 " "--vllm-gpu-memory-utilization 0.6 " "--vllm-max-model-len 16384 " 
+    vllm_args = "--rollout-num-gpus-per-engine 1 " "--vllm-gpu-memory-utilization 0.6 " "--vllm-max-model-len 16384 "
 
     megatron_args = (
         "--train-backend megatron "
