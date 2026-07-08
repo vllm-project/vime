@@ -170,6 +170,7 @@ def install_megatron_mpu_stub() -> MagicMock:
     mpu_stub.get_tensor_model_parallel_world_size.return_value = 2
     mpu_stub.get_tensor_model_parallel_group.return_value = "tp_group"
     mpu_stub.get_pipeline_model_parallel_rank.return_value = 0
+    mpu_stub.get_pipeline_model_parallel_world_size.return_value = 1
     mpu_stub.get_expert_model_parallel_world_size.return_value = 1
     mpu_stub.get_expert_model_parallel_group.return_value = "ep_group"
 

@@ -42,8 +42,9 @@ def _end_vllm_weight_update_session(rollout_engines: Sequence[ActorHandle]) -> N
 
 class UpdateWeightFromDistributed:
     """
-    Update distributed engines via NCCL. Each PP rank: group "vime-pp_{pp_rank}",
-    only DP=TP=0 broadcasts. Non-expert (TP) and expert (EP) params separate.
+    Update distributed engines via NCCL. For PP=1, keep one persistent transfer
+    group. For PP>1, send one pipeline stage at a time because vLLM keeps one
+    active receiver communicator. Non-expert (TP) and expert (EP) params separate.
     """
 
     def __init__(
@@ -98,10 +99,11 @@ class UpdateWeightFromDistributed:
             mpu.get_data_parallel_rank(with_context_parallel=True) == 0 and mpu.get_tensor_model_parallel_rank() == 0
         )
         pp_rank = mpu.get_pipeline_model_parallel_rank()
+        self._pp_world_size = mpu.get_pipeline_model_parallel_world_size()
         if self._is_pp_src_rank:
             self._group_name = f"vime-pp_{pp_rank}"
 
-        if self._is_pp_src_rank:
+        if self._is_pp_src_rank and self._pp_world_size == 1:
             if self._model_update_groups is not None:
                 disconnect_rollout_engines_from_distributed(
                     self.args, self._group_name, self._model_update_groups, self.rollout_engines
@@ -148,12 +150,9 @@ class UpdateWeightFromDistributed:
                 )
         dist.barrier(group=get_gloo_group())
 
-        pbar = tqdm(desc=f"[{self._group_name}] Update weights", total=0) if self._is_pp_src_rank else None
         _begin_vllm_weight_update_session(self.rollout_engines)
         try:
-            self._send_weights(pbar)
-            if self._is_pp_src_rank:
-                torch.cuda.synchronize()
+            self._send_weights_to_rollout_engines()
         finally:
             _end_vllm_weight_update_session(self.rollout_engines)
 
@@ -169,16 +168,72 @@ class UpdateWeightFromDistributed:
             ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
 
+    def _send_weights_to_rollout_engines(self) -> None:
+        pp_world_size = getattr(self, "_pp_world_size", None) or mpu.get_pipeline_model_parallel_world_size()
+        if pp_world_size == 1:
+            pbar = tqdm(desc=f"[{self._group_name}] Update weights", total=0) if self._is_pp_src_rank else None
+            self._send_weights(pbar)
+            if self._is_pp_src_rank:
+                torch.cuda.synchronize()
+            return
+
+        pp_rank = mpu.get_pipeline_model_parallel_rank()
+        base_is_pp_src_rank = self._is_pp_src_rank
+        original_group_name = getattr(self, "_group_name", None)
+        try:
+            for active_pp_rank in range(pp_world_size):
+                self._active_weight_sync_pp_rank = active_pp_rank
+                self._is_pp_src_rank = base_is_pp_src_rank and pp_rank == active_pp_rank
+                self._group_name = f"vime-pp_{active_pp_rank}"
+                if self._is_pp_src_rank:
+                    if self._model_update_groups is not None:
+                        disconnect_rollout_engines_from_distributed(
+                            self.args, self._group_name, self._model_update_groups, self.rollout_engines
+                        )
+                    self._model_update_groups = connect_rollout_engines_from_distributed(
+                        self.args,
+                        self._group_name,
+                        self.rollout_engines,
+                        engine_gpu_counts=self._engine_gpu_counts,
+                    )
+                    pbar = tqdm(desc=f"[{self._group_name}] Update weights", total=0)
+                else:
+                    pbar = None
+
+                dist.barrier(group=get_gloo_group())
+                self._send_weights(pbar)
+                if self._is_pp_src_rank:
+                    torch.cuda.synchronize()
+                dist.barrier(group=get_gloo_group())
+        finally:
+            self._active_weight_sync_pp_rank = None
+            self._is_pp_src_rank = base_is_pp_src_rank
+            if original_group_name is not None:
+                self._group_name = original_group_name
+
+    def _is_active_weight_sync_pp_stage(self) -> bool:
+        active_pp_rank = getattr(self, "_active_weight_sync_pp_rank", None)
+        return active_pp_rank is None or mpu.get_pipeline_model_parallel_rank() == active_pp_rank
+
     def _send_weights(self, pbar: tqdm | None) -> None:
         """
         Non-expert (TP) pass → barrier → expert (EP) pass → barrier. Each iterator
         yields broadcast-ready chunks (bucketing happens internally).
         """
-        use_vllm_packed = self._use_vllm_packed()
         if self._hf_weight_iterator is not None:
+            if not self._is_active_weight_sync_pp_stage():
+                dist.barrier(group=get_gloo_group())
+                return
+            use_vllm_packed = self._use_vllm_packed()
             self._sync_bridge_weights_to_rollout_engines(pbar, use_vllm_packed=use_vllm_packed)
             return
 
+        if not self._is_active_weight_sync_pp_stage():
+            dist.barrier(group=get_gloo_group())
+            dist.barrier(group=get_gloo_group())
+            return
+
+        use_vllm_packed = self._use_vllm_packed()
         if use_vllm_packed and self._is_pp_src_rank:
             logger.info("Using vLLM packed weight sync (bucketed; metadata + trainer_send_weights per bucket)")
 
@@ -189,7 +244,7 @@ class UpdateWeightFromDistributed:
         if not use_vllm_packed:
             for hf_chunk in self._iter_expert_chunks():
                 self._update_bucket_weights_from_distributed(hf_chunk, pbar=pbar, packed=False)
-            dist.barrier(group=get_gloo_group())
+        dist.barrier(group=get_gloo_group())
 
     def _sync_bridge_weights_to_rollout_engines(self, pbar: tqdm | None, *, use_vllm_packed: bool) -> None:
         """
@@ -338,7 +393,8 @@ class UpdateWeightFromDistributed:
         ray.get(refs)
         converted_named_tensors.clear()
         ray.get(self.rollout_engine_lock.release.remote())
-        pbar.update(1)
+        if pbar is not None:
+            pbar.update(1)
 
 
 def connect_rollout_engines_from_distributed(
