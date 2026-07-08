@@ -107,12 +107,35 @@ hf download Qwen/Qwen3-30B-A3B-FP8 --local-dir /root/Qwen3-30B-A3B-FP8
 
 ### 多机支持
 
-对于多机环境，需要进行如下几点修改：
+以下以 **2 节点 × 8 卡（共 16 GPU）colocate** 为例。多机与单机的差异只在于"跨节点启动 Ray"和"调整几个资源/并行度参数"，训练脚本主体不变。
 
-- 将训练模型、数据放在所有机器都可以访问到的路径上（如 NFS）；
-- 设置各台机器都可以访问到的 `MASTER_ADDR`（非 `127.0.0.1`），并在各节点手动启动 Ray 后再从 head 提交训练（见 [快速开始 — 多机训练](../get_started/quick_start.md#大规模-moe-模型的多机训练)）；
-- 按总卡数相应调整 `train.py` 的 `--actor-num-nodes` 以及 `PERF_ARGS` 中的并行度（TP/EP/CP）；
-- 去掉 CPU adam 相关配置，因为多机使用 distributed optimizer，optimizer 的显存占比会明显下降。
+1. **共享存储**：模型、数据、checkpoint 放在所有节点路径一致且都能访问的位置（如 NFS）。
+
+2. **跨节点启动 Ray**（在训练脚本之外，各节点手动执行；详见 [快速开始 — 多机训练](../get_started/quick_start.md#大规模-moe-模型的多机训练)）：
+
+   ```bash
+   # Head 节点（node0）；MASTER_ADDR 用局域网 IP，不能是 127.0.0.1
+   export MASTER_ADDR=<head 局域网 IP>
+   ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 8 --disable-usage-stats
+
+   # 其余各节点
+   ray start --address=${MASTER_ADDR}:6379 --num-gpus 8
+   ```
+
+   等 `ray status` 显示 16 GPU 后再提交。由于集群已手动起好，运行前请去掉脚本开头的 `ray start --head ...` 一行，让脚本直接走 `ray job submit`。
+
+3. **调整脚本参数**（`scripts/run-qwen3-30B-A3B.sh`）：
+   - 把 `train.py` 的 `--actor-num-nodes` 由 `1` 改为 `2`（`--actor-num-gpus-per-node` 保持 8）。colocate 下 `--rollout-num-gpus` 会自动取 `actor_num_gpus_per_node × actor_num_nodes = 16`，无需手设。
+   - 卡数翻倍后相应增大 `PERF_ARGS` 的并行度（如提高 TP 或引入 DP）；大规模的具体配比可参考 [GLM-4.7](glm4.7-355B-A32B.md)、[DeepSeek-R1](deepseek-r1.md) 等更大集群的例子。
+   - `global-batch-size` 必须等于 `rollout-batch-size × n-samples-per-prompt`。
+   - （可选）多机使用 distributed optimizer，optimizer 显存压力下降，可去掉 `OPTIMIZER_ARGS` 中的 CPU Adam（`--optimizer-cpu-offload` 等）以提速。
+
+4. **让每个 vLLM engine 留在单节点内**：推荐 `--rollout-num-gpus-per-engine 8`（每节点 1 个 engine），而不是 `16`（单个 engine 跨 2 节点 TP=16）。跨节点 TP 会明显变慢、且对 per-token 数值更敏感；该值需整除总推理卡数（此例为 16）。
+
+⚠️  常见问题：
+- **Worker 加不进 Ray / NCCL 失败**：检查 `MASTER_ADDR`、容器 `/etc/hosts`（hostname 勿指向 `127.0.0.1`）、多网卡时设 `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME`。
+- **`Not enough samples X for global_batch_size Y`**：保持 `global-batch-size = rollout-batch-size × n-samples-per-prompt`。
+- **每节点少于 8 卡（colocate）**：需显式设置 `--num-gpus-per-node`。
 
 此外，当总卡数不能被 expert 总数整除时，可以开启 vLLM 的 EPLB（Expert Parallelism Load Balancer），通过 `--vllm-eplb-config` 配置冗余 expert。例如 24 卡的场景：
 
