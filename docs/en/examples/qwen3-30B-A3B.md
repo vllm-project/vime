@@ -3,14 +3,11 @@
 
 ## Environment Preparation
 
-Environment setup and checkpoint conversion are the same as for the Qwen3-4B model; see [Example: Qwen3-4B Model](qwen3-4B.md) and replace mentions of Qwen3-4B with Qwen3-30B-A3B.
+Environment setup, model download, and checkpoint conversion are the same as for the Qwen3-4B model; see [Example: Qwen3-4B Model](qwen3-4B.md) and replace mentions of Qwen3-4B with Qwen3-30B-A3B.
 
-Download the model and data:
+Train and eval data (identical to Qwen3-4B):
 
 ```bash
-# hf checkpoint
-hf download Qwen/Qwen3-30B-A3B --local-dir /root/Qwen3-30B-A3B
-
 # train data
 hf download --repo-type dataset zhuzilin/dapo-math-17k \
   --local-dir /root/dapo-math-17k
