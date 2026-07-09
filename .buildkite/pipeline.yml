@@ -150,7 +150,7 @@ steps:
             value: short
           - label: "run-ci-vllm-config — 8 GPU, 4 tests"
             value: vllm-config
-          - label: "run-ci-megatron — 8 GPU, 14 runs"
+          - label: "run-ci-megatron — 8 GPU, 15 runs"
             value: megatron
           - label: "run-ci-precision — 8 GPU, 1 test"
             value: precision
