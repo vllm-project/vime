@@ -321,6 +321,15 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 help="Adapter name used when loading the runtime LoRA adapter into vLLM.",
             )
             parser.add_argument(
+                "--lora-adapter-path",
+                type=str,
+                default=None,
+                help=(
+                    "Resume from a saved LoRA adapter checkpoint (an `iter_*/adapter` directory). "
+                    "Base weights still come from --load; this overlays the adapter and optimizer state."
+                ),
+            )
+            parser.add_argument(
                 "--allgather-cp",
                 action="store_true",
                 default=False,
@@ -1817,6 +1826,9 @@ def vime_validate_args(args):
 
     if args.lora_rank < 0:
         raise ValueError("--lora-rank must be non-negative.")
+
+    if getattr(args, "lora_adapter_path", None) is not None and args.lora_rank == 0:
+        raise ValueError("--lora-adapter-path requires --lora-rank > 0; without it the model has no adapter to load.")
 
     if args.lora_rank > 0:
         from vime.backends.megatron_utils.lora_utils import normalize_target_modules

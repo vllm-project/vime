@@ -26,6 +26,19 @@ def test_target_module_name_conversion_deduplicates_fused_layers():
     ]
 
 
+def test_canonical_lora_targets_split_projections():
+    # CanonicalLoRA rejects the fused names that standard LoRA expects.
+    assert convert_target_modules_to_megatron(["all-linear"], "canonical_lora") == [
+        "linear_q",
+        "linear_k",
+        "linear_v",
+        "linear_proj",
+        "linear_fc1_gate",
+        "linear_fc1_up",
+        "linear_fc2",
+    ]
+
+
 def test_infer_hf_target_modules_covers_fused_siblings():
     names = [
         "model.layers.0.self_attn.q_proj.lora_A.weight",

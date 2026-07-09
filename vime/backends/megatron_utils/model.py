@@ -31,7 +31,7 @@ except ImportError:
 from vime.utils import logging_utils
 from vime.utils.memory_utils import clear_memory
 
-from .checkpoint import load_checkpoint, save_checkpoint
+from .checkpoint import load_checkpoint, save_checkpoint_with_lora
 from .cp_utils import reduce_train_step_metrics
 from .data import DataIterator, get_batch
 from .loss import ROLLOUT_TOP_P_TOKEN_KEYS, get_rollout_top_p_logprob_kwargs, loss_function
@@ -955,16 +955,7 @@ def save(
 
     if is_lora_enabled(args):
         save_lora_adapter_for_vllm(model, args, iteration)
-    save_checkpoint(
-        iteration,
-        model,
-        optimizer,
-        opt_param_scheduler,
-        num_floating_point_operations_so_far=0,
-        checkpointing_context=None,
-        train_data_iterator=None,
-        preprocess_common_state_dict_fn=None,
-    )
+    save_checkpoint_with_lora(iteration, model, optimizer, opt_param_scheduler)
     if should_disable_forward_pre_hook(args):
         enable_forward_pre_hook(model)
 

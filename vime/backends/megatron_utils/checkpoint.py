@@ -10,6 +10,8 @@ from megatron.training.global_vars import get_args
 
 from vime.utils import megatron_bridge_utils
 
+from .lora_utils import is_lora_enabled, is_lora_model, load_lora_adapter, save_lora_checkpoint
+
 try:
     # Here we patch out the `validate_non_overlapping_shards_metadata` in both functions
     # because it is really slow for large models with many shards.
@@ -91,7 +93,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["save_checkpoint"]
+__all__ = ["save_checkpoint", "save_checkpoint_with_lora", "load_checkpoint"]
 
 
 def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_context, skip_load_to_model_and_opt):
@@ -104,7 +106,7 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_con
     ), f"{args.load=} does not exist or is an empty directory. Did you specify the wrong folder?"
 
     if _is_megatron_checkpoint(load_path):
-        return _load_checkpoint_megatron(
+        result = _load_checkpoint_megatron(
             ddp_model=ddp_model,
             optimizer=optimizer,
             opt_param_scheduler=opt_param_scheduler,
@@ -112,11 +114,66 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_con
             skip_load_to_model_and_opt=skip_load_to_model_and_opt,
         )
     else:
-        return _load_checkpoint_hf(
+        result = _load_checkpoint_hf(
             ddp_model=ddp_model,
             optimizer=optimizer,
             args=args,
             load_path=load_path,
+        )
+
+    # LoRA resume needs both halves: the frozen base loaded above, and the trained
+    # adapter overlaid here.
+    if is_lora_enabled(args):
+        adapter_path = getattr(args, "lora_adapter_path", None)
+        if adapter_path is not None:
+            loaded, iteration = load_lora_adapter(
+                ddp_model,
+                adapter_path,
+                optimizer=optimizer,
+                opt_param_scheduler=opt_param_scheduler,
+            )
+            if loaded:
+                logger.info("Successfully loaded LoRA adapter from %s", adapter_path)
+                if iteration is not None:
+                    result = (iteration, result[1])
+            else:
+                logger.warning(
+                    "LoRA is enabled and --lora-adapter-path=%s was specified, but adapter weights "
+                    "could not be loaded. Training will start with freshly initialized adapter weights.",
+                    adapter_path,
+                )
+
+    return result
+
+
+def save_checkpoint_with_lora(iteration, model, optimizer, opt_param_scheduler):
+    """Save a LoRA adapter checkpoint, or a full Megatron checkpoint for non-LoRA models.
+
+    The adapter lands in ``{save}/iter_{it}/adapter`` and is resumed via ``--lora-adapter-path``.
+    """
+    args = get_args()
+
+    if is_lora_model(model):
+        save_dir = Path(args.save) / f"iter_{iteration:07d}" / "adapter"
+        logger.info("Saving LoRA checkpoint to %s", save_dir)
+        save_lora_checkpoint(
+            model,
+            args,
+            str(save_dir),
+            optimizer=optimizer,
+            opt_param_scheduler=opt_param_scheduler,
+            iteration=iteration,
+        )
+    else:
+        save_checkpoint(
+            iteration,
+            model,
+            optimizer,
+            opt_param_scheduler,
+            num_floating_point_operations_so_far=0,
+            checkpointing_context=None,
+            train_data_iterator=None,
+            preprocess_common_state_dict_fn=None,
         )
 
 
