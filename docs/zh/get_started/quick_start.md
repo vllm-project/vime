@@ -10,7 +10,7 @@
 
 **vime** 支持多种 NVIDIA GPU 硬件平台：
 
-- **B200 系列**：完全支持，运行步骤与 H 系列完全相同
+- **GB200 / GB300 / B200 / 300 系列**：完全支持，运行步骤与 H 系列完全相同
 - **H 系列 (H100/H200)**：官方支持，具有完整的 CI 测试保护，运行稳定可靠
 
 **重要说明**：
@@ -18,8 +18,7 @@
 - Megatron 后端在 H 卡上具有 CI 保护，经过充分测试验证，推荐生产环境使用
 - B 卡基本功能稳定，可作为开发和测试参考，但暂无 CI 保护
 - 两种硬件平台使用完全相同的安装和启动流程
-
-- 对于不方便使用 docker 的场景，请参考 [build_conda.sh](https://github.com/vllm-project/vime/blob/main/build_conda.sh)。
+- 对于 AMD 支持，请参考 [AMD 使用教程](../../en/platform_support/amd_tutorial.md)。
 
 ### 拉取并启动 Docker 容器
 
@@ -27,12 +26,12 @@
 
 ```shell
 # 拉取最新镜像
-docker pull inferactinc/public:vime-latest
+docker pull vllm/vime:latest
 
 # 启动容器
 docker run --rm --gpus all --ipc=host --shm-size=16g \
   --ulimit memlock=-1 --ulimit stack=67108864 \
-  -it inferactinc/public:vime-latest /bin/bash
+  -it vllm/vime:latest /bin/bash
 ```
 
 ### 安装 vime
@@ -52,7 +51,7 @@ pip install -e . --no-deps
 
 ```bash
 # 下载模型权重 (Qwen3-4B)
-hf download zai-org/Qwen3-4B --local-dir /root/Qwen3-4B
+hf download Qwen/Qwen3-4B --local-dir /root/Qwen3-4B
 
 # 下载训练数据集 (dapo-math-17k)
 hf download --repo-type dataset zhuzilin/dapo-math-17k \
@@ -303,7 +302,7 @@ VLLM_ARGS=(
 
 ### Colocated Actor and Rollout
 
-在默认的配置下，训练（Actor）和推理（Rollout）的资源是分开指定的，通过 ray 给训练部分分配 `actor_num_nodes * actor_num_gpus_per_node` 张 GPU，给推理分配 `rollout_num_gpus` 张 GPU，也即训推分离。
+在默认的配置下，训练（Actor）和推理（Rollout）的资源是分开指定的，通过 ray 给训练部分分配 `actor_num_nodes * actor_num_gpus_per_node` 张 GPU，给推理分配 `rollout_num_gpus` 张 GPU，也即训推分离。将 `--rollout-num-gpus` 显式设置为 `0` 时，vime 仍会解析 vLLM 参数并启动 router，但不会启动本地 vLLM server。
 
 **标准（分离）配置**：
 ```bash
@@ -317,7 +316,7 @@ ray job submit ... \
 上述配置中，Actor 使用 4 张卡，Rollout 也使用 4 张卡，两者并行运行。
 
 **训推一体化（Colocated）配置**：
-要将训练和推理部署在同一组 GPU 上，请添加 `--colocate` 参数，开启后会忽略 `--rollout-num-gpus` 让训练和推理的卡数相等。
+要将训练和推理部署在同一组 GPU 上，请添加 `--colocate` 参数，开启后默认会让训练和推理的卡数相等；也可以显式设置一个不同的正数，例如让 rollout 卡数多于 actor，多出的 GPU 会作为 rollout-only 资源使用。如果显式设置 `--rollout-num-gpus 0`，则只启动 router，不启动本地 vLLM server。
 
 
 ```bash
@@ -525,7 +524,7 @@ CUSTOM_ARGS=(
 
 ## 大规模 MOE 模型的多机训练
 
-为了启动多机任务，首先需要启动一个 ray 集群，即在 node 0 运行：
+如果使用 Ray 进行多机训练，可以参考下面的方式启动集群：
 
 ```bash
 # Node0（HEAD）
@@ -536,7 +535,7 @@ ray start --head --node-ip-address ${MASTER_ADDR} \
 ray start --address=${MASTER_ADDR}:6379 --num-gpus 8
 ```
 
-在 ray 集群启动后，可以在 node 0 提交任务，例如：
+在 Ray 集群启动后，可以在 node 0 提交任务，例如：
 
 ```bash
 ray job submit --address="http://127.0.0.1:8265" \
@@ -553,3 +552,7 @@ ray job submit --address="http://127.0.0.1:8265" \
 vime 针对大规模混合专家（MoE）模型的分布式训练进行了深度优化。我们提供了一些端到端的训练案例以供参考：
 
 - [示例：8xH100 训练 Qwen3-30B-A3B](../examples/qwen3-30B-A3B.md)
+- [示例：8xH100 训练 GLM-4.7-Flash](../examples/glm4.7-30B-A3B.md)
+- [示例：32xH100 训练 GLM-5.2](../examples/glm5.2-744B-A40B.md)
+- [示例：64xH100 训练 GLM-4.7](../examples/glm4.7-355B-A32B.md)
+- [示例：128xH100 训练 DeepSeek-R1](../examples/deepseek-r1.md)

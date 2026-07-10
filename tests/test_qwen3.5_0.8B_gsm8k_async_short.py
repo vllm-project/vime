@@ -36,6 +36,7 @@ def execute():
         "--n-samples-per-prompt 4 "
         "--rollout-max-response-len 1024 "
         "--rollout-temperature 0.8 "
+        "--rollout-top-p 0.95 "
         "--over-sampling-batch-size 8 "
         "--dynamic-sampling-filter-path vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std "
         "--global-batch-size 16 "
@@ -57,7 +58,7 @@ def execute():
         "--expert-model-parallel-size 1 "
         "--expert-tensor-parallel-size 1 "
         "--use-dynamic-batch-size "
-        "--max-tokens-per-gpu 9216 "
+        "--max-tokens-per-gpu 2048 "
     )
 
     grpo_args = (

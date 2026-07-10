@@ -4,7 +4,7 @@
 # ============================================================
 
 # for rerun the task
-pkill -9 -f "vllm serve"
+pkill -9 -f '[v]llm serve|VLL[M]::'
 sleep 3
 ray stop --force
 pkill -9 ray
@@ -15,7 +15,7 @@ pkill -9 python
 
 set -ex
 
-export PYTHONBUFFERED=16
+export PYTHONUNBUFFERED=1
 
 NVLINK_COUNT=$(nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l)
 if [ "$NVLINK_COUNT" -gt 0 ]; then

@@ -10,7 +10,7 @@ Use PD Disaggregation when:
 - decode dominates rollout time;
 - prefix-cache locality matters for multi-turn sessions;
 - prefill and decode need different TP, memory, or runtime settings;
-- you want an vLLM serving topology that is closer to production serving rather than a single uniform inference group.
+- you want a vLLM serving topology that is closer to production serving rather than a single uniform inference group.
 
 For short single-turn tasks, the default regular vLLM engine layout is usually simpler.
 
@@ -30,7 +30,7 @@ This is the lightweight path used by simple scripts. It is convenient when you o
 
 ### Advanced Path: `--vllm-config`
 
-For production rollout topologies, use [vLLM Config](vllm-config.md). It lets you configure prefill and decode groups independently, and can also express EPD-style layouts, heterogeneous engine groups, multi-model serving, and per-group vLLM overrides.
+For production rollout topologies, use [vLLM Config](vllm-config.md). It lets you configure prefill and decode groups independently, and can also express EPD-style layouts, heterogeneous server groups, multi-model serving, and per-group vLLM overrides.
 
 Example:
 

@@ -11,7 +11,7 @@ Since vime may contain temporary patches for vllm/megatron, to avoid potential e
 
 **vime** supports multiple NVIDIA GPU hardware platforms:
 
-- **B200 Series**: Fully supported with identical setup steps as H-series GPUs
+- **GB200 / GB300 / B200 / 300 Series**: Fully supported with identical setup steps as H-series GPUs
 - **H-Series (H100/H200)**: Official support with comprehensive CI testing and stable performance
 
 **Important Notes**:
@@ -19,8 +19,7 @@ Since vime may contain temporary patches for vllm/megatron, to avoid potential e
 - Megatron backend on H-series GPUs has CI protection, thoroughly validated, recommended for production environments
 - B-series basic functionality is stable and suitable for development/testing, but currently lacks CI protection
 - Both hardware platforms use identical installation and startup procedures
-
-- For scenarios where Docker is not convenient, please refer to [build_conda.sh](https://github.com/vllm-project/vime/blob/main/build_conda.sh).
+- For AMD support, please refer to [AMD Usage Tutorial](../platform_support/amd_tutorial.md).
 
 ### Pull and Start Docker Container
 
@@ -28,12 +27,12 @@ Please execute the following commands to pull the latest image and start an inte
 
 ```shell
 # Pull the latest image
-docker pull inferactinc/public:vime-latest
+docker pull vllm/vime:latest
 
 # Start the container
 docker run --rm --gpus all --ipc=host --shm-size=16g \
   --ulimit memlock=-1 --ulimit stack=67108864 \
-  -it inferactinc/public:vime-latest /bin/bash
+  -it vllm/vime:latest /bin/bash
 ```
 
 ### Install vime
@@ -53,7 +52,7 @@ You can download required models and datasets from platforms like Hugging Face, 
 
 ```bash
 # Download model weights (Qwen3-4B)
-hf download zai-org/Qwen3-4B --local-dir /root/Qwen3-4B
+hf download Qwen/Qwen3-4B --local-dir /root/Qwen3-4B
 
 # Download training dataset (dapo-math-17k)
 hf download --repo-type dataset zhuzilin/dapo-math-17k \
@@ -304,7 +303,7 @@ VLLM_ARGS=(
 
 ### Colocated Actor and Rollout
 
-Under the default configuration, training (Actor) and inference (Rollout) resources are specified separately. Ray allocates `actor_num_nodes * actor_num_gpus_per_node` GPUs to the training part and `rollout_num_gpus` GPUs to inference, that is, training and inference are separated.
+Under the default configuration, training (Actor) and inference (Rollout) resources are specified separately. Ray allocates `actor_num_nodes * actor_num_gpus_per_node` GPUs to the training part and `rollout_num_gpus` GPUs to inference, that is, training and inference are separated. When `--rollout-num-gpus` is explicitly set to `0`, vime still parses vLLM arguments and launches the router, but does not launch local vLLM servers.
 
 **Standard (Disaggregated) Configuration**:
 ```bash
@@ -318,7 +317,7 @@ ray job submit ... \
 In the above configuration, Actor uses 4 cards, and Rollout also uses 4 cards, running in parallel.
 
 **Training-Inference Integration (Colocated) Configuration**:
-To deploy training and inference on the same group of GPUs, please add the `--colocate` parameter. After enabling, `--rollout-num-gpus` will be ignored to make the number of cards for training and inference equal.
+To deploy training and inference on the same group of GPUs, please add the `--colocate` parameter. By default, this makes the number of cards for training and inference equal. You can explicitly set a different positive `--rollout-num-gpus`, for example to use more rollout GPUs than actor GPUs; the extra GPUs are used as rollout-only resources. If `--rollout-num-gpus 0` is set explicitly, vime launches only the router and no local vLLM servers.
 
 ```bash
 ray job submit ... \
@@ -520,7 +519,7 @@ CUSTOM_ARGS=(
 
 ## Multi-Node Training for Large-Scale MOE Models
 
-To start a multi-node task, you need to first start a Ray cluster. On node 0, run:
+If you use Ray for multi-node training, one option is to start the cluster as follows:
 
 ```bash
 # Node0 (HEAD)
@@ -557,3 +556,8 @@ export NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=$(ip -o -4 addr show | awk '$4 ~ /^10\.
 vime has been deeply optimized for distributed training of large-scale Mixture of Experts (MoE) models. We provide some end-to-end training cases for reference:
 
 - [Example: Qwen3-30B-A3B with 8xH100](../examples/qwen3-30B-A3B.md)
+- [Example: 8xH100 Training GLM-4.7-Flash](../examples/glm4.7-30B-A3B.md)
+- [Example: 32xH100 Training GLM-5.2](../examples/glm5.2-744B-A40B.md)
+- [Example: 64xH100 Training GLM-4.7](../examples/glm4.7-355B-A32B.md)
+- [Example: 128xH100 Training DeepSeek-R1](../examples/deepseek-r1.md)
+- Scripts such as `scripts/run_qwen3_30b_a3b.py` and `scripts/run_glm45_355b_a32b.py` also support multi-node training. Their documentation is still being expanded.

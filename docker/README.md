@@ -1,20 +1,19 @@
 # Docker release rule
 
 vime ships one image based on the official vllm image, published as
-`inferactinc/public:vime-latest`.
+`vllm/vime:latest`. Supports GB200/300 and H100/200.
 
 Build locally:
 
+
 ```bash
-docker build -f docker/Dockerfile -t vime .
+just release
 ```
 
-## Release matrix
+Before each update, we will test the following models with 64xH100:
 
-Before tagging a new stable image, the following matrix must pass. All four
-are currently TODO — none has been wired into CI yet:
-
-- [ ] Qwen3-4B sync
-- [ ] Qwen3-4B async
-- [ ] Qwen3-30B-A3B sync
-- [ ] Qwen3-30B-A3B fp8 sync
+- Qwen3-4B sync
+- Qwen3-4B async
+- Qwen3-30B-A3B sync
+- Qwen3-30B-A3B fp8 sync
+- GLM-4.5-106B-A12B sync

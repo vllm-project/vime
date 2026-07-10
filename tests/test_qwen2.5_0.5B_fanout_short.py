@@ -191,11 +191,11 @@ def execute():
     )
 
     # Post-train assertion: compact_generate must have been called exactly
-    # ``num_rollout * rollout_batch_size`` = 3 * 8 = 24 times. A regression
+    # ``num_rollout * rollout_batch_size`` = 2 * 4 = 8 times. A regression
     # that bypassed the custom path (arg parser drops the flag, or the
     # path is silently mis-routed) would either skip the file entirely or
     # under-count.
-    expected_calls = 3 * 8
+    expected_calls = 2 * 4
     try:
         with open(FANOUT_COUNTER_FILE) as f:
             actual_calls = sum(1 for _ in f)
@@ -207,7 +207,7 @@ def execute():
         ) from e
     assert actual_calls == expected_calls, (
         f"compact_generate was called {actual_calls} times, expected {expected_calls} "
-        f"(num_rollout=3 × rollout_batch_size=8). A mismatch points at the rollout "
+        f"(num_rollout=2 x rollout_batch_size=4). A mismatch points at the rollout "
         f"submission loop double-submitting / under-submitting prompts."
     )
 

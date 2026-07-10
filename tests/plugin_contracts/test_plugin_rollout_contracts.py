@@ -18,7 +18,7 @@ except ImportError:
         from _shared import get_contract_path, install_paths, install_stubs, run_contract_test_for_file
 
 install_paths()
-install_stubs(with_transformers=True)
+install_stubs(with_vllm_router=True, with_transformers=True)
 
 NUM_GPUS = 0
 DEFAULT_ROLLOUT_FUNCTION_PATH = "vime.rollout.vllm_rollout.generate_rollout"

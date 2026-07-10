@@ -4,26 +4,32 @@ End-to-end demo of vime's fully-async rollout path. A background asyncio
 worker keeps a fixed pool of in-flight generations across rollout boundaries,
 so the next training step doesn't wait for the slowest in-flight sample.
 The worker itself lives in `vime.rollout.fully_async_rollout`; this
-directory is just the launch script.
+directory is just the launch script + CI test.
 
 ## Files
 
-* `run-qwen3-4b-fully_async.sh` — fully-async demo with Qwen3-4B on
-  dapo-math-17k.
+* `run-qwen2.5-0.5B-fully_async.sh` — single-node, 4-GPU, three-rollout demo
+  with Qwen2.5-0.5B-Instruct on dapo-math-17k. Fast enough to be the CI
+  smoke test for the fully-async path.
+* `run-qwen3.5-9B-fully_async.sh` — single-node, 8-GPU, three-rollout demo
+  with Qwen3.5-9B on dapo-math-17k.
+
+The same script doubles as `tests/test_qwen2.5_0.5B_fully_async_short.py` in
+CI.
 
 ## Prerequisites
 
 ```
-/root/Qwen3-4B/            # HF checkpoint
-/root/Qwen3-4B_torch_dist/ # tools/convert_hf_to_torch_dist.py
-/path/to/dapo-math-17k.jsonl  # set PROMPT_SET in the script
+/root/models/Qwen2.5-0.5B-Instruct/            # HF checkpoint
+/root/models/Qwen2.5-0.5B-Instruct_torch_dist/ # tools/convert_hf_to_torch_dist.py
+/root/datasets/dapo-math-17k/dapo-math-17k.jsonl
 ```
 
 ## Run
 
 ```bash
 cd vime
-bash examples/fully_async/run-qwen3-4b-fully_async.sh
+bash examples/fully_async/run-qwen2.5-0.5B-fully_async.sh
 ```
 
 You should see:
@@ -51,8 +57,8 @@ work unchanged under fully-async:
 --custom-rm-path                your.module.reward      # (args, sample | list[Sample]) -> float | list[float]
 ```
 
-See `examples/coding_agent_rl/` for a non-trivial example that plugs in a
-multi-turn agent this way.
+See `examples/swe_codex/` for a non-trivial example that plugs in a
+multi-turn agent (Claude Code in a Docker-Proxy sandbox) this way.
 
 ## Worker Internals (Very Short)
 

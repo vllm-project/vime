@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 vLLM Decode Profile Analyzer
-============================
+==============================
 Analyzes PyTorch profiler traces (.trace.json.gz) from vLLM decode workers.
 
 Usage:
@@ -587,7 +587,7 @@ def print_analysis(r: TraceAnalysis):
                     "portion that runs OUTSIDE the CUDA graph (DeepEP dispatch/combine + NCCL allgather).",
                     "The 3-launch pattern per step = (1) pre-MoE graph, (2) post-MoE graph, (3) MoE-expert graph.",
                     "Optimization: try increasing decode batch size to amortize graph launch overhead per token.",
-                    "Check if `--enforce-eager` helps isolate whether the overhead is in graph "
+                    "Check if `--vllm-enforce-eager` helps isolate whether the overhead is in graph "
                     "management vs. actual compute.",
                     "Consider padding batch sizes to avoid frequent graph re-capture for different sizes.",
                 ],
@@ -633,7 +633,7 @@ def print_analysis(r: TraceAnalysis):
                 ),
                 "Increase batch size to improve GPU SM occupancy — many kernels are memory-bound at small batch.",
                 "Speculative decoding could help if generation is latency-bound.",
-                "Verify `--gpu-memory-utilization` is set high enough for large KV cache.",
+                "Verify `--vllm-gpu-memory-utilization` is set high enough for large KV cache.",
             ],
         )
     )

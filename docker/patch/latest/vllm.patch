@@ -1,7 +1,7 @@
 diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
 --- a/vllm/v1/engine/core.py
 +++ b/vllm/v1/engine/core.py
-@@ -750,8 +750,10 @@
+@@ -775,8 +775,10 @@
          if tags is None or tags:
              self.model_executor.wake_up(tags)
  
@@ -14,17 +14,110 @@ diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
  
      def is_sleeping(self) -> bool:
          """Check if engine is sleeping at any level."""
-@@ -1844,8 +1846,11 @@
+@@ -1894,9 +1896,12 @@
                      continue
  
                  # We are in a running state and so must execute a dummy pass
 -                # if the model didn't execute any ready requests.
--                self.execute_dummy_batch()
+-                with self.log_iteration_details(None):
+-                    self.execute_dummy_batch()
 +                # if the model didn't execute any ready requests -- unless the executor is
 +                # asleep (#44483: a decode-shaped dummy batch reads freed KV -> illegal memory
 +                # access). The finished-sync all-reduce below still runs (DP lockstep).
 +                if not self.is_sleeping():
-+                    self.execute_dummy_batch()
++                    with self.log_iteration_details(None):
++                        self.execute_dummy_batch()
  
              # 3) All-reduce operation to determine global unfinished reqs.
              self.engines_running = self._has_global_unfinished_reqs(
+diff --git a/vllm/model_executor/layers/fused_moe/all2all_utils.py b/vllm/model_executor/layers/fused_moe/all2all_utils.py
+--- a/vllm/model_executor/layers/fused_moe/all2all_utils.py
++++ b/vllm/model_executor/layers/fused_moe/all2all_utils.py
+@@ -5,7 +5,6 @@ from typing import Any
+ 
+ import torch
+ 
+-from vllm.config import get_current_vllm_config
+ from vllm.distributed import (
+     get_ep_group,
+ )
+@@ -240,9 +239,7 @@ def maybe_make_prepare_finalize(
+ 
+     elif moe.use_fi_nvl_one_sided_kernels:
+         assert quant_config is not None
+-        max_num_tokens = (
+-            get_current_vllm_config().scheduler_config.max_num_batched_tokens
+-        )
++        max_num_tokens = moe.max_num_tokens
+         if quant_config.quant_dtype is None:
+             dispatch_dtype_bytes_per_elem = 2
+             dispatch_scale_bytes_per_token = 0
+
+diff --git a/vllm/entrypoints/serve/dev/rlhf/api_router.py b/vllm/entrypoints/serve/dev/rlhf/api_router.py
+--- a/vllm/entrypoints/serve/dev/rlhf/api_router.py
++++ b/vllm/entrypoints/serve/dev/rlhf/api_router.py
+@@ -91,6 +91,51 @@ async def resume_generation(raw_request: Request) -> JSONResponse:
+         )
+ 
+ 
++@router.post("/abort_requests")
++async def abort_requests(raw_request: Request) -> JSONResponse:
++    """Abort in-flight requests without pausing the scheduler.
++
++    Empty/missing ``request_ids`` aborts all in-flight requests.
++    """
++
++    engine = engine_client(raw_request)
++
++    try:
++        body = await raw_request.json()
++    except json.JSONDecodeError as e:
++        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
++
++    request_ids = body.get("request_ids")
++
++    try:
++        if request_ids:
++            # Body ids are external (user-supplied) request ids.
++            await engine.abort(request_ids)
++        else:
++            # The dev RL server runs AsyncLLM; abort everything it is tracking.
++            # request_states is keyed by internal ids; parent_requests holds
++            # parallel-sampling parents. Abort both as internal ids.
++            from vllm.v1.engine.async_llm import AsyncLLM
++
++            assert isinstance(engine, AsyncLLM)
++            op = engine.output_processor
++            request_ids = [
++                *op.request_states.keys(),
++                *op.parent_requests.keys(),
++            ]
++            await engine.abort(request_ids, internal=True)
++        return JSONResponse(
++            content={"status": "aborted", "aborted": len(request_ids)},
++            status_code=HTTPStatus.OK.value,
++        )
++    except Exception as err:  # pragma: no cover - defensive
++        logger.exception("Failed to abort requests")
++        return JSONResponse(
++            content={"error": f"Failed to abort requests: {err}"},
++            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
++        )
++
++
+ @router.get("/is_paused")
+ async def is_paused(raw_request: Request) -> JSONResponse:
+     """Return the current pause status."""
+diff --git a/vllm/entrypoints/serve/disagg/protocol.py b/vllm/entrypoints/serve/disagg/protocol.py
+index 60d2a64..67f3f98 100644
+--- a/vllm/entrypoints/serve/disagg/protocol.py
++++ b/vllm/entrypoints/serve/disagg/protocol.py
+@@ -203,6 +203,8 @@ class GenerateResponse(BaseModel):
+     )
+     choices: list[GenerateResponseChoice]
+ 
++    usage: UsageInfo | None = Field(default=None)
++
+     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
+ 
+     kv_transfer_params: dict[str, Any] | None = Field(

@@ -30,7 +30,7 @@ vime 支持两种 PD 配置方式。
 
 ### 高级路径：`--vllm-config`
 
-生产级 rollout topology 推荐使用 [vLLM Config](vllm-config.md)。它可以独立配置 prefill 和 decode group，也能表达 EPD-style layout、heterogeneous engine group、multi-model serving 和 per-group vLLM override。
+生产级 rollout topology 推荐使用 [vLLM Config](vllm-config.md)。它可以独立配置 prefill 和 decode group，也能表达 EPD-style layout、heterogeneous server group、multi-model serving 和 per-group vLLM override。
 
 示例：
 

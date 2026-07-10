@@ -6,7 +6,7 @@ vime uses GitHub Actions for CI. Tests are triggered by **PR labels** — adding
 
 The workflow is defined in `.github/workflows/pr-test.yml` (auto-generated from `pr-test.yml.j2`). Each CI job:
 
-1. Runs on a self-hosted GPU runner via `docker run`; most tests use `inferactinc/public:vime-latest`, while image validation uses `inferactinc/public:vime-test-latest`.
+1. Runs on a self-hosted GPU runner via `docker run`; most tests use `vllm/vime:latest`, while image validation uses `vllm/vime:test-latest`.
 2. Installs vime with `pip install -e . --no-deps`.
 3. Acquires the required GPUs via `tests/ci/gpu_lock_exec.py --count <num_gpus>`.
 4. Executes the test file: `python <test_path>.py` or `python tests/<test_file>.py`, depending on whether the test lives under `tests/` or a subdirectory such as `tests/plugin_contracts/`.
@@ -23,7 +23,7 @@ Add a label to your PR to trigger the corresponding test suite:
 | `run-ci-megatron` | `e2e-test-megatron` | Core Megatron training tests covering dense, MoE, PPO, MTP, etc. |
 | `run-ci-precision` | `e2e-test-precision` | Numerical precision validation (parallel check). |
 | `run-ci-ckpt` | `e2e-test-ckpt` | Checkpoint save/load correctness (sync and async-save). |
-| `run-ci-image` | `e2e-test-image` | Full test suite run on `inferactinc/public:vime-test-latest` image (for image validation). |
+| `run-ci-image` | `e2e-test-image` | Full test suite run on `vllm/vime:test-latest` image (for image validation). |
 | `run-ci-changed` | `e2e-test-changed` | **Dynamically** detects new/modified test files in the PR and runs only those. |
 
 All labels also run when triggered via `workflow_dispatch` (manual run from the Actions tab).
@@ -44,7 +44,7 @@ This means you don't need to manually register your new test in the workflow —
 
 ### `run-ci-image` — Full Suite on Test Image
 
-This runs **all** registered tests on the `inferactinc/public:vime-test-latest` Docker image. Use this label to:
+This runs **all** registered tests on the `vllm/vime:test-latest` Docker image. Use this label to:
 
 - Validate a newly built Docker image before release.
 - Run the entire test suite for a comprehensive pre-merge check.

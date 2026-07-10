@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # for rerun the task
-pkill -9 -f "vllm serve"
+pkill -9 -f '[v]llm serve|VLL[M]::'
 sleep 3
 ray stop --force
 pkill -9 ray
@@ -13,7 +13,7 @@ pkill -9 python
 set -ex
 
 # will prevent ray from buffering stdout/stderr
-export PYTHONBUFFERED=16
+export PYTHONUNBUFFERED=1
 
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 
@@ -156,7 +156,7 @@ if [ -n "${HOSTFILE}" ]; then
     fi
     echo "Starting Ray worker on ${WORKER_IP}"
     ssh root@"${WORKER_IP}" \
-      "pkill -9 -f 'vllm serve' ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus ${ACTOR_NUM_GPUS_PER_NODE} --node-ip-address ${WORKER_IP} --disable-usage-stats" &
+      "pkill -9 -f '[v]llm serve|VLL[M]::' ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus ${ACTOR_NUM_GPUS_PER_NODE} --node-ip-address ${WORKER_IP} --disable-usage-stats" &
   done
   wait
 fi
@@ -170,6 +170,7 @@ RUNTIME_ENV_JSON=$(cat <<EOF_JSON
     "MASTER_ADDR": "${MASTER_ADDR}",
     "PYTHONPATH": "/root/Megatron-LM/",
     "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+    "NVSHMEM_DISABLE_NCCL": "1",
     "NCCL_NVLS_ENABLE": "${HAS_NVLINK}"
   }
 }

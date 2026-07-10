@@ -21,7 +21,7 @@ except ImportError:
         from _shared import get_contract_path, install_paths, install_stubs, run_contract_test_for_file
 
 install_paths()
-install_stubs(with_transformers=True)
+install_stubs(with_vllm_router=True, with_transformers=True)
 
 NUM_GPUS = 0
 REFERENCE_CUSTOM_GENERATE_PATH = "plugin_contracts.test_plugin_generate_contracts.custom_generate"

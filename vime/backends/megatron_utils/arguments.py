@@ -89,31 +89,6 @@ def validate_args(args):
             "pipeline_model_parallel_size is 1."
         )
 
-    # --dist-ckpt-optim-fully-reshardable stores the optimizer in a model-centric layout that avoids
-    # the precision-aware-optimizer (PAO) + cpu-offload load failure
-    #   "Cannot merge two lists with different lengths (81 and 52)"
-    # (the default bucket-centric `dp_reshardable` shards are not equal-length across save/load ranks
-    # under PAO, so the dist-ckpt merge fails). The cost is paid at SAVE time: Megatron NCCL
-    # all-gathers the full optimizer state into model space on EVERY rank. On a single node all ranks
-    # materialize that copy in host RAM concurrently (~190 GB/rank for Qwen3-30B-A3B => ~1.5 TB), which
-    # OOMs the host. On >=2 nodes the ranks split across hosts and it fits. Warn so single-node users
-    # can drop the flag (cheap `dp_reshardable` save; resume then requires the same TP/PP/EP layout)
-    # rather than OOMing at the first checkpoint.
-    if (
-        getattr(args, "dist_ckpt_optim_fully_reshardable", False)
-        and getattr(args, "optimizer_cpu_offload", False)
-        and getattr(args, "actor_num_nodes", 1) == 1
-    ):
-        logger.warning(
-            "[ckpt] --dist-ckpt-optim-fully-reshardable + --optimizer-cpu-offload on a single node: "
-            "the optimizer state is NCCL all-gathered into model space on every rank at save time and "
-            "held in host RAM concurrently (~190 GB/rank for a 30B model), which can OOM the host. "
-            "This flag is only needed to avoid the PAO load error 'Cannot merge two lists with "
-            "different lengths (81 and 52)'. For single-node runs prefer dp_reshardable (drop the "
-            "flag; resume then needs the same TP/PP/EP layout); keep fully_reshardable only for "
-            ">=2-node runs where the per-host optimizer copy fits."
-        )
-
 
 def _hf_validate_args(args, hf_config):
     def equal(x, y):
@@ -174,6 +149,11 @@ def _set_default_megatron_args(args):
     args.use_distributed_optimizer = True
     # TODO: maybe change this after megatron has good fp8 support
     args.bf16 = not args.fp16
+    # Checkpoint I/O defaults: these keep checkpoint contents unchanged while
+    # reducing repeated validation/planning work and parallelizing load.
+    args.use_persistent_ckpt_worker = True
+    args.ckpt_assume_constant_structure = True
+    args.ckpt_fully_parallel_load = True
     # placeholders
     if args.seq_length is None:
         args.seq_length = 4096

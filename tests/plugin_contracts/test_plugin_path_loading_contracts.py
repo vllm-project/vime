@@ -28,7 +28,7 @@ except ImportError:
         )
 
 install_paths()
-install_stubs(with_transformers=True)
+install_stubs(with_vllm_router=True, with_transformers=True)
 
 NUM_GPUS = 0
 

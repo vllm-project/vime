@@ -1,11 +1,12 @@
 """
-Colocated vLLM weight sync (trainer + worker)
-=============================================
+Colocated vLLM weight sync (trainer side)
+=========================================
 
-Trainer: ``UpdateWeightFromTensor`` — Megatron → HF chunks → CUDA IPC (Ray).
+``UpdateWeightFromTensor`` — Megatron → HF chunks → CUDA IPC handles
+→ ``POST /update_weights`` to vLLM's native ``IPCWeightTransferEngine``.
 
-Worker: ``vLLMColocateWorkerExtension`` — passed to ``vllm serve`` via
-``--worker-extension-cls``; patches IPC receive before handle deserialisation.
+vLLM handles UUID routing + device_index remapping + layerwise reload
+internally; no worker extension or monkey-patch is needed.
 
 https://docs.vllm.ai/en/stable/examples/rl/rlhf_ipc/
 """
@@ -73,8 +74,8 @@ def _build_ipc_update_info_from_named_tensors(
         shapes.append(list(tensor.shape))
         weight = tensor.detach().contiguous()
         weight_refs.append(weight)
-        rebuild_func, ipc_args = reduce_tensor(weight)
-        ipc_handles.append({gpu_uuid: (rebuild_func, ipc_args)})
+        _, ipc_args = reduce_tensor(weight)
+        ipc_handles.append({gpu_uuid: ipc_args})
 
     return (
         {
@@ -367,10 +368,8 @@ def _send_to_colocated_engine(
     local_info, weight_refs = _build_ipc_update_info_from_named_tensors(hf_named_tensors)
     payload = _serialize_ipc_update_info(local_info)
 
-    # all_gather_object is monkey-patched for ReloadableProcessGroup; gather_object
-    # is not (it fails after a Megatron reload).
-    gathered_payloads = [None] * slot_size
-    dist.all_gather_object(gathered_payloads, payload, group=ipc_gather_group)
+    gathered_payloads = [None] * slot_size if dist.get_rank() == ipc_gather_src else None
+    dist.gather_object(payload, object_gather_list=gathered_payloads, dst=ipc_gather_src, group=ipc_gather_group)
 
     refs = []
     if dist.get_rank() == ipc_gather_src:
@@ -381,113 +380,3 @@ def _send_to_colocated_engine(
         refs.append(ipc_engine.update_weights_from_tensor.remote(**merged, weight_version=str(weight_version)))
 
     return refs, weight_refs
-
-
-# ---------------------------------------------------------------------------
-# vLLM worker extension (loaded by ``--worker-extension-cls`` in colocate mode)
-# ---------------------------------------------------------------------------
-
-
-class _VLLMHijack:
-    """Monkey-patch vLLM IPC receive so CUDA IPC handles deserialize on the correct GPU."""
-
-    @staticmethod
-    def hijack() -> None:
-        from vllm.distributed.weight_transfer.ipc_engine import IPCWeightTransferEngine
-
-        if getattr(IPCWeightTransferEngine, "_vime_receive_patched", False):
-            return
-
-        _orig = IPCWeightTransferEngine.receive_weights
-
-        def _vime_receive_weights(self, update_info, load_weights, _orig=_orig):
-            _orig(self, update_info, load_weights)
-
-        IPCWeightTransferEngine.receive_weights = _vime_receive_weights
-        IPCWeightTransferEngine._vime_receive_patched = True  # type: ignore[attr-defined]
-
-
-class vLLMColocateWorkerExtension:
-    """vLLM ``--worker-extension-cls`` entry for colocated IPC weight sync."""
-
-    def __new__(cls, **kwargs):
-        _VLLMHijack.hijack()
-        return super().__new__(cls)
-
-    # ── Three-phase weight update protocol ────────────────────────────────────
-    # Mirrors SkyRL's NewInferenceWorkerWrap. Callable via /collective_rpc from
-    # VLLMEngine.update_weights_chunk / update_weights_chunk on the trainer side.
-
-    def update_weights_chunk(self, update_info: dict) -> None:
-        """Receive and load a single chunk of weights via CUDA IPC.
-
-        Accepts the ``update_info`` dict produced by
-        ``VLLMEngine.update_weights`` / ``update_weights``, which
-        carries ``ipc_handles_pickled`` (cloudpickle + base64 serialised CUDA
-        IPC handles assembled by the trainer's
-        ``IPCWeightTransferEngine.trainer_send_weights``).
-
-        Deserialises IPC handles inline (the same pattern as SkyRL's
-        NewInferenceWorkerWrap) and reconstructs each weight tensor before
-        loading into the model — no dependency on
-        ``weight_transfer_engine.receive_weights``.
-
-        Args:
-            update_info: Dict with keys:
-                - names: list[str]
-                - dtype_names: list[str]
-                - shapes: list[list[int]]
-                - ipc_handles_pickled: base64(cloudpickle({gpu_uuid: (func, args)}))
-        """
-        if not getattr(self, "_weight_update_active", False):
-            raise RuntimeError("start_weight_update must be called before update_weights.")
-
-        import base64
-
-        import cloudpickle
-
-        # Deserialise cloudpickle+b64 encoded IPC handles back to raw callables.
-        inner = dict(update_info)
-        if "ipc_handles_pickled" in inner:
-            inner["ipc_handles"] = cloudpickle.loads(base64.b64decode(inner.pop("ipc_handles_pickled")))
-
-        names: list[str] = inner["names"]
-        shapes: list[list[int]] = inner["shapes"]
-        ipc_handles: list[dict] = inner["ipc_handles"]
-
-        device_index = torch.cuda.current_device()
-        physical_gpu_id = str(torch.cuda.get_device_properties(device_index).uuid)
-
-        # Reconstruct weights from per-tensor IPC handles (one handle per
-        # parameter — the vLLM IPCWeightTransferEngine.trainer_send_weights
-        # convention, which differs from SkyRL's single-packed-buffer approach).
-        weights: list[tuple[str, torch.Tensor]] = []
-        for name, _shape, ipc_handle in zip(names, shapes, ipc_handles, strict=True):
-            if physical_gpu_id not in ipc_handle:
-                raise ValueError(
-                    f"IPC handle not found for GPU UUID {physical_gpu_id}. "
-                    f"Available UUIDs: {list(ipc_handle.keys())}"
-                )
-            func, args = ipc_handle[physical_gpu_id]
-            # Index 6 is the device_index in torch's rebuild_cuda_tensor tuple.
-            # Remap to the local (receiver-side) device index.
-            list_args = list(args)
-            list_args[6] = device_index
-            weight: torch.Tensor = func(*list_args)
-            weights.append((name, weight))
-
-        # Load weights into the model.
-        from vllm.config import set_current_vllm_config
-
-        model = self.model_runner.model
-        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
-            if self._is_checkpoint_format:
-                model.load_weights(weights=iter(weights))
-            else:
-                for name, weight in weights:
-                    param = model.get_parameter(name)
-                    param.copy_(weight)
-
-        # Ensure the receiver has finished consuming the IPC tensors before
-        # the sender drops its reference on the next barrier.
-        torch.accelerator.synchronize()

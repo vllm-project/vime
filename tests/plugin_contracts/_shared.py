@@ -19,13 +19,17 @@ def install_paths() -> None:
     sys.path.insert(0, str(current.parents[2]))
 
 
-def install_stubs(*, with_transformers: bool = False) -> None:
+def install_stubs(*, with_vllm_router: bool = False, with_transformers: bool = False) -> None:
     if "ray" not in sys.modules:
         ray_mod = types.ModuleType("ray")
         ray_mod._private = types.SimpleNamespace(
             services=types.SimpleNamespace(get_node_ip_address=lambda: "127.0.0.1")
         )
         sys.modules["ray"] = ray_mod
+
+    if with_vllm_router and "vllm_router" not in sys.modules:
+        mod = types.ModuleType("vllm_router")
+        sys.modules["vllm_router"] = mod
 
     if with_transformers and "transformers" not in sys.modules:
         mod = types.ModuleType("transformers")

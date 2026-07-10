@@ -1,0 +1,258 @@
+# vime on AMD ROCm 7.0.2, gfx950 (MI350/MI355X).
+#
+# Build:
+#   DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm \
+#     --build-arg GPU_ARCH=gfx950 -t vime-rocm702 .
+
+ARG GPU_ARCH="gfx950"
+
+FROM ubuntu:22.04 AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
+ARG PYTHON_VERSION=3.12
+
+RUN --mount=target=/var/lib/apt/lists,type=cache,sharing=locked \
+    --mount=target=/var/cache/apt,type=cache,sharing=locked \
+    apt update && \
+    apt install -y git software-properties-common curl rsync dialog gfortran wget sqlite3 ccache vim && \
+    if ! python3 --version | grep -q ${PYTHON_VERSION} ; then \
+    add-apt-repository -y ppa:deadsnakes/ppa && apt update ; fi && \
+    apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
+    python${PYTHON_VERSION}-lib2to3 python-is-python3
+
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
+    update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} && \
+    ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config && \
+    curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION}
+
+RUN wget -nv -O /tmp/cmake-3.26.4-linux-x86_64.tar.gz https://cmake.org/files/v3.26/cmake-3.26.4-linux-x86_64.tar.gz && \
+    tar zfx /tmp/cmake-3.26.4-linux-x86_64.tar.gz -C /opt/ && \
+    mv /opt/cmake-3.26.4-linux-x86_64 /opt/cmake-3.26.4 && \
+    rm -f /tmp/cmake-3.26.4-linux-x86_64.tar.gz
+
+ENV PATH=/opt/cmake-3.26.4/bin:$PATH
+
+ENV CCACHE_DIR=/root/.cache/ccache
+ENV CCACHE_MAXSIZE=50G
+ENV CMAKE_C_COMPILER_LAUNCHER=ccache
+ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
+ENV CMAKE_HIP_COMPILER_LAUNCHER=ccache
+
+# ======================================== ROCm 7.0.2 ==========================
+FROM base AS rocm_deb
+
+ARG ROCM_VERSION=7.0.2
+ARG AMDGPU_VERSION=7.0.2
+ARG GFX_ARCH=gfx950
+
+RUN --mount=target=/var/lib/apt/lists,type=cache,sharing=locked \
+    --mount=target=/var/cache/apt,type=cache,sharing=locked \
+    curl -sL https://repo.radeon.com/rocm/rocm.gpg.key | apt-key add - \
+    && printf "deb [arch=amd64] https://repo.radeon.com/rocm/apt/$ROCM_VERSION/ jammy main\n" | tee /etc/apt/sources.list.d/rocm.list \
+    && printf "deb [arch=amd64] https://repo.radeon.com/amdgpu/$AMDGPU_VERSION/ubuntu jammy main\n" | tee /etc/apt/sources.list.d/amdgpu.list \
+    && printf "Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n" | tee /etc/apt/preferences.d/rocm-pin-600 \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y rocm && \
+    find /opt/rocm/lib -type f -name '*gfx*' | grep -Ev "${GFX_ARCH}" | xargs rm -f && \
+    find /opt/rocm/lib/hipblaslt/library -type f -name '*gfx*' | grep -Ev "${GFX_ARCH}" | xargs rm -f && \
+    find /opt/rocm/lib/rocblas/library -type f -name '*gfx*' | grep -Ev "${GFX_ARCH}" | xargs rm -f && \
+    find /opt/rocm/share/miopen/db -type f -name '*gfx*' | grep -Ev "${GFX_ARCH}" | xargs rm -f
+
+ENV ROCM_HOME=/opt/rocm
+ENV CPLUS_INCLUDE_PATH=/opt/rocm/include
+ENV LD_LIBRARY_PATH=/opt/rocm/lib
+ENV PATH=/opt/rocm/bin:/opt/rocm/llvm/bin:$PATH
+
+# ======================================== torch + triton ======================
+FROM rocm_deb AS rocm_torch
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip "setuptools<80" wheel numpy einops packaging psutil ninja build pybind11 && \
+    pip install /opt/rocm/share/amd_smi
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install --index-url https://download.pytorch.org/whl/rocm7.0 \
+      --extra-index-url https://pypi.org/simple \
+      torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install --no-deps \
+    https://repo.radeon.com/rocm/manylinux/rocm-rel-7.0.2/apex-1.9.0a0+rocm7.0.2.git07c3ee53-cp312-cp312-linux_x86_64.whl || \
+    echo "WARN: apex install skipped/failed (training-only, vime uses --no-gradient-accumulation-fusion)"
+
+ARG TRITON_REPO="https://github.com/ROCm/triton.git"
+ARG TRITON_BRANCH="ba5c1517"
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    git config --global user.email "build@vime" && git config --global user.name "vime-build" && \
+    git clone ${TRITON_REPO} /opt/triton && cd /opt/triton && \
+    git checkout ${TRITON_BRANCH} && \
+    git cherry-pick 555d04f && \
+    git cherry-pick dd998b6 && \
+    ( [ -f setup.py ] || cd python ) && \
+    python3 setup.py bdist_wheel --dist-dir=/opt/triton-dist && \
+    pip install --force-reinstall --no-deps /opt/triton-dist/*.whl && \
+    cd /opt/triton/python/triton_kernels && python3 -m build --wheel --outdir /opt/triton-dist && \
+    pip install --force-reinstall --no-deps /opt/triton-dist/triton_kernels-*.whl
+
+ARG GPU_ARCH
+ENV PYTORCH_ROCM_ARCH=${GPU_ARCH}
+
+WORKDIR /root
+
+# ======================================== flash-attention (ROCm) ==============
+FROM rocm_torch AS fa_build
+
+ARG FA_REPO="https://github.com/ROCm/flash-attention"
+ARG FA_TAG="83f9e450cd10e20701fb109db9c7703d376f282b"
+
+RUN git clone ${FA_REPO} \
+    && cd flash-attention \
+    && git checkout ${FA_TAG} \
+    && git submodule init \
+    && git submodule update
+
+ARG GPU_ARCH
+ARG MAX_JOBS=
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    cd flash-attention \
+    && GPU_ARCHS=${GPU_ARCH} BUILD_TARGET=rocm MAX_JOBS=${MAX_JOBS:-$(nproc)} python3 setup.py bdist_wheel \
+    && mkdir /install && cp dist/*.whl /install \
+    && ccache -s
+
+FROM fa_build AS install_fa
+
+RUN --mount=type=bind,from=fa_build,source=/install,target=/tmp/install \
+    --mount=type=cache,target=/root/.cache/pip \
+    pip install /tmp/install/*.whl
+
+# ======================================== TransformerEngine ===================
+FROM install_fa AS te
+
+ARG GPU_ARCH
+ENV NVTE_USE_HIPBLASLT=1
+ENV NVTE_USE_ROCM=1
+ENV NVTE_FRAMEWORK=pytorch
+ENV NVTE_ROCM_ARCH=${GPU_ARCH}
+
+ARG TE_TAG="86438dc3d04e7726a2f8f7dc2bcbe74e2bc1f282"
+ARG MAX_JOBS=
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    pip install pybind11 pandas && \
+    git clone --recursive https://github.com/ROCm/TransformerEngine.git /root/TransformerEngine && \
+    cd /root/TransformerEngine && git checkout ${TE_TAG} && \
+    git submodule sync --recursive && git submodule update --init --recursive && \
+    GPU_ARCHS=${GPU_ARCH} MAX_JOBS=${MAX_JOBS:-$(nproc)} NVTE_FUSED_ATTN=0 \
+    pip install . --no-build-isolation -v && \
+    ccache -s && \
+    cd / && rm -rf /root/TransformerEngine
+
+RUN F=$(find /usr/local/lib/python3.12/dist-packages/ -path "*transformer_engine*/pytorch/attention/dot_product_attention/utils.py" | head -1) && \
+    if [ -z "$F" ]; then echo "ERROR: TE utils.py not found" && exit 1; fi && \
+    sed -i 's/max_version = PkgVersion("2.8.3")/max_version = PkgVersion("2.8.4")/' "$F" && \
+    grep -n 'max_version = PkgVersion' "$F"
+
+# ======================================== vLLM ================================
+FROM te AS install_vllm
+
+ARG VLLM_TAG="43914dd74"
+ARG MAX_JOBS=
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    pip install setuptools_scm && \
+    mkdir -p /workspace && cd /workspace && \
+    ln -sf /opt/rocm/lib/libamdhip64.so /usr/lib/libamdhip64.so && \
+    git clone https://github.com/vllm-project/vllm && \
+    cd vllm && git checkout ${VLLM_TAG} && \
+    pip install -r requirements/rocm.txt && \
+    MAX_JOBS=${MAX_JOBS:-$(nproc)} python3 setup.py develop --no-deps && \
+    ccache -s
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip uninstall tilelang -y && pip install xgrammar==0.1.32
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install "fastapi==0.136.3" "starlette==1.2.1"
+
+# ======================================== aiter ===============================
+FROM install_vllm AS aiter
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install cupy-rocm-7-0
+
+ENV MIOPEN_DEBUG_CONV_DIRECT=0
+
+ARG AITER_TAG="v0.1.13.post1"
+ARG GPU_ARCH
+ARG MAX_JOBS=
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    cd /workspace && git clone --recursive https://github.com/ROCm/aiter.git && \
+    cd aiter && git checkout ${AITER_TAG} && git submodule update --init --recursive && \
+    pip install -r requirements.txt && \
+    PREBUILD_KERNELS=1 GPU_ARCHS="${GPU_ARCH}" MAX_JOBS=${MAX_JOBS:-$(nproc)} python3 setup.py develop && \
+    ccache -s
+
+# ======================================== vime ===============================
+FROM aiter AS install_vime
+
+# Use vime's mainline Megatron (NVIDIA/Megatron-LM at ${MEGATRON_COMMIT}) plus the
+# AMD megatron.patch under docker/amd_patch/${PATCH_VERSION}/, mirroring slime's
+# docker/amd_patch layout so AMD-specific patches can be synced from upstream slime.
+# The ROCm fork-after-HIP-init checkpoint segfault is handled at runtime by
+# vime.utils.rocm_checkpoint_writer.
+ARG PATCH_VERSION=latest
+ARG MEGATRON_COMMIT=1dcf0dafa884ad52ffb243625717a3471643e087
+RUN --mount=type=cache,target=/root/.cache/pip \
+    git clone https://github.com/NVIDIA/Megatron-LM.git --recursive /root/Megatron-LM && \
+    cd /root/Megatron-LM && git checkout ${MEGATRON_COMMIT}
+
+COPY docker/amd_patch/${PATCH_VERSION}/megatron.patch /root/Megatron-LM/
+COPY docker/amd_patch/${PATCH_VERSION}/amd_megatron_fused_kernels_init.patch /root/Megatron-LM/
+RUN cd /root/Megatron-LM && \
+    git update-index --refresh && \
+    git apply megatron.patch --3way && \
+    git apply amd_megatron_fused_kernels_init.patch --3way && \
+    if grep -R -n '^<<<<<<< ' .; then \
+      echo "Patch failed to apply cleanly. Please resolve conflicts." && \
+      exit 1; \
+    fi && \
+    rm megatron.patch amd_megatron_fused_kernels_init.patch && \
+    pip install -e .
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --ignore-installed PyJWT && \
+    pip install flash-linear-attention==0.4.2 && \
+    pip install git+https://github.com/ISEEKYAN/mbridge.git@89eb10887887bc74853f89a4de258c0702932a1c --no-deps && \
+    pip install git+https://github.com/radixark/Megatron-Bridge.git@bridge --no-deps --no-build-isolation && \
+    pip install megatron-energon --no-deps && \
+    pip install multi-storage-client --no-deps
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@d64a639 \
+        --no-cache-dir --force-reinstall
+
+COPY requirements.txt /tmp/vime-requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r /tmp/vime-requirements.txt && \
+    pip install "numpy<2" "scipy<1.16"
+
+COPY . /root/vime
+RUN --mount=type=cache,target=/root/.cache/pip \
+    cd /root/vime && pip install -e . --no-deps
+
+RUN mkdir -p /opt/amdgpu/share/libdrm && \
+    ln -sf /usr/share/libdrm/amdgpu.ids /opt/amdgpu/share/libdrm/amdgpu.ids 2>/dev/null || true
+
+ENV CUDA_DEVICE_MAX_CONNECTIONS=1
+ENV HSA_NO_SCRATCH_RECLAIM=1
+ENV VLLM_ROCM_USE_AITER=1
+ENV PYTHONPATH=/root/vime:/root/Megatron-LM
+
+RUN python3 -c "\
+import vllm, vime; \
+from vllm.distributed.weight_transfer.ipc_engine import IPCWeightTransferEngine; \
+from vime.backends.vllm_utils.vllm_engine import VLLMEngine; \
+print('vllm', vllm.__version__); \
+print('IPCWeightTransferEngine + VLLMEngine import ok')"
+
+WORKDIR /root/vime
+ENTRYPOINT ["sleep"]
+CMD ["infinity"]

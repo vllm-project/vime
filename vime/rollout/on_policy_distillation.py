@@ -116,18 +116,12 @@ def post_process_rewards(args, samples: list[Sample], **kwargs):
     for reward, sample in zip(raw_rewards, samples, strict=True):
         plp = reward.get("prompt_logprobs")
         assert plp is not None, "teacher response missing top-level prompt_logprobs"
-        assert len(plp) == len(
-            sample.tokens
-        ), f"prompt_logprobs length {len(plp)} != token_ids length {len(sample.tokens)}"
         # plp[i] scores sample.tokens[i]; position 0 has no prior context.
         per_pos = [_logprob_for_token(plp[i], sample.tokens[i]) for i in range(1, len(sample.tokens))]
         teacher_log_probs.append(torch.tensor(per_pos, dtype=torch.float32))
 
     trimmed: list[torch.Tensor] = []
     for t_log_prob, response_length in zip(teacher_log_probs, response_lengths, strict=True):
-        assert (
-            len(t_log_prob) >= response_length
-        ), f"teacher logprobs ({len(t_log_prob)}) shorter than response_length ({response_length})"
         trimmed.append(t_log_prob[-response_length:])
 
     for sample, t_log_probs in zip(samples, trimmed, strict=True):

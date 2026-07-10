@@ -2,7 +2,7 @@
 
 ## Environment Setup
 
-After pulling the `inferactinc/public:vime-latest` image, initialize the image environment as follows:
+After pulling the `vllm/vime:latest` image, initialize the image environment as follows:
 
 ```bash
 cd /root/

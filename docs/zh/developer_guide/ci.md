@@ -6,7 +6,7 @@ vime 使用 GitHub Actions 进行 CI。测试通过 **PR label** 触发——给
 
 工作流定义在 `.github/workflows/pr-test.yml`（由 `pr-test.yml.j2` 自动生成）。每个 CI 任务会：
 
-1. 在自托管 GPU runner 上通过 `docker run` 运行；大多数测试使用 `inferactinc/public:vime-latest`，镜像验证使用 `inferactinc/public:vime-test-latest`。
+1. 在自托管 GPU runner 上通过 `docker run` 运行；大多数测试使用 `vllm/vime:latest`，镜像验证使用 `vllm/vime:test-latest`。
 2. 通过 `pip install -e . --no-deps` 安装 vime。
 3. 通过 `tests/ci/gpu_lock_exec.py --count <num_gpus>` 获取所需数量的 GPU。
 4. 执行测试文件：`python <test_path>.py` 或 `python tests/<test_file>.py`。如果测试位于 `tests/plugin_contracts/` 这样的子目录，CI 也会自动处理。
@@ -23,7 +23,7 @@ vime 使用 GitHub Actions 进行 CI。测试通过 **PR label** 触发——给
 | `run-ci-megatron` | `e2e-test-megatron` | 核心 Megatron 训练测试，覆盖 Dense、MoE、PPO、MTP 等。 |
 | `run-ci-precision` | `e2e-test-precision` | 数值精度校验（并行一致性检查）。 |
 | `run-ci-ckpt` | `e2e-test-ckpt` | Checkpoint 保存/加载正确性（同步和异步保存）。 |
-| `run-ci-image` | `e2e-test-image` | 在 `inferactinc/public:vime-test-latest` 镜像上运行**全部**测试（用于镜像验证）。 |
+| `run-ci-image` | `e2e-test-image` | 在 `vllm/vime:test-latest` 镜像上运行**全部**测试（用于镜像验证）。 |
 | `run-ci-changed` | `e2e-test-changed` | **动态**检测 PR 中新增或修改的测试文件，仅运行这些测试。 |
 
 所有 label 也可通过 `workflow_dispatch`（在 Actions 页面手动触发）来运行。
@@ -44,7 +44,7 @@ vime 使用 GitHub Actions 进行 CI。测试通过 **PR label** 触发——给
 
 ### `run-ci-image` — 在测试镜像上运行全部测试
 
-这会在 `inferactinc/public:vime-test-latest` Docker 镜像上运行**所有**已注册的测试。适用于：
+这会在 `vllm/vime:test-latest` Docker 镜像上运行**所有**已注册的测试。适用于：
 
 - 验证新构建的 Docker 镜像是否可用。
 - 在合并前做全面的测试检查。

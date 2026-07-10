@@ -3,6 +3,7 @@ import copy
 import json
 import logging
 import os
+import warnings
 from typing import Any
 
 import yaml
@@ -10,6 +11,7 @@ from vllm_router.launch_router import RouterArgs
 
 from vime.backends.vllm_utils.arguments import validate_args as vllm_validate_args
 from vime.backends.vllm_utils.arguments import vllm_parse_args
+from vime.backends.vllm_utils.external import apply_external_engine_info_to_args
 from vime.utils.eval_config import EvalDatasetConfig, build_eval_dataset_configs, ensure_dataset_list
 from vime.utils.logging_utils import configure_logger
 
@@ -47,8 +49,9 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=(
                     "Number of GPUs for inference. Note that when using --colocate, "
-                    "i.e. the training and the inference engines are on the same gpus, this param will be ignored and will be set as "
-                    "actor_num_gpus_per_node * actor_num_nodes."
+                    "i.e. the training and the inference engines are on the same gpus, this param will be set as "
+                    "actor_num_gpus_per_node * actor_num_nodes unless it is explicitly set. "
+                    "Set it to 0 to launch routers without local vLLM engines."
                 ),
             )
             parser.add_argument(
@@ -116,13 +119,6 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
         def add_train_arguments(parser):
             # --train-backend is parsed early in _pre_parse_mode() and merged later.
             parser.add_argument(
-                "--qkv-format",
-                type=str,
-                choices=["thd", "bshd"],
-                default="thd",
-                help="The qkv layout for Megatron backend.",
-            )
-            parser.add_argument(
                 "--qwen-gdn-backend",
                 type=str,
                 choices=["fla", "flashqla"],
@@ -146,6 +142,86 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 choices=["raw", "bridge"],
                 default="raw",
                 help="The method to convert megatron weights to hugging face weights for vLLM.",
+            )
+            # Delta weight sync.
+            parser.add_argument(
+                "--update-weight-mode",
+                choices=["full", "delta"],
+                default="full",
+                help=(
+                    "Weight sync strategy. 'full' (default) broadcasts every parameter "
+                    "every sync. 'delta' detects byte-level changes against a pinned-CPU "
+                    "snapshot of the previous broadcast and ships only the changed positions + values."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-transport",
+                choices=["nccl", "disk"],
+                default="nccl",
+                help=(
+                    "Carrier for weight sync. In full mode, 'nccl' broadcasts chunks and "
+                    "'disk' writes a complete HF checkpoint under --update-weight-disk-dir "
+                    "before engines reload it. In delta mode, 'nccl' broadcasts sparse deltas; "
+                    "'disk' writes sparse safetensors under --update-weight-disk-dir and pushes "
+                    "once at end-of-sync."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-disk-dir",
+                type=str,
+                default=None,
+                help=(
+                    "Filesystem directory for disk-backed weight sync. In --update-weight-mode=full, "
+                    "one complete HF checkpoint directory is written per sync. In delta mode, "
+                    "one sparse-delta directory is written per sync."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-disk-keep-files",
+                action="store_true",
+                default=False,
+                help=(
+                    "Skip cleanup of full-checkpoint directories written by "
+                    "--update-weight-mode=full --update-weight-transport=disk."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-encoding",
+                choices=["indices", "deltas", "deltas_zstd"],
+                default="indices",
+                help=(
+                    "Position encoding for partial flushes. 'indices': int32 absolute "
+                    "positions (largest, lowest compute). 'deltas': uint16 gap-deltas "
+                    "with uint32 fallback (smaller). 'deltas_zstd': 'deltas' with the "
+                    "safetensors blob wrapped in zstd L1 (smallest, heaviest compute — "
+                    "best for shared-FS bandwidth ≤ ~300 MB/s)."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-delta-dir",
+                type=str,
+                default=None,
+                help=(
+                    "Deprecated alias for --update-weight-disk-dir and will be removed in a future "
+                    "release. Prefer the transport-level directory flag for both full and delta disk sync."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-delta-keep-files",
+                action="store_true",
+                default=False,
+                help="Skip post-apply cleanup of per-sync version directories. Useful for debugging.",
+            )
+            parser.add_argument(
+                "--custom-delta-pre-push-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to a custom function called by --update-weight-transport=disk after each "
+                    "trainer rank's files are durably on local disk, before rank 0 fires the engine "
+                    "RPCs. Signature: ``def hook(args, version_dir: str, rollout_engines) -> None``. "
+                    "Called from every trainer rank; the hook gates itself."
+                ),
             )
             parser.add_argument(
                 "--custom-model-provider-path",
@@ -456,10 +532,15 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
-                "--rollout-external",
-                action="store_true",
-                default=False,
-                help="Use external vLLM instances instead of launching them inside the framework.",
+                "--rollout-data-transport",
+                type=str,
+                choices=["object-store", "nixl"],
+                default="object-store",
+                help=(
+                    "Transport for rollout data refs sent from rollout manager to trainer. Large rollout "
+                    "fields are tensorized on CPU before the refs are stored. Set to nixl to transfer "
+                    "those torch tensors via Ray NIXL."
+                ),
             )
             parser.add_argument(
                 "--rollout-external-engine-addrs",
@@ -616,8 +697,26 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 action="store_true",
                 default=False,
                 help=(
-                    "Balance the number of tokens between data parallel ranks with `karmarkar_karp` for verl. "
+                    "Balance estimated training FLOPs between data parallel ranks with `karmarkar_karp`. "
+                    "Micro-batch packing still follows the configured static/dynamic batching unless "
+                    "`--balance-by-flops` is also set. "
                     "Note that this may allocate the different response of the same prompt into different training steps."
+                ),
+            )
+
+            parser.add_argument(
+                "--balance-by-flops",
+                action="store_true",
+                default=False,
+                help=(
+                    "Use FLOPs-based workload estimation (coeff*L + L²) for micro-batch "
+                    "partitioning via Karmarkar-Karp instead of first-fit token packing. "
+                    "The linear coefficient is auto-computed from model config (hidden_size, "
+                    "ffn_hidden_size, swiglu, MoE experts). Captures the quadratic cost of "
+                    "attention, producing more balanced micro-batches when sequence lengths "
+                    "vary widely. This may create micro-batches whose total tokens exceed "
+                    "--max-tokens-per-gpu and cause OOM. Also enables --balance-data. "
+                    "Requires --use-dynamic-batch-size."
                 ),
             )
 
@@ -822,6 +921,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 choices=[
                     "grpo",
                     "gspo",
+                    "cispo",
                     "reinforce_plus_plus",
                     "reinforce_plus_plus_baseline",
                     "ppo",
@@ -914,6 +1014,15 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Whether to reset optimizer states after each rollout. "
                     "If enabled, the optimizer's history will be cleared at the end of each rollout, which can sometimes help with training stability or fulfill specific experiment requirements."
+                ),
+            )
+            parser.add_argument(
+                "--use-stateless-adam",
+                action="store_true",
+                default=False,
+                help=(
+                    "Whether to use a stateless Adam optimizer that does not persist the first/second moment "
+                    "estimates across steps. Requires --optimizer adam and --no-save-optim."
                 ),
             )
             parser.add_argument(
@@ -1038,10 +1147,6 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
             return parser
 
         def add_router_arguments(parser):
-            # vllm-router's full CLI surface (~30 knobs: policy, cache_threshold,
-            # retries, health-check, …) under `--router-*` prefix (collision-safe).
-            # exclude_host_port=True because vime owns `--vllm-router-ip / --vllm-router-port`
-            # (defined in vime/backends/vllm_utils/arguments.py:add_vllm_router_arguments).
             RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
             return parser
 
@@ -1406,7 +1511,6 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
         parser = add_on_policy_distillation_arguments(parser)
         parser = add_wandb_arguments(parser)
         parser = add_tensorboard_arguments(parser)
-        parser = add_router_arguments(parser)
         parser = add_debug_arguments(parser)
         parser = add_network_arguments(parser)
         parser = add_reward_model_arguments(parser)
@@ -1454,13 +1558,14 @@ def parse_args(add_custom_arguments=None):
     skip_vllm = pre.debug_train_only or pre.load_debug_rollout_data is not None
 
     # Phase 1: Parse vllm args independently (separate parser, parse_known_args).
+    # Skipped when vllm servers are not needed.
     vllm_ns = None
     if not skip_vllm:
         vllm_ns = vllm_parse_args()
 
     # Phase 2: Parse megatron + vime args.
-    # Uses ignore_unknown_args=True so that --vllm-* and pre-parsed CLI flags are
-    # silently ignored by the megatron parser.
+    # Uses ignore_unknown_args=True so that --vllm-* and pre-parsed CLI flags
+    # are silently ignored by the megatron parser.
     from vime.backends.megatron_utils.arguments import megatron_parse_args
     from vime.backends.megatron_utils.arguments import validate_args as megatron_validate_args
 
@@ -1615,6 +1720,60 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
     return eval_datasets
 
 
+def _resolve_update_weight_disk_dir(args) -> None:
+    """Normalize disk-sync directory args.
+
+    ``--update-weight-delta-dir`` is kept only as a compatibility alias. New
+    code should use ``--update-weight-disk-dir`` because the directory belongs
+    to the transport, not to the delta encoding mode.
+    """
+    disk_dir = args.update_weight_disk_dir
+    delta_dir = args.update_weight_delta_dir
+    if disk_dir and delta_dir and disk_dir != delta_dir:
+        raise ValueError(
+            "--update-weight-delta-dir is deprecated alias for --update-weight-disk-dir; "
+            "please set only one of them or set both to the same path."
+        )
+
+    if delta_dir:
+        warnings.warn(
+            "--update-weight-delta-dir is deprecated and will be removed in a future release; "
+            "use --update-weight-disk-dir instead.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    disk_dir = disk_dir or delta_dir
+    if args.update_weight_transport == "disk":
+        if not disk_dir:
+            raise ValueError(
+                "--update-weight-transport=disk requires --update-weight-disk-dir to point at "
+                "a filesystem shared between the trainer and the rollout engines."
+            )
+        args.update_weight_disk_dir = disk_dir
+        args.update_weight_delta_dir = disk_dir
+
+
+def _validate_update_weight_args(args) -> None:
+    _resolve_update_weight_disk_dir(args)
+
+    if args.update_weight_mode == "delta":
+        raise NotImplementedError(
+            "--update-weight-mode=delta is unverified on vime+vLLM and is disabled; use --update-weight-mode=full."
+        )
+        if args.update_weight_transport not in ("nccl", "disk"):
+            raise ValueError(
+                "--update-weight-mode=delta supports only --update-weight-transport=nccl or disk, "
+                f"got {args.update_weight_transport!r}."
+            )
+        if args.colocate:
+            raise ValueError(
+                "--update-weight-mode=delta is not supported with --colocate. Colocate transfers "
+                "weights via CUDA IPC (only a handle crosses processes), so the delta bookkeeping "
+                "(snapshot + diff + sparse encode) is pure overhead."
+            )
+
+
 def vime_validate_args(args):
     args.eval_datasets = _resolve_eval_datasets(args)
 
@@ -1719,8 +1878,20 @@ def vime_validate_args(args):
         if args.log_probs_max_tokens_per_gpu is None:
             args.log_probs_max_tokens_per_gpu = args.max_tokens_per_gpu
 
+    if getattr(args, "balance_by_flops", False):
+        assert args.use_dynamic_batch_size, "--balance-by-flops requires --use-dynamic-batch-size"
+        args.balance_data = True
+
     if args.eps_clip_high is None:
         args.eps_clip_high = args.eps_clip
+
+    if args.advantage_estimator == "cispo" and args.eps_clip < 1.0:
+        logger.warning(
+            "CISPO is canonically single-sided, but --eps-clip=%s keeps the lower clip bound %s active. "
+            "Set --eps-clip 1.0 (and tune --eps-clip-high, e.g. 4.0) for the canonical wide setting.",
+            args.eps_clip,
+            1.0 - args.eps_clip,
+        )
 
     if args.eval_reward_key is None:
         args.eval_reward_key = args.reward_key
@@ -1736,6 +1907,11 @@ def vime_validate_args(args):
         )
         args.debug_train_only = True
 
+    args.rollout_external = args.rollout_external_engine_addrs is not None
+
+    if args.rollout_external and not args.debug_train_only:
+        apply_external_engine_info_to_args(args, logger=logger)
+
     args.use_critic = args.advantage_estimator == "ppo"
     # Critic always uses the same GPU count as actor.
     args.critic_num_gpus_per_node = args.actor_num_gpus_per_node
@@ -1747,7 +1923,7 @@ def vime_validate_args(args):
     del args.offload
 
     if args.debug_rollout_only:
-        if args.colocate and (not args.rollout_num_gpus):
+        if args.colocate and args.rollout_num_gpus is None:
             args.rollout_num_gpus = args.actor_num_gpus_per_node * args.actor_num_nodes
             if args.num_gpus_per_node != args.actor_num_gpus_per_node:
                 logger.info(
@@ -1756,6 +1932,9 @@ def vime_validate_args(args):
                     f"{args.actor_num_gpus_per_node} (per-physical-node GPU count)."
                 )
                 args.num_gpus_per_node = args.actor_num_gpus_per_node
+        elif args.rollout_num_gpus == 0:
+            args.actor_num_gpus_per_node = 0
+            args.actor_num_nodes = 0
         else:
             args.actor_num_gpus_per_node = min(8, args.rollout_num_gpus)
             args.actor_num_nodes = args.rollout_num_gpus // args.actor_num_gpus_per_node
@@ -1775,24 +1954,15 @@ def vime_validate_args(args):
             args.offload_train = True
         if args.offload_rollout is None:
             args.offload_rollout = True
-        # In colocate mode the rollout engines share the actor's physical nodes, so the
-        # GPUs-per-physical-node equals actor_num_gpus_per_node. --num-gpus-per-node defaults
-        # to 8 (an 8-GPU/node assumption); on hardware with a different per-node count (e.g.
-        # 4x GB200/node) that default is wrong for MULTI-NODE colocate: the rollout-engine
-        # addr/port allocation computes node_index via num_gpus_per_node and maps every engine
-        # to node 0, so worker-node engines are handed the head node's IP and fail to bind
-        # (OSError: [Errno 99] Cannot assign requested address). Derive the real per-node count.
         if args.num_gpus_per_node != args.actor_num_gpus_per_node:
             logger.info(
                 f"colocate: overriding num_gpus_per_node {args.num_gpus_per_node} -> "
                 f"actor_num_gpus_per_node {args.actor_num_gpus_per_node} (per-physical-node GPU count)."
             )
             args.num_gpus_per_node = args.actor_num_gpus_per_node
-        if args.rollout_num_gpus != args.actor_num_gpus_per_node * args.actor_num_nodes:
-            logger.info(
-                f"rollout_num_gpus {args.rollout_num_gpus} != actor_num_gpus_per_node {args.actor_num_gpus_per_node} "
-                f"* actor_num_nodes {args.actor_num_nodes}, overriding rollout_num_gpus to match actor_num_gpus_per_node * actor_num_nodes."
-            )
+        if args.rollout_num_gpus == 0:
+            logger.info("rollout_num_gpus is 0 under colocate; no local vLLM engines will be launched.")
+        elif args.rollout_num_gpus != args.actor_num_gpus_per_node * args.actor_num_nodes:
             args.rollout_num_gpus = args.actor_num_gpus_per_node * args.actor_num_nodes
 
     if args.offload_train is None:
@@ -1862,16 +2032,6 @@ def vime_validate_args(args):
             if hasattr(args, k):
                 logger.info(f"Warning: Argument {k} is already set to {getattr(args, k)}, will override with {v}.")
             setattr(args, k, v)
-            # vllm launch_server_process distinguishes "user-supplied value" from
-            # "argparse default" via ``args._vllm_user_provided``. YAML overrides
-            # bypass argparse, so we register them explicitly here — without this,
-            # YAML values that happen to equal the vllm-side default (e.g.
-            # ``vllm_gpu_memory_utilization: 0.92``) would be treated as "default"
-            # and silently replaced by vime's preferred value.
-            if isinstance(k, str) and k.startswith("vllm_"):
-                if not hasattr(args, "_vllm_user_provided"):
-                    args._vllm_user_provided = set()
-                args._vllm_user_provided.add(k)
 
     if args.eval_max_context_len is None:
         logger.info(
@@ -1889,11 +2049,7 @@ def vime_validate_args(args):
             args.rollout_max_prompt_len <= args.rollout_max_context_len - 1
         ), f"args.rollout_max_prompt_len ({args.rollout_max_prompt_len}) must be smaller than args.rollout_max_context_len ({args.rollout_max_context_len}) so that there is at least one generated token to compute loss."
 
-    if args.qkv_format == "bshd":
-        assert args.train_backend == "megatron", "bshd format is only supported for megatron backend."
-        assert (
-            args.use_dynamic_batch_size is False
-        ), "Dynamic batch size is not supported for bshd format. Please specify --micro-batch-size instead."
-
     if args.only_train_params_name_list and args.freeze_params_name_list:
         raise ValueError("You can only specify ONE of: --only-train-params-name-list, or --freeze-params-name-list.")
+
+    _validate_update_weight_args(args)
