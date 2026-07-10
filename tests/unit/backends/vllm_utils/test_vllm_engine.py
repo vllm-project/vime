@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import json
+import pickle
 
 import pytest
 import requests
@@ -241,7 +243,7 @@ def test_finish_weight_update_posts_empty_body(vllm_engine, monkeypatch):
 
 
 @pytest.mark.unit
-def test_update_weights_from_tensor_posts_ipc_payload_and_records_version(vllm_engine, monkeypatch):
+def test_update_weights_posts_native_ipc_payload_and_records_version(vllm_engine, monkeypatch):
     posted: list[tuple[str, dict]] = []
 
     def fake_post(endpoint: str, payload: dict):
@@ -251,28 +253,35 @@ def test_update_weights_from_tensor_posts_ipc_payload_and_records_version(vllm_e
     monkeypatch.setattr(vllm_engine, "_make_request", fake_post)
     assert vllm_engine._weight_version is None
 
-    vllm_engine.update_weights_from_tensor(
-        names=["layer.0.weight"],
-        dtype_names=["float32"],
-        shapes=[[2, 2]],
-        ipc_handles=[{"uuid-gpu0": ("rebuild_fn", (1, 2, 3))}],
+    ipc_handles = [{"uuid-gpu0": ("rebuild_fn", (1, 2, 3))}]
+    vllm_engine.update_weights(
+        {
+            "update_info": {
+                "names": ["layer.0.weight"],
+                "dtype_names": ["float32"],
+                "shapes": [[2, 2]],
+                "ipc_handles": ipc_handles,
+                "packed": False,
+            }
+        },
         weight_version="42",
     )
 
-    assert posted[0][0] == "collective_rpc"
-    assert posted[0][1]["method"] == "update_weights_chunk"
-    sent = posted[0][1]["kwargs"]["update_info"]
-    # ipc_handles got cloudpickle'd into ipc_handles_pickled
+    assert posted[0][0] == "update_weights"
+    sent = posted[0][1]["update_info"]
+    # ipc_handles are pickled for native vLLM/vLLM-Ascend parse_update_info.
     assert "ipc_handles" not in sent
     assert isinstance(sent["ipc_handles_pickled"], str)
+    assert pickle.loads(base64.b64decode(sent["ipc_handles_pickled"])) == ipc_handles
     assert sent["names"] == ["layer.0.weight"]
     assert sent["shapes"] == [[2, 2]]
+    assert sent["packed"] is False
     # version recorded after POST success
     assert vllm_engine._weight_version == "42"
 
 
 @pytest.mark.unit
-def test_update_weights_from_tensor_does_not_advance_version_on_failure(vllm_engine, monkeypatch):
+def test_update_weights_does_not_advance_version_on_failure(vllm_engine, monkeypatch):
     """POST failure must not advance _weight_version (else a retry would skip the resync)."""
 
     def fake_post_fail(endpoint: str, payload: dict) -> dict:
@@ -282,8 +291,9 @@ def test_update_weights_from_tensor_does_not_advance_version_on_failure(vllm_eng
 
     vllm_engine._weight_version = "old"
     with pytest.raises(RuntimeError, match="simulated POST failure"):
-        vllm_engine.update_weights_from_tensor(
-            names=[], dtype_names=[], shapes=[], ipc_handles=[], weight_version="new"
+        vllm_engine.update_weights(
+            {"update_info": {"names": [], "dtype_names": [], "shapes": [], "ipc_handles": []}},
+            weight_version="new",
         )
     assert vllm_engine._weight_version == "old"
 

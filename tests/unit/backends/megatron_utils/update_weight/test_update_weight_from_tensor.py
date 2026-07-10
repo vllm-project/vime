@@ -1,4 +1,4 @@
-"""Unit tests for colocated vLLM IPC weight sync (UpdateWeightFromTensor)."""
+"""Unit tests for colocated vLLM IPC weight sync."""
 
 from __future__ import annotations
 
@@ -14,6 +14,13 @@ import torch
 
 MODULE_PATH = "vime.backends.megatron_utils.update_weight.update_weight_from_tensor"
 
+_PURGE_PREFIXES = ("megatron", "mindspeed", "vime.backends.megatron_utils")
+
+
+def _collect_subtree(prefix: str) -> list[str]:
+    """Collect all modules in sys.modules that start with the given prefix."""
+    return [k for k in sys.modules.keys() if k == prefix or k.startswith(prefix + ".")]
+
 
 def _install_stubs():
     mpu_stub = MagicMock()
@@ -24,9 +31,12 @@ def _install_stubs():
     mpu_stub.get_pipeline_model_parallel_rank.return_value = 0
 
     megatron_core = types.ModuleType("megatron.core")
+    megatron_core.__path__ = []
     megatron_core.mpu = mpu_stub
     megatron_mod = types.ModuleType("megatron")
+    megatron_mod.__path__ = []
     megatron_mod.core = megatron_core
+
     sys.modules.setdefault("megatron", megatron_mod)
     sys.modules.setdefault("megatron.core", megatron_core)
 
@@ -78,16 +88,9 @@ def _install_stubs():
     return hf_iter_stub, upw_dist_mod
 
 
-# Placeholder iterator stored on freshly-built instances; every test that drives a real
-# update overrides obj._hf_weight_iterator with its own MagicMock, so this only needs to be
-# a non-None object.
 _HF_ITER_STUB = MagicMock()
 _HF_ITER_STUB.get_hf_weight_chunks.return_value = iter([])
 
-# Modules stubbed by _install_stubs(), plus torch.distributed attributes it overwrites.
-# These are installed ONLY for this module's tests (inside the fixture) and restored on
-# teardown. Installing at import time leaked the stubs into sibling modules' COLLECTION (and
-# left MagicMocks on torch.distributed), one source of the cross-test order-pollution.
 _STUBBED_MODULES = (
     "megatron",
     "megatron.core",
@@ -104,24 +107,32 @@ _DIST_ATTRS = ("get_rank", "get_world_size", "get_process_group_ranks", "barrier
 def upw_vllm():
     import torch.distributed as _dist
 
-    saved_mods = {k: sys.modules.get(k) for k in (*_STUBBED_MODULES, MODULE_PATH)}
-    saved_dist = {a: getattr(_dist, a, None) for a in _DIST_ATTRS}
-    # Pop first so _install_stubs()'s setdefault() actually installs stubs (hermetic).
+    purge_keys = set()
+    for prefix in _PURGE_PREFIXES:
+        purge_keys.update(_collect_subtree(prefix))
     for k in _STUBBED_MODULES:
+        purge_keys.add(k)
+    purge_keys.add(MODULE_PATH)
+
+    saved_mods = {k: sys.modules.get(k) for k in purge_keys}
+    saved_dist = {a: getattr(_dist, a, None) for a in _DIST_ATTRS}
+    for k in purge_keys:
         sys.modules.pop(k, None)
     _install_stubs()
     sys.modules.pop(MODULE_PATH, None)
-    try:
-        yield importlib.import_module(MODULE_PATH)
-    finally:
-        for k, original in saved_mods.items():
-            if original is None:
-                sys.modules.pop(k, None)
-            else:
-                sys.modules[k] = original
-        for a, original in saved_dist.items():
-            if original is not None:
-                setattr(_dist, a, original)
+
+    with patch("vime.utils.common.is_npu", return_value=False):
+        try:
+            yield importlib.import_module(MODULE_PATH)
+        finally:
+            for k, original in saved_mods.items():
+                if original is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = original
+            for a, original in saved_dist.items():
+                if original is not None:
+                    setattr(_dist, a, original)
 
 
 @dataclass
@@ -146,7 +157,7 @@ class RecordingVLLMEngine:
     init_weight_transfer_engine: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     start_weight_update: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     finish_weight_update: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
-    update_weights_from_tensor: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
+    update_weights: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     pause_generation: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     flush_cache: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     continue_generation: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
@@ -176,9 +187,6 @@ def _make_instance(upw_vllm, args=None):
     obj.rollout_engines = []
     obj.distributed_rollout_engines = []
     obj.use_distribute = False
-    obj._ipc_engine = None
-    obj._ipc_gather_group = None
-    obj._ipc_gather_src = None
     obj._model_update_groups = None
     obj._is_distributed_src_rank = False
     obj._group_name = "vime"
@@ -186,25 +194,11 @@ def _make_instance(upw_vllm, args=None):
     return obj
 
 
-def _bind_single_slot(obj, engine, *, src=0):
-    """Bind ``obj`` to one colocated engine forming a slot whose leader rank is ``src``."""
-    obj.rollout_engines = [engine]
-    obj._ipc_engine = engine
-    obj._ipc_gather_group = "slot_group"
-    obj._ipc_gather_src = src
-
-
 def _chunks(n=1):
     return [[(f"p.{i}", torch.zeros(2, 2)) for i in range(2)] for _ in range(n)]
 
 
-def _run_update(obj, *, chunks=None, rank=0, slot_size=1) -> dict:
-    """Drive ``update_weights`` with controlled rank / slot size.
-
-    ``slot_size`` is what ``dist.get_world_size(self._ipc_gather_group)`` returns,
-    so slot_size==1 takes the direct IPC path and slot_size>1 the gather path.
-    Returns counters for barriers and ipc_collect calls.
-    """
+def _run_update(obj, *, chunks=None, rank=0) -> dict[str, int]:
     chunks = chunks or _chunks(1)
     obj._hf_weight_iterator = MagicMock()
     obj._hf_weight_iterator.get_hf_weight_chunks.return_value = iter(chunks)
@@ -218,228 +212,154 @@ def _run_update(obj, *, chunks=None, rank=0, slot_size=1) -> dict:
         counters["ipc_collect"] += 1
 
     with patch("torch.distributed.get_rank", return_value=rank), patch(
-        "torch.distributed.get_world_size", return_value=slot_size
-    ), patch("torch.distributed.barrier", side_effect=counting_barrier), patch(
-        "torch.cuda.ipc_collect", side_effect=counting_ipc_collect
-    ):
+        "torch.distributed.barrier", side_effect=counting_barrier
+    ), patch("torch.cuda.ipc_collect", side_effect=counting_ipc_collect):
         obj.update_weights()
     return counters
 
 
 @pytest.mark.unit
-def test_colocated_lifecycle_uses_pause_flush_and_weight_transfer_apis(upw_vllm):
+def test_colocated_lifecycle_uses_native_weight_transfer_session(upw_vllm):
     obj = _make_instance(upw_vllm)
     engine = RecordingVLLMEngine()
-    _bind_single_slot(obj, engine, src=0)
+    obj.rollout_engines = [engine]
 
-    dummy_info = {"names": ["w"], "dtype_names": ["bfloat16"], "shapes": [[2, 2]], "ipc_handles": [{"u": ("f", ())}]}
-    with patch(f"{MODULE_PATH}._build_ipc_update_info_from_named_tensors", return_value=(dummy_info, [])):
+    with patch(f"{MODULE_PATH}._send_to_colocated_engine") as send_to_colocated:
         counters = _run_update(obj, chunks=_chunks(2))
 
-    # Colocate quiesce: pause_generation + flush_cache only, no /sleep round-trip;
-    # continue_generation resumes. No release/resume_memory_occupation.
     assert len(engine.pause_generation.calls) == 1
     assert len(engine.flush_cache.calls) == 1
     assert len(engine.release_memory_occupation.calls) == 0
     assert len(engine.resume_memory_occupation.calls) == 0
-    # vLLM #39212: init runs in connect_rollout_engines, not update_weights.
-    assert len(engine.init_weight_transfer_engine.calls) == 0
     assert len(engine.start_weight_update.calls) == 1
-    assert engine.start_weight_update.calls[0].kwargs.get("is_checkpoint_format") is True
+    assert engine.start_weight_update.calls[0].kwargs == {"is_checkpoint_format": True}
     assert len(engine.finish_weight_update.calls) == 1
+    assert engine.finish_weight_update.calls[0].kwargs == {}
     assert len(engine.continue_generation.calls) == 1
-    # ipc_collect: one per HF chunk + one after the loop.
-    assert counters["ipc_collect"] == 2 + 1
-    # lifecycle barriers (no per-chunk barrier).
+
+    assert send_to_colocated.call_count == 2
+    assert counters["ipc_collect"] == 3
     assert counters["barrier"] >= 4
 
 
-@pytest.mark.unit
-def test_send_via_ipc_dispatches_update_weights_from_tensor_with_version(upw_vllm):
-    """slot_size=1: every HF chunk fires
-    ``engine.update_weights_from_tensor.remote(**fields, weight_version=...)`` —
-    same name, parameterized fields, version travels with data (no piggyback onto
-    ``finish_weight_update``)."""
-    obj = _make_instance(upw_vllm)
-    engine = RecordingVLLMEngine()
-    _bind_single_slot(obj, engine, src=0)
-
-    dummy_info = {"names": ["w"], "dtype_names": ["bfloat16"], "shapes": [[2, 2]], "ipc_handles": [{"u": ("f", ())}]}
-    with patch(
-        f"{MODULE_PATH}._build_ipc_update_info_from_named_tensors",
-        return_value=(dummy_info, []),
-    ):
-        _run_update(obj, chunks=_chunks(2))
-
-    # 2 HF chunks → 2 IPC RPCs
-    assert len(engine.update_weights_from_tensor.calls) == 2
-    kwargs = engine.update_weights_from_tensor.calls[0].kwargs
-    # fields are passed as explicit kwargs (** expanded from local_info)
-    assert kwargs["names"] == dummy_info["names"]
-    assert kwargs["dtype_names"] == dummy_info["dtype_names"]
-    assert kwargs["shapes"] == dummy_info["shapes"]
-    assert kwargs["ipc_handles"] is dummy_info["ipc_handles"]
-    # weight_version is the trainer's post-increment version (0 + 1 = 1) as a str
-    assert kwargs["weight_version"] == "1"
-    # finish_weight_update is a stateless bookend now — no kwargs
-    assert len(engine.finish_weight_update.calls) == 1
-    assert engine.finish_weight_update.calls[0].kwargs == {}
+@dataclass
+class _FakeUpdateInfo:
+    names: list[str]
+    dtype_names: list[str]
+    shapes: list[list[int]]
+    ipc_handles: list[dict[str, tuple]]
+    packed: bool = False
 
 
-@pytest.mark.unit
-def test_send_via_ipc_dispatches_update_weights_from_tensor_coordinator_multi_gpu(upw_vllm):
-    """slot_size > 1: the slot leader (rank == _ipc_gather_src) gathers payloads from
-    all slot ranks, merges them, and fires a single update_weights_from_tensor RPC per chunk."""
-    obj = _make_instance(upw_vllm)
-    engine = RecordingVLLMEngine()
-    _bind_single_slot(obj, engine, src=0)
+def _install_fake_npu_ipc_modules(monkeypatch, calls: list[dict]):
+    root_mod = types.ModuleType("vllm_ascend")
+    distributed_mod = types.ModuleType("vllm_ascend.distributed")
+    weight_transfer_mod = types.ModuleType("vllm_ascend.distributed.weight_transfer")
+    ipc_mod = types.ModuleType("vllm_ascend.distributed.weight_transfer.npu_ipc_engine")
 
-    dummy_info_0 = {
-        "names": ["w"],
-        "dtype_names": ["bfloat16"],
-        "shapes": [[2, 2]],
-        "ipc_handles": [{"uuid-gpu0": ("f", ())}],
-    }
-    dummy_info_1 = {
-        "names": ["w"],
-        "dtype_names": ["bfloat16"],
-        "shapes": [[2, 2]],
-        "ipc_handles": [{"uuid-gpu1": ("f", ())}],
-    }
+    @dataclass
+    class FakeNPUIPCTrainerSendWeightsArgs:
+        send_mode: object
+        packed: bool = False
 
-    def fake_all_gather_object(gathered_payloads, payload, group=None):
-        gathered_payloads[0] = "payload0"
-        gathered_payloads[1] = "payload1"
-
-    with patch(
-        f"{MODULE_PATH}._build_ipc_update_info_from_named_tensors",
-        return_value=(dummy_info_0, []),
-    ), patch(
-        f"{MODULE_PATH}._serialize_ipc_update_info", return_value="payload0"
-    ), patch(f"{MODULE_PATH}._deserialize_ipc_update_info", side_effect=[dummy_info_0, dummy_info_1] * 2), patch(
-        "torch.distributed.all_gather_object", side_effect=fake_all_gather_object
-    ):
-        _run_update(obj, chunks=_chunks(2), rank=0, slot_size=2)
-
-    assert len(engine.update_weights_from_tensor.calls) == 2
-    kwargs = engine.update_weights_from_tensor.calls[0].kwargs
-    assert kwargs["names"] == dummy_info_0["names"]
-    assert kwargs["dtype_names"] == dummy_info_0["dtype_names"]
-    assert kwargs["shapes"] == dummy_info_0["shapes"]
-    assert len(kwargs["ipc_handles"]) == 1
-    assert set(kwargs["ipc_handles"][0].keys()) == {"uuid-gpu0", "uuid-gpu1"}
-    assert kwargs["weight_version"] == "1"
-
-
-@pytest.mark.unit
-def test_merge_ipc_update_infos_combines_gpu_uuids(upw_vllm):
-    info0 = {
-        "names": ["w"],
-        "dtype_names": ["bfloat16"],
-        "shapes": [[2, 2]],
-        "ipc_handles": [{"uuid-gpu0": ("f0", ())}],
-    }
-    info1 = {
-        "names": ["w"],
-        "dtype_names": ["bfloat16"],
-        "shapes": [[2, 2]],
-        "ipc_handles": [{"uuid-gpu1": ("f1", ())}],
-    }
-    merged = upw_vllm._merge_ipc_update_infos([info0, info1])
-    assert set(merged["ipc_handles"][0].keys()) == {"uuid-gpu0", "uuid-gpu1"}
-
-
-@pytest.mark.unit
-def test_connect_binds_engine_and_slot_leader_per_gpu_slot(upw_vllm):
-    """Each rank binds to its slot's engine; the slot leader (== _ipc_gather_src,
-    the lowest trainer rank in the engine GPU range) is the start/finish coordinator."""
-    engines = [RecordingVLLMEngine() for _ in range(4)]
-    for rank, engine_idx, expected_src in [
-        (0, 0, 0),
-        (1, 0, 0),
-        (2, 1, 2),
-        (3, 1, 2),
-    ]:
-        obj = _make_instance(
-            upw_vllm,
-            args=_default_args(actor_num_gpus_per_node=8, rollout_num_gpus_per_engine=2),
-        )
-        with patch("torch.distributed.get_rank", return_value=rank), patch(
-            "megatron.core.mpu.get_tensor_model_parallel_rank", return_value=rank % 2
-        ), patch("torch.distributed.new_group", return_value="slot_group"):
-            obj.connect_rollout_engines(
-                engines,
-                rollout_engine_lock=MagicMock(),
-                engine_gpu_counts=[2, 2, 2, 2],
-                engine_gpu_offsets=[0, 2, 4, 6],
+    class FakeNPUIPCWeightTransferEngine:
+        @staticmethod
+        def trainer_send_weights(iterator, trainer_args):
+            calls.append({"items": list(iterator), "trainer_args": trainer_args})
+            trainer_args.send_mode(
+                _FakeUpdateInfo(
+                    names=["layer.weight"],
+                    dtype_names=["float32"],
+                    shapes=[[2, 2]],
+                    ipc_handles=[{"uuid": ("handle", ())}],
+                )
             )
-        assert obj._ipc_engine is engines[engine_idx]
-        assert obj._ipc_gather_src == expected_src
-        is_coordinator = rank == obj._ipc_gather_src
-        assert is_coordinator is (rank in (0, 2))
-        assert obj.use_distribute is False
-        assert obj.distributed_rollout_engines == []
-        # vLLM #39212: init_weight_transfer_engine fires once during connect (rank 0 only).
-        if rank == 0:
-            assert len(engines[0].init_weight_transfer_engine.calls) == 1
-            assert engines[0].init_weight_transfer_engine.calls[0].args[0] == {"init_info": {}}
+
+    ipc_mod.NPUIPCTrainerSendWeightsArgs = FakeNPUIPCTrainerSendWeightsArgs
+    ipc_mod.NPUIPCWeightTransferEngine = FakeNPUIPCWeightTransferEngine
+    weight_transfer_mod.npu_ipc_engine = ipc_mod
+    distributed_mod.weight_transfer = weight_transfer_mod
+    root_mod.distributed = distributed_mod
+    monkeypatch.setitem(sys.modules, "vllm_ascend", root_mod)
+    monkeypatch.setitem(sys.modules, "vllm_ascend.distributed", distributed_mod)
+    monkeypatch.setitem(sys.modules, "vllm_ascend.distributed.weight_transfer", weight_transfer_mod)
+    monkeypatch.setitem(sys.modules, "vllm_ascend.distributed.weight_transfer.npu_ipc_engine", ipc_mod)
 
 
 @pytest.mark.unit
-def test_non_leader_skips_start_finish_and_merged_rpc(upw_vllm):
-    obj = _make_instance(upw_vllm)
+def test_send_to_colocated_engine_uses_native_npu_ipc_engine(upw_vllm, monkeypatch):
     engine = RecordingVLLMEngine()
-    # slot leader is rank 0; we drive update_weights as rank 1 (non-leader).
-    _bind_single_slot(obj, engine, src=0)
+    calls: list[dict] = []
+    _install_fake_npu_ipc_modules(monkeypatch, calls)
 
-    dummy_info = {"names": [], "dtype_names": [], "shapes": [], "ipc_handles": []}
-    with patch(
-        f"{MODULE_PATH}._build_ipc_update_info_from_named_tensors",
-        return_value=(dummy_info, []),
-    ), patch(
-        f"{MODULE_PATH}._serialize_ipc_update_info", return_value="payload"
-    ), patch("torch.distributed.all_gather_object") as all_gather_obj:
-        _run_update(obj, chunks=_chunks(1), rank=1, slot_size=2)
+    tensors = [("layer.weight", torch.zeros(2, 2))]
+    with patch(f"{MODULE_PATH}.is_npu", return_value=True):
+        upw_vllm._send_to_colocated_engine(tensors, rollout_engines=[engine], weight_version=42)
 
-    all_gather_obj.assert_called_once()
-    # non-leader: no start/finish, and no merged update_weights_from_tensor RPC
-    assert len(engine.start_weight_update.calls) == 0
-    assert len(engine.finish_weight_update.calls) == 0
-    assert len(engine.update_weights_from_tensor.calls) == 0
+    assert calls[0]["items"] == tensors
+    assert calls[0]["trainer_args"].packed is False
+    assert len(engine.update_weights.calls) == 1
+    call = engine.update_weights.calls[0]
+    assert call.args[0]["update_info"]["names"] == ["layer.weight"]
+    assert call.args[0]["update_info"]["packed"] is False
+    assert call.kwargs == {"weight_version": "42"}
 
 
 @pytest.mark.unit
-def test_ipc_init_runs_once_in_connect(upw_vllm):
-    """init_weight_transfer_engine fires once in connect_rollout_engines (rank 0),
-    not in update_weights. A second connect call does not re-init."""
+def test_send_hf_params_returns_only_distributed_refs(upw_vllm):
+    obj = _make_instance(upw_vllm)
+    obj.rollout_engines = [RecordingVLLMEngine()]
+    obj.distributed_rollout_engines = [RecordingVLLMEngine()]
+    obj.use_distribute = True
+    obj._is_distributed_src_rank = True
+    obj._model_update_groups = "groups"
+    tensors = _chunks(1)[0]
+
+    with patch(f"{MODULE_PATH}._send_to_colocated_engine") as send_to_colocated, patch(
+        f"{MODULE_PATH}.update_weights_from_distributed", return_value=["distributed-ref"]
+    ) as send_distributed:
+        refs = obj._send_hf_params(tensors)
+
+    send_to_colocated.assert_called_once_with(
+        tensors,
+        rollout_engines=obj.rollout_engines,
+        weight_version=obj.weight_version,
+    )
+    send_distributed.assert_called_once()
+    assert refs == ["distributed-ref"]
+
+
+@pytest.mark.unit
+def test_connect_keeps_colocated_engines_and_initializes_once(upw_vllm):
     engines = [RecordingVLLMEngine() for _ in range(2)]
     obj = _make_instance(
         upw_vllm,
         args=_default_args(actor_num_gpus_per_node=4, rollout_num_gpus_per_engine=2),
     )
-    with patch("torch.distributed.get_rank", return_value=0), patch(
-        "megatron.core.mpu.get_tensor_model_parallel_rank", return_value=0
-    ), patch("torch.distributed.new_group", return_value="slot_group"):
+
+    with patch("torch.distributed.get_rank", return_value=0):
         obj.connect_rollout_engines(
             engines,
             rollout_engine_lock=MagicMock(),
             engine_gpu_counts=[2, 2],
             engine_gpu_offsets=[0, 2],
         )
+
+    assert obj.rollout_engines == engines
+    assert obj.distributed_rollout_engines == []
+    assert obj.use_distribute is False
     assert obj._ipc_initialized is True
     assert len(engines[0].init_weight_transfer_engine.calls) == 1
     assert len(engines[1].init_weight_transfer_engine.calls) == 1
 
-    # Second connect with _ipc_initialized=True does not re-init.
     engines2 = [RecordingVLLMEngine() for _ in range(2)]
-    with patch("torch.distributed.get_rank", return_value=0), patch(
-        "megatron.core.mpu.get_tensor_model_parallel_rank", return_value=0
-    ), patch("torch.distributed.new_group", return_value="slot_group"):
+    with patch("torch.distributed.get_rank", return_value=0):
         obj.connect_rollout_engines(
             engines2,
             rollout_engine_lock=MagicMock(),
             engine_gpu_counts=[2, 2],
             engine_gpu_offsets=[0, 2],
         )
+
     assert len(engines2[0].init_weight_transfer_engine.calls) == 0
     assert len(engines2[1].init_weight_transfer_engine.calls) == 0

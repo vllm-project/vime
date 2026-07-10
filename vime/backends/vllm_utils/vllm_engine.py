@@ -14,12 +14,12 @@ import ipaddress
 import logging
 import multiprocessing
 import os
+import pickle
 import time
 from argparse import BooleanOptionalAction
 from typing import Any
 from urllib.parse import quote
 
-import cloudpickle
 import requests
 
 from vime.backends.vllm_utils.arguments import SKIPPED_DESTS, get_vllm_cli_action_table
@@ -755,70 +755,19 @@ class VLLMEngine(RayActor):
         response.raise_for_status()
         return True
 
-    def update_weights_from_tensor(
-        self,
-        *,
-        names: list[str],
-        dtype_names: list[str],
-        shapes: list[list[int]],
-        ipc_handles: list[dict] | None = None,
-        weight_version: str | None = None,
-        flush_cache: bool = False,
-    ) -> dict | None:
-        """POST ``IPCWeightTransferUpdateInfo`` (names / dtype_names / shapes /
-        ipc_handles) to ``/update_weights``; record ``weight_version`` only on
-        success. ``ipc_handles`` are base64-cloudpickle'd (rebuild_fn closures).
-        """
+    def update_weights(self, request: dict, weight_version: str | None = None) -> dict | None:
+        """POST native vLLM ``/update_weights`` payloads from transfer engines."""
         if self.node_rank != 0:
             return None
 
-        payload: dict = {"names": names, "dtype_names": dtype_names, "shapes": shapes}
-        if ipc_handles is not None:
-            payload["ipc_handles_pickled"] = base64.b64encode(cloudpickle.dumps(ipc_handles)).decode("utf-8")
-        if flush_cache:
-            self.flush_cache()
+        update_info = request["update_info"] if "update_info" in request else request
+        payload = dict(update_info)
+        if "ipc_handles" in payload:
+            payload["ipc_handles_pickled"] = base64.b64encode(pickle.dumps(payload.pop("ipc_handles"))).decode("utf-8")
 
-        response = self._make_request(
-            "collective_rpc",
-            {"method": "update_weights_chunk", "kwargs": {"update_info": payload}},
-        )
+        response = self._post_vllm_update_weights_http(payload)
         if weight_version is not None:
             self._weight_version = str(weight_version)
-        return response
-
-    def update_weights_chunk(self, update_info: dict) -> dict:
-        """POST ``/update_weights_chunk`` with a single named-tensor chunk.
-
-        Mirrors the SkyRL ``RemoteInferenceClient.update_weights_chunk`` API.
-        Must be called between :meth:`start_weight_update` and
-        :meth:`finish_weight_update`.
-
-        Unlike :meth:`update_weights`, ``update_info`` is the *inner* payload
-        dict (``names``, ``dtype_names``, ``shapes``, and one of
-        ``ipc_handles`` / ``ipc_handles_pickled`` for IPC, or ``packed`` for
-        NCCL) — **not** wrapped in ``{"update_info": ...}``.
-
-        If ``ipc_handles`` are present (raw CUDA callables produced by
-        ``reduce_tensor``), they are serialised with cloudpickle + base64 so
-        vLLM can deserialise them when
-        ``VLLM_ALLOW_INSECURE_SERIALIZATION=1`` is set.
-        """
-        if self.node_rank != 0:
-            return {"ok": True, "skipped": True}
-
-        import base64
-
-        import cloudpickle
-
-        payload = dict(update_info)
-        if payload.get("ipc_handles") is not None:
-            payload["ipc_handles_pickled"] = base64.b64encode(cloudpickle.dumps(payload.pop("ipc_handles"))).decode(
-                "utf-8"
-            )
-        response = self._make_request(
-            "collective_rpc",
-            {"method": "update_weights_chunk", "kwargs": {"update_info": payload}},
-        )
         return response
 
     def flush_cache(self):
@@ -877,8 +826,8 @@ class VLLMEngine(RayActor):
         if self._weight_version is None:
             raise RuntimeError(
                 "VLLMEngine.get_weight_version called before any successful "
-                "weight transfer recorded a version (update_weights_from_tensor "
-                "/ update_weights_from_distributed never reached their "
+                "weight transfer recorded a version (update_weights "
+                "/ update_weights_from_distributed never reached its "
                 "post-POST version write)."
             )
         return self._weight_version
@@ -926,16 +875,15 @@ class VLLMEngine(RayActor):
                     time.sleep(2 * attempt)
         raise RuntimeError(f"vLLM init_weight_transfer_engine failed: {last_error}") from last_error
 
-    def start_weight_update(self, is_checkpoint_format: bool = False) -> dict:
+    def start_weight_update(self, is_checkpoint_format: bool = True) -> dict:
         """``POST /start_weight_update`` — signals vLLM to enter IPC weight-update mode."""
         return self._make_request("start_weight_update", {"is_checkpoint_format": is_checkpoint_format})
 
     def finish_weight_update(self) -> dict:
         """``POST /finish_weight_update`` — signals vLLM to exit IPC weight-update mode.
 
-        Purely a state-machine bookend now; ``_weight_version`` is recorded by
-        ``update_weights_from_tensor`` (the IPC data-carrying RPC), matching slime's
-        single-RPC version-with-data semantics.
+        Purely a state-machine bookend; ``_weight_version`` is recorded by
+        the data-carrying ``update_weights`` / distributed update calls.
         """
         return self._make_request("finish_weight_update", {})
 
