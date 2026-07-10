@@ -146,12 +146,14 @@ steps:
         multiple: true
         required: true
         options:
-          - label: "run-ci-short — 4 GPU, 4 tests"
+          - label: "run-ci-short — 4 GPU, 3 tests"
             value: short
           - label: "run-ci-vllm-config — 8 GPU, 4 tests"
             value: vllm-config
-          - label: "run-ci-megatron — 8 GPU, 15 runs"
+          - label: "run-ci-megatron — 8 GPU, 14 runs"
             value: megatron
+          - label: "run-ci-vime-customized — 4 GPU, 1 test"
+            value: vime-customized
           - label: "run-ci-precision — 8 GPU, 1 test"
             value: precision
           - label: "run-ci-ckpt — 8 GPU, 2 runs"

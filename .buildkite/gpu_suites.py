@@ -68,9 +68,11 @@ SUITES = {
         ("test_qwen3_4B_streaming_partial_rollout.py", 8, "", {}),
         ("test_moonlight_16B_A3B.py", 8, "", {}),
         ("test_moonlight_16B_A3B_r3.py", 8, "", {"ENABLE_EVAL": "0"}),
-        ("test_qwen2.5_0.5B_non_colocate_pp.py", 4, "", {}),
         ("test_qwen2.5_0.5B_debug_rollout_then_train.py", 8, "", {}),
         ("test_qwen2.5_0.5B_opd_vllm.py", 8, "", {}),
+    ],
+    "vime-customized": [
+        ("test_qwen2.5_0.5B_non_colocate_pp.py", 4, "", {}),
     ],
     "precision": [
         ("test_qwen3_0.6B_parallel_check.py", 8, "", {}),

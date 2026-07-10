@@ -49,7 +49,7 @@ No secrets are required for these steps (WANDB etc. is GPU-suite only).
 
 The GPU suites are behind a **block step** (`:rocket: Run GPU test suites?`):
 click it in the Buildkite UI, multi-select the suites (`short`,
-`vllm-config`, `megatron`, `precision`, `ckpt`), and the follow-up step
+`vllm-config`, `megatron`, `vime-customized`, `precision`, `ckpt`), and the follow-up step
 generates one job per test via [`gpu_suites.py`](./gpu_suites.py) — the same
 `gpu_lock_exec.py` + `docker run` invocations used by the GPU jobs, including
 the per-test `VIME_TEST_USE_DEEPEP` / `VIME_TEST_USE_FP8_ROLLOUT` /

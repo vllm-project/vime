@@ -393,8 +393,7 @@ class UpdateWeightFromDistributed:
         ray.get(refs)
         converted_named_tensors.clear()
         ray.get(self.rollout_engine_lock.release.remote())
-        if pbar is not None:
-            pbar.update(1)
+        pbar.update(1)
 
 
 def connect_rollout_engines_from_distributed(
