@@ -624,6 +624,17 @@ def train_one_step(
                 "loss_mask": batch["full_loss_masks"],
             }
 
+            # vime-patch: mcore MambaModel.forward (hybrid NemotronH) has no
+            # loss_mask kwarg (GPTModel does). Drop it when unsupported; loss
+            # masking happens in vime's own loss fn, not the model.
+            import inspect as _inspect
+
+            _m = model
+            while hasattr(_m, "module"):
+                _m = _m.module
+            if "loss_mask" not in _inspect.signature(_m.forward).parameters:
+                forward_kwargs.pop("loss_mask", None)
+
             if batch["multimodal_train_inputs"] is not None:
                 forward_kwargs.update(batch["multimodal_train_inputs"])
 

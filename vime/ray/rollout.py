@@ -191,6 +191,8 @@ class ServerGroup:
             )
 
             env_vars = {name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST}
+            # vime-patch: expandable_segments breaks vLLM custom-allreduce CUDA IPC; force default allocator in engines
+            env_vars["PYTORCH_CUDA_ALLOC_CONF"] = ""
             rollout_engine = RolloutRayActor.options(
                 num_cpus=num_cpus,
                 num_gpus=num_gpus,
