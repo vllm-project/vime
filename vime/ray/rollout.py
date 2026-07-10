@@ -2,6 +2,7 @@ import dataclasses
 import itertools
 import logging
 import multiprocessing
+import os
 import random
 import time
 from pathlib import Path
@@ -191,8 +192,14 @@ class ServerGroup:
             )
 
             env_vars = {name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST}
-            # vime-patch: expandable_segments breaks vLLM custom-allreduce CUDA IPC; force default allocator in engines
-            env_vars["PYTORCH_CUDA_ALLOC_CONF"] = ""
+            # vime-patch: expandable_segments breaks vLLM custom all-reduce CUDA
+            # IPC. Strip only that key, keeping any other allocator settings.
+            _alloc = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+            env_vars["PYTORCH_CUDA_ALLOC_CONF"] = ",".join(
+                kv
+                for kv in _alloc.split(",")
+                if kv and not kv.strip().startswith("expandable_segments")
+            )
             rollout_engine = RolloutRayActor.options(
                 num_cpus=num_cpus,
                 num_gpus=num_gpus,

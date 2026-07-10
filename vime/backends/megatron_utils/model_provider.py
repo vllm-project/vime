@@ -105,9 +105,9 @@ def _get_model_provider_func(
         # the hybrid model. Forward them so MoELayer.moe_layer_recompute engages.
         if getattr(args, "recompute_granularity", None) is not None:
             provider.recompute_granularity = args.recompute_granularity
-            provider.recompute_modules = args.recompute_modules
-            provider.recompute_method = args.recompute_method
-            provider.recompute_num_layers = args.recompute_num_layers
+            provider.recompute_modules = getattr(args, "recompute_modules", None)
+            provider.recompute_method = getattr(args, "recompute_method", None)
+            provider.recompute_num_layers = getattr(args, "recompute_num_layers", None)
         if hasattr(args, "moe_token_dispatcher_type"):
             provider.moe_token_dispatcher_type = args.moe_token_dispatcher_type
         if getattr(args, "decoder_first_pipeline_num_layers", None) is not None:
