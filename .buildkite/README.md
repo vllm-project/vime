@@ -61,7 +61,7 @@ reports a passing commit status even if nobody unblocks the GPU gate.
 GPU jobs run on the shared **`mithril-h100-pool`** queue, following the same
 pattern vllm-omni uses for it: each job is a Kubernetes pod (agent-stack-k8s
 `kubernetes` plugin) on an H100 SXM node, with GPUs allocated via
-`nvidia.com/gpu` limits (2 to 8), a memory-backed `/dev/shm`, and the node's
+`nvidia.com/gpu` limits (1 to 8), a memory-backed `/dev/shm`, and the node's
 `/mnt/hf-cache` mounted as `HF_HOME`. vime tests `hf download` their models at
 startup, so a warm HF cache is all they need. `WANDB_API_KEY` is not wired up
 yet; runs report without wandb until it's added (e.g. as a k8s secret in the

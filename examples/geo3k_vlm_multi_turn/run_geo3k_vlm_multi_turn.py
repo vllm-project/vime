@@ -103,9 +103,6 @@ def execute():
         "--vllm-gpu-memory-utilization 0.9 "
         "--vllm-generation-config vllm "
         f"--vllm-cudagraph-capture-sizes {cudagraph_sizes} "
-        # vLLM 0.22.0 needs eager mode for Qwen3-VL logprob parity. This can be
-        # disabled after vLLM includes https://github.com/vllm-project/vllm/pull/43617.
-        "--vllm-enforce-eager "
         "--vllm-logprobs-mode processed_logprobs "
     )
 
