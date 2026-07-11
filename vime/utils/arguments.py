@@ -403,6 +403,18 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                     "This is used to shuffle the prompts and also for the random sampling of the prompts."
                 ),
             )
+            parser.add_argument(
+                "--transfer-backend",
+                choices=["ray", "mooncake_store"],
+                default="ray",
+                help="Rollout data transfer backend. Keep ray as the default; mooncake_store uses Mooncake Store.",
+            )
+            parser.add_argument(
+                "--mooncake-store-init-kwargs",
+                type=json.loads,
+                default=None,
+                help="JSON kwargs passed to MooncakeDistributedStore.setup for mooncake_store transfer.",
+            )
 
             # sampling
             parser.add_argument(
@@ -1766,6 +1778,11 @@ def _validate_update_weight_args(args) -> None:
 
 def vime_validate_args(args):
     args.eval_datasets = _resolve_eval_datasets(args)
+
+    if getattr(args, "transfer_backend", "ray") == "mooncake_store":
+        from vime.utils.remote_batch import normalize_store_init_kwargs
+
+        args.mooncake_store_init_kwargs = normalize_store_init_kwargs(args.mooncake_store_init_kwargs)
 
     if args.kl_coef != 0 or args.use_kl_loss:
         if not os.path.exists(args.ref_load):

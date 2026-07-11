@@ -291,7 +291,14 @@ class Dataset:
 
 def process_rollout_data(args, rollout_data_ref, dp_rank, dp_size):
     assert len(rollout_data_ref) == dp_size
-    rollout_data = ray.get(rollout_data_ref[dp_rank].inner)
+    if getattr(args, "transfer_backend", "ray") == "mooncake_store":
+        from vime.utils.rollout_store_transfer import RolloutStoreBatch, rollout_store_batch_to_data
+
+        batch = rollout_data_ref[dp_rank]
+        assert isinstance(batch, RolloutStoreBatch), f"expected RolloutStoreBatch, got {type(batch)}"
+        rollout_data = rollout_store_batch_to_data(batch)
+    else:
+        rollout_data = ray.get(rollout_data_ref[dp_rank].inner)
 
     partition = rollout_data.pop("partition")
     total_lengths = rollout_data["total_lengths"]

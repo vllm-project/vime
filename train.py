@@ -1,5 +1,7 @@
 import ray
 
+from vime.utils.rollout_store_transfer import maybe_cleanup_mooncake_store_refs
+
 from vime.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
 from vime.utils.arguments import parse_args
 from vime.utils.logging_utils import configure_logger, finish_tracking, init_tracking
@@ -71,14 +73,19 @@ def train(args):
 
         actor_trains_this_step = (not args.use_critic) or rollout_id >= args.num_critic_only_steps
 
-        if args.use_critic:
-            value_refs = critic_model.async_train(rollout_id, rollout_data_ref)
-            if actor_trains_this_step:
-                ray.get(actor_model.async_train(rollout_id, rollout_data_ref, external_data=value_refs))
+        train_succeeded = False
+        try:
+            if args.use_critic:
+                value_refs = critic_model.async_train(rollout_id, rollout_data_ref)
+                if actor_trains_this_step:
+                    ray.get(actor_model.async_train(rollout_id, rollout_data_ref, external_data=value_refs))
+                else:
+                    ray.get(value_refs)
             else:
-                ray.get(value_refs)
-        else:
-            ray.get(actor_model.async_train(rollout_id, rollout_data_ref))
+                ray.get(actor_model.async_train(rollout_id, rollout_data_ref))
+            train_succeeded = True
+        finally:
+            maybe_cleanup_mooncake_store_refs(args, rollout_data_ref, suppress_errors=not train_succeeded)
 
         if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
             save(rollout_id)

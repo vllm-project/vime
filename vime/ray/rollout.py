@@ -860,6 +860,19 @@ class RolloutManager:
             rollout_indices=data["rollout_ids"],
         )
 
+        if getattr(self.args, "transfer_backend", "ray") == "mooncake_store":
+            from vime.utils.rollout_store_transfer import split_rollout_data_by_dp_mooncake_store
+
+            return split_rollout_data_by_dp_mooncake_store(
+                self.args,
+                data,
+                dp_size,
+                partitions,
+                micro_batch_indices=micro_batch_indices,
+                num_microbatches=num_microbatches,
+                global_batch_sizes=global_batch_sizes,
+            )
+
         # Package per-rank rollout_data
         rollout_data_refs = []
         for r in range(dp_size):
