@@ -121,3 +121,67 @@ index 60d2a64..67f3f98 100644
      prompt_logprobs: list[dict[int, Logprob] | None] | None = None
  
      kv_transfer_params: dict[str, Any] | None = Field(
+diff --git a/vllm/model_executor/model_loader/reload/layerwise.py b/vllm/model_executor/model_loader/reload/layerwise.py
+index 6cf1c19..f3e4a78 100644
+--- a/vllm/model_executor/model_loader/reload/layerwise.py
++++ b/vllm/model_executor/model_loader/reload/layerwise.py
+@@ -379,17 +379,24 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
+     kernel tensor references on the layer. Preserves cudagraph references."""
+     assert info.kernel_tensors is not None
+     parameters, buffers = info.kernel_tensors
++    loaded_tensor_names = {name for name, _ in info.loaded_weights}
+     for name, param in parameters.items():
+         param.data.copy_(getattr(layer, name))
+     for name, buffer in buffers.items():
+         if name not in layer._buffers:
+             continue
++        if (
++            name in layer._non_persistent_buffers_set
++            and name not in loaded_tensor_names
++        ):
++            continue
+         buffer.data.copy_(getattr(layer, name))
+ 
+     _place_kernel_tensors(layer, info)
+ 
+ 
+ def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
++    non_persistent_buffers = set(layer._non_persistent_buffers_set)
+     for name in get_layer_tensors(layer):
+         delattr(layer, name)
+ 
+@@ -398,4 +405,8 @@ def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
+     for name, param in parameters.items():
+         layer.register_parameter(name, param)
+     for name, buffer in buffers.items():
+-        layer.register_buffer(name, buffer)
++        layer.register_buffer(
++            name,
++            buffer,
++            persistent=name not in non_persistent_buffers,
++        )
+diff --git a/vllm/model_executor/model_loader/reload/meta.py b/vllm/model_executor/model_loader/reload/meta.py
+index 283a98d..3edc931 100644
+--- a/vllm/model_executor/model_loader/reload/meta.py
++++ b/vllm/model_executor/model_loader/reload/meta.py
+@@ -117,6 +117,7 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
+     if layer.__class__.__name__ in SKIP_MODULES:
+         return
+ 
++    non_persistent_buffers = set(layer._non_persistent_buffers_set)
+     for name in get_layer_tensors(layer):
+         if name not in SKIP_TENSORS:
+             delattr(layer, name)
+@@ -130,7 +131,11 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
+     for name, buffer in restore_buffers.items():
+         if name not in SKIP_TENSORS:
+             buffer = restore_layer_refs(buffer, layer)
+-            layer.register_buffer(name, buffer)
++            layer.register_buffer(
++                name,
++                buffer,
++                persistent=name not in non_persistent_buffers,
++            )
+ 
+ 
+ def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):
