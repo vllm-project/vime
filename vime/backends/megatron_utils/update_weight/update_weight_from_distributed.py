@@ -86,7 +86,8 @@ class UpdateWeightFromDistributed:
         engine_gpu_offsets: Sequence[int] | None = None,
     ) -> None:
         """
-        Create NCCL "vime-pp_{pp_rank}" if PP source (DP=TP=0). Lock prevents concurrent broadcasts.
+        Record rollout engines and create the NCCL group eagerly for PP=1.
+        PP>1 groups are created one pipeline stage at a time during updates.
         """
         self.rollout_engines = rollout_engines
         self.rollout_engine_lock = rollout_engine_lock
@@ -169,7 +170,7 @@ class UpdateWeightFromDistributed:
         dist.barrier(group=get_gloo_group())
 
     def _send_weights_to_rollout_engines(self) -> None:
-        pp_world_size = getattr(self, "_pp_world_size", None) or mpu.get_pipeline_model_parallel_world_size()
+        pp_world_size = self._pp_world_size
         if pp_world_size == 1:
             pbar = tqdm(desc=f"[{self._group_name}] Update weights", total=0) if self._is_pp_src_rank else None
             self._send_weights(pbar)
@@ -178,14 +179,11 @@ class UpdateWeightFromDistributed:
             return
 
         pp_rank = mpu.get_pipeline_model_parallel_rank()
-        base_is_pp_src_rank = self._is_pp_src_rank
-        original_group_name = getattr(self, "_group_name", None)
         try:
             for active_pp_rank in range(pp_world_size):
                 self._active_weight_sync_pp_rank = active_pp_rank
-                self._is_pp_src_rank = base_is_pp_src_rank and pp_rank == active_pp_rank
-                self._group_name = f"vime-pp_{active_pp_rank}"
-                if self._is_pp_src_rank:
+                is_active_pp_src = self._is_pp_src_rank and pp_rank == active_pp_rank
+                if is_active_pp_src:
                     if self._model_update_groups is not None:
                         disconnect_rollout_engines_from_distributed(
                             self.args, self._group_name, self._model_update_groups, self.rollout_engines
@@ -202,14 +200,11 @@ class UpdateWeightFromDistributed:
 
                 dist.barrier(group=get_gloo_group())
                 self._send_weights(pbar)
-                if self._is_pp_src_rank:
+                if is_active_pp_src:
                     torch.cuda.synchronize()
                 dist.barrier(group=get_gloo_group())
         finally:
             self._active_weight_sync_pp_rank = None
-            self._is_pp_src_rank = base_is_pp_src_rank
-            if original_group_name is not None:
-                self._group_name = original_group_name
 
     def _is_active_weight_sync_pp_stage(self) -> bool:
         active_pp_rank = getattr(self, "_active_weight_sync_pp_rank", None)

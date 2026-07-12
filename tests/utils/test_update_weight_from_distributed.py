@@ -553,6 +553,7 @@ def test_multi_pp_weight_sync_connects_only_active_pp_stage(upw, monkeypatch):
     obj = _make_instance(upw)
     obj._model_update_groups = None
     obj._pp_world_size = 2
+    obj._group_name = "vime-pp_0"
     obj._engine_gpu_counts = [1]
     obj.rollout_engines = [RecordingEngine()]
     send_calls: list[tuple[int, bool, str, bool, object]] = []
@@ -573,7 +574,7 @@ def test_multi_pp_weight_sync_connects_only_active_pp_stage(upw, monkeypatch):
         send_calls.append(
             (
                 self._active_weight_sync_pp_rank,
-                self._is_pp_src_rank,
+                self._is_active_weight_sync_pp_stage(),
                 self._group_name,
                 pbar is not None,
                 self._model_update_groups,
@@ -588,12 +589,12 @@ def test_multi_pp_weight_sync_connects_only_active_pp_stage(upw, monkeypatch):
     assert connect_calls == ["vime-pp_0"]
     assert send_calls == [
         (0, True, "vime-pp_0", True, DummyGroup("vime-pp_0")),
-        (1, False, "vime-pp_1", False, DummyGroup("vime-pp_0")),
+        (1, False, "vime-pp_0", False, DummyGroup("vime-pp_0")),
     ]
     assert barriers == ["gloo", "gloo", "gloo", "gloo"]
     assert obj._active_weight_sync_pp_rank is None
     assert obj._is_pp_src_rank is True
-    assert obj._group_name == "g"
+    assert obj._group_name == "vime-pp_0"
 
 
 @pytest.mark.unit
