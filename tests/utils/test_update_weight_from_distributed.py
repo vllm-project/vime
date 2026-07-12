@@ -549,6 +549,35 @@ def test_connect_rollout_engines_defers_vllm_group_init_for_multi_pp(upw, monkey
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(("pp_rank", "is_src", "expected_connect_calls"), [(0, True, ["vime-pp_0"]), (1, False, [])])
+def test_bridge_multi_pp_connects_only_pp0(upw, monkeypatch, pp_rank, is_src, expected_connect_calls):
+    obj = _make_instance(upw)
+    obj._model_update_groups = None
+    obj._hf_weight_iterator = MagicMock()
+    actual_connect_calls: list[str] = []
+
+    monkeypatch.setattr(upw.mpu, "get_data_parallel_rank", lambda **kwargs: 0)
+    monkeypatch.setattr(upw.mpu, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(upw.mpu, "get_pipeline_model_parallel_rank", lambda: pp_rank)
+    monkeypatch.setattr(upw.mpu, "get_pipeline_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(
+        upw,
+        "connect_rollout_engines_from_distributed",
+        lambda *args, **kwargs: actual_connect_calls.append(args[1]) or DummyGroup(args[1]),
+    )
+
+    upw.UpdateWeightFromDistributed.connect_rollout_engines(
+        obj,
+        [RecordingEngine()],
+        RecordingLock(),
+        engine_gpu_counts=[1],
+    )
+
+    assert obj._is_pp_src_rank is is_src
+    assert actual_connect_calls == expected_connect_calls
+
+
+@pytest.mark.unit
 def test_multi_pp_weight_sync_connects_only_active_pp_stage(upw, monkeypatch):
     obj = _make_instance(upw)
     obj._model_update_groups = None
@@ -615,19 +644,39 @@ def test_inactive_pp_stage_joins_raw_send_barriers_without_iterating(upw, monkey
 
 
 @pytest.mark.unit
-def test_inactive_pp_stage_joins_bridge_send_barrier_without_exporting(upw, monkeypatch):
+def test_bridge_export_is_not_staged_by_pp(upw, monkeypatch):
     obj = _make_instance(upw)
-    obj._active_weight_sync_pp_rank = 1
+    obj._pp_world_size = 2
+    obj._is_pp_src_rank = False
     obj._hf_weight_iterator = MagicMock()
+    send_calls: list[tuple[object, object]] = []
+
+    monkeypatch.setattr(
+        upw.UpdateWeightFromDistributed,
+        "_send_weights",
+        lambda self, pbar: send_calls.append((getattr(self, "_active_weight_sync_pp_rank", None), pbar)),
+    )
+
+    upw.UpdateWeightFromDistributed._send_weights_to_rollout_engines(obj)
+
+    assert send_calls == [(None, None)]
+
+
+@pytest.mark.unit
+def test_bridge_export_runs_on_non_source_pp_stage(upw, monkeypatch):
+    obj = _make_instance(upw)
+    obj._is_pp_src_rank = False
+    obj._hf_weight_iterator = MagicMock()
+    obj._hf_weight_iterator.get_hf_weight_chunks.return_value = []
     barriers: list[object] = []
 
-    monkeypatch.setattr(upw.mpu, "get_pipeline_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(upw.UpdateWeightFromDistributed, "_use_vllm_packed", lambda self: True)
     monkeypatch.setattr(upw, "get_gloo_group", lambda: "gloo")
     monkeypatch.setattr(upw.dist, "barrier", lambda *args, **kwargs: barriers.append(kwargs.get("group")))
 
     upw.UpdateWeightFromDistributed._send_weights(obj, pbar=None)
 
-    assert obj._hf_weight_iterator.get_hf_weight_chunks.call_count == 0
+    obj._hf_weight_iterator.get_hf_weight_chunks.assert_called_once_with({})
     assert barriers == ["gloo"]
 
 

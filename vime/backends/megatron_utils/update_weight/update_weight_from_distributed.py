@@ -43,8 +43,9 @@ def _end_vllm_weight_update_session(rollout_engines: Sequence[ActorHandle]) -> N
 class UpdateWeightFromDistributed:
     """
     Update distributed engines via NCCL. For PP=1, keep one persistent transfer
-    group. For PP>1, send one pipeline stage at a time because vLLM keeps one
-    active receiver communicator. Non-expert (TP) and expert (EP) params separate.
+    group. For raw PP>1 export, send one pipeline stage at a time because vLLM
+    keeps one active receiver communicator. Bridge export runs collectively once
+    on all ranks and sends the complete model from PP0.
     """
 
     def __init__(
@@ -87,7 +88,8 @@ class UpdateWeightFromDistributed:
     ) -> None:
         """
         Record rollout engines and create the NCCL group eagerly for PP=1.
-        PP>1 groups are created one pipeline stage at a time during updates.
+        Raw PP>1 groups are created one pipeline stage at a time during updates.
+        Bridge PP>1 uses one persistent group from PP0.
         """
         self.rollout_engines = rollout_engines
         self.rollout_engine_lock = rollout_engine_lock
@@ -96,15 +98,17 @@ class UpdateWeightFromDistributed:
         # For TP:
         #   1. AllGather parameters to rank 0
         #   2. Broadcast parameters from rank 0 to all vLLM engines
-        self._is_pp_src_rank = (
-            mpu.get_data_parallel_rank(with_context_parallel=True) == 0 and mpu.get_tensor_model_parallel_rank() == 0
-        )
         pp_rank = mpu.get_pipeline_model_parallel_rank()
         self._pp_world_size = mpu.get_pipeline_model_parallel_world_size()
+        self._is_pp_src_rank = (
+            mpu.get_data_parallel_rank(with_context_parallel=True) == 0
+            and mpu.get_tensor_model_parallel_rank() == 0
+            and (self._hf_weight_iterator is None or pp_rank == 0)
+        )
         if self._is_pp_src_rank:
             self._group_name = f"vime-pp_{pp_rank}"
 
-        if self._is_pp_src_rank and self._pp_world_size == 1:
+        if self._is_pp_src_rank and (self._pp_world_size == 1 or self._hf_weight_iterator is not None):
             if self._model_update_groups is not None:
                 disconnect_rollout_engines_from_distributed(
                     self.args, self._group_name, self._model_update_groups, self.rollout_engines
@@ -171,7 +175,7 @@ class UpdateWeightFromDistributed:
 
     def _send_weights_to_rollout_engines(self) -> None:
         pp_world_size = self._pp_world_size
-        if pp_world_size == 1:
+        if pp_world_size == 1 or self._hf_weight_iterator is not None:
             pbar = tqdm(desc=f"[{self._group_name}] Update weights", total=0) if self._is_pp_src_rank else None
             self._send_weights(pbar)
             if self._is_pp_src_rank:
