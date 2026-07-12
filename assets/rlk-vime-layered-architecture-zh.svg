@@ -1,0 +1,145 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1050" viewBox="0 0 1600 1050" role="img" aria-labelledby="title desc">
+  <title id="title">RL-Kernel 嵌入 vime 的分层架构</title>
+  <desc id="desc">一张分层架构图，展示用户侧开关、vime 控制层、vime 执行层、内嵌的 RL-Kernel 算子路由层、RL-Kernel 算子后端、运行时基础设施，以及贯穿各层的一致性契约和可观测性能力。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path d="M 0 0 L 9 4.5 L 0 9 z" fill="#395f99"/>
+    </marker>
+    <style>
+      text { font-family: Inter, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; }
+      .outer { fill: #9fc3f8; }
+      .window { fill: #f7f9fd; stroke: #ffffff; stroke-width: 4; }
+      .topbar { fill: #f1f1f2; }
+      .ghost { fill: #e3e5e8; }
+      .content { fill: #fbfdff; }
+      .layer-label { font-size: 24px; font-weight: 800; fill: #2f3540; }
+      .section { fill: #6f8ec5; stroke: #2f3e55; stroke-width: 2; }
+      .section-dark { fill: #4f86e8; stroke: #2f5ea8; stroke-width: 2; }
+      .section-light { fill: #dfe3ff; stroke: #6e7797; stroke-width: 2; }
+      .section-gray { fill: #eef3f8; stroke: #5b6675; stroke-width: 2; }
+      .rail { fill: #a9c6f4; stroke: #2f3e55; stroke-width: 2; }
+      .card { fill: #ffffff; stroke: #2f3e55; stroke-width: 2; }
+      .soft-card { fill: #f8fbff; stroke: #2f3e55; stroke-width: 2; }
+      .white-text { font-size: 20px; font-weight: 800; fill: #ffffff; }
+      .dark-text { font-size: 18px; font-weight: 800; fill: #2b3038; }
+      .small-text { font-size: 13px; font-weight: 600; fill: #4b5565; }
+      .rail-text { font-size: 18px; font-weight: 800; fill: #2b3038; }
+      .dash { stroke: #aeb4bf; stroke-width: 2; stroke-dasharray: 8 7; }
+      .flow { stroke: #395f99; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+      .soft-flow { stroke: #7c8aa3; stroke-width: 2.2; stroke-dasharray: 7 6; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect class="outer" x="0" y="0" width="1600" height="1050" rx="36"/>
+  <rect class="window" x="28" y="30" width="1544" height="990" rx="22"/>
+  <rect class="topbar" x="28" y="30" width="1544" height="92" rx="22"/>
+  <rect class="ghost" x="70" y="62" width="138" height="12" rx="2"/>
+  <rect class="ghost" x="70" y="86" width="94" height="12" rx="2"/>
+  <rect class="ghost" x="690" y="62" width="34" height="34" rx="9"/>
+  <rect class="ghost" x="742" y="62" width="34" height="34" rx="9"/>
+  <rect class="ghost" x="794" y="62" width="34" height="34" rx="9"/>
+  <circle class="ghost" cx="1320" cy="80" r="18"/>
+  <circle class="ghost" cx="1350" cy="80" r="18"/>
+  <circle class="ghost" cx="1380" cy="80" r="18"/>
+  <rect class="ghost" x="1468" y="60" width="88" height="36" rx="9"/>
+  <rect class="content" x="28" y="122" width="1544" height="898" rx="22"/>
+
+  <text class="layer-label" x="164" y="246">用户层</text>
+  <text class="layer-label" x="126" y="371">vime 控制层</text>
+  <text class="layer-label" x="126" y="503">vime 执行层</text>
+  <text class="layer-label" x="70" y="657">RL-Kernel 路由层</text>
+  <text class="layer-label" x="70" y="800">RL-Kernel 后端层</text>
+  <text class="layer-label" x="139" y="925">基础设施层</text>
+
+  <line class="dash" x1="230" y1="292" x2="1395" y2="292"/>
+  <line class="dash" x1="230" y1="420" x2="1395" y2="420"/>
+  <line class="dash" x1="230" y1="570" x2="1395" y2="570"/>
+  <line class="dash" x1="230" y1="720" x2="1395" y2="720"/>
+  <line class="dash" x1="230" y1="855" x2="1395" y2="855"/>
+  <line class="dash" x1="230" y1="970" x2="1395" y2="970"/>
+
+  <rect class="rail" x="300" y="180" width="58" height="780" rx="5"/>
+  <text class="rail-text" transform="translate(336 570) rotate(-90)" text-anchor="middle">一致性契约 · Batch Invariant</text>
+  <rect class="rail" x="1302" y="180" width="58" height="780" rx="5"/>
+  <text class="rail-text" transform="translate(1338 570) rotate(-90)" text-anchor="middle">Trace · Debug · Fallback</text>
+
+  <rect class="section" x="385" y="180" width="890" height="105" rx="5"/>
+  <text class="white-text" x="408" y="216">用户入口</text>
+  <rect class="card" x="545" y="202" width="205" height="58" rx="2"/>
+  <text class="dark-text" x="647.5" y="226" text-anchor="middle">CLI 开关</text>
+  <text class="small-text" x="647.5" y="248" text-anchor="middle">fast / consistency modes</text>
+  <rect class="card" x="775" y="202" width="205" height="58" rx="2"/>
+  <text class="dark-text" x="877.5" y="226" text-anchor="middle">环境变量别名</text>
+  <text class="small-text" x="877.5" y="248" text-anchor="middle">VIME_RLK_* aliases</text>
+  <rect class="card" x="1005" y="202" width="230" height="58" rx="2"/>
+  <text class="dark-text" x="1120" y="226" text-anchor="middle">Debug / 测试</text>
+  <text class="small-text" x="1120" y="248" text-anchor="middle">replay / A0-A5 / CI</text>
+
+  <rect class="section" x="385" y="310" width="200" height="82" rx="5"/>
+  <text class="white-text" x="485" y="347" text-anchor="middle">模式</text>
+  <text class="white-text" x="485" y="374" text-anchor="middle">选择</text>
+  <rect class="section" x="615" y="310" width="200" height="82" rx="5"/>
+  <text class="white-text" x="715" y="347" text-anchor="middle">Capability</text>
+  <text class="white-text" x="715" y="374" text-anchor="middle">查询</text>
+  <rect class="section" x="845" y="310" width="200" height="82" rx="5"/>
+  <text class="white-text" x="945" y="347" text-anchor="middle">Fallback</text>
+  <text class="white-text" x="945" y="374" text-anchor="middle">策略</text>
+  <rect class="section" x="1075" y="310" width="200" height="82" rx="5"/>
+  <text class="white-text" x="1175" y="347" text-anchor="middle">Audit</text>
+  <text class="white-text" x="1175" y="374" text-anchor="middle">Harness</text>
+
+  <rect class="section-dark" x="385" y="438" width="270" height="58" rx="5"/>
+  <text class="white-text" x="520" y="474" text-anchor="middle">vLLM rollout</text>
+  <rect class="section-dark" x="692" y="438" width="245" height="58" rx="5"/>
+  <text class="white-text" x="814.5" y="474" text-anchor="middle">Data Buffer</text>
+  <rect class="section-dark" x="974" y="438" width="301" height="58" rx="5"/>
+  <text class="white-text" x="1124.5" y="474" text-anchor="middle">Megatron replay</text>
+  <rect class="soft-card" x="410" y="514" width="405" height="38" rx="2"/>
+  <text class="dark-text" x="612.5" y="539" text-anchor="middle">tokens / old_logp / metadata</text>
+  <rect class="soft-card" x="845" y="514" width="405" height="38" rx="2"/>
+  <text class="dark-text" x="1047.5" y="539" text-anchor="middle">training tensors: hidden / logits</text>
+
+  <rect class="section-light" x="385" y="590" width="890" height="116" rx="5"/>
+  <text class="dark-text" x="830" y="617" text-anchor="middle">vime 进程内嵌的 RL-Kernel Adapter</text>
+  <rect class="card" x="415" y="635" width="190" height="50" rx="2"/>
+  <text class="dark-text" x="510" y="655" text-anchor="middle">算子注册</text>
+  <text class="dark-text" x="510" y="678" text-anchor="middle">桥接</text>
+  <rect class="card" x="625" y="635" width="190" height="50" rx="2"/>
+  <text class="dark-text" x="720" y="655" text-anchor="middle">Backend</text>
+  <text class="dark-text" x="720" y="678" text-anchor="middle">descriptors</text>
+  <rect class="card" x="835" y="635" width="200" height="50" rx="2"/>
+  <text class="dark-text" x="935" y="655" text-anchor="middle">Native / RLK /</text>
+  <text class="dark-text" x="935" y="678" text-anchor="middle">ref 路由</text>
+  <rect class="card" x="1055" y="635" width="190" height="50" rx="2"/>
+  <text class="dark-text" x="1150" y="655" text-anchor="middle">Backward</text>
+  <text class="dark-text" x="1150" y="678" text-anchor="middle">saved state</text>
+
+  <rect class="section-gray" x="385" y="738" width="890" height="98" rx="5"/>
+  <rect class="card" x="405" y="760" width="160" height="54" rx="2"/>
+  <text class="dark-text" x="485" y="782" text-anchor="middle">linear_logp</text>
+  <text class="small-text" x="485" y="804" text-anchor="middle">fwd + bwd</text>
+  <rect class="card" x="585" y="760" width="130" height="54" rx="2"/>
+  <text class="dark-text" x="650" y="782" text-anchor="middle">logp</text>
+  <text class="small-text" x="650" y="804" text-anchor="middle">reference</text>
+  <rect class="card" x="735" y="760" width="190" height="54" rx="2"/>
+  <text class="dark-text" x="830" y="782" text-anchor="middle">attention</text>
+  <text class="small-text" x="830" y="804" text-anchor="middle">CP / reductions</text>
+  <rect class="card" x="945" y="760" width="175" height="54" rx="2"/>
+  <text class="dark-text" x="1032.5" y="782" text-anchor="middle">matmul / norm</text>
+  <text class="small-text" x="1032.5" y="804" text-anchor="middle">RoPE / SwiGLU</text>
+  <rect class="card" x="1140" y="760" width="115" height="54" rx="2"/>
+  <text class="dark-text" x="1197.5" y="782" text-anchor="middle">loss</text>
+  <text class="small-text" x="1197.5" y="804" text-anchor="middle">embedding</text>
+
+  <rect class="section-dark" x="385" y="875" width="890" height="76" rx="5"/>
+  <text class="white-text" x="830" y="906" text-anchor="middle">CUDA streams/workspace · NCCL TP/SP/CP · HBM allocator</text>
+  <text class="white-text" x="830" y="934" text-anchor="middle">vLLM/Megatron tensors · distributed runtime metadata</text>
+
+  <path class="flow" d="M 830 285 L 830 310"/>
+  <path class="flow" d="M 830 392 L 830 438"/>
+  <path class="flow" d="M 830 552 L 830 590"/>
+  <path class="flow" d="M 830 706 L 830 738"/>
+  <path class="flow" d="M 830 836 L 830 875"/>
+  <path class="soft-flow" d="M 358 650 C 370 650 372 650 385 650"/>
+  <path class="soft-flow" d="M 1275 650 C 1287 650 1289 650 1302 650"/>
+</svg>

@@ -161,13 +161,15 @@ Fourth, full-gradient backward also moves onto a faster path. RL-Kernel organize
 
 ## Roadmap
 
+For the detailed integration plan, see the [RL-Kernel and vime Integration Roadmap](RL-Kernel-vime-integration-roadmap.md).
+
 RL-Kernel and vime will continue to evolve along several practical directions:
 
-- **Train-inference consistency first**: We will prioritize operator-level rollout-training consistency, then push operator performance to the limit under that guarantee.
-- **Observable path selection**: Continue improving selection among fast paths, consistency-first paths, and native fallbacks so workloads can make clear tradeoffs among performance, coverage, and rollout-training consistency.
-- **Deeper vime integration**: Improve operator selection, fallback visibility, timing counters, and weight-sync instrumentation for long-running RL jobs.
-- **More RL-specific kernels**: Extend fused and memory-efficient paths beyond `linear_logp` to other GRPO, PPO, DPO, attention, sampling, and MoE hot spots.
-- **Broader hardware coverage**: Continue maturing CUDA paths while expanding Triton and ROCm backends so the same operator-level API can serve more accelerator environments.
+- **Consistency contracts**: make rollout-training `dlogp`, provenance, batch-invariance checks, and strict/audit modes first-class vime diagnostics.
+- **Fast-path expansion**: extend contract-preserving RL-Kernel backends beyond `linear_logp` only where profiling shows real bottlenecks.
+- **Compute/communication decoupling**: separate compute kernels, collective scheduling, and overlap telemetry so TP/NCCL bottlenecks can be optimized without hiding numeric-contract changes.
+- **Operator coverage**: add targeted paths for logprob reference scoring, attention/reductions, matmul projections, normalization, embeddings, and RL loss fragments.
+- **Release discipline**: keep operator-level, actor-window, and full-step claims separate, with structured fallback reporting and reproducible benchmark slices.
 
 ## Quick Start
 

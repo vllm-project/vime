@@ -1,0 +1,185 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">A0-A5 logprob drift 消融矩阵</title>
+  <desc id="desc">面向 vime 与 RL-Kernel 训推 logprob drift 分析的科研风格消融矩阵。A0 到 A5 每一行只放开声明的 mismatch class，并复用同一个 active-token logprob metric。</desc>
+  <defs>
+    <style>
+      text { font-family: Inter, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #172033; }
+      .bg { fill: #ffffff; }
+      .title { font-size: 34px; font-weight: 800; }
+      .subtitle { font-size: 18px; font-weight: 500; fill: #556273; }
+      .header { fill: #f3f6fa; stroke: #aeb8c6; stroke-width: 1.3; }
+      .rowhead { fill: #f8fafc; stroke: #b9c3d0; stroke-width: 1.3; }
+      .fixed { fill: #e8f4ff; stroke: #89b6dc; stroke-width: 1.3; }
+      .vary { fill: #fff1c7; stroke: #d7a22c; stroke-width: 1.3; }
+      .pair { fill: #eadff8; stroke: #9a79c3; stroke-width: 1.3; }
+      .prod { fill: #fbdde2; stroke: #c66b7a; stroke-width: 1.3; }
+      .metric { fill: #eaf8ef; stroke: #74ad82; stroke-width: 1.3; }
+      .celltext { font-size: 18px; font-weight: 800; }
+      .subtext { font-size: 13px; font-weight: 600; fill: #526071; }
+      .rowtitle { font-size: 19px; font-weight: 800; }
+      .rowsub { font-size: 13px; font-weight: 600; fill: #607084; }
+      .note { font-size: 16px; font-weight: 600; fill: #435066; }
+      .formula { font-size: 20px; font-weight: 800; fill: #183153; }
+      .legendtext { font-size: 14px; font-weight: 700; fill: #39485d; }
+      .axis { stroke: #738196; stroke-width: 1.4; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="900"/>
+  <text class="title" x="70" y="66">A0-A5 logprob drift 消融矩阵</text>
+  <text class="subtitle" x="70" y="98">每次只控制一个 mismatch class；semantic identity 与 active-token comparator 保持固定。</text>
+
+  <rect class="header" x="70" y="145" width="190" height="58"/>
+  <text class="celltext" x="165" y="181" text-anchor="middle">Profile</text>
+
+  <rect class="header" x="260" y="145" width="185" height="58"/>
+  <text class="celltext" x="352.5" y="172" text-anchor="middle">Semantic</text>
+  <text class="celltext" x="352.5" y="193" text-anchor="middle">identity</text>
+
+  <rect class="header" x="445" y="145" width="185" height="58"/>
+  <text class="celltext" x="537.5" y="172" text-anchor="middle">Arithmetic</text>
+  <text class="celltext" x="537.5" y="193" text-anchor="middle">/ kernel</text>
+
+  <rect class="header" x="630" y="145" width="185" height="58"/>
+  <text class="celltext" x="722.5" y="172" text-anchor="middle">Reduction</text>
+  <text class="celltext" x="722.5" y="193" text-anchor="middle">/ topology</text>
+
+  <rect class="header" x="815" y="145" width="185" height="58"/>
+  <text class="celltext" x="907.5" y="172" text-anchor="middle">Representation</text>
+  <text class="celltext" x="907.5" y="193" text-anchor="middle">/ quant</text>
+
+  <rect class="header" x="1000" y="145" width="185" height="58"/>
+  <text class="celltext" x="1092.5" y="172" text-anchor="middle">Serving</text>
+  <text class="celltext" x="1092.5" y="193" text-anchor="middle">/ batch</text>
+
+  <rect class="header" x="1185" y="145" width="305" height="58"/>
+  <text class="celltext" x="1337.5" y="181" text-anchor="middle">输出 / 证据</text>
+
+  <rect class="rowhead" x="70" y="203" width="190" height="78"/>
+  <text class="rowtitle" x="92" y="235">A0</text>
+  <text class="rowsub" x="92" y="258">完全对齐 reference</text>
+  <rect class="fixed" x="260" y="203" width="185" height="78"/>
+  <text class="celltext" x="352.5" y="236" text-anchor="middle">固定</text>
+  <text class="subtext" x="352.5" y="259" text-anchor="middle">ckpt/tokens/masks</text>
+  <rect class="fixed" x="445" y="203" width="185" height="78"/>
+  <text class="celltext" x="537.5" y="236" text-anchor="middle">固定</text>
+  <text class="subtext" x="537.5" y="259" text-anchor="middle">reference kernels</text>
+  <rect class="fixed" x="630" y="203" width="185" height="78"/>
+  <text class="celltext" x="722.5" y="236" text-anchor="middle">固定</text>
+  <text class="subtext" x="722.5" y="259" text-anchor="middle">same topology</text>
+  <rect class="fixed" x="815" y="203" width="185" height="78"/>
+  <text class="celltext" x="907.5" y="236" text-anchor="middle">固定</text>
+  <text class="subtext" x="907.5" y="259" text-anchor="middle">same dtype policy</text>
+  <rect class="fixed" x="1000" y="203" width="185" height="78"/>
+  <text class="celltext" x="1092.5" y="236" text-anchor="middle">固定</text>
+  <text class="subtext" x="1092.5" y="259" text-anchor="middle">same layout</text>
+  <rect class="metric" x="1185" y="203" width="305" height="78"/>
+  <text class="celltext" x="1337.5" y="236" text-anchor="middle">baseline tolerance</text>
+  <text class="subtext" x="1337.5" y="259" text-anchor="middle">先证明 comparator 有效</text>
+
+  <rect class="rowhead" x="70" y="281" width="190" height="78"/>
+  <text class="rowtitle" x="92" y="313">A1</text>
+  <text class="rowsub" x="92" y="336">只变 arithmetic</text>
+  <rect class="fixed" x="260" y="281" width="185" height="78"/>
+  <text class="celltext" x="352.5" y="326" text-anchor="middle">固定</text>
+  <rect class="vary" x="445" y="281" width="185" height="78"/>
+  <text class="celltext" x="537.5" y="314" text-anchor="middle">单轴变化</text>
+  <text class="subtext" x="537.5" y="337" text-anchor="middle">kernel/fusion/compiler</text>
+  <rect class="fixed" x="630" y="281" width="185" height="78"/>
+  <text class="celltext" x="722.5" y="326" text-anchor="middle">固定</text>
+  <rect class="fixed" x="815" y="281" width="185" height="78"/>
+  <text class="celltext" x="907.5" y="326" text-anchor="middle">固定</text>
+  <rect class="fixed" x="1000" y="281" width="185" height="78"/>
+  <text class="celltext" x="1092.5" y="326" text-anchor="middle">固定</text>
+  <rect class="metric" x="1185" y="281" width="305" height="78"/>
+  <text class="celltext" x="1337.5" y="314" text-anchor="middle">kernel delta</text>
+  <text class="subtext" x="1337.5" y="337" text-anchor="middle">fused vs native logprob</text>
+
+  <rect class="rowhead" x="70" y="359" width="190" height="78"/>
+  <text class="rowtitle" x="92" y="391">A2</text>
+  <text class="rowsub" x="92" y="414">只变 topology</text>
+  <rect class="fixed" x="260" y="359" width="185" height="78"/>
+  <text class="celltext" x="352.5" y="404" text-anchor="middle">固定</text>
+  <rect class="fixed" x="445" y="359" width="185" height="78"/>
+  <text class="celltext" x="537.5" y="404" text-anchor="middle">固定</text>
+  <rect class="vary" x="630" y="359" width="185" height="78"/>
+  <text class="celltext" x="722.5" y="392" text-anchor="middle">单轴变化</text>
+  <text class="subtext" x="722.5" y="415" text-anchor="middle">TP/SP/CP/ranks</text>
+  <rect class="fixed" x="815" y="359" width="185" height="78"/>
+  <text class="celltext" x="907.5" y="404" text-anchor="middle">固定</text>
+  <rect class="fixed" x="1000" y="359" width="185" height="78"/>
+  <text class="celltext" x="1092.5" y="404" text-anchor="middle">固定</text>
+  <rect class="metric" x="1185" y="359" width="305" height="78"/>
+  <text class="celltext" x="1337.5" y="392" text-anchor="middle">per-rank dlogp</text>
+  <text class="subtext" x="1337.5" y="415" text-anchor="middle">collective/shard attribution</text>
+
+  <rect class="rowhead" x="70" y="437" width="190" height="78"/>
+  <text class="rowtitle" x="92" y="469">A3</text>
+  <text class="rowsub" x="92" y="492">只变 representation</text>
+  <rect class="fixed" x="260" y="437" width="185" height="78"/>
+  <text class="celltext" x="352.5" y="482" text-anchor="middle">固定</text>
+  <rect class="fixed" x="445" y="437" width="185" height="78"/>
+  <text class="celltext" x="537.5" y="482" text-anchor="middle">固定</text>
+  <rect class="fixed" x="630" y="437" width="185" height="78"/>
+  <text class="celltext" x="722.5" y="482" text-anchor="middle">固定</text>
+  <rect class="vary" x="815" y="437" width="185" height="78"/>
+  <text class="celltext" x="907.5" y="470" text-anchor="middle">单轴变化</text>
+  <text class="subtext" x="907.5" y="493" text-anchor="middle">dtype/quant/cache</text>
+  <rect class="fixed" x="1000" y="437" width="185" height="78"/>
+  <text class="celltext" x="1092.5" y="482" text-anchor="middle">固定</text>
+  <rect class="metric" x="1185" y="437" width="305" height="78"/>
+  <text class="celltext" x="1337.5" y="470" text-anchor="middle">representation delta</text>
+  <text class="subtext" x="1337.5" y="493" text-anchor="middle">downcast/scale attribution</text>
+
+  <rect class="rowhead" x="70" y="515" width="190" height="78"/>
+  <text class="rowtitle" x="92" y="547">A4</text>
+  <text class="rowsub" x="92" y="570">pairwise</text>
+  <rect class="fixed" x="260" y="515" width="185" height="78"/>
+  <text class="celltext" x="352.5" y="560" text-anchor="middle">固定</text>
+  <rect class="pair" x="445" y="515" width="185" height="78"/>
+  <text class="celltext" x="537.5" y="548" text-anchor="middle">两两组合</text>
+  <text class="subtext" x="537.5" y="571" text-anchor="middle">if needed</text>
+  <rect class="pair" x="630" y="515" width="185" height="78"/>
+  <text class="celltext" x="722.5" y="548" text-anchor="middle">两两组合</text>
+  <text class="subtext" x="722.5" y="571" text-anchor="middle">if needed</text>
+  <rect class="pair" x="815" y="515" width="185" height="78"/>
+  <text class="celltext" x="907.5" y="548" text-anchor="middle">两两组合</text>
+  <text class="subtext" x="907.5" y="571" text-anchor="middle">if needed</text>
+  <rect class="pair" x="1000" y="515" width="185" height="78"/>
+  <text class="celltext" x="1092.5" y="548" text-anchor="middle">可选</text>
+  <text class="subtext" x="1092.5" y="571" text-anchor="middle">serving pair</text>
+  <rect class="metric" x="1185" y="515" width="305" height="78"/>
+  <text class="celltext" x="1337.5" y="548" text-anchor="middle">interaction ranking</text>
+  <text class="subtext" x="1337.5" y="571" text-anchor="middle">smallest failing pair</text>
+
+  <rect class="rowhead" x="70" y="593" width="190" height="78"/>
+  <text class="rowtitle" x="92" y="625">A5</text>
+  <text class="rowsub" x="92" y="648">production</text>
+  <rect class="fixed" x="260" y="593" width="185" height="78"/>
+  <text class="celltext" x="352.5" y="626" text-anchor="middle">固定</text>
+  <text class="subtext" x="352.5" y="649" text-anchor="middle">same logical sample</text>
+  <rect class="prod" x="445" y="593" width="185" height="78"/>
+  <text class="celltext" x="537.5" y="638" text-anchor="middle">生产配置</text>
+  <rect class="prod" x="630" y="593" width="185" height="78"/>
+  <text class="celltext" x="722.5" y="638" text-anchor="middle">生产配置</text>
+  <rect class="prod" x="815" y="593" width="185" height="78"/>
+  <text class="celltext" x="907.5" y="638" text-anchor="middle">生产配置</text>
+  <rect class="prod" x="1000" y="593" width="185" height="78"/>
+  <text class="celltext" x="1092.5" y="638" text-anchor="middle">生产配置</text>
+  <rect class="metric" x="1185" y="593" width="305" height="78"/>
+  <text class="celltext" x="1337.5" y="626" text-anchor="middle">result cube / gate</text>
+  <text class="subtext" x="1337.5" y="649" text-anchor="middle">strict pass/fail + cost</text>
+
+  <line class="axis" x1="70" y1="700" x2="1490" y2="700"/>
+  <rect class="fixed" x="70" y="730" width="30" height="22"/>
+  <text class="legendtext" x="112" y="747">固定：保持对齐</text>
+  <rect class="vary" x="278" y="730" width="30" height="22"/>
+  <text class="legendtext" x="320" y="747">单轴变化：只放开一个声明的 axis</text>
+  <rect class="pair" x="620" y="730" width="30" height="22"/>
+  <text class="legendtext" x="662" y="747">两两组合：只在需要时扩展</text>
+  <rect class="prod" x="960" y="730" width="30" height="22"/>
+  <text class="legendtext" x="1002" y="747">生产配置：真实 vime rollout/training setup</text>
+
+  <text class="formula" x="70" y="806">primary metric: active response/action tokens 上的 max_abs_dlogp</text>
+  <text class="note" x="70" y="837">规则：每一行都固定 semantic identity。silent runtime fallback 会让该行无效，除非 fallback 本身就是声明要测试的 axis。</text>
+</svg>
