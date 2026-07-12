@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="640" viewBox="0 0 1200 640" role="img" aria-labelledby="title desc">
+  <title id="title">linear_logp forward plus backward CUDA time</title>
+  <desc id="desc">Bar chart comparing vime and vime + RL-Kernel forward plus backward CUDA time for T1, T2, and T3.</desc>
+  <defs>
+    <style>
+      .bg { fill: #f7f9fc; }
+      .axis { stroke: #9aa8ba; stroke-width: 1.2; }
+      .grid { stroke: #e0e6ef; stroke-width: 1; }
+      .title { font: 800 30px Inter, Arial, sans-serif; fill: #0f1f33; }
+      .subtitle { font: 400 16px Inter, Arial, sans-serif; fill: #5d6b7f; }
+      .label { font: 600 16px Inter, Arial, sans-serif; fill: #17243a; }
+      .small { font: 400 13px Inter, Arial, sans-serif; fill: #536277; }
+      .value { font: 700 14px Inter, Arial, sans-serif; fill: #13233a; }
+      .speed { font: 800 17px Inter, Arial, sans-serif; fill: #0f5132; }
+      .vime { fill: #eda84f; }
+      .vime-rlk { fill: #3478f6; }
+      .legend-text { font: 600 14px Inter, Arial, sans-serif; fill: #243246; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1200" height="640"/>
+  <text class="title" x="58" y="58">Fused linear_logp cuts fwd+bwd CUDA time</text>
+  <text class="subtitle" x="58" y="86">Qwen3-30B-A3B, 8xH100, full rollout training, stable no-trace windows.</text>
+
+  <rect x="930" y="88" width="18" height="18" rx="4" class="vime"/>
+  <text class="legend-text" x="956" y="103">vime</text>
+  <rect x="1030" y="88" width="18" height="18" rx="4" class="vime-rlk"/>
+  <text class="legend-text" x="1056" y="103">vime + RL-Kernel</text>
+
+  <line class="axis" x1="130" y1="500" x2="1085" y2="500"/>
+  <line class="axis" x1="130" y1="150" x2="130" y2="500"/>
+
+  <line class="grid" x1="130" y1="403" x2="1085" y2="403"/>
+  <line class="grid" x1="130" y1="306" x2="1085" y2="306"/>
+  <line class="grid" x1="130" y1="208" x2="1085" y2="208"/>
+  <text class="small" x="82" y="505">0 ms</text>
+  <text class="small" x="72" y="408">10 ms</text>
+  <text class="small" x="72" y="311">20 ms</text>
+  <text class="small" x="72" y="213">30 ms</text>
+
+  <text class="small" x="137" y="138">fwd+bwd CUDA time</text>
+
+  <rect class="vime" x="258" y="352" width="72" height="148" rx="6"/>
+  <rect class="vime-rlk" x="344" y="380" width="72" height="120" rx="6"/>
+  <text class="value" x="268" y="340">15.24</text>
+  <text class="value" x="354" y="368">12.37</text>
+  <text class="label" x="304" y="535">T1</text>
+  <text class="speed" x="292" y="566">1.23x</text>
+  <text class="small" x="266" y="588">796 tokens/call</text>
+
+  <rect class="vime" x="556" y="320" width="72" height="180" rx="6"/>
+  <rect class="vime-rlk" x="642" y="399" width="72" height="101" rx="6"/>
+  <text class="value" x="566" y="308">18.56</text>
+  <text class="value" x="652" y="387">10.37</text>
+  <text class="label" x="602" y="535">T2</text>
+  <text class="speed" x="590" y="566">1.79x</text>
+  <text class="small" x="558" y="588">1820 tokens/call</text>
+
+  <rect class="vime" x="854" y="170" width="72" height="330" rx="6"/>
+  <rect class="vime-rlk" x="940" y="320" width="72" height="180" rx="6"/>
+  <text class="value" x="864" y="158">33.96</text>
+  <text class="value" x="950" y="308">18.50</text>
+  <text class="label" x="900" y="535">T3</text>
+  <text class="speed" x="888" y="566">1.84x</text>
+  <text class="small" x="856" y="588">6827 tokens/call</text>
+
+  <text class="small" x="58" y="616">Note: vime native-logprob spike rounds are excluded from the stable-window comparison.</text>
+</svg>

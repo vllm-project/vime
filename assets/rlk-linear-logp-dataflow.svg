@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" role="img" aria-labelledby="title desc">
+  <title id="title">RL-Kernel linear_logp data flow</title>
+  <desc id="desc">Comparison of the native vime selected-logprob path and the RL-Kernel fused linear_logp path.</desc>
+  <defs>
+    <marker id="arrow-blue" markerWidth="7" markerHeight="7" refX="6.5" refY="3.5" orient="auto">
+      <path d="M 0 0 L 7 3.5 L 0 7 z" fill="#2f6fef"/>
+    </marker>
+    <marker id="arrow-amber" markerWidth="7" markerHeight="7" refX="6.5" refY="3.5" orient="auto">
+      <path d="M 0 0 L 7 3.5 L 0 7 z" fill="#b96b10"/>
+    </marker>
+    <style>
+      .bg { fill: #f7f9fc; }
+      .panel { fill: #ffffff; stroke: #d6deea; stroke-width: 1.5; }
+      .panel-title { font: 700 22px Inter, Arial, sans-serif; fill: #13233a; }
+      .caption { font: 400 15px Inter, Arial, sans-serif; fill: #5d6b7f; }
+      .node { stroke-width: 1.5; rx: 8; }
+      .native-node { fill: #fff7ed; stroke: #edb76a; }
+      .kernel-node { fill: #eef6ff; stroke: #7fb3ff; }
+      .final-node { fill: #edfdf4; stroke: #64c58a; }
+      .warning-node { fill: #fff0f0; stroke: #f09a9a; }
+      .text { font: 600 16px Inter, Arial, sans-serif; fill: #17243a; }
+      .small { font: 400 13px Inter, Arial, sans-serif; fill: #536277; }
+      .badge { font: 700 13px Inter, Arial, sans-serif; fill: #0f5132; }
+      .title { font: 800 30px Inter, Arial, sans-serif; fill: #0f1f33; }
+      .subtitle { font: 400 16px Inter, Arial, sans-serif; fill: #5d6b7f; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1200" height="520"/>
+  <text class="title" x="54" y="54">From materialized logits to fused selected logprob</text>
+  <text class="subtitle" x="54" y="82">The vime + RL-Kernel path keeps the hot RL operator fused instead of exposing full [tokens, vocab] logits to Python.</text>
+
+  <rect class="panel" x="52" y="118" width="520" height="340" rx="8"/>
+  <text class="panel-title" x="82" y="164">vime</text>
+  <text class="caption" x="82" y="188">Output layer first, selected logprob second</text>
+
+  <rect class="node native-node" x="82" y="222" width="150" height="62"/>
+  <text class="text" x="103" y="248">Hidden</text>
+  <text class="small" x="103" y="269">states</text>
+
+  <line x1="232" y1="253" x2="278" y2="253" stroke="#b96b10" stroke-width="3" marker-end="url(#arrow-amber)"/>
+
+  <rect class="node native-node" x="286" y="222" width="190" height="62"/>
+  <text class="text" x="308" y="248">Megatron</text>
+  <text class="small" x="308" y="269">output layer</text>
+
+  <line x1="381" y1="284" x2="381" y2="326" stroke="#b96b10" stroke-width="3" marker-end="url(#arrow-amber)"/>
+
+  <rect class="node warning-node" x="286" y="334" width="190" height="70"/>
+  <text class="text" x="307" y="362">Full logits</text>
+  <text class="small" x="307" y="383">[tokens, vocab]</text>
+
+  <line x1="286" y1="369" x2="228" y2="369" stroke="#b96b10" stroke-width="3" marker-end="url(#arrow-amber)"/>
+
+  <rect class="node native-node" x="82" y="334" width="150" height="70"/>
+  <text class="text" x="103" y="362">Native</text>
+  <text class="small" x="103" y="383">logprob + clone</text>
+
+  <text class="small" x="82" y="430">Cost: large HBM traffic, allocator pressure, and full-logits backward.</text>
+
+  <rect class="panel" x="628" y="118" width="520" height="340" rx="8"/>
+  <text class="panel-title" x="658" y="164">vime + RL-Kernel</text>
+  <text class="caption" x="658" y="188">Selected logprob is computed as one fused operator</text>
+
+  <rect class="node kernel-node" x="658" y="222" width="185" height="70"/>
+  <text class="text" x="681" y="248">Hidden + LM</text>
+  <text class="small" x="681" y="269">head + target ids</text>
+
+  <line x1="843" y1="257" x2="887" y2="257" stroke="#2f6fef" stroke-width="3" marker-end="url(#arrow-blue)"/>
+
+  <rect class="node kernel-node" x="896" y="222" width="210" height="70"/>
+  <text class="text" x="918" y="248">FusedLinear</text>
+  <text class="small" x="918" y="269">LogpSM90Op</text>
+
+  <line x1="1001" y1="292" x2="1001" y2="328" stroke="#2f6fef" stroke-width="3" marker-end="url(#arrow-blue)"/>
+
+  <rect class="node kernel-node" x="896" y="336" width="210" height="70"/>
+  <text class="text" x="918" y="362">Tile GEMM</text>
+  <text class="small" x="918" y="383">max, sum-exp, target</text>
+
+  <line x1="896" y1="371" x2="845" y2="371" stroke="#2f6fef" stroke-width="3" marker-end="url(#arrow-blue)"/>
+
+  <rect class="node final-node" x="658" y="336" width="185" height="70"/>
+  <text class="text" x="681" y="362">Selected</text>
+  <text class="small" x="681" y="383">logprob + bwd state</text>
+
+  <rect x="658" y="420" width="118" height="26" rx="8" fill="#dff7eb" stroke="#8ad9aa"/>
+  <text class="badge" x="675" y="438">fallback=0</text>
+  <text class="small" x="790" y="438">T1/T2/T3 complete 12-rollout no-trace runs</text>
+</svg>
