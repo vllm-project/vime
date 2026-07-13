@@ -79,6 +79,9 @@ class UpdateWeightFromDistributed:
             else None
         )
 
+    def _uses_persistent_group(self) -> bool:
+        return self._pp_world_size == 1 or self._hf_weight_iterator is not None
+
     def connect_rollout_engines(
         self,
         rollout_engines: Sequence[ActorHandle],
@@ -108,8 +111,7 @@ class UpdateWeightFromDistributed:
         if self._is_pp_src_rank:
             self._group_name = f"vime-pp_{pp_rank}"
 
-        uses_persistent_group = self._pp_world_size == 1 or self._hf_weight_iterator is not None
-        if self._is_pp_src_rank and uses_persistent_group:
+        if self._is_pp_src_rank and self._uses_persistent_group():
             if self._model_update_groups is not None:
                 disconnect_rollout_engines_from_distributed(
                     self.args, self._group_name, self._model_update_groups, self.rollout_engines
@@ -175,8 +177,7 @@ class UpdateWeightFromDistributed:
         dist.barrier(group=get_gloo_group())
 
     def _send_weights_to_rollout_engines(self) -> None:
-        pp_world_size = self._pp_world_size
-        if pp_world_size == 1 or self._hf_weight_iterator is not None:
+        if self._uses_persistent_group():
             pbar = tqdm(desc=f"[{self._group_name}] Update weights", total=0) if self._is_pp_src_rank else None
             self._send_weights(pbar)
             if self._is_pp_src_rank:
@@ -185,7 +186,7 @@ class UpdateWeightFromDistributed:
 
         pp_rank = mpu.get_pipeline_model_parallel_rank()
         try:
-            for active_pp_rank in range(pp_world_size):
+            for active_pp_rank in range(self._pp_world_size):
                 self._active_weight_sync_pp_rank = active_pp_rank
                 is_active_pp_src = self._is_pp_src_rank and pp_rank == active_pp_rank
                 if is_active_pp_src:
@@ -221,9 +222,6 @@ class UpdateWeightFromDistributed:
         yields broadcast-ready chunks (bucketing happens internally).
         """
         if self._hf_weight_iterator is not None:
-            if not self._is_active_weight_sync_pp_stage():
-                dist.barrier(group=get_gloo_group())
-                return
             use_vllm_packed = self._use_vllm_packed()
             self._sync_bridge_weights_to_rollout_engines(pbar, use_vllm_packed=use_vllm_packed)
             return
