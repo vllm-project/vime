@@ -79,6 +79,16 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--non-colocate-weight-sync-backend",
+                choices=["broadcast", "nccl-xfer"],
+                default="broadcast",
+                help=(
+                    "Weight sync backend for non-colocated rollout engines. "
+                    "'broadcast' uses the existing vLLM NCCL gather-broadcast path; "
+                    "'nccl-xfer' opts into the experimental NCCL Xfer reshard path with broadcast fallback."
+                ),
+            )
+            parser.add_argument(
                 "--offload",
                 action="store_true",
                 default=False,
@@ -1959,6 +1969,9 @@ def vime_validate_args(args):
         args.offload_train = False
     if args.offload_rollout is None:
         args.offload_rollout = False
+
+    if args.colocate and getattr(args, "non_colocate_weight_sync_backend", "broadcast") != "broadcast":
+        raise ValueError("--non-colocate-weight-sync-backend=nccl-xfer is only valid when --colocate is disabled.")
 
     if args.use_critic:
         args.offload_train = True
