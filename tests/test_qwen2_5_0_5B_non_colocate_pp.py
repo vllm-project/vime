@@ -15,10 +15,15 @@ def prepare():
     U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
     U.hf_download_dataset("zhuzilin/gsm8k")
 
+    U.convert_checkpoint(
+        model_name=MODEL_NAME,
+        megatron_model_type=MODEL_TYPE,
+        num_gpus_per_node=NUM_GPUS,
+        dir_dst="/root/models",
+    )
+
 
 def execute():
-    ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load /root/models/{MODEL_NAME}/ "
-
     rollout_args = (
         "--prompt-data /root/datasets/gsm8k/train.parquet "
         "--input-key messages "
@@ -83,26 +88,37 @@ def execute():
         "--attention-backend flash "
         "--actor-num-nodes 1 "
         "--actor-num-gpus-per-node 2 "
-        "--megatron-to-hf-mode bridge "
     )
 
-    train_args = (
-        f"{ckpt_args} "
-        f"{rollout_args} "
-        f"{optimizer_args} "
-        f"{grpo_args} "
-        f"{U.get_default_wandb_args(__file__)} "
-        f"{perf_args} "
-        f"{vllm_args} "
-        f"{ci_args} "
-        f"{misc_args} "
-    )
+    for megatron_to_hf_mode in ("bridge", "raw"):
+        if megatron_to_hf_mode == "bridge":
+            ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ --ref-load /root/models/{MODEL_NAME}/ "
+        else:
+            torch_dist_checkpoint = f"/root/models/{MODEL_NAME}_torch_dist"
+            ckpt_args = (
+                f"--hf-checkpoint /root/models/{MODEL_NAME}/ "
+                f"--load {torch_dist_checkpoint} "
+                f"--ref-load {torch_dist_checkpoint} "
+            )
 
-    U.execute_train(
-        train_args=train_args,
-        num_gpus_per_node=NUM_GPUS,
-        megatron_model_type=MODEL_TYPE,
-    )
+        train_args = (
+            f"{ckpt_args} "
+            f"{rollout_args} "
+            f"{optimizer_args} "
+            f"{grpo_args} "
+            f"{U.get_default_wandb_args(__file__)} "
+            f"{perf_args} "
+            f"{vllm_args} "
+            f"{ci_args} "
+            f"{misc_args} "
+            f"--megatron-to-hf-mode {megatron_to_hf_mode} "
+        )
+
+        U.execute_train(
+            train_args=train_args,
+            num_gpus_per_node=NUM_GPUS,
+            megatron_model_type=MODEL_TYPE,
+        )
 
 
 if __name__ == "__main__":
