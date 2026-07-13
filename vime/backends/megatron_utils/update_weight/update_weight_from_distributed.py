@@ -108,7 +108,8 @@ class UpdateWeightFromDistributed:
         if self._is_pp_src_rank:
             self._group_name = f"vime-pp_{pp_rank}"
 
-        if self._is_pp_src_rank and (self._pp_world_size == 1 or self._hf_weight_iterator is not None):
+        uses_persistent_group = self._pp_world_size == 1 or self._hf_weight_iterator is not None
+        if self._is_pp_src_rank and uses_persistent_group:
             if self._model_update_groups is not None:
                 disconnect_rollout_engines_from_distributed(
                     self.args, self._group_name, self._model_update_groups, self.rollout_engines
