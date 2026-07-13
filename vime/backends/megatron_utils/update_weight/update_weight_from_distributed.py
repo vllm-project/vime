@@ -226,20 +226,18 @@ class UpdateWeightFromDistributed:
             self._sync_bridge_weights_to_rollout_engines(pbar, use_vllm_packed=use_vllm_packed)
             return
 
-        if not self._is_active_weight_sync_pp_stage():
-            dist.barrier(group=get_gloo_group())
-            dist.barrier(group=get_gloo_group())
-            return
+        is_active_stage = self._is_active_weight_sync_pp_stage()
+        use_vllm_packed = False
+        if is_active_stage:
+            use_vllm_packed = self._use_vllm_packed()
+            if use_vllm_packed and self._is_pp_src_rank:
+                logger.info("Using vLLM packed weight sync (bucketed; metadata + trainer_send_weights per bucket)")
 
-        use_vllm_packed = self._use_vllm_packed()
-        if use_vllm_packed and self._is_pp_src_rank:
-            logger.info("Using vLLM packed weight sync (bucketed; metadata + trainer_send_weights per bucket)")
-
-        for hf_chunk in self._iter_non_expert_chunks():
-            self._update_bucket_weights_from_distributed(hf_chunk, pbar=pbar, packed=use_vllm_packed)
+            for hf_chunk in self._iter_non_expert_chunks():
+                self._update_bucket_weights_from_distributed(hf_chunk, pbar=pbar, packed=use_vllm_packed)
         dist.barrier(group=get_gloo_group())
 
-        if not use_vllm_packed:
+        if is_active_stage and not use_vllm_packed:
             for hf_chunk in self._iter_expert_chunks():
                 self._update_bucket_weights_from_distributed(hf_chunk, pbar=pbar, packed=False)
         dist.barrier(group=get_gloo_group())
