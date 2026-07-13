@@ -118,7 +118,6 @@ def execute_train(
         "pkill -9 vime; "
         "sleep 3; "
         f"{'' if external_ray else 'pkill -9 ray; '}"
-        "pkill -9 -f '[v]llm serve|VLL[M]::'; "
         # "pkill -9 python; "
         "pkill -9 vime; "
         "pkill -9 redis; "

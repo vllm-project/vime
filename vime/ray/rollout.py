@@ -510,6 +510,9 @@ class RolloutManager:
     def dispose(self):
         for monitor in self._health_monitors:
             monitor.stop()
+        engines = [engine for server in self.servers.values() for engine in server.all_engines if engine is not None]
+        if engines:
+            ray.get([engine.shutdown.remote() for engine in engines])
         logging_utils.finish_tracking(self.args)
 
     @property
