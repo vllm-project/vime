@@ -196,9 +196,7 @@ class ServerGroup:
             # IPC. Strip only that key, keeping any other allocator settings.
             _alloc = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
             env_vars["PYTORCH_CUDA_ALLOC_CONF"] = ",".join(
-                kv
-                for kv in _alloc.split(",")
-                if kv and not kv.strip().startswith("expandable_segments")
+                kv for kv in _alloc.split(",") if kv and not kv.strip().startswith("expandable_segments")
             )
             rollout_engine = RolloutRayActor.options(
                 num_cpus=num_cpus,
