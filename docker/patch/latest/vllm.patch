@@ -1,65 +1,41 @@
-diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
---- a/vllm/v1/engine/core.py
-+++ b/vllm/v1/engine/core.py
-@@ -775,8 +775,10 @@
-         if tags is None or tags:
-             self.model_executor.wake_up(tags)
- 
--        # Resume scheduling (applies to all levels)
--        self.resume_scheduler()
-+        # Partial wakes intentionally keep the remaining allocations asleep.
-+        # Resume scheduling only once all executor memory is resident again.
-+        if not self.model_executor.is_sleeping:
-+            self.resume_scheduler()
- 
-     def is_sleeping(self) -> bool:
-         """Check if engine is sleeping at any level."""
-@@ -1894,9 +1896,12 @@
-                     continue
- 
-                 # We are in a running state and so must execute a dummy pass
--                # if the model didn't execute any ready requests.
--                with self.log_iteration_details(None):
--                    self.execute_dummy_batch()
-+                # if the model didn't execute any ready requests -- unless the executor is
-+                # asleep (#44483: a decode-shaped dummy batch reads freed KV -> illegal memory
-+                # access). The finished-sync all-reduce below still runs (DP lockstep).
-+                if not self.is_sleeping():
-+                    with self.log_iteration_details(None):
-+                        self.execute_dummy_batch()
- 
-             # 3) All-reduce operation to determine global unfinished reqs.
-             self.engines_running = self._has_global_unfinished_reqs(
-diff --git a/vllm/model_executor/layers/fused_moe/all2all_utils.py b/vllm/model_executor/layers/fused_moe/all2all_utils.py
---- a/vllm/model_executor/layers/fused_moe/all2all_utils.py
-+++ b/vllm/model_executor/layers/fused_moe/all2all_utils.py
-@@ -5,7 +5,6 @@ from typing import Any
- 
- import torch
- 
--from vllm.config import get_current_vllm_config
- from vllm.distributed import (
-     get_ep_group,
- )
-@@ -240,9 +239,7 @@ def maybe_make_prepare_finalize(
- 
-     elif moe.use_fi_nvl_one_sided_kernels:
-         assert quant_config is not None
--        max_num_tokens = (
--            get_current_vllm_config().scheduler_config.max_num_batched_tokens
--        )
-+        max_num_tokens = moe.max_num_tokens
-         if quant_config.quant_dtype is None:
-             dispatch_dtype_bytes_per_elem = 2
-             dispatch_scale_bytes_per_token = 0
+diff --git a/vllm/engine/protocol.py b/vllm/engine/protocol.py
+index 3f83734a5..c68f696ba 100644
+--- a/vllm/engine/protocol.py
++++ b/vllm/engine/protocol.py
+@@ -248,6 +248,10 @@ class EngineClient(ABC):
+         """Start a new weight update."""
+         raise NotImplementedError
 
++    async def start_draft_weight_update(self) -> None:
++        """Start a new weight update targeting the speculative draft model."""
++        raise NotImplementedError
++
+     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
+         """Batched weight update for RL training."""
+         raise NotImplementedError
+diff --git a/vllm/entrypoints/llm.py b/vllm/entrypoints/llm.py
+index 892e5035a..f3e5234d5 100644
+--- a/vllm/entrypoints/llm.py
++++ b/vllm/entrypoints/llm.py
+@@ -880,6 +880,10 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
+             kwargs={"is_checkpoint_format": is_checkpoint_format},
+         )
+
++    def start_draft_weight_update(self) -> None:
++        """Start a new weight update targeting the speculative draft model."""
++        self.llm_engine.collective_rpc("start_draft_weight_update")
++
+     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
+         """
+         Update the weights of the model.
 diff --git a/vllm/entrypoints/serve/dev/rlhf/api_router.py b/vllm/entrypoints/serve/dev/rlhf/api_router.py
+index 6237de877..fe40c012a 100644
 --- a/vllm/entrypoints/serve/dev/rlhf/api_router.py
 +++ b/vllm/entrypoints/serve/dev/rlhf/api_router.py
-@@ -91,6 +91,51 @@ async def resume_generation(raw_request: Request) -> JSONResponse:
+@@ -91,6 +91,47 @@ async def resume_generation(raw_request: Request) -> JSONResponse:
          )
- 
- 
+
+
 +@router.post("/abort_requests")
 +async def abort_requests(raw_request: Request) -> JSONResponse:
 +    """Abort in-flight requests without pausing the scheduler.
@@ -78,12 +54,8 @@ diff --git a/vllm/entrypoints/serve/dev/rlhf/api_router.py b/vllm/entrypoints/se
 +
 +    try:
 +        if request_ids:
-+            # Body ids are external (user-supplied) request ids.
 +            await engine.abort(request_ids)
 +        else:
-+            # The dev RL server runs AsyncLLM; abort everything it is tracking.
-+            # request_states is keyed by internal ids; parent_requests holds
-+            # parallel-sampling parents. Abort both as internal ids.
 +            from vllm.v1.engine.async_llm import AsyncLLM
 +
 +            assert isinstance(engine, AsyncLLM)
@@ -108,16 +80,224 @@ diff --git a/vllm/entrypoints/serve/dev/rlhf/api_router.py b/vllm/entrypoints/se
  @router.get("/is_paused")
  async def is_paused(raw_request: Request) -> JSONResponse:
      """Return the current pause status."""
-diff --git a/vllm/entrypoints/serve/disagg/protocol.py b/vllm/entrypoints/serve/disagg/protocol.py
-index 60d2a64..67f3f98 100644
---- a/vllm/entrypoints/serve/disagg/protocol.py
-+++ b/vllm/entrypoints/serve/disagg/protocol.py
-@@ -203,6 +203,8 @@ class GenerateResponse(BaseModel):
-     )
-     choices: list[GenerateResponseChoice]
- 
-+    usage: UsageInfo | None = Field(default=None)
+@@ -140,6 +181,12 @@ async def start_weight_update(raw_request: Request):
+     return JSONResponse(content={"message": "Weight update started"})
+
+
++@router.post("/start_draft_weight_update")
++async def start_draft_weight_update(raw_request: Request):
++    await engine_client(raw_request).start_draft_weight_update()
++    return JSONResponse(content={"message": "Draft weight update started"})
 +
-     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
- 
-     kv_transfer_params: dict[str, Any] | None = Field(
++
+ @router.post("/update_weights")
+ async def update_weights(raw_request: Request):
+     try:
+diff --git a/vllm/model_executor/layers/fused_moe/all2all_utils.py b/vllm/model_executor/layers/fused_moe/all2all_utils.py
+index 1351e87b5..1a91cc6b6 100644
+--- a/vllm/model_executor/layers/fused_moe/all2all_utils.py
++++ b/vllm/model_executor/layers/fused_moe/all2all_utils.py
+@@ -282,9 +282,7 @@ def maybe_make_prepare_finalize(
+
+     elif moe.use_fi_nvl_one_sided_kernels:
+         assert quant_config is not None
+-        max_num_tokens = (
+-            get_current_vllm_config().scheduler_config.max_num_batched_tokens
+-        )
++        max_num_tokens = moe.max_num_tokens
+         if quant_config.quant_dtype is None:
+             dispatch_dtype_bytes_per_elem = 2
+             dispatch_scale_bytes_per_token = 0
+diff --git a/vllm/v1/engine/async_llm.py b/vllm/v1/engine/async_llm.py
+index 419e15163..f39c9a6d5 100644
+--- a/vllm/v1/engine/async_llm.py
++++ b/vllm/v1/engine/async_llm.py
+@@ -1087,6 +1087,10 @@ class AsyncLLM(EngineClient):
+             kwargs={"is_checkpoint_format": is_checkpoint_format},
+         )
+
++    async def start_draft_weight_update(self) -> None:
++        """Start a new weight update targeting the speculative draft model."""
++        await self.collective_rpc("start_draft_weight_update")
++
+     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
+         """
+         Batched weight update for RL training.
+diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runner.py
+index 30ca2ddc5..853b9e51e 100644
+--- a/vllm/v1/worker/gpu/model_runner.py
++++ b/vllm/v1/worker/gpu/model_runner.py
+@@ -371,6 +371,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+     def get_model(self) -> nn.Module:
+         return self.model
+
++    def get_draft_model(self) -> nn.Module | None:
++        if not isinstance(self.speculator, DraftModelSpeculator):
++            return None
++        return self.speculator.model
++
+     def reload_weights(self, *args, **kwargs) -> None:
+         # TODO(Wentao): Use full version instead of import when fully migrated to v2
+         from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+index 74938a823..65e223e38 100644
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -3218,6 +3218,17 @@ class GPUModelRunner(
+             return self.model.unwrap()
+         return self.model
+
++    def get_draft_model(self) -> nn.Module | None:
++        drafter = getattr(self, "drafter", None)
++        if drafter is None:
++            return None
++        model = getattr(drafter, "model", None)
++        if isinstance(
++            model, (CUDAGraphWrapper, UBatchWrapper, BreakableCUDAGraphWrapper)
++        ):
++            return cast(nn.Module, model.unwrap())
++        return cast(nn.Module | None, model)
++
+     def apply_sparse_weight_patches(self, patches: Iterable[SparseWeightPatch]) -> None:
+         """Apply sparse flat-index patches directly to existing model params."""
+         model = self.get_model()
+diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
+index 5e266a313..8e8616111 100644
+--- a/vllm/v1/worker/gpu_worker.py
++++ b/vllm/v1/worker/gpu_worker.py
+@@ -147,6 +147,8 @@ class Worker(WorkerBase):
+         self.weight_transfer_engine: WeightTransferEngine | None = None
+         self._weight_update_active = False
+         self._is_checkpoint_format = True
++        self._weight_update_model: nn.Module | None = None
++        self._weight_update_model_config = None
+
+         # Torch/CUDA profiler. Enabled and configured through profiler_config.
+         # Profiler wrapper is created lazily in profile() when start is called,
+@@ -788,6 +790,32 @@ class Worker(WorkerBase):
+     def get_model(self) -> nn.Module:
+         return self.model_runner.get_model()
+
++    def get_draft_model(self) -> nn.Module | None:
++        return self.model_runner.get_draft_model()
++
++    def _select_weight_update_target(self, is_draft: bool) -> None:
++        if not is_draft:
++            self._weight_update_model = self.model_runner.model
++            self._weight_update_model_config = self.model_config
++            return
++
++        draft_model = self.get_draft_model()
++        if draft_model is None:
++            raise RuntimeError(
++                "Draft model weight update requested, but no draft model is configured."
++            )
++        speculative_config = self.speculative_config
++        if speculative_config is None or speculative_config.draft_model_config is None:
++            raise RuntimeError(
++                "Draft model weight update requested, but no draft model config is configured."
++            )
++        self._weight_update_model = draft_model
++        self._weight_update_model_config = speculative_config.draft_model_config
++
++    def _clear_weight_update_target(self) -> None:
++        self._weight_update_model = None
++        self._weight_update_model_config = None
++
+     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+         return self.model_runner.get_supported_tasks()
+
+@@ -1051,6 +1079,18 @@ class Worker(WorkerBase):
+                 format (need layerwise processing) or kernel format (direct
+                 copy / sparse patch application).
+         """
++        self._start_weight_update(
++            is_checkpoint_format=is_checkpoint_format,
++            is_draft=False,
++        )
++
++    def start_draft_weight_update(self) -> None:
++        """Start a checkpoint-format update targeting the speculative draft."""
++        self._start_weight_update(is_checkpoint_format=True, is_draft=True)
++
++    def _start_weight_update(
++        self, *, is_checkpoint_format: bool, is_draft: bool
++    ) -> None:
+         self._check_weight_transfer_engine()
+
+         if self._weight_update_active:
+@@ -1059,14 +1099,19 @@ class Worker(WorkerBase):
+                 "active. Call finish_weight_update first."
+             )
+
+-        if is_checkpoint_format:
+-            from vllm.model_executor.model_loader.reload import (
+-                initialize_layerwise_reload,
+-            )
++        try:
++            self._select_weight_update_target(is_draft)
++            if is_checkpoint_format:
++                from vllm.model_executor.model_loader.reload import (
++                    initialize_layerwise_reload,
++                )
+
+-            model = self.model_runner.model
+-            with torch.device(self.device):
+-                initialize_layerwise_reload(model)
++                assert self._weight_update_model is not None
++                with torch.device(self.device):
++                    initialize_layerwise_reload(self._weight_update_model)
++        except BaseException:
++            self._clear_weight_update_target()
++            raise
+
+         self._is_checkpoint_format = is_checkpoint_format
+         self._weight_update_active = True
+@@ -1104,7 +1149,8 @@ class Worker(WorkerBase):
+                             "`start_weight_update(is_checkpoint_format=False)`."
+                         )
+
+-                    model = self.model_runner.model
++                    assert self._weight_update_model is not None
++                    model = self._weight_update_model
+
+                     # Use layerwise reload pattern for checkpoint format weights
+                     self.weight_transfer_engine.receive_weights(
+@@ -1121,7 +1167,8 @@ class Worker(WorkerBase):
+                         apply_patches=self.model_runner.apply_sparse_weight_patches,
+                     )
+                 else:
+-                    model = self.model_runner.model
++                    assert self._weight_update_model is not None
++                    model = self._weight_update_model
+
+                     # Weights are already in kernel format, copy directly.
+                     def load_weights_direct(
+@@ -1144,6 +1191,7 @@ class Worker(WorkerBase):
+             if not update_succeeded:
+                 self._weight_update_active = False
+                 self._is_checkpoint_format = True
++                self._clear_weight_update_target()
+
+     def finish_weight_update(self) -> None:
+         """Finish the current weight update session."""
+@@ -1159,12 +1207,17 @@ class Worker(WorkerBase):
+                 finalize_layerwise_reload,
+             )
+
+-            model = self.model_runner.model
++            assert self._weight_update_model is not None
++            assert self._weight_update_model_config is not None
+             with torch.device(self.device):
+-                finalize_layerwise_reload(model, self.model_config)
++                finalize_layerwise_reload(
++                    self._weight_update_model,
++                    self._weight_update_model_config,
++                )
+
+         self._weight_update_active = False
+         self._is_checkpoint_format = True
++        self._clear_weight_update_target()
+
+     def shutdown(self) -> None:
+         gc.unfreeze()

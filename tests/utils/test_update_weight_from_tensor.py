@@ -127,6 +127,7 @@ class RecordingVLLMEngine:
     resume_memory_occupation: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     init_weight_transfer_engine: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     start_weight_update: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
+    start_draft_weight_update: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     finish_weight_update: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     update_weights_from_tensor: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     pause_generation: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
@@ -141,6 +142,8 @@ def _default_args(**kwargs) -> Namespace:
         rollout_num_gpus_per_engine=2,
         megatron_to_hf_mode="raw",
         update_weight_buffer_size=1 << 30,
+        enable_mtp_training=False,
+        vllm_speculative_config=None,
     )
     base.update(kwargs)
     return Namespace(**base)
@@ -189,7 +192,7 @@ def _run_update(obj, *, chunks=None, rank=0, slot_size=1) -> dict:
     """
     chunks = chunks or _chunks(1)
     obj._hf_weight_iterator = MagicMock()
-    obj._hf_weight_iterator.get_hf_weight_chunks.return_value = iter(chunks)
+    obj._hf_weight_iterator.get_hf_weight_chunks.side_effect = lambda *args, **kwargs: iter(chunks)
 
     counters = {"barrier": 0, "ipc_collect": 0}
 
@@ -234,6 +237,29 @@ def test_colocated_lifecycle_uses_pause_flush_and_weight_transfer_apis(upw_vllm)
     assert counters["ipc_collect"] == 2 + 1
     # lifecycle barriers (no per-chunk barrier).
     assert counters["barrier"] >= 4
+
+
+@pytest.mark.unit
+def test_colocated_mtp_updates_target_then_draft_from_fresh_weight_stream(upw_vllm):
+    obj = _make_instance(
+        upw_vllm,
+        args=_default_args(
+            enable_mtp_training=True,
+            vllm_speculative_config={"method": "mtp", "num_speculative_tokens": 2},
+        ),
+    )
+    engine = RecordingVLLMEngine()
+    _bind_single_slot(obj, engine, src=0)
+
+    dummy_info = {"names": ["w"], "dtype_names": ["bfloat16"], "shapes": [[2, 2]], "ipc_handles": []}
+    with patch(f"{MODULE_PATH}._build_ipc_update_info_from_named_tensors", return_value=(dummy_info, [])):
+        _run_update(obj, chunks=_chunks(2))
+
+    assert len(engine.start_weight_update.calls) == 1
+    assert len(engine.start_draft_weight_update.calls) == 1
+    assert len(engine.finish_weight_update.calls) == 2
+    assert len(engine.update_weights_from_tensor.calls) == 4
+    assert obj._hf_weight_iterator.get_hf_weight_chunks.call_count == 2
 
 
 @pytest.mark.unit

@@ -164,6 +164,15 @@ class UpdateWeightFromDistributed:
         finally:
             _end_vllm_weight_update_session(self.rollout_engines)
 
+        if self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp":
+            if dist.get_rank() == 0:
+                ray.get([engine.start_draft_weight_update.remote() for engine in self.rollout_engines])
+            dist.barrier(group=get_gloo_group())
+            try:
+                self._send_weights_to_rollout_engines()
+            finally:
+                _end_vllm_weight_update_session(self.rollout_engines)
+
         dist.barrier(group=get_gloo_group())
         if dist.get_rank() == 0:
             # int4/fp4 post_process

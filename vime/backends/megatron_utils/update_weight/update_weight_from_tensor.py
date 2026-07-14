@@ -317,6 +317,27 @@ class UpdateWeightFromTensor:
             ray.get(self._ipc_engine.finish_weight_update.remote())
         dist.barrier(group=get_gloo_group())
 
+        if (
+            not self.use_distribute
+            and self.args.enable_mtp_training
+            and (self.args.vllm_speculative_config or {}).get("method") == "mtp"
+        ):
+            if self._ipc_engine is not None and rank == self._ipc_gather_src:
+                ray.get(self._ipc_engine.start_draft_weight_update.remote())
+            dist.barrier(group=get_gloo_group())
+
+            for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(megatron_local_weights):
+                refs, long_lived_tensors = self._send_hf_params(hf_named_tensors)
+                ray.get(refs)
+                del long_lived_tensors, hf_named_tensors
+                torch.cuda.ipc_collect()
+
+            dist.barrier(group=get_gloo_group())
+            torch.cuda.ipc_collect()
+            if self._ipc_engine is not None and rank == self._ipc_gather_src:
+                ray.get(self._ipc_engine.finish_weight_update.remote())
+            dist.barrier(group=get_gloo_group())
+
         # int4/fp4 post_process
         if rank == 0:
             if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:

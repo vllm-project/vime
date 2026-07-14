@@ -711,8 +711,9 @@ def test_weight_update_session_calls_start_and_finish(upw, monkeypatch):
 def test_source_wraps_sync_with_weight_update_session(upw):
     src = inspect.getsource(upw.UpdateWeightFromDistributed.update_weights)
     assert "_begin_vllm_weight_update_session" in src
+    assert "start_draft_weight_update" in src
     assert "_end_vllm_weight_update_session" in src
-    assert "_send_weights" in src
+    assert src.count("_send_weights_to_rollout_engines") == 2
 
 
 @pytest.mark.unit

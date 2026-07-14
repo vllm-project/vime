@@ -338,6 +338,22 @@ def test_start_weight_update_posts_four_phase_endpoint(vllm_engine, monkeypatch)
 
 
 @pytest.mark.unit
+def test_start_draft_weight_update_posts_empty_body(vllm_engine, monkeypatch):
+    calls: list[tuple] = []
+
+    def fake_post(endpoint: str, payload: dict):
+        calls.append((endpoint, payload))
+        return {"ok": True}
+
+    monkeypatch.setattr(vllm_engine, "_make_request", fake_post)
+
+    result = vllm_engine.start_draft_weight_update()
+
+    assert result == {"ok": True}
+    assert calls == [("start_draft_weight_update", {})]
+
+
+@pytest.mark.unit
 def test_finish_weight_update_posts_empty_body(vllm_engine, monkeypatch):
     calls: list[tuple] = []
 
