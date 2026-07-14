@@ -31,6 +31,7 @@ from .cp_utils import slice_log_prob_with_cp, slice_with_cp
 from .data import DataIterator, get_data_iterator, log_perf_data, log_rollout_data
 from .hf_checkpoint_saver import save_hf_model_to_path
 from .initialize import init, is_megatron_main_rank
+from .lora_utils import is_lora_enabled
 from .loss import compute_advantages_and_returns, get_log_probs_and_entropy, get_values
 from .model import forward_only, initialize_model_and_optimizer, save, train
 from .update_weight.common import named_params_and_buffers
@@ -200,7 +201,12 @@ class MegatronTrainRayActor(TrainRayActor):
             self.weight_updater.disconnect_rollout_engines()
         destroy_process_groups()
 
-        torch_memory_saver.pause()
+        # Under LoRA the DDP buffers hold only the adapter and live in no-cpu-backup
+        # regions (tags "param_buffer"/"grad_buffer"), so an untagged pause would unmap
+        # them and discard their contents. Pausing only "default" keeps the adapter
+        # resident, which is what lets update_weights run without waking the base.
+        tag = "default" if is_lora_enabled(self.args) else None
+        torch_memory_saver.pause(tag=tag)
 
         print_memory("after offload model")
 
@@ -209,7 +215,8 @@ class MegatronTrainRayActor(TrainRayActor):
         assert self.args.offload_train
         print_memory("before wake_up model")
 
-        torch_memory_saver.resume()
+        tag = "default" if is_lora_enabled(self.args) else None
+        torch_memory_saver.resume(tag=tag)
 
         clear_memory()
         reload_process_groups()
@@ -592,14 +599,15 @@ class MegatronTrainRayActor(TrainRayActor):
         )
 
         reconnect_rollout_engines = self.args.offload_train and self.args.use_critic and not self.args.colocate
-        wake_for_lora_update = self.args.offload_train and self.args.lora_rank > 0
 
         if not rollout_engines and not reconnect_rollout_engines:
             if dist.get_rank() == 0:
                 logger.info("No updatable vLLM engines are running; skip weight update.")
             return
 
-        if reconnect_rollout_engines or wake_for_lora_update:
+        # LoRA needs no wake here: sleep() pauses only the "default" region, so the
+        # adapter buffers the export reads are still mapped on the GPU.
+        if reconnect_rollout_engines:
             self.wake_up()
         elif self.args.offload_train:
             reload_process_groups()
@@ -639,7 +647,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 else:
                     self.weights_backuper.backup("old_actor")
 
-        if reconnect_rollout_engines or wake_for_lora_update:
+        if reconnect_rollout_engines:
             self.sleep()
         elif self.args.offload_train:
             destroy_process_groups()
