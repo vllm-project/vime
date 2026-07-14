@@ -58,7 +58,6 @@ def launch_server_process(server_args_dict: dict) -> multiprocessing.Process:
 def _build_subprocess_env(server_args_dict: dict[str, Any]) -> dict[str, str]:
     args = server_args_dict["_args"]
     env = os.environ.copy()
-    env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
     env.setdefault("NCCL_CUMEM_ENABLE", "0")
     env["CUDA_VISIBLE_DEVICES"] = server_args_dict["_visible_devices"]
     # ROCm: keep HIP visibility in sync with CUDA (no-op on CUDA).
@@ -86,6 +85,15 @@ def _build_subprocess_env(server_args_dict: dict[str, Any]) -> dict[str, str]:
 
 def _run_vllm_server(kwargs: dict, env: dict) -> None:
     os.environ.update(env)
+    # multiprocessing(spawn) inherits the parent's full live environment before
+    # this function runs; os.environ.update(env) above only adds/overrides keys
+    # present in `env`, it can't remove an inherited key that isn't in `env`.
+    # So this must pop straight from this process's own os.environ (after the
+    # inherit, not from a dict merged into it) to actually take effect,
+    # regardless of whether the parent's PYTORCH_CUDA_ALLOC_CONF came from
+    # Ray's runtime_env or anywhere else. expandable_segments breaks vLLM's
+    # custom all-reduce CUDA IPC.
+    os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
 
     from vllm.entrypoints.cli.serve import ServeSubcommand
     from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
