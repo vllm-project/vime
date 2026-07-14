@@ -20,6 +20,7 @@ from vime.utils.http_utils import get_host_info
 logger = logging.getLogger(__name__)
 
 _VLLM_WAKE_TAGS = frozenset({"weights", "kv_cache"})
+_ASCEND_MXFP8_WORKER_EXTENSION = "vime.backends.vllm_utils.ascend_mxfp8.AscendMXFP8WorkerExtension"
 
 
 def get_base_gpu_id(args, rank):
@@ -66,13 +67,17 @@ def _build_subprocess_env(server_args_dict: dict[str, Any]) -> dict[str, str]:
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")
     if getattr(args, "vllm_enable_deterministic_inference", False):
         env["VLLM_BATCH_INVARIANT"] = "1"
-    if getattr(args, "colocate", False):
+    needs_vime_pythonpath = getattr(args, "colocate", False) or (
+        server_args_dict.get("worker_extension_cls") == _ASCEND_MXFP8_WORKER_EXTENSION
+    )
+    if needs_vime_pythonpath:
         import vime
 
         vime_root = os.path.dirname(os.path.dirname(os.path.abspath(vime.__file__)))
         existing_pp = env.get("PYTHONPATH", "")
         if vime_root not in {p for p in existing_pp.split(os.pathsep) if p}:
             env["PYTHONPATH"] = os.pathsep.join(filter(None, [vime_root, existing_pp]))
+    if getattr(args, "colocate", False):
         env.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     worker_type = server_args_dict.get("_worker_type", "regular")
@@ -130,6 +135,9 @@ class VLLMEngine(RayActor):
         self.vllm_overrides = vllm_overrides or {}
         self.num_gpus_per_engine = num_gpus_per_engine
         self._weight_version: str | None = None
+        self._pending_weight_version: str | None = None
+        quantization = _requested_quantization(args, self.vllm_overrides)
+        self._uses_ascend_mxfp8 = not args.rollout_external and str(quantization).lower() == "ascend"
 
     def init(
         self,
@@ -279,7 +287,7 @@ class VLLMEngine(RayActor):
         if flush_cache:
             self.flush_cache()
         result = self._make_request("update_weights", {"update_info": payload})
-        self._weight_version = str(weight_version)
+        self._record_weight_version(weight_version)
         return result
 
     def flush_cache(self):
@@ -330,6 +338,12 @@ class VLLMEngine(RayActor):
     def set_weight_version(self, new_version: str):
         self._weight_version = str(new_version)
 
+    def _record_weight_version(self, weight_version: str) -> None:
+        if self._uses_ascend_mxfp8:
+            self._pending_weight_version = str(weight_version)
+        else:
+            self._weight_version = str(weight_version)
+
     def release_memory_occupation(self, level: int = 2):
         self.flush_cache()
         response = requests.post(f"http://{self.server_host}:{self.server_port}/sleep", params={"level": level})
@@ -355,10 +369,49 @@ class VLLMEngine(RayActor):
         return self._make_request("init_weight_transfer_engine", payload)
 
     def start_weight_update(self, is_checkpoint_format: bool = False) -> dict:
-        return self._make_request("start_weight_update", {"is_checkpoint_format": is_checkpoint_format})
+        result = self._make_request("start_weight_update", {"is_checkpoint_format": is_checkpoint_format})
+        if self._uses_ascend_mxfp8:
+            try:
+                self._collective_rpc("prepare_ascend_mxfp8_weight_update")
+            except Exception:
+                try:
+                    self._collective_rpc("finalize_ascend_mxfp8_weight_update", success=False)
+                except Exception:
+                    logger.exception("Failed to clean up Ascend MXFP8 prepare state")
+                try:
+                    self._make_request("finish_weight_update", {})
+                except Exception:
+                    logger.exception("Failed to close vLLM weight update after Ascend MXFP8 prepare error")
+                raise
+        return result
 
     def finish_weight_update(self) -> dict:
-        return self._make_request("finish_weight_update", {})
+        if not self._uses_ascend_mxfp8:
+            return self._make_request("finish_weight_update", {})
+
+        try:
+            result = self._make_request("finish_weight_update", {})
+        except Exception:
+            try:
+                self._collective_rpc("finalize_ascend_mxfp8_weight_update", success=False)
+            except Exception:
+                logger.exception("Failed to clean up Ascend MXFP8 state after vLLM finish error")
+            self._pending_weight_version = None
+            raise
+
+        try:
+            self._collective_rpc("finalize_ascend_mxfp8_weight_update", success=True)
+        except Exception:
+            self._pending_weight_version = None
+            raise
+
+        if self._pending_weight_version is not None:
+            self._weight_version = self._pending_weight_version
+            self._pending_weight_version = None
+        return result
+
+    def _collective_rpc(self, method: str, **kwargs):
+        return self._make_request("collective_rpc", {"method": method, "kwargs": kwargs})
 
     def update_weights_from_disk(self, model_path: str, load_format: str | None = None):
         del load_format
@@ -413,7 +466,7 @@ class VLLMEngine(RayActor):
             "packed": bool(packed),
         }
         result = self._make_request("update_weights", {"update_info": update_info})
-        self._weight_version = str(weight_version)
+        self._record_weight_version(weight_version)
         return result
 
     def pause_generation(self):
@@ -477,6 +530,14 @@ def _normalize_vllm_wake_tags(tags: list[str] | None) -> list[str] | None:
     if dropped:
         logger.debug("vLLM wake_up: dropped tags not supported by vLLM: %s", sorted(dropped))
     return normalized or None
+
+
+def _requested_quantization(args, vllm_overrides: dict | None) -> str | None:
+    if vllm_overrides:
+        for key, value in vllm_overrides.items():
+            if key.replace("-", "_") == "quantization":
+                return value
+    return getattr(args, "vllm_quantization", None)
 
 
 def _resolve_parallel_sizes(args, *, gpus_per_engine: int) -> tuple[int, int, int]:
@@ -620,6 +681,20 @@ def _compute_server_args(
             kwargs[normalized_key] = value
         if "model_path" in {k.replace("-", "_") for k in vllm_overrides}:
             kwargs["model"] = str(vllm_overrides.get("model_path") or vllm_overrides.get("model-path"))
+
+    if str(kwargs.get("quantization", "")).lower() == "ascend":
+        if args.rollout_external:
+            raise ValueError(
+                "Ascend MXFP8 rollout requires a Vime-managed vLLM server; "
+                "external vLLM servers are not supported."
+            )
+        worker_extension = kwargs.get("worker_extension_cls")
+        if worker_extension and worker_extension != _ASCEND_MXFP8_WORKER_EXTENSION:
+            raise ValueError(
+                "Ascend MXFP8 rollout requires Vime's worker extension, but a different "
+                f"worker extension was configured: {worker_extension}"
+            )
+        kwargs["worker_extension_cls"] = _ASCEND_MXFP8_WORKER_EXTENSION
 
     # vLLM-specific: topology metadata consumed by launch_server_process / _build_subprocess_env.
     # These keys are stripped before passing to vLLM's argparse.

@@ -306,6 +306,43 @@ def test_compute_server_args_no_sleep_mode_from_colocate(vllm_args):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(("colocate", "backend"), [(True, "ipc"), (False, "nccl")])
+def test_ascend_quantization_installs_same_worker_extension(vllm_args, monkeypatch, colocate, backend):
+    monkeypatch.setattr(mod, "_VLLM_SERVER_FIELDS", frozenset({"quantization", "worker_extension_cls"}))
+    vllm_args.rollout_external = False
+    vllm_args.colocate = colocate
+    vllm_args.vllm_quantization = "ascend"
+
+    server_args, _ = mod._compute_server_args(
+        vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000
+    )
+
+    assert server_args["weight_transfer_config"]["backend"] == backend
+    assert server_args["worker_extension_cls"] == mod._ASCEND_MXFP8_WORKER_EXTENSION
+
+
+@pytest.mark.unit
+def test_ascend_quantization_rejects_external_server(vllm_args, monkeypatch):
+    monkeypatch.setattr(mod, "_VLLM_SERVER_FIELDS", frozenset({"quantization", "worker_extension_cls"}))
+    vllm_args.rollout_external = True
+    vllm_args.vllm_quantization = "ascend"
+
+    with pytest.raises(ValueError, match="external vLLM"):
+        mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
+
+
+@pytest.mark.unit
+def test_ascend_quantization_rejects_conflicting_worker_extension(vllm_args, monkeypatch):
+    monkeypatch.setattr(mod, "_VLLM_SERVER_FIELDS", frozenset({"quantization", "worker_extension_cls"}))
+    vllm_args.rollout_external = False
+    vllm_args.vllm_quantization = "ascend"
+    vllm_args.vllm_worker_extension_cls = "custom.WorkerExtension"
+
+    with pytest.raises(ValueError, match="worker extension"):
+        mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
+
+
+@pytest.mark.unit
 def test_get_base_gpu_id_colocate(vllm_args):
     vllm_args.colocate = True
     vllm_args.num_gpus_per_node = 8
@@ -332,6 +369,25 @@ def test_start_weight_update_posts_four_phase_endpoint(vllm_engine, monkeypatch)
 
 
 @pytest.mark.unit
+def test_mxfp8_start_calls_native_then_prepare(vllm_engine, monkeypatch):
+    calls: list[tuple[str, dict]] = []
+    vllm_engine._uses_ascend_mxfp8 = True
+    monkeypatch.setattr(
+        vllm_engine,
+        "_make_request",
+        lambda endpoint, payload: calls.append((endpoint, payload)) or {"ok": True},
+    )
+
+    result = vllm_engine.start_weight_update(is_checkpoint_format=True)
+
+    assert result == {"ok": True}
+    assert calls == [
+        ("start_weight_update", {"is_checkpoint_format": True}),
+        ("collective_rpc", {"method": "prepare_ascend_mxfp8_weight_update", "kwargs": {}}),
+    ]
+
+
+@pytest.mark.unit
 def test_finish_weight_update_posts_empty_body(vllm_engine, monkeypatch):
     calls: list[tuple] = []
 
@@ -345,6 +401,58 @@ def test_finish_weight_update_posts_empty_body(vllm_engine, monkeypatch):
 
     assert result == {"done": True}
     assert calls == [("finish_weight_update", {})]
+
+
+@pytest.mark.unit
+def test_mxfp8_finish_finalizes_then_promotes_pending_version(vllm_engine, monkeypatch):
+    calls: list[tuple[str, dict]] = []
+    vllm_engine._uses_ascend_mxfp8 = True
+    vllm_engine._weight_version = "old"
+    vllm_engine._pending_weight_version = "new"
+    monkeypatch.setattr(
+        vllm_engine,
+        "_make_request",
+        lambda endpoint, payload: calls.append((endpoint, payload)) or {"ok": True},
+    )
+
+    result = vllm_engine.finish_weight_update()
+
+    assert result == {"ok": True}
+    assert calls == [
+        ("finish_weight_update", {}),
+        (
+            "collective_rpc",
+            {"method": "finalize_ascend_mxfp8_weight_update", "kwargs": {"success": True}},
+        ),
+    ]
+    assert vllm_engine._weight_version == "new"
+    assert vllm_engine._pending_weight_version is None
+
+
+@pytest.mark.unit
+def test_mxfp8_finish_failure_cleans_up_without_promoting_version(vllm_engine, monkeypatch):
+    calls: list[tuple[str, dict]] = []
+    vllm_engine._uses_ascend_mxfp8 = True
+    vllm_engine._weight_version = "old"
+    vllm_engine._pending_weight_version = "new"
+
+    def fake_request(endpoint, payload):
+        calls.append((endpoint, payload))
+        if endpoint == "finish_weight_update":
+            raise RuntimeError("finish failed")
+        return {"ok": True}
+
+    monkeypatch.setattr(vllm_engine, "_make_request", fake_request)
+
+    with pytest.raises(RuntimeError, match="finish failed"):
+        vllm_engine.finish_weight_update()
+
+    assert calls[-1] == (
+        "collective_rpc",
+        {"method": "finalize_ascend_mxfp8_weight_update", "kwargs": {"success": False}},
+    )
+    assert vllm_engine._weight_version == "old"
+    assert vllm_engine._pending_weight_version is None
 
 
 @pytest.mark.unit
@@ -375,6 +483,18 @@ def test_update_weights_from_tensor_posts_ipc_payload_and_records_version(vllm_e
     assert sent["shapes"] == [[2, 2]]
     # version recorded after POST success
     assert vllm_engine._weight_version == "42"
+
+
+@pytest.mark.unit
+def test_mxfp8_tensor_update_defers_version_until_finish(vllm_engine, monkeypatch):
+    vllm_engine._uses_ascend_mxfp8 = True
+    vllm_engine._weight_version = "old"
+    monkeypatch.setattr(vllm_engine, "_make_request", lambda endpoint, payload: {"ok": True})
+
+    vllm_engine.update_weights_from_tensor(names=[], dtype_names=[], shapes=[], ipc_handles=[], weight_version="new")
+
+    assert vllm_engine._weight_version == "old"
+    assert vllm_engine._pending_weight_version == "new"
 
 
 @pytest.mark.unit
@@ -447,6 +567,20 @@ def test_update_weights_from_distributed_posts_update_weights_without_checkpoint
     assert info["packed"] is True
     assert "is_checkpoint_format" not in info
     assert vllm_engine._weight_version == "7"
+
+
+@pytest.mark.unit
+def test_mxfp8_distributed_update_defers_version_until_finish(vllm_engine, monkeypatch):
+    vllm_engine._uses_ascend_mxfp8 = True
+    vllm_engine._weight_version = "old"
+    monkeypatch.setattr(vllm_engine, "_make_request", lambda endpoint, payload: {"ok": True})
+
+    vllm_engine.update_weights_from_distributed(
+        [], [], [], group_name="vime", weight_version="new", packed=True
+    )
+
+    assert vllm_engine._weight_version == "old"
+    assert vllm_engine._pending_weight_version == "new"
 
 
 @pytest.mark.unit
