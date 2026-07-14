@@ -141,7 +141,46 @@ def finalize_mxfp8_modules_after_reload(model: torch.nn.Module) -> int:
     return finalized
 
 
+class AscendMXFP8WorkerExtension:
+    """vLLM worker extension for online Ascend MXFP8 weight conversion.
+
+    Method names are intentionally unique: vLLM rejects extension classes
+    whose attributes conflict with methods already defined by its worker.
+    """
+
+    def prepare_ascend_mxfp8_weight_update(self) -> dict[str, int | bool]:
+        model_runner = self.model_runner
+        if not is_ascend_mxfp8_config(model_runner.vllm_config.quant_config):
+            return {"active": False, "modules": 0}
+        if hasattr(self, "_vime_mxfp8_original_load_weights"):
+            raise RuntimeError("Ascend MXFP8 weight update is already active")
+
+        model = model_runner.model
+        modules = prepare_mxfp8_modules_for_reload(model)
+        original_load_weights = model.load_weights
+
+        def load_quantized(weights):
+            dtype = model_runner.vllm_config.model_config.dtype
+            return original_load_weights(quantize_mxfp8_weights(weights, model, dtype))
+
+        self._vime_mxfp8_original_load_weights = original_load_weights
+        model.load_weights = load_quantized
+        return {"active": True, "modules": modules}
+
+    def finalize_ascend_mxfp8_weight_update(self, success: bool = True) -> dict[str, int | bool]:
+        original_load_weights = getattr(self, "_vime_mxfp8_original_load_weights", None)
+        if original_load_weights is None:
+            return {"active": False, "modules": 0}
+
+        model = self.model_runner.model
+        model.load_weights = original_load_weights
+        del self._vime_mxfp8_original_load_weights
+        modules = finalize_mxfp8_modules_after_reload(model) if success else 0
+        return {"active": True, "modules": modules}
+
+
 __all__ = [
+    "AscendMXFP8WorkerExtension",
     "MXFP8_QUANT_TYPE",
     "finalize_mxfp8_modules_after_reload",
     "is_ascend_mxfp8_config",

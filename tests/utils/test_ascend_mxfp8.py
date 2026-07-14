@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import types
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -66,6 +67,17 @@ class _Model(torch.nn.Module):
         super().__init__()
         self.layers = torch.nn.ModuleList([_Block(proj)])
         self.packed_modules_mapping = {}
+
+
+class _LoadableModel(_Model):
+    def __init__(self, proj):
+        super().__init__(proj)
+        self.loaded = []
+
+    def load_weights(self, weights):
+        loaded = list(weights)
+        self.loaded.extend(loaded)
+        return {name for name, _ in loaded}
 
 
 class _PackedBlock(torch.nn.Module):
@@ -226,3 +238,80 @@ def test_finalize_reapplies_mxfp8_layout_idempotently():
     assert mx.finalize_mxfp8_modules_after_reload(model) == 1
     assert mx.finalize_mxfp8_modules_after_reload(model) == 0
     layer.scheme.process_weights_after_loading.assert_called_once_with(layer)
+
+
+def _make_worker(config, *, transformed: bool = True):
+    worker = mx.AscendMXFP8WorkerExtension()
+    layer = _Linear(transformed=transformed, native_shapes_restored=True)
+    layer.scheme.process_weights_after_loading.side_effect = lambda module: setattr(
+        module, "_mxfp8_transformed", True
+    )
+    model = _LoadableModel(layer)
+    worker.model_runner = SimpleNamespace(
+        model=model,
+        vllm_config=SimpleNamespace(
+            quant_config=config,
+            model_config=SimpleNamespace(dtype=torch.bfloat16),
+        ),
+    )
+    return worker, model, layer
+
+
+@pytest.mark.unit
+def test_worker_prepare_wraps_common_model_load_boundary(fake_ascend_config_module, fake_torch_npu):
+    config = fake_ascend_config_module({"layer.weight": "W8A8_MXFP8"})
+    worker, model, _ = _make_worker(config)
+
+    result = worker.prepare_ascend_mxfp8_weight_update()
+    loaded = model.load_weights([("layers.0.proj.weight", torch.ones(2, 4))])
+
+    assert result == {"active": True, "modules": 1}
+    assert loaded == {"layers.0.proj.weight", "layers.0.proj.weight_scale"}
+    assert [name for name, _ in model.loaded] == ["layers.0.proj.weight", "layers.0.proj.weight_scale"]
+
+
+@pytest.mark.unit
+def test_worker_finalize_restores_loader_and_reapplies_layout(fake_ascend_config_module):
+    config = fake_ascend_config_module({"layer.weight": "W8A8_MXFP8"})
+    worker, model, layer = _make_worker(config)
+    original_loader = model.load_weights
+
+    worker.prepare_ascend_mxfp8_weight_update()
+    result = worker.finalize_ascend_mxfp8_weight_update(success=True)
+
+    assert model.load_weights == original_loader
+    assert result == {"active": True, "modules": 1}
+    layer.scheme.process_weights_after_loading.assert_called_once_with(layer)
+
+
+@pytest.mark.unit
+def test_worker_failure_cleanup_restores_loader_without_processing(fake_ascend_config_module):
+    config = fake_ascend_config_module({"layer.weight": "W8A8_MXFP8"})
+    worker, model, layer = _make_worker(config)
+    original_loader = model.load_weights
+
+    worker.prepare_ascend_mxfp8_weight_update()
+    result = worker.finalize_ascend_mxfp8_weight_update(success=False)
+
+    assert model.load_weights == original_loader
+    assert result == {"active": True, "modules": 0}
+    layer.scheme.process_weights_after_loading.assert_not_called()
+
+
+@pytest.mark.unit
+def test_worker_non_mxfp8_config_is_noop(fake_ascend_config_module):
+    worker, model, _ = _make_worker(fake_ascend_config_module({"layer.weight": "FLOAT"}))
+    original_loader = model.load_weights
+
+    assert worker.prepare_ascend_mxfp8_weight_update() == {"active": False, "modules": 0}
+    assert worker.finalize_ascend_mxfp8_weight_update() == {"active": False, "modules": 0}
+    assert model.load_weights == original_loader
+
+
+@pytest.mark.unit
+def test_worker_rejects_nested_prepare(fake_ascend_config_module):
+    worker, _, _ = _make_worker(fake_ascend_config_module({"layer.weight": "W8A8_MXFP8"}))
+    worker.prepare_ascend_mxfp8_weight_update()
+
+    with pytest.raises(RuntimeError, match="already active"):
+        worker.prepare_ascend_mxfp8_weight_update()
