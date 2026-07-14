@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=vllm/vllm-openai:v0.24.0-cu129-ubuntu2404
+ARG BASE_IMAGE=vllm/vllm-openai:v0.24.0-ubuntu2404
 FROM ${BASE_IMAGE}
 
 # ======================================== Arguments =============================================
@@ -6,7 +6,7 @@ FROM ${BASE_IMAGE}
 ARG PATCH_VERSION=latest
 ARG MEGATRON_COMMIT=1dcf0dafa884ad52ffb243625717a3471643e087
 
-ARG ENABLE_CUDA_13=0
+ARG ENABLE_CUDA_13=1
 
 # ======================================== Setup =============================================
 
