@@ -104,8 +104,26 @@ def install_vllm_router_stub() -> None:
         return
 
     class RouterArgs:
+        # Stub of vllm_router.RouterArgs for CPU unit tests when the real package is absent.
         @classmethod
-        def add_cli_args(cls, parser, *args, **kwargs):  # noqa: ARG003
+        def add_cli_args(
+            cls, parser, *args, use_router_prefix=False, exclude_host_port=False, **kwargs
+        ):  # noqa: ARG003
+            prefix = "router-" if use_router_prefix else ""
+            dprefix = "router_" if use_router_prefix else ""
+            parser.add_argument(
+                f"--{prefix}policy",
+                dest=f"{dprefix}policy",
+                type=str,
+                default="cache_aware",
+                choices=["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash"],
+            )
+            parser.add_argument(
+                f"--{prefix}request-timeout-secs",
+                dest=f"{dprefix}request_timeout_secs",
+                type=int,
+                default=1800,
+            )
             return parser
 
         @classmethod
@@ -210,6 +228,9 @@ def install_ray_stub() -> None:
 
 def install_vllm_cli_stubs() -> None:
     """Stub vLLM CLI/parser imports for ``vime.backends.vllm_utils.arguments`` when vLLM is absent."""
+    # arguments.py imports RouterArgs at module load, so the router stub must be present too.
+    install_vllm_router_stub()
+
     if real_module_available("vllm"):
         return
 

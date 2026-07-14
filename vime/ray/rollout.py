@@ -1042,17 +1042,17 @@ def _start_router(
     router_args.port = router_port
     router_args.prometheus_port = find_available_port(random.randint(4000, 5000))
     router_args.log_level = "warning"
-    router_args.request_timeout_secs = args.router_request_timeout_secs
+    router_args.request_timeout_secs = args.vllm_router_request_timeout_secs
 
     if has_pd_disaggregation:
         router_args.vllm_pd_disaggregation = True
-        # Disable circuit breaker so transient RDMA transfer timeouts (PCIe
-        # contention under load) don't mark decode workers dead.
-        router_args.disable_circuit_breaker = True
 
     if prefill_urls is not None:
         router_args.prefill_urls = prefill_urls
         router_args.decode_urls = decode_urls
+
+    # We will not use the circuit breaker from router.
+    router_args.disable_circuit_breaker = True
 
     logger.info(f"Launch router with args: {router_args}")
 
