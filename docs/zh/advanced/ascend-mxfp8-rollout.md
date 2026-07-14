@@ -136,4 +136,3 @@ Worker extension 冲突
 外部服务被拒绝
 : 让 Vime 自行拉起 rollout server。本特性不会向独立启动的外部 vLLM 服务注入 MXFP8
   worker extension。
-

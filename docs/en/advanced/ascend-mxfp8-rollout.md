@@ -159,4 +159,3 @@ Worker extension conflict
 External server rejected
 : Let Vime launch the rollout servers. Independently launched external vLLM
   servers do not receive Vime's MXFP8 worker extension in this feature.
-
