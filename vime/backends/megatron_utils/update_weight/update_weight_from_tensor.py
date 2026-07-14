@@ -289,6 +289,7 @@ class _VLLMHijack:
 
         _orig_load_model = worker_cls.load_model
         _orig_start_weight_update = worker_cls.start_weight_update
+        _orig_wake_up = worker_cls.wake_up
         has_dummy_kw = "load_dummy_weights" in inspect.signature(_orig_load_model).parameters
 
         if has_dummy_kw:
@@ -309,8 +310,24 @@ class _VLLMHijack:
             _VLLMHijack.patch_moe_weight_loader(self.model_runner.model)
             _orig(self, is_checkpoint_format=is_checkpoint_format)
 
+        def _patched_wake_up(self, tags=None, _orig=_orig_wake_up) -> None:
+            quant_config = self.vllm_config.quant_config
+            if quant_config is not None:
+                _orig(self, tags=tags)
+                return
+
+            # vllm-ascend transposes unquantized w13_weight/w2_weight in
+            # wake_up(). Keep the native allocator and buffer restoration, but
+            # skip that branch: layerwise reload owns the final runtime layout.
+            self.vllm_config.quant_config = object()
+            try:
+                _orig(self, tags=tags)
+            finally:
+                self.vllm_config.quant_config = quant_config
+
         worker_cls.load_model = _patched_load_model  # type: ignore[attr-defined]
         worker_cls.start_weight_update = _patched_start_weight_update  # type: ignore[attr-defined]
+        worker_cls.wake_up = _patched_wake_up  # type: ignore[attr-defined]
 
     @staticmethod
     def patch_moe_weight_loader(model: torch.nn.Module) -> None:

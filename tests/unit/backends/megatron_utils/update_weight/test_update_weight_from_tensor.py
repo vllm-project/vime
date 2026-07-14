@@ -306,6 +306,49 @@ def test_send_to_colocated_engine_uses_native_npu_ipc_engine(upw_vllm, monkeypat
 
 
 @pytest.mark.unit
+def test_npu_worker_patch_skips_moe_transpose_during_wake_up(upw_vllm):
+    wake_quant_configs = []
+
+    class FakeWorker:
+        def __init__(self):
+            self.vllm_config = types.SimpleNamespace(quant_config=None)
+            self.moe_transposed = False
+
+        def load_model(self):
+            pass
+
+        def start_weight_update(self, is_checkpoint_format=True):
+            pass
+
+        def update_weights(self, update_info):
+            pass
+
+        def finish_weight_update(self):
+            pass
+
+        def wake_up(self, tags=None):
+            wake_quant_configs.append(self.vllm_config.quant_config)
+            if self.vllm_config.quant_config is None and (tags is None or "weights" in tags):
+                self.moe_transposed = True
+
+    native_update_weights = FakeWorker.update_weights
+    native_finish_weight_update = FakeWorker.finish_weight_update
+    native_wake_up = FakeWorker.wake_up
+    upw_vllm._VLLMHijack._patch_one_worker(FakeWorker)
+
+    assert FakeWorker.update_weights is native_update_weights
+    assert FakeWorker.finish_weight_update is native_finish_weight_update
+    assert FakeWorker.wake_up is not native_wake_up
+
+    worker = FakeWorker()
+    worker.wake_up(tags=["weights"])
+
+    assert wake_quant_configs[0] is not None
+    assert not worker.moe_transposed
+    assert worker.vllm_config.quant_config is None
+
+
+@pytest.mark.unit
 def test_send_hf_params_returns_only_distributed_refs(upw_vllm):
     obj = _make_instance(upw_vllm)
     obj.rollout_engines = [RecordingVLLMEngine()]
