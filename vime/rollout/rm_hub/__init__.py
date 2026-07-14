@@ -106,21 +106,14 @@ async def batched_async_rm(
         rm_function = load_function(args.custom_rm_path)
         rewards = await rm_function(args, samples, **kwargs)
     else:
-        tasks = [async_rm(args, sample, **kwargs) for sample in samples]
-        rewards = await asyncio.gather(*tasks)
-    rm_name = getattr(args, "custom_rm_path", None) or getattr(args, "rm_type", None) or "batched_async_rm"
-    if rewards is None:
-        raise TypeError(f"batched reward model {rm_name!r} returned None instead of an iterable of rewards")
-    if isinstance(rewards, (str, bytes, bytearray, dict)):
+        rewards = await asyncio.gather(*(async_rm(args, sample, **kwargs) for sample in samples))
+
+    rm_name = args.custom_rm_path or args.rm_type or "batched_async_rm"
+    if rewards is None or isinstance(rewards, (str, bytes, bytearray, dict)):
         raise TypeError(
             f"batched reward model {rm_name!r} returned {type(rewards).__name__} instead of an iterable of rewards"
         )
-    try:
-        rewards = list(rewards)
-    except TypeError as exc:
-        raise TypeError(
-            f"batched reward model {rm_name!r} returned {type(rewards).__name__} instead of an iterable of rewards"
-        ) from exc
+    rewards = list(rewards)
     if len(rewards) != len(samples):
         raise ValueError(
             f"batched reward model {rm_name!r} returned {len(rewards)} rewards for {len(samples)} samples"
