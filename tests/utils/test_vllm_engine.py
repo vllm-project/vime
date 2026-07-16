@@ -478,6 +478,64 @@ def test_get_url_ipv6_host(vllm_engine):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("host", "expected_host"),
+    [
+        ("127.0.0.1", "127.0.0.1"),
+        ("2001:db8::1", "[2001:db8::1]"),
+        ("[2001:db8::1]", "[2001:db8::1]"),
+    ],
+)
+def test_init_formats_server_host_for_urls(vllm_engine, monkeypatch, host, expected_host):
+    monkeypatch.setattr(vllm_engine, "_init_external", lambda *args, **kwargs: None)
+
+    vllm_engine.init(
+        dist_init_addr="127.0.0.1:29500",
+        port=8765,
+        nccl_port=None,
+        host=host,
+    )
+
+    assert vllm_engine.server_host == expected_host
+    assert vllm_engine.get_url() == f"http://{expected_host}:8765"
+
+
+@pytest.mark.unit
+def test_launch_server_process_brackets_ipv6_health_url(vllm_args, monkeypatch):
+    class _FakeProcess:
+        def start(self):
+            pass
+
+        def is_alive(self):
+            return True
+
+    process = _FakeProcess()
+    base_urls = []
+
+    monkeypatch.setattr(mod, "_build_subprocess_env", lambda _: {})
+    monkeypatch.setattr(mod.multiprocessing, "set_start_method", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod.multiprocessing, "Process", lambda *args, **kwargs: process)
+
+    def fake_wait_server_healthy(base_url, is_process_alive):
+        assert is_process_alive()
+        base_urls.append(base_url)
+
+    monkeypatch.setattr(mod, "_wait_server_healthy", fake_wait_server_healthy)
+
+    mod.launch_server_process(
+        {
+            "_args": vllm_args,
+            "_visible_devices": "0",
+            "host": "2001:db8::1",
+            "port": 8000,
+            "node_rank": 0,
+        }
+    )
+
+    assert base_urls == ["http://[2001:db8::1]:8000"]
+
+
+@pytest.mark.unit
 def test_get_base_gpu_id_with_critic_offset(vllm_args):
     vllm_args.colocate = False
     vllm_args.debug_rollout_only = False

@@ -1,7 +1,6 @@
 import argparse
 import base64
 import dataclasses
-import ipaddress
 import logging
 import multiprocessing
 import os
@@ -15,7 +14,7 @@ from vllm.utils.system_utils import kill_process_tree
 
 from vime.backends.vllm_utils.external import get_server_info
 from vime.ray.ray_actor import RayActor
-from vime.utils.http_utils import get_host_info
+from vime.utils.http_utils import _wrap_ipv6, get_host_info
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +47,7 @@ def launch_server_process(server_args_dict: dict) -> multiprocessing.Process:
         return p
 
     _wait_server_healthy(
-        base_url=f"http://{(server_args_dict['host'] or '127.0.0.1').strip('[]')}:{server_args_dict['port']}",
+        base_url=f"http://{_wrap_ipv6(server_args_dict['host'] or '127.0.0.1')}:{server_args_dict['port']}",
         is_process_alive=lambda: p.is_alive(),
     )
 
@@ -147,19 +146,9 @@ class VLLMEngine(RayActor):
 
         host = host or get_host_info()[1]
 
-        def _format_v6_uri(addr):
-            if not addr or addr.startswith("["):
-                return addr
-            try:
-                if ipaddress.ip_address(addr).version == 6:
-                    return f"[{addr}]"
-            except ValueError:
-                pass
-            return addr
-
-        host = _format_v6_uri(host)
+        host = _wrap_ipv6(host)
         ip_part, port_part = dist_init_addr.rsplit(":", 1)
-        dist_init_addr = f"{_format_v6_uri(ip_part)}:{port_part}"
+        dist_init_addr = f"{_wrap_ipv6(ip_part)}:{port_part}"
 
         server_args_dict, external_engine_need_check_fields = _compute_server_args(
             self.args,
@@ -175,7 +164,7 @@ class VLLMEngine(RayActor):
         )
 
         self.node_rank = server_args_dict["node_rank"]
-        self.server_host = server_args_dict["host"]
+        self.server_host = _wrap_ipv6(server_args_dict["host"])
         self.server_port = server_args_dict["port"]
 
         if self.args.rollout_external:
