@@ -19,9 +19,7 @@ if NUM_ROLLOUT <= 0:
     raise ValueError("VIME_SCRIPT_NUM_ROLLOUT must be positive")
 
 MODEL_ROOT = os.environ.get("VIME_SCRIPT_MODEL_ROOT", "/root/models")
-DATA_ROOT = os.environ.get(
-    "VIME_SCRIPT_DATA_ROOT", "/root/datasets/geo3k_imgurl_processed"
-)
+DATA_ROOT = os.environ.get("VIME_SCRIPT_DATA_ROOT", "/root/datasets/geo3k_imgurl_processed")
 TRAIN_DATA_PATH = os.path.join(DATA_ROOT, "train.parquet")
 
 
