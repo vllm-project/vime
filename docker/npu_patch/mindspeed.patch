@@ -114,7 +114,7 @@ index f14b231d..4615590e 100644
          setattr(full_args, k, v)
      MindSpeedFeaturesManager.apply_features_pre_patches(full_args)
 diff --git a/mindspeed/te/pytorch/attention/dot_product_attention/dot_product_attention.py b/mindspeed/te/pytorch/attention/dot_product_attention/dot_product_attention.py
-index ac4eabe5..061377cc 100644
+index ac4eabe5..f82a581b 100644
 --- a/mindspeed/te/pytorch/attention/dot_product_attention/dot_product_attention.py
 +++ b/mindspeed/te/pytorch/attention/dot_product_attention/dot_product_attention.py
 @@ -330,6 +330,8 @@ class DotProductAttention(torch.nn.Module):
@@ -126,7 +126,7 @@ index ac4eabe5..061377cc 100644
      ) -> torch.Tensor:
          """
          Dot Product Attention Layer.
-@@ -653,18 +655,39 @@ class MindSpeedTEDotProductAttention(DotProductAttention):
+@@ -653,6 +655,30 @@ class MindSpeedTEDotProductAttention(DotProductAttention):
          packed_seq_params: PackedSeqParams = None,
          ):
          """Forward."""
@@ -157,21 +157,19 @@ index ac4eabe5..061377cc 100644
          if (
              attention_mask is None and
              self.attn_mask_type == AttnMaskType.causal
-         ) and not getattr(self.config, 'is_llava', False):
+@@ -660,12 +686,6 @@ class MindSpeedTEDotProductAttention(DotProductAttention):
              self.config.sparse_mode = 2
              attention_mask = get_attention_mask(self.config)
--
+ 
 -        packed_seq_kwargs = (
 -            {key: getattr(packed_seq_params, key) for key in self.kept_packed_seq_params}
 -            if packed_seq_params is not None
 -            else {}
 -        )
-+        attention_mask = torch.triu(
-+            torch.ones((2048, 2048),
-+                       device=query.device, dtype=torch.bool), diagonal=1)
- 
+-
          core_attn_out = super().forward(
              query,
+             key,
 diff --git a/mindspeed/core/fusions/fused_rope.py b/mindspeed/core/fusions/fused_rope.py
 index 70f7cb08..15189c2d 100644
 --- a/mindspeed/core/fusions/fused_rope.py
