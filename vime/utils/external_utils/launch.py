@@ -1,10 +1,13 @@
-"""Hardware-platform abstraction for the test-launch harness.
+"""Device-specific launch policy for the vime test/example harness.
 
-A `Platform` is data describing one accelerator: how Ray advertises its devices, the device
-runtime env, whether torch_dist checkpoint conversion works, unsupported features, and how to
-detect it. To support a new accelerator (XPU/TPU/ROCm), add one `register(Platform(...))` in
-the REGISTERED PLATFORMS block below — the resolver, launcher, and the `execute_train` seam are
-platform-agnostic and need no changes. cuda is the default, so the GPU path is unchanged.
+Used only by the test and example launch utilities (`command_utils.execute_train`), not by
+vime core: a `Platform` describes one accelerator for the purpose of *launching a job* — how
+Ray advertises its devices, the device runtime env, whether torch_dist checkpoint conversion
+works, unsupported features, and how to detect it. Adding one `register(Platform(...))` in the
+REGISTERED PLATFORMS block reuses the resolver, launcher, and the `execute_train` seam
+unchanged; but full end-to-end support for a new accelerator may still need changes in vime
+core (resource selection, backends, rollout workers), which still branches on `is_npu()`. cuda
+is the default, so the GPU path is unchanged.
 
 Imports stay stdlib-only (torch imports are lazy) so the module is unit-testable in isolation;
 the actual `exec_command` calls live in `command_utils`.
@@ -12,6 +15,7 @@ the actual `exec_command` calls live in `command_utils`.
 
 import json
 import os
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -28,7 +32,7 @@ class Platform:
     name: str
     ray_args: str  # ray-start resource flags, "{n}"-templated with the device count
     env: dict = field(default_factory=dict)  # device runtime env (into runtime_env + raylet)
-    unsupported_features: frozenset = frozenset()  # e.g. {"deepep", "fp8_rollout"}
+    unsupported_features: frozenset = frozenset()  # declarative (e.g. {"deepep"}); not enforced by the launcher yet
     torch_dist_convert: bool = True  # False -> load HF weights via bridge, no conversion
     detect: Callable[[], bool] = _never  # True on this platform's hardware (detection fallback)
 
@@ -147,7 +151,7 @@ def launch_commands(
     if not external_ray:
         # Export the device env BEFORE `ray start` so the raylet and the actors it spawns
         # (e.g. vLLM engines) inherit it; a job's runtime_env does not reach those actors.
-        exports = "".join(f'export {k}="{v}" && ' for k, v in all_env.items())
+        exports = "".join(f"export {k}={shlex.quote(str(v))} && " for k, v in all_env.items())
         cmds.append(
             f"{exports}export PYTHONUNBUFFERED=1 && ray start --head --node-ip-address {master_addr} "
             f"{platform.ray_start_args(num_devices)} --disable-usage-stats"
@@ -160,7 +164,7 @@ def launch_commands(
     cmds.append(
         f"export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && {src}"
         f'ray job submit --address="http://127.0.0.1:8265" '
-        f"--runtime-env-json='{json.dumps(runtime_env)}' "
+        f"--runtime-env-json={shlex.quote(json.dumps(runtime_env))} "
         f"-- python3 {train_script} {model_args} {train_args}"
     )
     return cmds

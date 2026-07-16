@@ -55,19 +55,20 @@ def selected_suites() -> list:
 
 
 def npu_step(suite: str, test_name: str, resource_class: str, extra_args: str, env: dict) -> dict:
-    pod_env = [
-        {"name": "VIME_TEST_ENABLE_INFINITE_RUN", "value": "false"},
-        {"name": "BUILDKITE_PULL_REQUEST", "value": os.environ.get("BUILDKITE_PULL_REQUEST", "false")},
-        {"name": "BUILDKITE_COMMIT", "value": os.environ.get("BUILDKITE_COMMIT", "")},
-        {"name": "HF_TOKEN", "value": "${HF_TOKEN}"},
-        {"name": "HF_ENDPOINT", "value": "https://hf-mirror.com"},
-        {"name": "ASCEND_RT_VISIBLE_DEVICES", "value": "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"},
-        {"name": "IMAGE_REGISTRY", "value": IMAGE_REGISTRY},
-        {"name": "IMAGE_NAME", "value": IMAGE_NAME},
-        {"name": "VIME_IMAGE_TAG", "value": VIME_IMAGE_TAG},
-        {"name": "HF_HOME", "value": "/root/.cache/huggingface"},
-    ]
-    pod_env += [{"name": k, "value": v} for k, v in env.items()]
+    step_env = {
+        "VIME_TEST_ENABLE_INFINITE_RUN": "false",
+        "BUILDKITE_PULL_REQUEST": os.environ.get("BUILDKITE_PULL_REQUEST", "false"),
+        "BUILDKITE_COMMIT": os.environ.get("BUILDKITE_COMMIT", ""),
+        "HF_TOKEN": "${HF_TOKEN}",
+        "HF_ENDPOINT": "https://hf-mirror.com",
+        "HF_HUB_OFFLINE": "0",  # image presets offline=1; let a missing model download via mirror
+        "ASCEND_RT_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15",
+        "IMAGE_REGISTRY": IMAGE_REGISTRY,
+        "IMAGE_NAME": IMAGE_NAME,
+        "VIME_IMAGE_TAG": VIME_IMAGE_TAG,
+        "HF_HOME": "/root/.cache/huggingface",
+        **env,
+    }
 
     commands = "\n".join(
         [
@@ -99,7 +100,7 @@ def npu_step(suite: str, test_name: str, resource_class: str, extra_args: str, e
                 }
             }
         ],
-        "env": pod_env,
+        "env": step_env,
     }
     return step
 

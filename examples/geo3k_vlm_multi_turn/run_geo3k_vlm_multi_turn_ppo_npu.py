@@ -1,7 +1,7 @@
 import os
 import tempfile
 
-from vime.utils.external_utils.command_utils import execute_train_npu
+from vime.utils.external_utils.command_utils import execute_train
 
 MODEL_NAME = os.environ.get("VIME_SCRIPT_MODEL_NAME", "Qwen3-VL-2B-Instruct")
 assert MODEL_NAME in {
@@ -148,8 +148,9 @@ megatron:
         f"{wandb_args} "
     )
 
-    execute_train_npu(
+    execute_train(
         train_args=train_args,
+        num_gpus_per_node=16,  # actor 8 + rollout 8 (non-colocate)
         megatron_model_type=megatron_model_type,
         extra_env_vars=({"WANDB_API_KEY": os.environ["WANDB_API_KEY"]} if os.environ.get("WANDB_API_KEY") else {}),
     )

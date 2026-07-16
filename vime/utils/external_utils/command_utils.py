@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from vime.utils.external_utils.platforms import current_platform, launch_commands
+from vime.utils.external_utils.launch import current_platform, launch_commands
 from vime.utils.external_utils.typer_utils import dataclass_cli
 from vime.utils.misc import exec_command
 
