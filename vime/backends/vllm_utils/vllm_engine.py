@@ -37,6 +37,8 @@ def get_base_gpu_id(args, rank):
 def launch_server_process(server_args_dict: dict) -> multiprocessing.Process:
     env = _build_subprocess_env(server_args_dict)
     kwargs = {k: v for k, v in server_args_dict.items() if not k.startswith("_")}
+    host = _wrap_ipv6(kwargs.get("host") or "127.0.0.1")
+    kwargs["host"] = host.strip("[]")
     logger.info("Launching vLLM server: %s", kwargs)
 
     multiprocessing.set_start_method("spawn", force=True)
@@ -47,7 +49,7 @@ def launch_server_process(server_args_dict: dict) -> multiprocessing.Process:
         return p
 
     _wait_server_healthy(
-        base_url=f"http://{_wrap_ipv6(server_args_dict['host'] or '127.0.0.1')}:{server_args_dict['port']}",
+        base_url=f"http://{host}:{server_args_dict['port']}",
         is_process_alive=lambda: p.is_alive(),
     )
 
@@ -141,7 +143,7 @@ class VLLMEngine(RayActor):
     ):
         del nccl_port
 
-        self.router_ip = router_ip
+        self.router_ip = _wrap_ipv6(router_ip) if router_ip is not None else None
         self.router_port = router_port
 
         host = host or get_host_info()[1]
@@ -164,7 +166,7 @@ class VLLMEngine(RayActor):
         )
 
         self.node_rank = server_args_dict["node_rank"]
-        self.server_host = _wrap_ipv6(server_args_dict["host"])
+        self.server_host = server_args_dict["host"]  # with [] if ipv6
         self.server_port = server_args_dict["port"]
 
         if self.args.rollout_external:
@@ -553,13 +555,11 @@ def _compute_server_args(
         master_addr = ip_part.strip("[]")
         master_port = int(port_part)
 
-    host_for_subprocess = (host or "127.0.0.1").strip("[]")
-
     kwargs: dict[str, Any] = {
         "model": str(args.hf_checkpoint),
         "trust_remote_code": True,
         "seed": args.seed + rank,
-        "host": host_for_subprocess,
+        "host": _wrap_ipv6(host or "127.0.0.1"),
         "port": port,
         "nnodes": nnodes,
         "node_rank": node_rank,
@@ -651,6 +651,8 @@ def _compute_server_args(
             kwargs[normalized_key] = value
         if "model_path" in {k.replace("-", "_") for k in vllm_overrides}:
             kwargs["model"] = str(vllm_overrides.get("model_path") or vllm_overrides.get("model-path"))
+
+    kwargs["host"] = _wrap_ipv6(kwargs.get("host") or "127.0.0.1")
 
     # vLLM-specific: topology metadata consumed by launch_server_process / _build_subprocess_env.
     # These keys are stripped before passing to vLLM's argparse.
