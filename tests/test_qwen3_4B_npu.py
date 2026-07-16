@@ -17,10 +17,7 @@ def prepare():
 
     U.exec_command(f"mkdir -p {models_dir} {datasets_dir}")
     U.exec_command(f"hf download Qwen/Qwen3-4B --local-dir {model_dir}")
-    U.exec_command(
-        "hf download --repo-type dataset zhuzilin/dapo-math-17k "
-        f"--local-dir {dataset_dir}"
-    )
+    U.exec_command("hf download --repo-type dataset zhuzilin/dapo-math-17k " f"--local-dir {dataset_dir}")
 
 
 def execute():
