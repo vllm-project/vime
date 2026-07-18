@@ -220,7 +220,7 @@ def _copy_manifest_files(source: Path, destination: Path, files: dict[str, dict[
             copied_size = destination_file.stat().st_size
             copied_hash = _sha256(destination_file)
         except OSError as exc:
-            raise OSError(f"failed to copy checkpoint file {relative}") from exc
+            raise OSError(f"failed to copy checkpoint file {relative}: {exc}") from exc
         if copied_size != metadata["size"] or copied_hash != metadata["sha256"]:
             raise OSError(f"checkpoint file changed while copying: {relative}")
 
