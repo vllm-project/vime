@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from vime.utils.trace_utils import trace_span
+from vime.utils.trace_utils import TRACE_CHILDREN_KEY, build_vllm_meta_trace_attrs, trace_span
 from vime.utils.types import Sample
 
 
@@ -20,6 +20,48 @@ def _load_trace_timeline_viewer_module():
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.mark.unit
+def test_build_vllm_meta_trace_attrs_keeps_standard_and_pd_fields():
+    attrs = build_vllm_meta_trace_attrs(
+        {
+            "prompt_tokens": 12,
+            "completion_tokens": 7,
+            "cached_tokens": 3,
+            "pd_prefill_forward_duration": 0.125,
+            "pd_decode_transfer_duration": 0.05,
+            "finish_reason": {"type": "stop"},
+            "unused_field": "ignored",
+        }
+    )
+    trace_children = attrs.pop(TRACE_CHILDREN_KEY)
+
+    assert attrs == {
+        "prompt_tokens": 12,
+        "completion_tokens": 7,
+        "cached_tokens": 3,
+        "finish_reason": "stop",
+    }
+    assert trace_children[0]["name"] == "vllm_pd_prefill"
+    assert trace_children[0]["children"][0]["attrs"] == {"pd_prefill_forward_duration": 0.125}
+    assert trace_children[1]["name"] == "vllm_pd_decode"
+    assert trace_children[1]["children"][0]["attrs"] == {"pd_decode_transfer_duration": 0.05}
+
+
+@pytest.mark.unit
+def test_build_vllm_meta_trace_attrs_reads_native_response_shape():
+    assert build_vllm_meta_trace_attrs(
+        {
+            "choices": [{"finish_reason": "length"}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 7, "cached_tokens": 3},
+        }
+    ) == {
+        "prompt_tokens": 12,
+        "completion_tokens": 7,
+        "cached_tokens": 3,
+        "finish_reason": "length",
+    }
 
 
 @pytest.mark.unit

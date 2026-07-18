@@ -1,5 +1,5 @@
 """
-MemAgent rollout for vime (migrated from slime-agentic).
+MemAgent rollout for vime.
 
 Chunk-by-chunk memory update pipeline:
     for chunk in split(context):

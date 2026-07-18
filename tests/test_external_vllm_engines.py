@@ -8,7 +8,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from vime.backends.vllm_utils.external import apply_external_engine_info_to_args, discover_external_engines
+from vime.backends.vllm_utils.external import (
+    apply_external_engine_info_to_args,
+    discover_external_engines,
+    get_server_info,
+)
 from vime.utils.http_utils import get_rollout_num_engines
 
 NUM_GPUS = 0
@@ -30,7 +34,7 @@ class _Response:
 def test_discover_external_engines_reads_server_info(monkeypatch):
     def fake_get(url, timeout):
         assert timeout == 30.0
-        assert url == "http://host1:10090/server_info"
+        assert url == "http://host1:10090/server_info?config_format=json"
         return _Response(
             {
                 "tp_size": 4,
@@ -58,9 +62,39 @@ def test_discover_external_engines_reads_server_info(monkeypatch):
     assert info.server_info["ep_size"] == 4
 
 
+def test_get_server_info_flattens_nested_vllm_transfer_configs(monkeypatch):
+    def fake_get(url, timeout):
+        assert url == "http://host1:10090/server_info?config_format=json"
+        assert timeout == 30.0
+        return _Response(
+            {
+                "vllm_config": {
+                    "parallel_config": {"tensor_parallel_size": 2},
+                    "model_config": {
+                        "kv_transfer_config": {
+                            "kv_connector": "NixlConnector",
+                            "kv_role": "kv_producer",
+                        },
+                        "weight_transfer_config": {"backend": "nccl"},
+                    },
+                },
+                "vllm_env": {"VLLM_NIXL_SIDE_CHANNEL_PORT": 12090},
+            }
+        )
+
+    monkeypatch.setattr("vime.backends.vllm_utils.external.requests.get", fake_get)
+    server_info = get_server_info("http://host1:10090")
+
+    assert server_info["tensor_parallel_size"] == 2
+    assert server_info["kv_transfer_config"]["kv_role"] == "kv_producer"
+    assert server_info["weight_transfer_config"] == {"backend": "nccl"}
+    assert server_info["disaggregation_mode"] == "prefill"
+    assert server_info["disaggregation_bootstrap_port"] == 12090
+
+
 def test_apply_external_engine_info_handles_pd(monkeypatch):
     payloads = {
-        "http://prefill:10090/server_info": {
+        "http://prefill:10090/server_info?config_format=json": {
             "tp_size": 2,
             "pp_size": 1,
             "dp_size": 1,
@@ -68,7 +102,7 @@ def test_apply_external_engine_info_handles_pd(monkeypatch):
             "disaggregation_mode": "prefill",
             "disaggregation_bootstrap_port": 12090,
         },
-        "http://decode:10091/server_info": {
+        "http://decode:10091/server_info?config_format=json": {
             "tp_size": 4,
             "pp_size": 1,
             "dp_size": 2,
@@ -108,7 +142,7 @@ def test_apply_external_engine_info_handles_pd(monkeypatch):
 
 def test_apply_external_engine_info_preserves_router_pd_flag(monkeypatch):
     def fake_get(url, timeout):
-        assert url == "http://regular:10090/server_info"
+        assert url == "http://regular:10090/server_info?config_format=json"
         return _Response(
             {
                 "tp_size": 2,

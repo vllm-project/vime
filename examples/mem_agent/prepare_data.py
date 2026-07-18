@@ -1,5 +1,5 @@
 """
-Convert MemAgent hotpotqa parquet data to slime-compatible JSONL format.
+Convert MemAgent hotpotqa parquet data to vime-compatible JSONL format.
 
 MemAgent parquet fields:
     prompt        : [{"role": "user", "content": question}]
@@ -9,7 +9,7 @@ MemAgent parquet fields:
     data_source   : "hotpotqa"
     ability       : "memory"
 
-Output JSONL fields (slime convention):
+Output JSONL fields (vime convention):
     prompt    : question string            (--input-key prompt)
     label     : first answer string        (--label-key label)
     metadata  : {
@@ -58,7 +58,7 @@ def _to_json_safe(obj):
 
 
 def convert_row(row: dict) -> dict | None:
-    """Convert one row from MemAgent format to slime JSONL format.
+    """Convert one row from MemAgent format to vime JSONL format.
 
     Compatible with two formats:
       Training set format (parquet): prompt(list) / reward_model / extra_info / context
@@ -228,7 +228,7 @@ def convert_hf_file(dataset_name: str, filename: str, output_path: str) -> int:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert MemAgent parquet to slime JSONL")
+    parser = argparse.ArgumentParser(description="Convert MemAgent parquet to vime JSONL")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--input", help="Local parquet file path")
     group.add_argument("--hf-dataset", help="HuggingFace dataset name, e.g. BytedTsinghua-SIA/hotpotqa")

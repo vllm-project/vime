@@ -1,5 +1,6 @@
 accelerate
 anthropic
+blake3
 blobfile
 cloudpickle
 datasets
@@ -20,5 +21,7 @@ ring_flash_attn
 safetensors
 tensorboard
 transformers
-vllm-router>=0.1.14
+vllm-router>=0.1.15
 wandb
+xxhash  # disk delta weight sync (checksum + codec)
+zstandard

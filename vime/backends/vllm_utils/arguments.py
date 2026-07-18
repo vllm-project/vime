@@ -2,6 +2,7 @@ import argparse
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm_router.launch_router import RouterArgs
 
 from vime.utils.http_utils import _wrap_ipv6
 
@@ -11,36 +12,27 @@ def add_vllm_router_arguments(parser):
         "--vllm-router-ip",
         type=str,
         default=None,
-        help="IP address of the vllm router (where vime connects to send rollout requests).",
+        help="IP address of the vllm router",
     )
     parser.add_argument(
         "--vllm-router-port",
         type=int,
         default=None,
-        help="Port of the vllm router.",
+        help="Port of the vllm router",
     )
     parser.add_argument(
-        "--router-request-timeout-secs",
+        "--vllm-router-request-timeout-secs",
         type=int,
         default=14400,
-        help="Timeout (seconds) for HTTP requests vime makes to the vllm router.",
+        help="Timeout for requests to the vllm router in seconds",
     )
-    parser.add_argument(
-        "--vllm-router-policy",
-        type=str,
-        default="consistent_hash",
-        dest="router_policy",
-        choices=["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash"],
-        help=(
-            "vllm-router load-balancing policy. Defaults to 'consistent_hash' for "
-            "session-affinity routing replay via the x-session-id header."
-        ),
-    )
+    RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
     return parser
 
 
 def add_vllm_arguments(parser):
     parser = add_vllm_router_arguments(parser)
+    parser.set_defaults(router_balance_abs_threshold=10, router_balance_rel_threshold=1.2)
     parser.add_argument("--vllm-server-concurrency", type=int, default=512)
     parser.add_argument(
         "--vllm-enable-deterministic-inference",
@@ -51,19 +43,6 @@ def add_vllm_arguments(parser):
             "AND exports ``VLLM_BATCH_INVARIANT=1`` to the vLLM subprocess."
         ),
     )
-    _vllm_packed = parser.add_mutually_exclusive_group()
-    _vllm_packed.add_argument(
-        "--vllm-weight-sync-packed",
-        dest="vllm_weight_sync_packed",
-        action="store_true",
-    )
-    _vllm_packed.add_argument(
-        "--no-vllm-weight-sync-packed",
-        dest="vllm_weight_sync_packed",
-        action="store_false",
-    )
-    parser.set_defaults(vllm_weight_sync_packed=True)
-
     # Monkey-patch parser to prefix all engine flags with --vllm- / vllm_
     old_add_argument = parser.add_argument
     old_add_argument_group = parser.add_argument_group

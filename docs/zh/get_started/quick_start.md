@@ -8,7 +8,11 @@
 
 ### 硬件支持说明
 
-**vime** 支持多种 NVIDIA GPU 硬件平台：
+**vime** 支持多种硬件平台。
+
+**NVIDIA GPU**：
+
+为目前稳定支持的硬件，包括：
 
 - **GB200 / GB300 / B200 / 300 系列**：完全支持，运行步骤与 H 系列完全相同
 - **H 系列 (H100/H200)**：官方支持，具有完整的 CI 测试保护，运行稳定可靠
@@ -17,7 +21,18 @@
 - 最新的 Docker 镜像对 B 卡和 H 卡通用，无需额外配置
 - Megatron 后端在 H 卡上具有 CI 保护，经过充分测试验证，推荐生产环境使用
 - B 卡基本功能稳定，可作为开发和测试参考，但暂无 CI 保护
-- 两种硬件平台使用完全相同的安装和启动流程
+- 两种 NVIDIA 硬件平台使用完全相同的安装和启动流程
+- 其它卡（如A100/A800）也可以运行，但暂不进行功能维护
+
+
+**Ascend NPU**：
+
+- 使用说明请参考 [Ascend NPU 教程](../platform_support/ascend_tutorial.md)。
+- NPU 脚本与 patch 位于 [ascend](https://github.com/vllm-project/vime/tree/ascend) 分支。
+
+**AMD GPU**：
+
+请参考 [AMD 使用教程](../../en/platform_support/amd_tutorial.md)。
 
 ### 拉取并启动 Docker 容器
 

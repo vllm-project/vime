@@ -467,7 +467,7 @@ async def generate_and_rm(
         samples_need_reward = [sample for sample in samples if sample.reward is None]
         with trace_span(samples_need_reward, "reward_model"):
             rewards = await batched_async_rm(args, samples_need_reward)
-        for sample, reward in zip(samples_need_reward, rewards, strict=False):
+        for sample, reward in zip(samples_need_reward, rewards, strict=True):
             sample.reward = reward
         return samples
     else:
@@ -522,7 +522,7 @@ async def generate_and_rm_group(
     if not state.aborted and args.group_rm:
         with trace_span(group, "group_reward_model"):
             rewards = await batched_async_rm(args, group)
-        for sample, reward in zip(group, rewards, strict=False):
+        for sample, reward in zip(group, rewards, strict=True):
             sample.reward = reward
 
     return group
@@ -795,7 +795,6 @@ async def eval_rollout_single_dataset(
     for coro in asyncio.as_completed(tasks):
         sample = await coro
         if do_print:
-            logged_sample = sample[0] if isinstance(sample, list) else sample
             logged_sample = sample[0] if isinstance(sample, list) else sample
             logger.info(
                 "eval_rollout_single_dataset example data: "

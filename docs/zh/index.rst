@@ -12,6 +12,21 @@ vime 构建于 `slime <https://github.com/THUDM/slime>`_ 之上，slime 正是 G
 - DeepSeek V3 系列 (DeepSeek V3, V3.1, DeepSeek R1)；
 - Llama 3。
 
+按使用场景开始
+--------------
+
+- 第一次使用 vime：:doc:`get_started/quick_start`
+- 配置 training 和 rollout 参数：:doc:`get_started/usage`
+- 添加 custom generation、reward 或 rollout function：:doc:`get_started/customization`
+- 构建 agentic RL workflow：:doc:`get_started/agent`
+- 配置生产级 vLLM rollout topology：:doc:`advanced/vllm-config`
+- 接入 external rollout engines：:doc:`advanced/external-rollout-engines`
+- 以字节级 delta 同步权重：:doc:`advanced/delta-weight-sync`
+- 使用 PD disaggregation：:doc:`advanced/pd-disaggregation`
+- 使用 BF16 训练 + FP8 rollout 或 FP8 KV cache：:doc:`advanced/low-precision`
+- 了解 CI 和可靠性覆盖：:doc:`developer_guide/ci`
+- 调试、trace 和 profiling 长时间任务：:doc:`developer_guide/debug`、:doc:`developer_guide/trace`、:doc:`developer_guide/profiling`
+
 .. toctree::
    :maxdepth: 1
    :caption: 开始使用
@@ -26,6 +41,8 @@ vime 构建于 `slime <https://github.com/THUDM/slime>`_ 之上，slime 正是 G
    :caption: Dense
 
    examples/qwen3-4B.md
+   examples/gemma4.md
+   examples/glm4-9B.md
 
 .. toctree::
    :maxdepth: 1
@@ -66,3 +83,9 @@ vime 构建于 `slime <https://github.com/THUDM/slime>`_ 之上，slime 正是 G
    developer_guide/debug.md
    developer_guide/trace.md
    developer_guide/profiling.md
+
+.. toctree::
+   :maxdepth: 1
+   :caption: 硬件平台
+
+   platform_support/ascend_tutorial.md

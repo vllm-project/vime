@@ -435,7 +435,7 @@ def test_parse_model_output_plain_text_no_parsers():
 def test_parse_model_output_think_split_fallback():
     # The qwen3 reasoning parser lives in vllm (lazy import); skip where the
     # lean CPU CI env has no vllm installed.
-    pytest.importorskip("vllm")
+    pytest.importorskip("vllm.entrypoints.openai.chat_completion.protocol")
     parsed = parse_model_output(
         "<think>reason here</think>visible",
         tools_schema=None,

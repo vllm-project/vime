@@ -7,29 +7,31 @@
 # built on its own native host and pushed BY DIGEST (no tag lands in the hub),
 # then the two digests are fused into the final tag with `just manifest`.
 #
-# CUDA 12.9 is the default, so it carries NO cu marker in the tag. Only the
-# non-default cu13 variant is suffixed.
+# CUDA 13 is the default and carries no cu marker. The explicit cu13 tags are
+# compatibility aliases for users of the previous two-variant release scheme.
 #
 # Tag scheme:
-#   vllm/vime:<version>             immutable, multi-arch (cu12.9)
-#   vllm/vime:latest                rolling,   multi-arch (cu12.9)
-#   vllm/vime:cu13-<version>        immutable, multi-arch (cu13 variant)
-#   vllm/vime:cu13-latest           rolling,   multi-arch (cu13 variant)
+#   vllm/vime:<version>             immutable, multi-arch (cu13)
+#   vllm/vime:latest                rolling,   multi-arch (cu13)
+#   vllm/vime:cu13-<version>        compatibility alias
+#   vllm/vime:cu13-latest           compatibility alias
 # <version> comes from docker/version.txt.
 
 IMAGE := "vllm/vime"
-BUILDER := "vime-builder"
+BUILDER := env("VIME_BUILDER", "vime-builder")
+VIME_COMMIT := env("VIME_COMMIT", "main")
+FA2_MAX_JOBS := env("VIME_FA2_MAX_JOBS", "64")
 
 # ---- per-arch build, pushed BY DIGEST (run once on an amd64 host, once on an arm64 host) ----
 
-# Default — cu12.9 base.
+# Default — pinned vLLM 0.25.1 / CUDA 13 base.
 build:
-    ARG_TAG_SUFFIX="" ARG_BUILD_EXTRA_ARGS="--build-arg INSTALL_FLASHQLA=1" just _build-digest
+    ARG_TAG_SUFFIX="" ARG_BUILD_EXTRA_ARGS="--build-arg INSTALL_FLASHQLA=1 --build-arg VIME_COMMIT={{ VIME_COMMIT }} --build-arg FA2_MAX_JOBS={{ FA2_MAX_JOBS }}" just _build-digest
 
-# cu13 variant — vLLM latest (cu130) base; ENABLE_CUDA_13 builds TE from source
-# and installs the cu13 Triton fork on top.
+# Compatibility target for the explicit cu13 aliases. Keep the base pinned so
+# this target cannot silently drift away from the default image.
 build-cu13:
-    ARG_TAG_SUFFIX="-cu13" ARG_BUILD_EXTRA_ARGS='--build-arg BASE_IMAGE=vllm/vllm-openai:latest-ubuntu2404 --build-arg ENABLE_CUDA_13=1' just _build-digest
+    ARG_TAG_SUFFIX="-cu13" ARG_BUILD_EXTRA_ARGS='--build-arg BASE_IMAGE=vllm/vllm-openai:v0.25.1-ubuntu2404 --build-arg ENABLE_CUDA_13=1 --build-arg INSTALL_FLASHQLA=1 --build-arg VIME_COMMIT={{ VIME_COMMIT }} --build-arg FA2_MAX_JOBS={{ FA2_MAX_JOBS }}' just _build-digest
 
 _build-digest:
     #!/bin/bash
@@ -40,18 +42,18 @@ _build-digest:
     META="/tmp/vime${ARG_TAG_SUFFIX}-$(uname -m).json"
 
     # push-by-digest requires the docker-container buildx driver.
-    docker buildx inspect {{BUILDER}} >/dev/null 2>&1 || docker buildx create --name {{BUILDER}} --driver docker-container
+    docker buildx inspect {{ BUILDER }} >/dev/null 2>&1 || docker buildx create --name {{ BUILDER }} --driver docker-container
 
-    docker buildx build --builder {{BUILDER}} --platform "$PLATFORM" -f docker/Dockerfile $ARG_BUILD_EXTRA_ARGS --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" -o "type=image,name={{IMAGE}},push-by-digest=true,push=true" --metadata-file "$META" .
+    docker buildx build --builder {{ BUILDER }} --platform "$PLATFORM" -f docker/Dockerfile $ARG_BUILD_EXTRA_ARGS --build-arg HTTP_PROXY="${http_proxy:-}" --build-arg HTTPS_PROXY="${https_proxy:-}" --build-arg NO_PROXY="localhost,127.0.0.1" -o "type=image,name={{ IMAGE }},push-by-digest=true,push=true" --metadata-file "$META" .
 
     echo "Pushed vime${ARG_TAG_SUFFIX} ${PLATFORM} by digest — pass this to \`just manifest\`:"
     jq -r '."containerimage.digest"' "$META"
 
 # ---- fuse the two per-arch digests into one multi-arch tag ----
-# Run once after `build` (or `build-cu13`) has pushed on BOTH hosts, passing the
-# digests it printed. For the default cu12.9 image leave VARIANT empty:
+# Run once after `build` (or `build-cu13`) has pushed on both hosts. Publish the
+# default tags first; the same digests can also publish the cu13 aliases:
 #   just manifest "" sha256:<amd64> sha256:<arm64>     -> vime:<version> + vime:latest
-#   just manifest cu13 sha256:<amd64> sha256:<arm64>   -> vime:cu13-<version> + vime:cu13-latest
+# just manifest cu13 sha256:<amd64> sha256:<arm64>   -> cu13 compatibility aliases
 manifest VARIANT AMD_DIGEST ARM_DIGEST:
     #!/bin/bash
     set -euxo pipefail
@@ -59,8 +61,8 @@ manifest VARIANT AMD_DIGEST ARM_DIGEST:
 
     VERSION="$(cat docker/version.txt | tr -d '\n')"
     PREFIX=""
-    [ -n "{{VARIANT}}" ] && PREFIX="{{VARIANT}}-"
-    docker buildx imagetools create -t "{{IMAGE}}:${PREFIX}${VERSION}" -t "{{IMAGE}}:${PREFIX}latest" "{{IMAGE}}@{{AMD_DIGEST}}" "{{IMAGE}}@{{ARM_DIGEST}}"
+    [ -n "{{ VARIANT }}" ] && PREFIX="{{ VARIANT }}-"
+    docker buildx imagetools create -t "{{ IMAGE }}:${PREFIX}${VERSION}" -t "{{ IMAGE }}:${PREFIX}latest" "{{ IMAGE }}@{{ AMD_DIGEST }}" "{{ IMAGE }}@{{ ARM_DIGEST }}"
 
 # ---- single-arch test/debug image for the run-ci-image validation job ----
 # The e2e-test-image runner is x86, so this is amd64-only and
@@ -71,8 +73,8 @@ build-test:
     cd ..
 
     VERSION="$(cat docker/version.txt | tr -d '\n')"
-    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="$http_proxy" --build-arg HTTPS_PROXY="$https_proxy" --build-arg NO_PROXY="localhost,127.0.0.1" --build-arg INSTALL_FLASHQLA=1 -t "{{IMAGE}}:test-${VERSION}"
-    docker push "{{IMAGE}}:test-${VERSION}"
+    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="${http_proxy:-}" --build-arg HTTPS_PROXY="${https_proxy:-}" --build-arg NO_PROXY="localhost,127.0.0.1" --build-arg INSTALL_FLASHQLA=1 -t "{{ IMAGE }}:test-${VERSION}"
+    docker push "{{ IMAGE }}:test-${VERSION}"
 
-    docker tag "{{IMAGE}}:test-${VERSION}" "{{IMAGE}}:test-latest"
-    docker push "{{IMAGE}}:test-latest"
+    docker tag "{{ IMAGE }}:test-${VERSION}" "{{ IMAGE }}:test-latest"
+    docker push "{{ IMAGE }}:test-latest"

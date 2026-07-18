@@ -624,6 +624,22 @@ def train_one_step(
                 "loss_mask": batch["full_loss_masks"],
             }
 
+            # vime-patch: mcore MambaModel.forward (hybrid NemotronH) has no
+            # loss_mask kwarg (GPTModel does). Drop it when unsupported; loss
+            # masking happens in vime's own loss fn, not the model.
+            _m = model
+            while hasattr(_m, "module"):
+                _m = _m.module
+            # Signature does not change during training, so compute once and cache.
+            accepts_loss_mask = getattr(_m, "_vime_forward_accepts_loss_mask", None)
+            if accepts_loss_mask is None:
+                import inspect
+
+                accepts_loss_mask = "loss_mask" in inspect.signature(_m.forward).parameters
+                _m._vime_forward_accepts_loss_mask = accepts_loss_mask
+            if not accepts_loss_mask:
+                forward_kwargs.pop("loss_mask", None)
+
             if batch["multimodal_train_inputs"] is not None:
                 forward_kwargs.update(batch["multimodal_train_inputs"])
 
@@ -973,6 +989,14 @@ def initialize_model_and_optimizer(
         tuple[list[DDP], MegatronOptimizer, OptimizerParamScheduler, int]:
             DDP-wrapped model chunks, optimizer, scheduler, and iteration index.
     """
+
+    if torch.version.hip:
+        import megatron.core.dist_checkpointing.strategies.filesystem_async as filesystem_async_module
+
+        from vime.utils.rocm_checkpoint_writer import ROCmFileSystemWriterAsync
+
+        filesystem_async_module.FileSystemWriterAsync = ROCmFileSystemWriterAsync
+        logger.info("[ROCm] Applied FileSystemWriterAsync patch for HIP compatibility")
 
     model, optimizer, opt_param_scheduler = setup_model_and_optimizer(args, role)
     model[0].role = role

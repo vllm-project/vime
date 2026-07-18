@@ -56,6 +56,7 @@ SUITES = {
         ("test_vllm_config_mixed_offload_ft.py", 8, "", {}),
     ],
     "megatron": [
+        ("test_full_disk_weight_update.py", 4, "", {}),
         ("test_quick_start_glm4_9B.py", 8, "", {}),
         ("test_glm4.7_30B_A3B_pd_mooncake.py", 8, "", {}),
         ("test_qwen3_30B_A3B.py", 8, "", {"USE_DEEPEP": "1", "USE_FP8_ROLLOUT": "1"}),
@@ -65,17 +66,29 @@ SUITES = {
         ("test_qwen3_4B_ppo.py", 8, "", {}),
         ("test_qwen3_4B_ppo_disaggregate.py", 8, "", {}),
         ("test_qwen3_4B_ppo_train_critic_only.py", 8, "", {}),
+        ("test_ppo_logprob_entropy_gpu.py", 2, "", {}),
+        ("test_release_train.py", 4, "", {}),
         ("test_qwen3_4B_streaming_partial_rollout.py", 8, "", {}),
         ("test_moonlight_16B_A3B.py", 8, "", {}),
         ("test_moonlight_16B_A3B_r3.py", 8, "", {"ENABLE_EVAL": "0"}),
+        ("test_mimo_7B_mtp_only_grad.py", 8, "", {}),
         ("test_qwen2.5_0.5B_debug_rollout_then_train.py", 8, "", {}),
         ("test_qwen2.5_0.5B_opd_vllm.py", 8, "", {}),
+        ("test_qwen3_4B_external_pd.py", 6, "", {}),
+        ("test_qwen2.5_0.5B_fanout_short.py", 4, "", {}),
+    ],
+    "vime-customized": [
+        ("test_qwen2_5_0_5B_non_colocate_pp.py", 4, "", {}),
+        ("test_geo3k_vlm_multi_turn_e2e.py", 1, "", {}),
     ],
     "precision": [
         ("test_qwen3_0.6B_parallel_check.py", 8, "", {}),
     ],
     "ckpt": [
-        ("test_qwen3_4B_ckpt.py", 8, "", {}),
+        ("test_qwen3_4B_ckpt.py", 8, "--save-optimizer gpu --load-optimizer gpu", {}),
+        ("test_qwen3_4B_ckpt.py", 8, "--save-optimizer gpu --load-optimizer cpu", {}),
+        ("test_qwen3_4B_ckpt.py", 8, "--save-optimizer cpu --load-optimizer cpu", {}),
+        ("test_qwen3_4B_ckpt.py", 8, "--save-optimizer cpu --load-optimizer gpu", {}),
         ("test_qwen3_4B_ckpt.py", 8, "--async-save", {}),
     ],
 }

@@ -170,58 +170,10 @@ def test_allgather_cp_ignores_cp_size_one(monkeypatch):
 @pytest.mark.unit
 def test_update_weight_disk_dir_required_for_disk_transport(monkeypatch):
     module = load_vime_arguments_module(monkeypatch)
-    args = types.SimpleNamespace(
-        update_weight_transport="disk",
-        update_weight_disk_dir=None,
-        update_weight_delta_dir=None,
-    )
+    args = make_vime_validate_args(update_weight_transport="disk", update_weight_disk_dir=None)
 
     with pytest.raises(ValueError, match="update-weight-disk-dir"):
-        module._resolve_update_weight_disk_dir(args)
-
-
-@pytest.mark.unit
-def test_update_weight_disk_dir_normalizes_delta_alias(monkeypatch):
-    module = load_vime_arguments_module(monkeypatch)
-    args = types.SimpleNamespace(
-        update_weight_transport="disk",
-        update_weight_disk_dir=None,
-        update_weight_delta_dir="/shared/delta",
-    )
-
-    with pytest.warns(UserWarning, match="will be removed in a future release"):
-        module._resolve_update_weight_disk_dir(args)
-
-    assert args.update_weight_disk_dir == "/shared/delta"
-    assert args.update_weight_delta_dir == "/shared/delta"
-
-
-@pytest.mark.unit
-def test_update_weight_disk_dir_backfills_legacy_delta_field(monkeypatch):
-    module = load_vime_arguments_module(monkeypatch)
-    args = types.SimpleNamespace(
-        update_weight_transport="disk",
-        update_weight_disk_dir="/shared/updates",
-        update_weight_delta_dir=None,
-    )
-
-    module._resolve_update_weight_disk_dir(args)
-
-    assert args.update_weight_disk_dir == "/shared/updates"
-    assert args.update_weight_delta_dir == "/shared/updates"
-
-
-@pytest.mark.unit
-def test_update_weight_disk_dir_rejects_conflicting_alias(monkeypatch):
-    module = load_vime_arguments_module(monkeypatch)
-    args = types.SimpleNamespace(
-        update_weight_transport="disk",
-        update_weight_disk_dir="/shared/full",
-        update_weight_delta_dir="/shared/delta",
-    )
-
-    with pytest.raises(ValueError, match="deprecated alias"):
-        module._resolve_update_weight_disk_dir(args)
+        module.vime_validate_args(args)
 
 
 def make_vime_validate_args(**overrides):
@@ -298,11 +250,13 @@ def make_vime_validate_args(**overrides):
         rollout_max_context_len=None,
         rollout_max_prompt_len=None,
         train_backend="megatron",
+        release_train=False,
+        keep_old_actor=False,
         only_train_params_name_list=None,
         freeze_params_name_list=None,
         update_weight_transport="nccl",
         update_weight_disk_dir=None,
-        update_weight_delta_dir=None,
+        update_weight_local_checkpoint_dir=None,
         update_weight_mode="full",
         lora_rank=0,
     )

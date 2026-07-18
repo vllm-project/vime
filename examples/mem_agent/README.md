@@ -6,6 +6,8 @@ The paper trains end-to-end with **Multi-Conv DAPO** (this example uses **GRPO**
 
 This example reproduces that pipeline on vime: HotpotQA multi-turn rollout, GRPO training, and RULER-HQA evaluation, with vLLM as the inference backend.
 
+The rollout and evaluation implementation was adapted from the `slime-agentic` MemAgent example.
+
 ## Files
 
 | File | Description |

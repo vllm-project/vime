@@ -57,19 +57,71 @@ def external_engine_init_kwargs(info: ExternalEngineInfo) -> dict:
 
 def get_server_info(url: str, timeout: float = 30.0) -> dict:
     errors = []
-    for endpoint in ("/server_info", "/get_server_info"):
+    for endpoint in ("/server_info?config_format=json", "/server_info", "/get_server_info"):
         try:
             response = requests.get(f"{url}{endpoint}", timeout=timeout)
             response.raise_for_status()
-            return response.json()
+            return _normalize_server_info(response.json())
         except Exception as exc:
             errors.append(f"{endpoint}: {exc}")
     raise RuntimeError(f"Failed to fetch vLLM server info from {url}: {'; '.join(errors)}")
 
 
+def _normalize_server_info(server_info: dict) -> dict:
+    vllm_config = server_info.get("vllm_config")
+    if not isinstance(vllm_config, dict):
+        return server_info
+
+    normalized = dict(server_info)
+    for section in vllm_config.values():
+        if not isinstance(section, dict):
+            continue
+        for key, value in section.items():
+            normalized.setdefault(key, value)
+
+    def find_config_value(config, name):
+        if not isinstance(config, dict):
+            return None
+        if name in config:
+            return config[name]
+        for value in config.values():
+            found = find_config_value(value, name)
+            if found is not None:
+                return found
+        return None
+
+    kv_transfer_config = find_config_value(vllm_config, "kv_transfer_config")
+    if kv_transfer_config is not None:
+        normalized["kv_transfer_config"] = kv_transfer_config
+    weight_transfer_config = find_config_value(vllm_config, "weight_transfer_config")
+    if weight_transfer_config is not None:
+        normalized["weight_transfer_config"] = weight_transfer_config
+    if isinstance(kv_transfer_config, dict):
+        role = kv_transfer_config.get("kv_role")
+        if role == "kv_producer":
+            normalized["disaggregation_mode"] = "prefill"
+        elif role == "kv_consumer":
+            normalized["disaggregation_mode"] = "decode"
+
+    vllm_env = server_info.get("vllm_env")
+    if isinstance(vllm_env, dict):
+        bootstrap_port = vllm_env.get("VLLM_NIXL_SIDE_CHANNEL_PORT")
+        if bootstrap_port is not None:
+            normalized["disaggregation_bootstrap_port"] = bootstrap_port
+
+    return normalized
+
+
 def _infer_worker_type(server_info: dict) -> str:
     if server_info.get("encoder_only"):
         return "encoder"
+    kv_transfer_config = server_info.get("kv_transfer_config")
+    if isinstance(kv_transfer_config, dict):
+        role = kv_transfer_config.get("kv_role")
+        if role == "kv_producer":
+            return "prefill"
+        if role == "kv_consumer":
+            return "decode"
     mode = server_info.get("disaggregation_mode")
     if mode in ("prefill", "decode"):
         return mode
@@ -182,7 +234,15 @@ def start_external_rollout_servers(args, *, start_router) -> tuple[dict[str, Ext
     from vime.ray.utils import add_default_ray_env_vars
 
     infos = external_engine_infos_from_args(args)
-    router_ip, router_port = start_router(args, has_pd_disaggregation=any(info.is_pd_worker for info in infos))
+    has_pd_disaggregation = any(info.is_pd_worker for info in infos)
+    prefill_urls = [(info.url, info.disaggregation_bootstrap_port) for info in infos if info.worker_type == "prefill"]
+    decode_urls = [info.url for info in infos if info.worker_type == "decode"]
+    router_ip, router_port, _ = start_router(
+        args,
+        has_pd_disaggregation=has_pd_disaggregation,
+        prefill_urls=prefill_urls if has_pd_disaggregation else None,
+        decode_urls=decode_urls if has_pd_disaggregation else None,
+    )
     args.vllm_router_ip = router_ip
     args.vllm_router_port = router_port
 
@@ -211,8 +271,8 @@ def start_external_rollout_servers(args, *, start_router) -> tuple[dict[str, Ext
         init_handles.append(
             rollout_engine.init.remote(
                 **external_engine_init_kwargs(info),
-                router_ip=router_ip,
-                router_port=router_port,
+                router_ip=None if has_pd_disaggregation else router_ip,
+                router_port=None if has_pd_disaggregation else router_port,
             )
         )
 

@@ -31,7 +31,7 @@ bash scripts/run-qwen3-30B-A3B.sh
 
 Here, we will briefly introduce the MoE-related parts in the [run-qwen3-30B-A3B.sh](https://github.com/vllm-project/vime/blob/main/scripts/run-qwen3-30B-A3B.sh) script.
 
-1.  To support running Qwen3-30B-A3B in an 8xH800 environment, we need to enable Megatron's CPU Adam to save GPU memory. The corresponding configuration is:
+1.  To support running Qwen3-30B-A3B in an 8xH100 environment, we need to enable Megatron's CPU Adam to save GPU memory. The corresponding configuration is:
 
     ```bash
     OPTIMIZER_ARGS=(
@@ -72,92 +72,66 @@ Here, we will briefly introduce the MoE-related parts in the [run-qwen3-30B-A3B.
     For DP on the attention block plus EP on the experts, combine
     `--vllm-data-parallel-size N` with `--vllm-enable-expert-parallel`.
 
+### BF16 Training with FP8 Inference
+
+vime also supports BF16 training with FP8 inference. For the Qwen3-30B-A3B model, just download the FP8 weights:
+
+```bash
+hf download Qwen/Qwen3-30B-A3B-FP8 --local-dir /root/Qwen3-30B-A3B-FP8
+```
+
+And replace `--hf-checkpoint` in the script with:
+
+```bash
+#--hf-checkpoint /root/Qwen3-30B-A3B
+--hf-checkpoint /root/Qwen3-30B-A3B-FP8
+```
+
+This triggers FP8 inference. Currently we directly cast the BF16 weights to FP8; more precision-friendly quantization schemes will be added over time.
+
+⚠️ The Megatron checkpoint used for training must still be the one originally converted from the BF16 huggingface weights (`--ref-load` / `--load` unchanged).
+
 ### Multi-Node Support
 
-The following uses **two machines with 8 GPUs each (16 GPUs total)** as the starting example; scripts and parameters scale to **N nodes**. Key differences from single-node:
+The following uses **2 nodes × 8 GPUs (16 GPUs total) in colocate mode** as the example. The only differences from single-node are "starting Ray across nodes" and "adjusting a few resource/parallelism arguments"; the training script itself is unchanged.
 
-- Place weights, checkpoints, and data on storage visible to every node (e.g. NFS).
-- Set `MASTER_ADDR` to the head **LAN IP** (not `127.0.0.1`).
-- Omit CPU Adam (multi-node uses a distributed optimizer; do not use `--optimizer-cpu-offload`).
-- `global-batch-size` must equal `rollout-batch-size × n-samples-per-prompt`.
+1. **Shared storage**: put the model, data, and checkpoints on a location that every node can access at the same path (e.g. NFS).
 
-#### Topology
-
-| Component | Dual-node defaults |
-|-----------|-------------------|
-| Cluster | `ACTOR_NUM_NODES=2`, `ACTOR_NUM_GPUS_PER_NODE=8` |
-| Megatron training | TP=8, EP=8, CP=2 (experts sharded across nodes) |
-| vLLM rollout | Cross-node TP=16 (`rollout-num-gpus-per-engine = nodes × GPUs per node`) |
-| Scheduling | Ray cluster + `--colocate` mode |
-
-Convert checkpoints with Megatron parallelism matching training (dual-node: TP=8, EP=8). Checkpoint EP must match `--expert-model-parallel-size`, or `load_checkpoint` may hang or resharding may be extremely slow.
-
-#### Start the Ray Cluster
-
-Start Ray **outside** the training script on each node. Join all workers first; verify `ray status` reports the expected GPU count, then submit training from the head. Dual-node example:
-
-```bash
-# === Head node ===
-export MASTER_ADDR=<head_lan_ip>
-ray start --head --node-ip-address="${MASTER_ADDR}" --num-gpus 8 --disable-usage-stats \
-   --dashboard-host=0.0.0.0 --dashboard-port=8265
-
-# === Each worker node ===
-export MASTER_ADDR=<head_lan_ip>
-ray start --address="${MASTER_ADDR}:6379" --node-ip-address=<this_node_lan_ip> --num-gpus 8
-```
-
-See [Quick Start — Multi-node training](../get_started/quick_start.md#multi-node-training-for-large-scale-moe-models) for more details.
-
-#### Run Training
-
-After the Ray cluster is ready, on the **head node** set multi-node env vars and run the **same script as single-node** (`ACTOR_NUM_NODES>1` skips Ray startup and applies multi-node defaults):
-
-```bash
-export MASTER_ADDR=<head_lan_ip>
-export ACTOR_NUM_NODES=2
-export ACTOR_NUM_GPUS_PER_NODE=8
-cd /root/vime
-bash scripts/run-qwen3-30B-A3B.sh
-```
-
-2-step smoke test:
-
-```bash
-NUM_ROLLOUT=2 ENABLE_R3=0 bash scripts/run-qwen3-30B-A3B.sh
-```
-
-To scale to N nodes (e.g. 4×8), join all workers to Ray, set `ACTOR_NUM_NODES=4` on the head, and tune `MEGATRON_TP` / `MEGATRON_EP` / `MEGATRON_CP` / `ROLLOUT_NUM_GPUS_PER_ENGINE` for total GPU count.
-
-#### Key Multi-Node Parameters
-
-| Variable | Dual-node default | Description |
-|----------|-------------------|-------------|
-| `ACTOR_NUM_NODES` | 2 (default 1 for single-node) | Total nodes including head; script skips Ray startup when >1 |
-| `ACTOR_NUM_GPUS_PER_NODE` | 8 | GPUs per node |
-| `MEGATRON_TP` / `MEGATRON_EP` / `MEGATRON_CP` | 8 / 8 / 2 | Megatron parallelism |
-| `ROLLOUT_NUM_GPUS_PER_ENGINE` | total GPUs | vLLM engine GPU count |
-| `ENABLE_R3` | 1 | set to 0 to disable R3 |
-
-Default batch: `rollout-batch-size=4`, `n-samples-per-prompt=2`, `global-batch-size=8`; vLLM uses `--vllm-moe-backend triton`.
-
-#### Multi-Node Troubleshooting
-
-- **Worker cannot join Ray / NCCL failures**: check `MASTER_ADDR`, container `/etc/hosts` (hostname must not map to `127.0.0.1`), `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME`.
-- **`Not enough samples X for global_batch_size Y`**: keep `global-batch-size` equal to `rollout-batch-size × n-samples-per-prompt`.
-- **GPU memory full but no processes**: restart the container or run `ray stop --force` to clear stale vLLM contexts.
-
-#### EPLB
-
-When the total number of GPUs is not a multiple or divisor of the total number of experts, enable vLLM's EPLB (Expert Parallelism Load Balancer) and configure redundant experts via `--vllm-eplb-config`. For example, in a 24-GPU scenario:
+2. **Start Ray across nodes** (outside the training script, run manually on each node; see [Quick Start — Multi-node training](../get_started/quick_start.md#multi-node-training-for-large-scale-moe-models)):
 
    ```bash
-   VLLM_ARGS=(
-      --rollout-num-gpus-per-engine 24
-      --vllm-gpu-memory-utilization 0.7
-      --vllm-data-parallel-size 3
-      --vllm-enable-expert-parallel
-      --vllm-enable-eplb
-      --vllm-eplb-config '{"num_redundant_experts": 16}'
-   )
+   # Head node (node0); MASTER_ADDR must be a LAN IP, not 127.0.0.1
+   export MASTER_ADDR=<head_lan_ip>
+   ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 8 --disable-usage-stats
+
+   # Every other node
+   ray start --address=${MASTER_ADDR}:6379 --num-gpus 8
    ```
+
+   Wait until `ray status` reports 16 GPUs before submitting. Because you started the cluster manually, make the script skip its process-management preamble — remove (or comment out) **both** the initial cleanup block (`ray stop --force`, `pkill -9 ray`, `pkill -9 python`, `pkill -9 redis`) **and** the `ray start --head ...` line. Otherwise running the script tears down the head you just started (and orphans the workers), so `ray job submit` to `http://127.0.0.1:8265` fails. Keep the rest of the script — it still sources the model args and runs `ray job submit`.
+
+3. **Adjust script arguments** (`scripts/run-qwen3-30B-A3B.sh`):
+   - Change `--actor-num-nodes` for `train.py` from `1` to `2` (keep `--actor-num-gpus-per-node` at 8). Under colocate, `--rollout-num-gpus` is auto-set to `actor_num_gpus_per_node × actor_num_nodes = 16`, so you don't set it manually.
+   - Scale up the parallelism in `PERF_ARGS` for the doubled GPU count (e.g. raise TP or add DP); for concrete large-scale ratios see the bigger-cluster examples such as [GLM-4.7](glm4.7-355B-A32B.md) and [DeepSeek-R1](deepseek-r1.md).
+   - `global-batch-size` must equal `rollout-batch-size × n-samples-per-prompt`.
+   - (Optional) Multi-node uses a distributed optimizer, which lowers optimizer memory pressure, so you may drop the CPU Adam options (`--optimizer-cpu-offload`, etc.) from `OPTIMIZER_ARGS` for speed.
+
+4. **Keep each vLLM engine within a single node**: prefer `--rollout-num-gpus-per-engine 8` (one engine per node) over `16` (a single engine spanning both nodes at TP=16). Cross-node TP is noticeably slower and more sensitive to per-token numerics; this value must divide the total rollout GPU count (16 here).
+
+⚠️ Common issues:
+- **Worker cannot join Ray / NCCL failures**: check `MASTER_ADDR`, container `/etc/hosts` (hostname must not map to `127.0.0.1`), and set `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` on multi-NIC hosts.
+- **`Not enough samples X for global_batch_size Y`**: keep `global-batch-size = rollout-batch-size × n-samples-per-prompt`.
+- **Fewer than 8 GPUs per node (colocate)**: set `--num-gpus-per-node` explicitly.
+
+In addition, when the total number of GPUs is not a multiple or divisor of the total number of experts, you can enable vLLM's EPLB (Expert Parallelism Load Balancer) and configure redundant experts via `--vllm-eplb-config`. For example, in a 24-GPU scenario:
+
+```bash
+VLLM_ARGS=(
+   --rollout-num-gpus-per-engine 24
+   --vllm-gpu-memory-utilization 0.7
+   --vllm-data-parallel-size 3
+   --vllm-enable-expert-parallel
+   --vllm-enable-eplb
+   --vllm-eplb-config '{"num_redundant_experts": 16}'
+)
+```

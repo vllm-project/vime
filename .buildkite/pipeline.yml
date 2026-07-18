@@ -58,11 +58,13 @@ steps:
         python:3.11 bash -c '
           set -euo pipefail
           pip install -q torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle
+          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle blake3 xxhash zstandard psutil
           pip install -q -e . --no-deps
           python tests/test_megatron_argument_validation.py
           python tests/test_value_temperature.py
           python tests/test_rollout_validation.py
+          python tests/test_placement_group.py
+          python tests/test_external_vllm_engines.py
           python tests/plugin_contracts/test_plugin_rollout_contracts.py
           python tests/plugin_contracts/test_plugin_runtime_hook_contracts.py
           python tests/plugin_contracts/test_plugin_path_loading_contracts.py
@@ -80,6 +82,9 @@ steps:
           python tests/test_sample.py
           python tests/test_cispo_loss.py
           python tests/test_logprob_response_spans.py
+          python tests/test_empty_colocated_weight_bucket.py
+          python tests/test_reloadable_process_group_memory_check.py
+          python tests/test_ppo_logprob_entropy.py
           python tests/utils/test_hf_checkpoint_saver.py
         '
 
@@ -100,7 +105,7 @@ steps:
         python:3.11 bash -c '
           set -euo pipefail
           pip install -q torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle
+          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle blake3 xxhash zstandard
           pip install -q openai openai-agents anthropic
           pip install -q -e . --no-deps
           python tests/test_agent/test_adapters.py
@@ -126,7 +131,7 @@ steps:
         python:3.11 bash -lc '
           set -euo pipefail
           pip install -q torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle
+          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle blake3 xxhash zstandard
           pip install -q -e . --no-deps
           python -m pytest tests/utils
         '
@@ -146,15 +151,17 @@ steps:
         multiple: true
         required: true
         options:
-          - label: "run-ci-short — 4 GPU, 4 tests"
+          - label: "run-ci-short — 4 GPU, 3 tests"
             value: short
           - label: "run-ci-vllm-config — 8 GPU, 4 tests"
             value: vllm-config
-          - label: "run-ci-megatron — 8 GPU, 14 runs"
+          - label: "run-ci-megatron — up to 8 GPU, 20 runs"
             value: megatron
+          - label: "run-ci-vime-customized — 1–4 GPU, 2 tests"
+            value: vime-customized
           - label: "run-ci-precision — 8 GPU, 1 test"
             value: precision
-          - label: "run-ci-ckpt — 8 GPU, 2 runs"
+          - label: "run-ci-ckpt — 8 GPU, 5 runs"
             value: ckpt
 
   - label: ":pipeline: upload selected GPU suites"

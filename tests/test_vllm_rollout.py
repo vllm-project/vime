@@ -501,6 +501,98 @@ def test_generate_and_rm_custom_generate_path(patch_generate_state, monkeypatch)
 
 
 @pytest.mark.unit
+def test_generate_and_rm_rejects_batched_rm_length_mismatch_without_partial_assignment(
+    patch_generate_state, monkeypatch
+):
+    from vime.rollout import rm_hub
+
+    generated_samples: list[Sample] = []
+
+    async def fake_generate(args, sample, sampling_params):
+        sample.response = "a"
+        sample.response_length = 1
+        sample.tokens = [1]
+        sample.reward = None
+        sample.status = Sample.Status.COMPLETED
+
+        sibling = Sample(index=1, prompt="p1", status=Sample.Status.COMPLETED)
+        sibling.response = "b"
+        sibling.response_length = 1
+        sibling.tokens = [2]
+        sibling.reward = None
+        generated_samples[:] = [sample, sibling]
+        return generated_samples
+
+    async def short_batched_rm(args, samples, **kwargs):
+        assert len(samples) == 2
+        return [0.25]
+
+    monkeypatch.setattr(mod, "generate", fake_generate)
+    monkeypatch.setattr(rm_hub, "load_function", lambda _path: short_batched_rm)
+
+    with pytest.raises(ValueError, match="returned 1 rewards for 2 samples"):
+        asyncio.run(
+            mod.generate_and_rm(
+                _rollout_args(custom_rm_path="fake.rm"),
+                Sample(index=0, prompt="p0"),
+                _default_sampling_params(),
+            )
+        )
+
+    assert [sample.reward for sample in generated_samples] == [None, None]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "invalid_rewards,type_name",
+    [
+        ({"first": 0.25, "second": 0.75}, "dict"),
+        ("ab", "str"),
+        (b"ab", "bytes"),
+    ],
+)
+def test_generate_and_rm_rejects_deceptive_batched_rm_result_types_without_partial_assignment(
+    patch_generate_state, monkeypatch, invalid_rewards, type_name
+):
+    from vime.rollout import rm_hub
+
+    generated_samples: list[Sample] = []
+
+    async def fake_generate(args, sample, sampling_params):
+        sample.response = "a"
+        sample.response_length = 1
+        sample.tokens = [1]
+        sample.reward = None
+        sample.status = Sample.Status.COMPLETED
+
+        sibling = Sample(index=1, prompt="p1", status=Sample.Status.COMPLETED)
+        sibling.response = "b"
+        sibling.response_length = 1
+        sibling.tokens = [2]
+        sibling.reward = None
+        generated_samples[:] = [sample, sibling]
+        return generated_samples
+
+    async def invalid_batched_rm(args, samples, **kwargs):
+        assert len(samples) == 2
+        return invalid_rewards
+
+    monkeypatch.setattr(mod, "generate", fake_generate)
+    monkeypatch.setattr(rm_hub, "load_function", lambda _path: invalid_batched_rm)
+
+    with pytest.raises(TypeError, match=f"returned {type_name} instead of an iterable of rewards"):
+        asyncio.run(
+            mod.generate_and_rm(
+                _rollout_args(custom_rm_path="fake.rm"),
+                Sample(index=0, prompt="p0"),
+                _default_sampling_params(),
+            )
+        )
+
+    assert [sample.reward for sample in generated_samples] == [None, None]
+
+
+@pytest.mark.unit
 def test_generate_and_rm_group_assigns_session_ids(patch_generate_state, monkeypatch):
     async def fake_generate_and_rm(args, sample, sampling_params, evaluation=False):
         sample.response = "ok"
@@ -513,6 +605,40 @@ def test_generate_and_rm_group_assigns_session_ids(patch_generate_state, monkeyp
     result = asyncio.run(mod.generate_and_rm_group(_rollout_args(), group, _default_sampling_params()))
     assert all(s.session_id for s in result)
     assert result[0].session_id != result[1].session_id
+
+
+@pytest.mark.unit
+def test_generate_and_rm_group_rejects_batched_rm_length_mismatch_without_partial_assignment(
+    patch_generate_state, monkeypatch
+):
+    from vime.rollout import rm_hub
+
+    async def fake_generate(args, sample, sampling_params):
+        sample.response = "ok"
+        sample.response_length = 1
+        sample.tokens = [sample.index or 0]
+        sample.reward = None
+        sample.status = Sample.Status.COMPLETED
+        return sample
+
+    async def long_batched_rm(args, samples, **kwargs):
+        assert len(samples) == 2
+        return [0.25, 0.75, 1.0]
+
+    monkeypatch.setattr(mod, "generate", fake_generate)
+    monkeypatch.setattr(rm_hub, "load_function", lambda _path: long_batched_rm)
+
+    group = [Sample(index=0, prompt="p0"), Sample(index=1, prompt="p1")]
+    with pytest.raises(ValueError, match="returned 3 rewards for 2 samples"):
+        asyncio.run(
+            mod.generate_and_rm_group(
+                _rollout_args(group_rm=True, custom_rm_path="fake.rm"),
+                group,
+                _default_sampling_params(),
+            )
+        )
+
+    assert [sample.reward for sample in group] == [None, None]
 
 
 @pytest.mark.unit

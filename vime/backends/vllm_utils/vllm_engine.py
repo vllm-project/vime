@@ -1,7 +1,6 @@
 import argparse
 import base64
 import dataclasses
-import ipaddress
 import logging
 import multiprocessing
 import os
@@ -15,7 +14,7 @@ from vllm.utils.system_utils import kill_process_tree
 
 from vime.backends.vllm_utils.external import get_server_info
 from vime.ray.ray_actor import RayActor
-from vime.utils.http_utils import get_host_info
+from vime.utils.http_utils import _wrap_ipv6, get_host_info
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +37,8 @@ def get_base_gpu_id(args, rank):
 def launch_server_process(server_args_dict: dict) -> multiprocessing.Process:
     env = _build_subprocess_env(server_args_dict)
     kwargs = {k: v for k, v in server_args_dict.items() if not k.startswith("_")}
+    host = _wrap_ipv6(kwargs.get("host") or "127.0.0.1")
+    kwargs["host"] = host.strip("[]")
     logger.info("Launching vLLM server: %s", kwargs)
 
     multiprocessing.set_start_method("spawn", force=True)
@@ -48,7 +49,7 @@ def launch_server_process(server_args_dict: dict) -> multiprocessing.Process:
         return p
 
     _wait_server_healthy(
-        base_url=f"http://{(server_args_dict['host'] or '127.0.0.1').strip('[]')}:{server_args_dict['port']}",
+        base_url=f"http://{host}:{server_args_dict['port']}",
         is_process_alive=lambda: p.is_alive(),
     )
 
@@ -58,9 +59,10 @@ def launch_server_process(server_args_dict: dict) -> multiprocessing.Process:
 def _build_subprocess_env(server_args_dict: dict[str, Any]) -> dict[str, str]:
     args = server_args_dict["_args"]
     env = os.environ.copy()
-    env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
     env.setdefault("NCCL_CUMEM_ENABLE", "0")
     env["CUDA_VISIBLE_DEVICES"] = server_args_dict["_visible_devices"]
+    # ROCm: keep HIP visibility in sync with CUDA (no-op on CUDA).
+    env["HIP_VISIBLE_DEVICES"] = server_args_dict["_visible_devices"]
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")
     if getattr(args, "vllm_enable_deterministic_inference", False):
         env["VLLM_BATCH_INVARIANT"] = "1"
@@ -143,24 +145,14 @@ class VLLMEngine(RayActor):
     ):
         del nccl_port
 
-        self.router_ip = router_ip
+        self.router_ip = _wrap_ipv6(router_ip) if router_ip is not None else None
         self.router_port = router_port
 
         host = host or get_host_info()[1]
 
-        def _format_v6_uri(addr):
-            if not addr or addr.startswith("["):
-                return addr
-            try:
-                if ipaddress.ip_address(addr).version == 6:
-                    return f"[{addr}]"
-            except ValueError:
-                pass
-            return addr
-
-        host = _format_v6_uri(host)
+        host = _wrap_ipv6(host)
         ip_part, port_part = dist_init_addr.rsplit(":", 1)
-        dist_init_addr = f"{_format_v6_uri(ip_part)}:{port_part}"
+        dist_init_addr = f"{_wrap_ipv6(ip_part)}:{port_part}"
 
         server_args_dict, external_engine_need_check_fields = _compute_server_args(
             self.args,
@@ -176,7 +168,7 @@ class VLLMEngine(RayActor):
         )
 
         self.node_rank = server_args_dict["node_rank"]
-        self.server_host = server_args_dict["host"]
+        self.server_host = server_args_dict["host"]  # with [] if ipv6
         self.server_port = server_args_dict["port"]
 
         if self.args.rollout_external:
@@ -187,12 +179,17 @@ class VLLMEngine(RayActor):
     def _init_external(self, expect_server_args, external_engine_need_check_fields):
         logger.info(f"Use external vLLM engine (rank={self.rank}, expect_server_args={expect_server_args})")
 
+        def _matches_expected(actual, expected):
+            if isinstance(actual, dict) and isinstance(expected, dict):
+                return all(key in actual and _matches_expected(actual[key], value) for key, value in expected.items())
+            return actual == expected
+
         def _sanity_check_server_args(actual_server_args, expect_server_args):
             for name in external_engine_need_check_fields:
                 expect_value = expect_server_args.get(name)
                 actual_value = actual_server_args.get(name)
-                assert (
-                    actual_value == expect_value
+                assert _matches_expected(
+                    actual_value, expect_value
                 ), f"{name=} {expect_value=} {actual_value=} {expect_server_args=} {actual_server_args=}"
 
         actual_server_args = get_server_info(f"http://{self.server_host}:{self.server_port}")
@@ -215,7 +212,9 @@ class VLLMEngine(RayActor):
                 "worker_type": self.worker_type,
             }
             if self.worker_type == "prefill":
-                bootstrap_port = server_args_dict.get("disaggregation_bootstrap_port")
+                bootstrap_port = server_args_dict.get("_disaggregation_bootstrap_port")
+                if bootstrap_port is None:
+                    bootstrap_port = server_args_dict.get("disaggregation_bootstrap_port")
                 if bootstrap_port is None:
                     raise RuntimeError(
                         f"Prefill worker {worker_url} does not have disaggregation_bootstrap_port; "
@@ -269,13 +268,19 @@ class VLLMEngine(RayActor):
         names: list[str],
         dtype_names: list[str],
         shapes: list[list[int]],
-        ipc_handles: list[dict] | None = None,
+        ipc_handles: dict[str, tuple],
+        tensor_sizes: list[int],
         weight_version: str,
         flush_cache: bool = False,
     ):
-        payload: dict = {"names": names, "dtype_names": dtype_names, "shapes": shapes}
-        if ipc_handles is not None:
-            payload["ipc_handles_pickled"] = base64.b64encode(cloudpickle.dumps(ipc_handles)).decode("utf-8")
+        payload: dict = {
+            "names": names,
+            "dtype_names": dtype_names,
+            "shapes": shapes,
+            "ipc_handles_pickled": base64.b64encode(cloudpickle.dumps(ipc_handles)).decode("utf-8"),
+            "tensor_sizes": tensor_sizes,
+            "packed": True,
+        }
         if flush_cache:
             self.flush_cache()
         result = self._make_request("update_weights", {"update_info": payload})
@@ -362,11 +367,31 @@ class VLLMEngine(RayActor):
     def start_weight_update(self, is_checkpoint_format: bool = False) -> dict:
         return self._make_request("start_weight_update", {"is_checkpoint_format": is_checkpoint_format})
 
+    def start_draft_weight_update(self) -> dict:
+        return self._make_request("start_draft_weight_update", {})
+
     def finish_weight_update(self) -> dict:
         return self._make_request("finish_weight_update", {})
 
-    def update_weights_from_disk(self, model_path: str, load_format: str | None = None):
+    def pull_weights(self, target_version: int):
+        return self._make_request(
+            "pull_weights",
+            {
+                "local_checkpoint_dir": self.args.update_weight_local_checkpoint_dir,
+                "source_dir": self.args.update_weight_disk_dir,
+                "target_version": target_version,
+            },
+        )
+
+    def update_weights_from_disk(
+        self,
+        model_path: str,
+        load_format: str | None = None,
+        weight_version: str | None = None,
+    ):
         del load_format
+        if self.node_rank != 0:
+            return
         response = requests.post(
             f"http://{self.server_host}:{self.server_port}/collective_rpc",
             json={"method": "reload_weights", "kwargs": {"weights_path": model_path, "is_checkpoint_format": True}},
@@ -376,6 +401,8 @@ class VLLMEngine(RayActor):
         except requests.exceptions.HTTPError as e:
             e.add_note(f"{response.text=}")
             raise
+        if weight_version is not None:
+            self._weight_version = str(weight_version)
         return response.json()
 
     def init_weights_update_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
@@ -401,13 +428,10 @@ class VLLMEngine(RayActor):
         names,
         dtypes,
         shapes,
-        group_name,
         *,
         flush_cache=False,
         weight_version: str,
-        packed: bool = True,
     ):
-        del group_name
         if flush_cache:
             self.flush_cache()
         dtype_names = [str(d).replace("torch.", "") for d in dtypes]
@@ -415,7 +439,7 @@ class VLLMEngine(RayActor):
             "names": names,
             "dtype_names": dtype_names,
             "shapes": [list(s) for s in shapes],
-            "packed": bool(packed),
+            "packed": True,
         }
         result = self._make_request("update_weights", {"update_info": update_info})
         self._weight_version = str(weight_version)
@@ -464,6 +488,8 @@ class VLLMEngine(RayActor):
         return response.json() if response.content else None
 
     def pause_generation(self):
+        if self.node_rank != 0:
+            return
         response = requests.post(
             f"http://{self.server_host}:{self.server_port}/pause",
             params={"mode": "keep", "clear_cache": "false"},
@@ -473,6 +499,8 @@ class VLLMEngine(RayActor):
         return response
 
     def continue_generation(self):
+        if self.node_rank != 0:
+            return
         response = requests.post(f"http://{self.server_host}:{self.server_port}/resume", json={})
         response.raise_for_status()
         return response
@@ -495,11 +523,15 @@ class VLLMEngine(RayActor):
         with_stack: bool | None = None,
         record_shapes: bool | None = None,
     ):
+        if self.node_rank != 0:
+            return
         response = requests.post(f"http://{self.server_host}:{self.server_port}/start_profile", json={})
         response.raise_for_status()
         return response
 
     def stop_profile(self):
+        if self.node_rank != 0:
+            return
         response = requests.post(f"http://{self.server_host}:{self.server_port}/stop_profile", json={})
         response.raise_for_status()
         return response
@@ -575,13 +607,11 @@ def _compute_server_args(
         master_addr = ip_part.strip("[]")
         master_port = int(port_part)
 
-    host_for_subprocess = (host or "127.0.0.1").strip("[]")
-
     kwargs: dict[str, Any] = {
         "model": str(args.hf_checkpoint),
         "trust_remote_code": True,
         "seed": args.seed + rank,
-        "host": host_for_subprocess,
+        "host": _wrap_ipv6(host or "127.0.0.1"),
         "port": port,
         "nnodes": nnodes,
         "node_rank": node_rank,
@@ -603,12 +633,18 @@ def _compute_server_args(
             kwargs["headless"] = True
 
     if worker_type == "prefill":
-        kwargs["disaggregation_mode"] = "prefill"
         assert (
             disaggregation_bootstrap_port is not None
         ), "disaggregation_bootstrap_port must be set for prefill worker"
+        kwargs["kv_transfer_config"] = {
+            "kv_connector": "NixlConnector",
+            "kv_role": "kv_producer",
+        }
     elif worker_type == "decode":
-        kwargs["disaggregation_mode"] = "decode"
+        kwargs["kv_transfer_config"] = {
+            "kv_connector": "NixlConnector",
+            "kv_role": "kv_consumer",
+        }
 
     if args.use_rollout_routing_replay:
         kwargs["enable_return_routed_experts"] = True
@@ -668,6 +704,8 @@ def _compute_server_args(
         if "model_path" in {k.replace("-", "_") for k in vllm_overrides}:
             kwargs["model"] = str(vllm_overrides.get("model_path") or vllm_overrides.get("model-path"))
 
+    kwargs["host"] = _wrap_ipv6(kwargs.get("host") or "127.0.0.1")
+
     # vLLM-specific: topology metadata consumed by launch_server_process / _build_subprocess_env.
     # These keys are stripped before passing to vLLM's argparse.
     kwargs["_args"] = args
@@ -683,10 +721,7 @@ def _compute_server_args(
 
 
 def _vllm_server_field_names() -> frozenset[str]:
-    """Valid vLLM server-arg field names: ``AsyncEngineArgs`` ∪ ``FrontendArgs``. vLLM has no
-    single ``ServerArgs`` class (sglang does); their union is the faithful translation. Single
-    source of truth for ``--vllm-*`` flag generation and ``--vllm-config`` override validation.
-    """
+    """Return the vLLM fields accepted by CLI generation and config overrides."""
     from vllm.engine.arg_utils import AsyncEngineArgs
     from vllm.entrypoints.openai.cli_args import FrontendArgs
 

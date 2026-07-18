@@ -31,6 +31,9 @@ def all_gather_param(name: str, param: torch.nn.Parameter) -> torch.Tensor:
         tp_size = mpu.get_tensor_model_parallel_world_size()
         tp_group = mpu.get_tensor_model_parallel_group()
 
+    if tp_size == 1:
+        return param.data
+
     param_partitions = [torch.empty_like(param.data) for _ in range(tp_size)]
     dist.all_gather(param_partitions, param.data, group=tp_group)
     partition_dim = param.partition_dim
@@ -54,65 +57,62 @@ def all_gather_params_async(
     param_infos_and_params: list[tuple[ParamInfo, torch.Tensor]],
 ) -> list[torch.Tensor]:
     """
-    Parallel TP all-gather for multiple params. Loop 1: for each TP param, allocate buffers +
-    dist.all_gather(async_op=True) on expert-TP/regular-TP group (skip expert_bias/non-TP/duplicated).
-    Loop 2: wait all NCCL handles (enables overlap). Loop 3: concat partitions + apply GLU rechunk/MoE dim fix.
+    Coalesce TP-sharded params by process group and dtype, then reconstruct
+    their original layouts after one all-gather per bucket.
     """
-    # Phase 1: Start all async all_gather operations
-    gather_tasks = []
-    handles = []
+    gathered_params: list[torch.Tensor | None] = [None] * len(param_infos_and_params)
+    grouped_params: dict[tuple[bool, torch.dtype], list[tuple[int, ParamInfo, torch.Tensor]]] = {}
 
-    for info, param in param_infos_and_params:
-        # Prepare async all_gather
+    for index, (info, param) in enumerate(param_infos_and_params):
         if "expert_bias" in info.name:
-            gather_tasks.append((info, param, None, None, None))
-            handles.append(None)
+            gathered_params[index] = param
         elif not param.tensor_model_parallel or getattr(param, "parallel_mode", None) == "duplicated":
-            gather_tasks.append((info, param.data, None, None, None))
-            handles.append(None)
+            gathered_params[index] = param.data
         else:
-            # Start async all_gather
-            if ".experts." in info.name:
-                tp_size = mpu.get_expert_tensor_parallel_world_size()
-                tp_group = mpu.get_expert_tensor_parallel_group()
+            is_expert = ".experts." in info.name
+            tp_size = (
+                mpu.get_expert_tensor_parallel_world_size()
+                if is_expert
+                else mpu.get_tensor_model_parallel_world_size()
+            )
+            if tp_size == 1:
+                gathered_params[index] = param.data
             else:
-                tp_size = mpu.get_tensor_model_parallel_world_size()
-                tp_group = mpu.get_tensor_model_parallel_group()
+                grouped_params.setdefault((is_expert, param.dtype), []).append((index, info, param))
 
-            param_partitions = [torch.empty_like(param.data) for _ in range(tp_size)]
-            handle = dist.all_gather(param_partitions, param.data, group=tp_group, async_op=True)
-            gather_tasks.append((info, None, handle, param_partitions, param.partition_dim))
-            handles.append(handle)
+    gather_tasks = []
+    for (is_expert, _dtype), entries in grouped_params.items():
+        tp_size = (
+            mpu.get_expert_tensor_parallel_world_size() if is_expert else mpu.get_tensor_model_parallel_world_size()
+        )
+        tp_group = mpu.get_expert_tensor_parallel_group() if is_expert else mpu.get_tensor_model_parallel_group()
+        local_flat = torch.cat([param.data.reshape(-1) for _, _, param in entries])
+        gathered_flat = torch.empty(tp_size * local_flat.numel(), dtype=local_flat.dtype, device=local_flat.device)
+        handle = dist.all_gather_into_tensor(gathered_flat, local_flat, group=tp_group, async_op=True)
+        gather_tasks.append((handle, gathered_flat, local_flat.numel(), entries, tp_size))
 
-    # Phase 2: Wait for ALL async operations to complete at once
-    # This ensures maximum parallelism by not blocking on individual operations
-    for handle in handles:
-        if handle is not None:
-            handle.wait()
-
-    # Phase 3: Process all results after all communications are done
-    gathered_params = []
-    for info, direct_param, handle, param_partitions, partition_dim in gather_tasks:
-        if handle is None:
-            # No all_gather needed
-            param = direct_param
-        else:
-            # Process the gathered partitions (same logic as original all_gather_param)
-            assert partition_dim is not None, "partition_stride != 1 is not supported"
-            # TODO: here we did an extra copy during concat, maybe merge this with convert_to_hf is better?
-            # TODO: check only GLU is used.
+    for handle, gathered_flat, rank_stride, entries, tp_size in gather_tasks:
+        handle.wait()
+        offset = 0
+        for index, info, param in entries:
+            numel = param.numel()
+            param_partitions = [
+                gathered_flat.narrow(0, rank * rank_stride + offset, numel).view_as(param) for rank in range(tp_size)
+            ]
+            partition_dim = param.partition_dim
+            assert param.partition_stride == 1 or (
+                param.partition_stride == 2 and "linear_fc1" in info.name
+            ), "partition_stride != 1 is not supported"
             if "linear_fc1.weight" in info.name or "linear_fc1.bias" in info.name:
                 param_partitions = [p.chunk(2, dim=0) for p in param_partitions]
                 param_partitions = [p[0] for p in param_partitions] + [p[1] for p in param_partitions]
-            # this is bug in megatron's grouped moe.
-            if "linear_fc2.weight" in info.name:
-                if partition_dim == 0:
-                    partition_dim = 1
-            param = torch.cat(param_partitions, dim=partition_dim)
+            if "linear_fc2.weight" in info.name and partition_dim == 0:
+                partition_dim = 1
+            gathered_params[index] = torch.cat(param_partitions, dim=partition_dim)
+            offset += numel
 
-        gathered_params.append(param)
-
-    return gathered_params
+    assert all(param is not None for param in gathered_params)
+    return [param for param in gathered_params if param is not None]
 
 
 def named_params_and_buffers(

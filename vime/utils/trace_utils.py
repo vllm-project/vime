@@ -153,6 +153,14 @@ def build_vllm_meta_trace_attrs(output: dict[str, Any]) -> dict[str, Any]:
     for key in ("prompt_tokens", "completion_tokens", "cached_tokens"):
         if usage.get(key) is not None:
             attrs[key] = usage[key]
+        elif output.get(key) is not None:
+            attrs[key] = output[key]
+    if output.get("finish_reason") is not None:
+        finish_reason = output["finish_reason"]
+        attrs["finish_reason"] = finish_reason.get("type") if isinstance(finish_reason, dict) else finish_reason
+    trace_children = _build_vllm_pd_trace_children(output)
+    if trace_children:
+        attrs[TRACE_CHILDREN_KEY] = trace_children
     return attrs
 
 

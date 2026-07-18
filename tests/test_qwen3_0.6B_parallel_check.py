@@ -61,6 +61,7 @@ def execute():
         "--rollout-num-gpus 8 "
         "--vllm-gpu-memory-utilization 0.8 "
         "--vllm-max-cudagraph-capture-size 16 "
+        '--vllm-compilation-config \'{"cudagraph_mode":"FULL_DECODE_ONLY"}\' '
     )
 
     ci_args = "--ci-test "

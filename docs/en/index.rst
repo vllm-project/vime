@@ -12,6 +12,21 @@ vime is built on `slime <https://github.com/THUDM/slime>`_, the RL framework beh
 - DeepSeek V3 series (DeepSeek V3, V3.1, DeepSeek R1);
 - Llama 3.
 
+Start by Use Case
+-----------------
+
+- New to vime: :doc:`get_started/quick_start`
+- Configure training and rollout arguments: :doc:`get_started/usage`
+- Add custom generation, reward, or rollout functions: :doc:`get_started/customization`
+- Build agentic RL workflows: :doc:`get_started/agent`
+- Configure production vLLM rollout topology: :doc:`advanced/vllm-config`
+- Connect external rollout engines: :doc:`advanced/external-rollout-engines`
+- Sync weights as byte-level deltas: :doc:`advanced/delta-weight-sync`
+- Use PD disaggregation: :doc:`advanced/pd-disaggregation`
+- Use BF16 training with FP8 rollout or FP8 KV cache: :doc:`advanced/low-precision`
+- Understand CI and reliability coverage: :doc:`developer_guide/ci`
+- Debug, trace, and profile long-running jobs: :doc:`developer_guide/debug`, :doc:`developer_guide/trace`, :doc:`developer_guide/profiling`
+
 .. toctree::
    :maxdepth: 1
    :caption: Get Started
@@ -26,6 +41,8 @@ vime is built on `slime <https://github.com/THUDM/slime>`_, the RL framework beh
    :caption: Dense
 
    examples/qwen3-4B.md
+   examples/gemma4.md
+   examples/glm4-9B.md
 
 .. toctree::
    :maxdepth: 1
@@ -66,3 +83,10 @@ vime is built on `slime <https://github.com/THUDM/slime>`_, the RL framework beh
    developer_guide/debug.md
    developer_guide/trace.md
    developer_guide/profiling.md
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Hardware Platforms
+
+   platform_support/amd_tutorial.md
+   platform_support/ascend_tutorial.md

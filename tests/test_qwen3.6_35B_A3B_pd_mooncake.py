@@ -24,6 +24,7 @@ def prepare():
 
 
 def execute():
+    os.environ.setdefault("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
     debug_data_path = os.environ.get("DEBUG_ROLLOUT_DATA") or tempfile.mktemp(
         prefix="qwen3_6_35b_a3b_pd_rollout_", suffix=".pt"
     )
