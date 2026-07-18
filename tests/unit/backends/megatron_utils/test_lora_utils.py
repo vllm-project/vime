@@ -1,11 +1,31 @@
 from argparse import Namespace
 
 from vime.backends.megatron_utils.lora_utils import (
+    build_lora_weight_update_request,
     build_peft_lora_config,
     convert_target_modules_to_megatron,
     infer_hf_target_modules,
     normalize_target_modules,
 )
+
+
+def test_build_lora_weight_update_request_matches_vllm_contract():
+    args = Namespace(lora_rank=128, lora_alpha=64)
+    names = [
+        "model.layers.0.self_attn.q_proj.lora_A.weight",
+        "model.layers.0.self_attn.q_proj.lora_B.weight",
+        "model.layers.0.mlp.experts.0.gate_proj.lora_A.weight",
+        "model.layers.0.mlp.experts.0.gate_proj.lora_B.weight",
+    ]
+    req = build_lora_weight_update_request(args, lora_int_id=1, tensor_names=names)
+
+    assert req["lora_int_id"] == 1
+    assert req["tensor_names"] == names
+    # vime exports per-expert 2D matrices, not stacked 3D grouped weights.
+    assert req["is_3d_lora_weight"] is False
+    assert req["peft_config"]["r"] == 128
+    assert req["peft_config"]["lora_alpha"] == 64
+    assert sorted(req["peft_config"]["target_modules"]) == ["gate_proj", "q_proj"]
 
 
 def test_normalize_target_modules_expands_all_linear_and_excludes():

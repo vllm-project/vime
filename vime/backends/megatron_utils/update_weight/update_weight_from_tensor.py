@@ -27,7 +27,12 @@ from ray.actor import ActorHandle
 
 from vime.utils.distributed_utils import get_gloo_group
 
-from ..lora_utils import is_lora_enabled, save_lora_adapter_for_vllm
+from ..lora_utils import (
+    build_lora_weight_update_request,
+    export_lora_named_tensors,
+    is_lora_enabled,
+    save_lora_adapter_for_vllm,
+)
 from .hf_weight_iterator_base import HfWeightIteratorBase
 from .update_weight_from_distributed import (
     connect_rollout_engines_from_distributed,
@@ -165,6 +170,10 @@ class UpdateWeightFromTensor:
         self._model_update_groups = None
         # vLLM #39212 IPC transfer-engine init runs once per set of colocated engines.
         self._ipc_initialized = False
+        # The vLLM LoRA tensor-update path (#48409) can only update an adapter that is
+        # already registered, so the first sync always loads from disk to register it;
+        # later syncs stream the adapter over IPC.
+        self._lora_adapter_registered = False
         # vLLM IPC handle payloads may use cloudpickle on the Ray/HTTP bridge.
         os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
@@ -351,11 +360,19 @@ class UpdateWeightFromTensor:
 
     @torch.no_grad()
     def _update_lora_adapter(self) -> None:
-        """Export the current adapter and ask vLLM engines to load it by path."""
+        """Push the current adapter to the colocated vLLM engines.
+
+        Disk path (default): export the adapter to a PEFT dir and have vLLM reload it.
+        Tensor path (--lora-sync-from-tensor): stream the adapter over IPC into vLLM's
+        in-memory update target (#48409), avoiding the multi-GB disk write+read. The
+        first sync always uses the disk path so the adapter is registered before any
+        in-memory update can target it.
+        """
         rank = dist.get_rank()
-        # The barriers below must always be reached on rank 0, even when a Ray
-        # call raises, otherwise the other ranks would block on the barrier
-        # indefinitely instead of failing fast.
+        use_tensor = getattr(self.args, "lora_sync_from_tensor", False) and self._lora_adapter_registered
+
+        # The barriers below must always be reached on rank 0, even when a Ray call
+        # raises, otherwise the other ranks would block on the barrier indefinitely.
         if rank == 0:
             try:
                 ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
@@ -365,10 +382,11 @@ class UpdateWeightFromTensor:
         else:
             dist.barrier(group=get_gloo_group())
 
-        adapter_path = save_lora_adapter_for_vllm(self.model, self.args, self.weight_version)
-
-        if rank == 0:
-            try:
+        if use_tensor:
+            self._send_lora_adapter_via_ipc()
+        else:
+            adapter_path = save_lora_adapter_for_vllm(self.model, self.args, self.weight_version)
+            if rank == 0:
                 refs = [
                     engine.load_lora_adapter.remote(
                         self.args.lora_adapter_name,
@@ -378,11 +396,51 @@ class UpdateWeightFromTensor:
                     for engine in self.rollout_engines
                 ]
                 ray.get(refs)
+            self._lora_adapter_registered = True
+
+        if rank == 0:
+            try:
                 ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
             finally:
                 dist.barrier(group=get_gloo_group())
         else:
             dist.barrier(group=get_gloo_group())
+
+    @torch.no_grad()
+    def _send_lora_adapter_via_ipc(self) -> None:
+        """Stream the adapter tensors into vLLM's LoRA update target over IPC (#48409).
+
+        Reuses the colocate IPC channel the full-parameter path uses: open a LoRA update
+        transaction on each engine, send the adapter tensors with the same
+        ``update_weights_from_tensor`` call (which now routes into the adapter), then
+        commit. Each colocate group's gather-source rank drives its own engine's HTTP.
+        """
+        rank = dist.get_rank()
+        # vime registers exactly one adapter (`--lora-adapter-name`), so vLLM assigns it
+        # int id 1 on first load.
+        lora_int_id = 1
+
+        named = export_lora_named_tensors(self.model, self.args)  # collective across TP
+        tensor_names = [name for name, _ in named]
+
+        if self._ipc_engine is not None and rank == self._ipc_gather_src:
+            request = build_lora_weight_update_request(self.args, lora_int_id, tensor_names)
+            ray.get(self._ipc_engine.start_lora_weight_update.remote(request, weight_version=str(self.weight_version)))
+        dist.barrier(group=get_gloo_group())
+
+        refs, _long_lived = _send_to_colocated_engine(
+            named,
+            ipc_engine=self._ipc_engine,
+            ipc_gather_src=self._ipc_gather_src,
+            ipc_gather_group=self._ipc_gather_group,
+            weight_version=self.weight_version,
+        )
+        if refs:
+            ray.get(refs)
+
+        if self._ipc_engine is not None and rank == self._ipc_gather_src:
+            ray.get(self._ipc_engine.finish_weight_update.remote())
+        dist.barrier(group=get_gloo_group())
 
 
 def _send_to_colocated_engine(

@@ -127,6 +127,7 @@ def _export_bridge(hf_checkpoint: str):
     import vime_plugins.megatron_bridge  # noqa: F401
     from vime.utils import megatron_bridge_utils
 
+    megatron_bridge_utils.patch_bridge_grouped_lora_te_fastpath()
     return megatron_bridge_utils.patch_auto_bridge_hf_config(
         AutoBridge.from_hf_pretrained(hf_checkpoint, trust_remote_code=True)
     )
@@ -193,6 +194,51 @@ def save_lora_adapter_for_vllm(model: Sequence[torch.nn.Module], args: Namespace
     if dist.is_initialized():
         dist.barrier(group=get_gloo_group())
     return str(save_dir)
+
+
+def export_lora_named_tensors(model: Sequence[torch.nn.Module], args: Namespace) -> list[tuple[str, torch.Tensor]]:
+    """Export the current adapter as in-memory (hf_name, gpu_tensor) pairs for IPC sync.
+
+    Same bridge export as :func:`save_lora_adapter_for_vllm`, but the tensors stay on the
+    GPU instead of being written to disk, so they can be streamed to vLLM's LoRA update
+    target (#48409) over the existing IPC weight-transfer channel. Collective: all ranks
+    must call it because the bridge all-gathers across TP.
+    """
+    from vime.utils import megatron_bridge_utils
+
+    bridge = _export_bridge(args.hf_checkpoint)
+    named: list[tuple[str, torch.Tensor]] = []
+    with megatron_bridge_utils.patch_megatron_model(model):
+        for hf_name, weight, _megatron_name in bridge.export_adapter_weights(
+            model,
+            cpu=False,
+            show_progress=False,
+        ):
+            named.append((hf_name, weight))
+    if not named:
+        raise RuntimeError("No LoRA adapter weights were exported; is the actor model missing PEFT adapters?")
+    return named
+
+
+def build_lora_weight_update_request(
+    args: Namespace, lora_int_id: int, tensor_names: Sequence[str]
+) -> dict[str, Any]:
+    """Metadata for vLLM's ``start_lora_weight_update`` (#48409).
+
+    vime exports the MoE experts as separate per-expert 2D matrices (see the
+    ``experts.N.gate_proj.lora_A`` names in the runtime adapter), not a stacked 3D
+    grouped weight, so ``is_3d_lora_weight`` is False.
+    """
+    return {
+        "lora_int_id": lora_int_id,
+        "peft_config": {
+            "r": args.lora_rank,
+            "lora_alpha": args.lora_alpha,
+            "target_modules": infer_hf_target_modules(tensor_names),
+        },
+        "tensor_names": list(tensor_names),
+        "is_3d_lora_weight": False,
+    }
 
 
 def build_peft_lora_config(args: Namespace, target_modules: Sequence[str]) -> dict[str, Any]:

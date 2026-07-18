@@ -17,7 +17,7 @@ from megatron.core.transformer.spec_utils import import_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training.arguments import core_transformer_config_from_args
 
-from vime.utils.megatron_bridge_utils import patch_auto_bridge_hf_config
+from vime.utils.megatron_bridge_utils import patch_auto_bridge_hf_config, patch_bridge_grouped_lora_te_fastpath
 from vime.utils.misc import load_function
 
 
@@ -89,6 +89,7 @@ def _get_model_provider_func(
 
         import vime_plugins.megatron_bridge  # noqa: F401  # register custom bridges
 
+        patch_bridge_grouped_lora_te_fastpath()
         bridge = patch_auto_bridge_hf_config(AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True))
         provider = bridge.to_megatron_provider(load_weights=False)
         # TODO: we should not manually set this...

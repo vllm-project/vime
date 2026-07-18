@@ -6,6 +6,23 @@ except ImportError:
     unwrap_model = None
 
 
+def patch_bridge_grouped_lora_te_fastpath() -> None:
+    """Disable a Megatron-Bridge LoRA fast path that is version-coupled to TE internals."""
+    try:
+        from megatron.bridge.peft.utils import GroupedExpertLinearAdapter
+    except ImportError:
+        return
+
+    if getattr(GroupedExpertLinearAdapter, "_vime_disable_te_grouped_lora", False):
+        return
+
+    def _can_use_te_grouped_linear(self, x):  # noqa: ARG001
+        return False
+
+    GroupedExpertLinearAdapter._can_use_te_grouped_linear = _can_use_te_grouped_linear
+    GroupedExpertLinearAdapter._vime_disable_te_grouped_lora = True
+
+
 def patch_hf_config_for_megatron_bridge(hf_config):
     configs = []
     seen_config_ids = set()

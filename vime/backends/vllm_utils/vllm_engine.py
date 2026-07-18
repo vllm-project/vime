@@ -441,6 +441,28 @@ class VLLMEngine(RayActor):
         if weight_version is not None:
             self._weight_version = str(weight_version)
 
+    def start_lora_weight_update(self, lora_request: dict, weight_version: str | None = None):
+        """Open an in-memory LoRA update transaction on the engine (vLLM #48409).
+
+        Installs a LoRA weight-update target so the adapter tensors streamed over the
+        existing IPC channel land in the adapter instead of the base model. The engine
+        must already be paused. ``finish_weight_update`` commits and clears the target.
+        Requires a vLLM build with #48409; a 404 here means the running vLLM predates it.
+        """
+        if self.node_rank != 0:
+            return None
+        base_url = f"http://{self.server_host}:{self.server_port}"
+        response = requests.post(f"{base_url}/start_lora_weight_update", json={"lora_request": lora_request})
+        if response.status_code == 404:
+            raise RuntimeError(
+                "vLLM rejected /start_lora_weight_update (404): the running vLLM lacks LoRA "
+                "tensor-update support (#48409). Drop --lora-sync-from-tensor or upgrade vLLM."
+            )
+        response.raise_for_status()
+        if weight_version is not None:
+            self._weight_version = str(weight_version)
+        return response.json() if response.content else None
+
     def pause_generation(self):
         response = requests.post(
             f"http://{self.server_host}:{self.server_port}/pause",

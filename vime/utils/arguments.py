@@ -330,6 +330,16 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--lora-sync-from-tensor",
+                action="store_true",
+                default=False,
+                help=(
+                    "Stream the LoRA adapter to colocated vLLM over IPC instead of writing it to "
+                    "disk and reloading. Requires a vLLM build with LoRA tensor updates (#48409); "
+                    "the first sync still registers the adapter from disk."
+                ),
+            )
+            parser.add_argument(
                 "--allgather-cp",
                 action="store_true",
                 default=False,
@@ -1850,6 +1860,12 @@ def vime_validate_args(args):
             args.vllm_max_lora_rank = max(int(args.vllm_max_lora_rank or 0), int(args.lora_rank))
         if hasattr(args, "vllm_max_loras"):
             args.vllm_max_loras = max(int(args.vllm_max_loras or 0), 1)
+
+    if getattr(args, "lora_sync_from_tensor", False):
+        if args.lora_rank == 0:
+            raise ValueError("--lora-sync-from-tensor requires LoRA training (--lora-rank > 0).")
+        if not args.colocate:
+            raise ValueError("--lora-sync-from-tensor requires colocated vLLM rollout (--colocate).")
 
     if args.kl_coef != 0 or args.use_kl_loss:
         if not os.path.exists(args.ref_load):
