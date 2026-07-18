@@ -516,6 +516,20 @@ def test_update_weights_does_not_advance_version_on_failure(vllm_engine, monkeyp
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("action", ["snapshot", "reset_tensors", "compare"])
+def test_check_weights_posts_weights_checker_action(vllm_engine, monkeypatch, action):
+    calls: list[tuple[str, dict]] = []
+
+    def fake_make_request(endpoint: str, payload: dict):
+        calls.append((endpoint, payload))
+        return {"action": action, "results": []}
+
+    monkeypatch.setattr(vllm_engine, "_make_request", fake_make_request)
+    assert vllm_engine.check_weights(action) == {"action": action, "results": []}
+    assert calls == [("weights_checker", {"action": action})]
+
+
+@pytest.mark.unit
 def test_get_weight_version_reads_vllm_weight_info(vllm_engine, monkeypatch):
     monkeypatch.setattr(
         mod.requests,

@@ -166,3 +166,96 @@ diff --git a/vllm/model_executor/models/qwen3_omni_moe_thinker.py b/vllm/model_e
          )
  
          self.attn = MMEncoderAttention(
+diff --git a/vllm/entrypoints/serve/dev/rlhf/api_router.py b/vllm/entrypoints/serve/dev/rlhf/api_router.py
+--- a/vllm/entrypoints/serve/dev/rlhf/api_router.py
++++ b/vllm/entrypoints/serve/dev/rlhf/api_router.py
+@@ -220,6 +220,28 @@ async def update_weight_version(
+     return JSONResponse(content={"success": True, "new_version": new_version})
+ 
+ 
++@router.post("/weights_checker")
++async def check_weights(raw_request: Request):
++    body = await raw_request.json()
++    action = body.get("action")
++    if action not in {"snapshot", "reset_tensors", "compare"}:
++        raise HTTPException(
++            status_code=HTTPStatus.BAD_REQUEST.value, detail="unsupported action"
++        )
++    results = await engine_client(raw_request).collective_rpc(
++        method="check_weights", kwargs={"action": action}
++    )
++    success = all(
++        isinstance(result, dict) and result.get("success") for result in results
++    )
++    return JSONResponse(
++        content={"success": success, "results": results},
++        status_code=(
++            HTTPStatus.OK.value if success else HTTPStatus.BAD_REQUEST.value
++        ),
++    )
++
++
+ @router.get("/weight_info")
+ async def weight_info(raw_request: Request):
+     weight_version = await engine_client(raw_request).get_weight_version()
+diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runner.py
+--- a/vllm/v1/worker/gpu/model_runner.py
++++ b/vllm/v1/worker/gpu/model_runner.py
+@@ -492,6 +492,44 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+         if not isinstance(speculator, DraftModelSpeculator):
+             return None
+         return speculator.model
++
++    def check_weights(self, action: str) -> dict[str, Any]:
++        tensors = dict(self._weight_check_state())
++        if action == "snapshot":
++            self._weight_check_snapshot = {
++                name: tensor.detach().cpu().clone() for name, tensor in tensors.items()
++            }
++            return {"success": True}
++        if action == "reset_tensors":
++            ignored = ("cos_sin_cache", "inv_freq", "freqs_cis", "_weight_fp32")
++            with torch.inference_mode():
++                for name, tensor in tensors.items():
++                    if any(pattern in name for pattern in ignored):
++                        continue
++                    if tensor.is_floating_point():
++                        tensor.normal_()
++                    else:
++                        tensor.random_()
++            return {"success": True}
++        if action == "compare":
++            snapshot = getattr(self, "_weight_check_snapshot", None)
++            if snapshot is None:
++                return {
++                    "success": False,
++                    "error": "compare requires a prior snapshot",
++                }
++            mismatches = sorted(tensors.keys() ^ snapshot.keys())
++            mismatches.extend(
++                name
++                for name in tensors.keys() & snapshot.keys()
++                if not torch.equal(tensors[name].detach().cpu(), snapshot[name])
++            )
++            return {"success": not mismatches, "mismatches": mismatches[:32]}
++        return {"success": False, "error": f"unsupported action: {action!r}"}
++
++    def _weight_check_state(self):
++        yield from self.model.named_parameters()
++        yield from self.model.named_buffers()
+ 
+     def reload_weights(self, *args, **kwargs) -> None:
+         # TODO(Wentao): Use full version instead of import when fully migrated to v2
+diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
+--- a/vllm/v1/worker/gpu_worker.py
++++ b/vllm/v1/worker/gpu_worker.py
+@@ -893,6 +893,9 @@ class Worker(WorkerBase):
+ 
+     def get_model(self) -> nn.Module:
+         return self.model_runner.get_model()
++
++    def check_weights(self, action: str) -> dict:
++        return self.model_runner.check_weights(action)
+ 
+     def get_draft_model(self) -> nn.Module | None:
+         return self.model_runner.get_draft_model()
