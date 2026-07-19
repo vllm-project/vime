@@ -193,3 +193,13 @@ def test_publish_checkpoint_directory_is_immutable_and_retryable(tmp_path: Path)
     with pytest.raises(receiver.CheckpointConflictError, match="different contents"):
         receiver.publish_checkpoint_directory(conflict_staging, destination)
     assert (destination / "model-00001.safetensors").read_bytes() == b"weights-v1"
+
+
+def test_publish_checkpoint_directory_accepts_late_shared_fs_publisher(tmp_path: Path):
+    destination = tmp_path / "weight_v000001"
+    staging = tmp_path / ".weight_v000001.staging"
+    _publish(tmp_path / "first", 1).rename(staging)
+
+    assert receiver.publish_checkpoint_directory(staging, destination) == "published"
+    assert not staging.exists()
+    assert receiver.publish_checkpoint_directory(staging, destination) == "published_by_peer"

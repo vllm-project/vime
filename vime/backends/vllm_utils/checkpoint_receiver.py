@@ -180,14 +180,37 @@ def _resolve_local_directory(value: str | Path) -> Path:
 def publish_checkpoint_directory(staging_dir: str | Path, destination_dir: str | Path) -> str:
     """Publish an immutable checkpoint directory, allowing an identical retry."""
 
-    staging = _resolve_existing_directory(staging_dir, "checkpoint staging directory")
+    if not isinstance(staging_dir, (str, Path)) or not str(staging_dir).strip():
+        raise CheckpointReceiveError("checkpoint staging directory must be a non-empty path")
+    staging_path = Path(staging_dir).expanduser()
+    if staging_path.is_symlink():
+        raise CheckpointReceiveError(f"checkpoint staging directory must not be a symlink: {staging_path}")
+    try:
+        staging_parent = staging_path.parent.resolve(strict=True)
+    except OSError as exc:
+        raise CheckpointReceiveError(
+            f"checkpoint staging directory parent does not exist: {staging_path.parent}"
+        ) from exc
     destination = _prepare_local_directory(destination_dir)
-    if staging.parent != destination.parent:
+    if staging_parent != destination.parent:
         raise CheckpointReceiveError("checkpoint staging and destination directories must be siblings")
+    staging_path = staging_parent / staging_path.name
+
+    try:
+        staging = _resolve_existing_directory(staging_path, "checkpoint staging directory")
+    except CheckpointReceiveError:
+        if not staging_path.exists() and _published_checkpoint_is_valid(destination):
+            return "published_by_peer"
+        raise
 
     if destination.exists():
         destination_manifest = _build_checkpoint_manifest(destination)
-        staging_manifest = _build_checkpoint_manifest(staging)
+        try:
+            staging_manifest = _build_checkpoint_manifest(staging)
+        except (CheckpointReceiveError, OSError):
+            if not staging.exists() and _published_checkpoint_is_valid(destination):
+                return "published_by_peer"
+            raise
         destination_hash = _manifest_hash(destination_manifest["files"])
         staging_hash = _manifest_hash(staging_manifest["files"])
         if destination_hash != staging_hash:
@@ -201,11 +224,21 @@ def publish_checkpoint_directory(staging_dir: str | Path, destination_dir: str |
     except FileNotFoundError:
         # On a shared filesystem another writer rank may have renamed the same
         # staging directory after the distributed write barrier.
-        if destination.is_dir() and not destination.is_symlink():
+        if _published_checkpoint_is_valid(destination):
             return "published_by_peer"
         raise
     _fsync_directory(destination.parent)
     return "published"
+
+
+def _published_checkpoint_is_valid(destination: Path) -> bool:
+    if not destination.is_dir() or destination.is_symlink():
+        return False
+    try:
+        _build_checkpoint_manifest(destination)
+    except (CheckpointReceiveError, OSError):
+        return False
+    return True
 
 
 def _build_checkpoint_manifest(root: Path) -> dict[str, Any]:
