@@ -58,6 +58,42 @@ class _Actor:
         self.update_weights = _RemoteMethod(calls)
 
 
+class _NamedRemoteMethod:
+    def __init__(self, name: str, calls: list[str], result=None) -> None:
+        self.name = name
+        self.calls = calls
+        self.result = result if result is not None else name
+        self.kwargs: list[dict] = []
+
+    def remote(self, *args, **kwargs):
+        self.calls.append(self.name)
+        self.kwargs.append(kwargs)
+        return self.result
+
+
+class _RolloutEngine:
+    def __init__(self, calls: list[str], pull_result=None) -> None:
+        self.pull_weights = _NamedRemoteMethod(
+            "pull",
+            calls,
+            pull_result or {"success": True, "local_checkpoint_dir": "/remote/local"},
+        )
+        self.pause_generation = _NamedRemoteMethod("pause", calls)
+        self.flush_cache = _NamedRemoteMethod("flush", calls)
+        self.update_weights_from_disk = _NamedRemoteMethod("reload", calls)
+        self.continue_generation = _NamedRemoteMethod("continue", calls)
+
+
+class _RolloutManager:
+    def __init__(self, engine) -> None:
+        engines = engine if isinstance(engine, list) else [engine]
+        self.get_updatable_engines_and_lock = _NamedRemoteMethod(
+            "get_engines",
+            [],
+            (engines, None, 0, [], []),
+        )
+
+
 def _make_group(module, tmp_path: Path):
     group = module.RayTrainGroup.__new__(module.RayTrainGroup)
     group.args = SimpleNamespace(
@@ -135,3 +171,81 @@ def test_full_disk_group_retries_same_version_after_actor_failure(actor_group_mo
 
     assert actor_calls == [{"weight_version": 1}, {"weight_version": 1}]
     assert group._disk_weight_version == 1
+
+
+@pytest.mark.parametrize(
+    ("failed_call", "expected_calls"),
+    [
+        ("pause", ["pause", "continue"]),
+        ("flush", ["pause", "flush", "continue"]),
+        ("reload", ["pause", "flush", "reload", "continue"]),
+    ],
+)
+def test_disk_reload_resumes_engines_after_failure(
+    actor_group_module,
+    tmp_path: Path,
+    failed_call: str,
+    expected_calls: list[str],
+):
+    group = _make_group(actor_group_module, tmp_path)
+    group.args.offload_rollout = False
+    group.args.update_weight_local_checkpoint_dir = None
+    group.args.update_weight_disk_keep_files = True
+    group.args.ci_test = False
+    calls: list[str] = []
+    engine = _RolloutEngine(calls)
+    group._rollout_manager = _RolloutManager(engine)
+
+    def ray_get(refs):
+        if refs == [failed_call]:
+            raise RuntimeError(f"{failed_call} failed")
+        return refs
+
+    actor_group_module.ray.get = ray_get
+
+    with pytest.raises(RuntimeError, match=rf"{failed_call} failed"):
+        group._reload_rollout_weights_from_disk(tmp_path / "weight_v000001", "1")
+
+    assert calls == expected_calls
+
+
+def test_disk_reload_uses_server_returned_local_path(actor_group_module, tmp_path: Path):
+    group = _make_group(actor_group_module, tmp_path)
+    group.args.offload_rollout = False
+    group.args.update_weight_local_checkpoint_dir = "/trainer/local"
+    group.args.update_weight_disk_keep_files = True
+    group.args.ci_test = False
+    calls: list[str] = []
+    engine = _RolloutEngine(calls, {"success": True, "local_checkpoint_dir": "/remote/local"})
+    group._rollout_manager = _RolloutManager(engine)
+
+    group._reload_rollout_weights_from_disk(tmp_path / "weight_v000001", "1")
+
+    assert calls == ["pull", "pause", "flush", "reload", "continue"]
+    assert engine.pull_weights.kwargs == [{"target_version": 1}]
+    assert engine.update_weights_from_disk.kwargs[0]["model_path"] == "/remote/local"
+
+
+def test_disk_reload_fans_out_server_returned_local_paths(actor_group_module, tmp_path: Path):
+    group = _make_group(actor_group_module, tmp_path)
+    group.args.offload_rollout = False
+    group.args.update_weight_local_checkpoint_dir = "/trainer/local"
+    group.args.update_weight_disk_keep_files = True
+    group.args.ci_test = False
+    calls: list[str] = []
+    engines = [
+        _RolloutEngine(calls, {"success": True, "local_checkpoint_dir": "/remote/engine-0"}),
+        _RolloutEngine(calls, {"success": True, "local_checkpoint_dir": "/remote/engine-1"}),
+    ]
+    group._rollout_manager = _RolloutManager(engines)
+
+    group._reload_rollout_weights_from_disk(tmp_path / "weight_v000001", "1")
+
+    assert [engine.pull_weights.kwargs for engine in engines] == [
+        [{"target_version": 1}],
+        [{"target_version": 1}],
+    ]
+    assert [engine.update_weights_from_disk.kwargs[0]["model_path"] for engine in engines] == [
+        "/remote/engine-0",
+        "/remote/engine-1",
+    ]

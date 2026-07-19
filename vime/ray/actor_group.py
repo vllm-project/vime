@@ -237,33 +237,62 @@ class RayTrainGroup:
             # each host pulls the published checkpoint onto local disk (e.g. NVMe) and
             # the engines reload from there; the pull is disk-only, so it runs before
             # pause and overlaps generation
-            ray.get([engine.pull_weights.remote(int(weight_version)) for engine in engines])
-            model_path = self.args.update_weight_local_checkpoint_dir
+            pull_results = ray.get(
+                [engine.pull_weights.remote(target_version=int(weight_version)) for engine in engines]
+            )
+            if not isinstance(pull_results, list) or len(pull_results) != len(engines):
+                raise RuntimeError(f"pull_weights returned one result per engine: {pull_results!r}")
+            model_paths = []
+            for index, result in enumerate(pull_results):
+                if (
+                    not isinstance(result, dict)
+                    or result.get("success") is not True
+                    or not isinstance(result.get("local_checkpoint_dir"), str)
+                    or not result["local_checkpoint_dir"]
+                ):
+                    raise RuntimeError(f"pull_weights returned an invalid result for engine {index}: {result!r}")
+                model_paths.append(result["local_checkpoint_dir"])
         else:
-            model_path = str(disk_weight_dir)
-        ray.get([engine.pause_generation.remote() for engine in engines])
-        ray.get([engine.flush_cache.remote() for engine in engines])
-        ray.get(
-            [
-                engine.update_weights_from_disk.remote(
-                    model_path=model_path,
-                    weight_version=weight_version,
-                )
-                for engine in engines
-            ]
-        )
-        if self.args.ci_test:
-            engine_versions = ray.get([engine.get_weight_version.remote() for engine in engines])
-            mismatches = [
-                f"engine {idx}: {engine_version}"
-                for idx, engine_version in enumerate(engine_versions)
-                if str(engine_version) != str(weight_version)
-            ]
-            if mismatches:
-                raise RuntimeError(
-                    "Weight version mismatch after disk reload! "
-                    f"Expected: {weight_version}; " + ", ".join(mismatches)
-                )
-        if not self.args.update_weight_disk_keep_files:
-            shutil.rmtree(disk_weight_dir, ignore_errors=True)
-        ray.get([engine.continue_generation.remote() for engine in engines])
+            model_paths = [str(disk_weight_dir)] * len(engines)
+        reload_error: Exception | None = None
+        pause_attempted = False
+        try:
+            # Resume every engine even if only a subset completed the batched
+            # pause call before Ray surfaced an error.
+            pause_attempted = True
+            ray.get([engine.pause_generation.remote() for engine in engines])
+            ray.get([engine.flush_cache.remote() for engine in engines])
+            ray.get(
+                [
+                    engine.update_weights_from_disk.remote(
+                        model_path=model_path,
+                        weight_version=weight_version,
+                    )
+                    for engine, model_path in zip(engines, model_paths, strict=True)
+                ]
+            )
+            if self.args.ci_test:
+                engine_versions = ray.get([engine.get_weight_version.remote() for engine in engines])
+                mismatches = [
+                    f"engine {idx}: {engine_version}"
+                    for idx, engine_version in enumerate(engine_versions)
+                    if str(engine_version) != str(weight_version)
+                ]
+                if mismatches:
+                    raise RuntimeError(
+                        "Weight version mismatch after disk reload! "
+                        f"Expected: {weight_version}; " + ", ".join(mismatches)
+                    )
+            if not self.args.update_weight_disk_keep_files:
+                shutil.rmtree(disk_weight_dir, ignore_errors=True)
+        except Exception as exc:
+            reload_error = exc
+            raise
+        finally:
+            if pause_attempted:
+                try:
+                    ray.get([engine.continue_generation.remote() for engine in engines])
+                except Exception as resume_error:
+                    if reload_error is None:
+                        raise
+                    reload_error.add_note(f"Failed to resume rollout engines after reload failure: {resume_error}")
