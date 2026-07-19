@@ -342,6 +342,20 @@ def test_build_vllm_subprocess_env_sets_checkpoint_roots(vllm_args):
 
 
 @pytest.mark.unit
+def test_pull_weights_leaves_paths_to_server(vllm_engine, monkeypatch):
+    calls: list[tuple[str, dict]] = []
+
+    def fake_make_request(endpoint: str, payload: dict):
+        calls.append((endpoint, payload))
+        return {"success": True, "local_checkpoint_dir": "/remote/local"}
+
+    monkeypatch.setattr(vllm_engine, "_make_request", fake_make_request)
+
+    assert vllm_engine.pull_weights(7)["local_checkpoint_dir"] == "/remote/local"
+    assert calls == [("pull_weights", {"target_version": 7})]
+
+
+@pytest.mark.unit
 def test_build_vllm_subprocess_env_sets_disaggregation_side_channel(vllm_args):
     env = mod._build_subprocess_env(
         {
