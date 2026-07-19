@@ -560,7 +560,7 @@ class MegatronTrainRayActor(TrainRayActor):
             self.sleep()
 
     @timer
-    def update_weights(self) -> None:
+    def update_weights(self, weight_version: int | None = None) -> None:
         if self.args.debug_train_only or self.args.debug_rollout_only:
             return
 
@@ -609,7 +609,14 @@ class MegatronTrainRayActor(TrainRayActor):
                     if ".draft_model." in name:
                         param.data = backup[name].to(param.device)
             print_memory("before update_weights")
-            self.weight_updater.update_weights()
+            if self.args.update_weight_mode == "full" and self.args.update_weight_transport == "disk":
+                if weight_version is None:
+                    raise ValueError("full-disk weight update requires an explicit weight_version")
+                self.weight_updater.update_weights(weight_version=weight_version)
+            else:
+                if weight_version is not None:
+                    raise ValueError("weight_version is only valid for full-disk weight updates")
+                self.weight_updater.update_weights()
             print_memory("after update_weights")
 
             if getattr(self.args, "keep_old_actor", False):

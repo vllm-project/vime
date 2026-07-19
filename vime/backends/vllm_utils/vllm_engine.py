@@ -355,8 +355,6 @@ class VLLMEngine(RayActor):
         return response.json()
 
     def check_weights(self, action: str):
-        if action not in {"snapshot", "reset_tensors", "compare"}:
-            raise ValueError(f"unsupported weight check action: {action!r}")
         return self._make_request("weights_checker", {"action": action})
 
     def init_weight_transfer_engine(self, payload: dict) -> dict:

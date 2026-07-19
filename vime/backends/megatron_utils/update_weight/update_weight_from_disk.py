@@ -9,6 +9,7 @@ import torch
 import torch.distributed as dist
 from ray.actor import ActorHandle
 
+from vime.backends.vllm_utils.checkpoint_receiver import publish_checkpoint_directory
 from vime.utils.distributed_utils import get_gloo_group
 
 from ..hf_checkpoint_saver import save_hf_model_to_path
@@ -63,20 +64,27 @@ class UpdateWeightFromDisk:
         return out
 
     @torch.no_grad()
-    def update_weights(self) -> None:
-        self.weight_version += 1
-        version_dir = Path(self.args.update_weight_disk_dir) / f"weight_v{self.weight_version:06d}"
+    def update_weights(self, *, weight_version: int) -> None:
+        if weight_version < self.weight_version or weight_version > self.weight_version + 1:
+            raise ValueError(
+                f"invalid full-disk weight version {weight_version}; current version is {self.weight_version}"
+            )
 
-        if dist.get_rank() == 0:
-            shutil.rmtree(version_dir, ignore_errors=True)
+        version_dir = Path(self.args.update_weight_disk_dir) / f"weight_v{weight_version:06d}"
+        staging_dir = version_dir.with_name(f".{version_dir.name}.staging")
+
+        # Every rank cleans its local view. On a POSIX shared filesystem these
+        # calls converge on the same path; on host-local/object-backed mounts
+        # each writer must clean and create its own staging directory.
+        shutil.rmtree(staging_dir, ignore_errors=True)
         dist.barrier(group=get_gloo_group())
 
-        # every writing rank creates the dir itself: a non-POSIX shared filesystem may not surface
+        # Every writing rank creates the dir itself: a non-POSIX shared filesystem may not surface
         # one rank's mkdir to another until commit
-        version_dir.mkdir(parents=True, exist_ok=True)
+        staging_dir.mkdir(parents=True, exist_ok=True)
         save_hf_model_to_path(
             self.args,
-            version_dir,
+            staging_dir,
             self.model,
             model_name=self.model_name,
             quantization_config=self.quantization_config,
@@ -84,11 +92,16 @@ class UpdateWeightFromDisk:
         )
         dist.barrier(group=get_gloo_group())
 
+        publish_checkpoint_directory(staging_dir, version_dir)
+        dist.barrier(group=get_gloo_group())
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
         # every rank runs the hook (it gates itself): each container must publish
         # its own writes
         if self._post_write_hook is not None:
             self._post_write_hook(self.args, str(version_dir), list(self.rollout_engines))
         dist.barrier(group=get_gloo_group())
+        self.weight_version = weight_version
 
         # VLLM reload is orchestrated by RayTrainGroup after the checkpoint
         # is fully written, so training-side lifecycle can decide whether

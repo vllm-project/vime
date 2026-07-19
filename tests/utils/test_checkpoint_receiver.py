@@ -121,3 +121,75 @@ def test_concurrent_same_version_pulls_are_serialized(tmp_path: Path):
         statuses = sorted(pool.map(lambda _: pull(), range(2)))
     assert statuses == ["already_applied", "materialized"]
     assert (local / "model.safetensors.index.json").is_file()
+
+
+def test_materialize_rejects_paths_outside_configured_roots(tmp_path: Path):
+    configured_source = tmp_path / "configured-source"
+    other_source = tmp_path / "other-source"
+    _publish(configured_source, 1)
+    _publish(other_source, 1)
+    configured_local = tmp_path / "configured-local"
+
+    with pytest.raises(receiver.CheckpointReceiveError, match="configured checkpoint source"):
+        receiver.materialize_checkpoint(
+            source_dir=str(other_source),
+            local_checkpoint_dir=str(configured_local),
+            target_version=1,
+            expected_source_dir=str(configured_source),
+            expected_local_checkpoint_dir=str(configured_local),
+        )
+
+    with pytest.raises(receiver.CheckpointReceiveError, match="configured local checkpoint destination"):
+        receiver.materialize_checkpoint(
+            source_dir=str(configured_source),
+            local_checkpoint_dir=str(tmp_path / "other-local"),
+            target_version=1,
+            expected_source_dir=str(configured_source),
+            expected_local_checkpoint_dir=str(configured_local),
+        )
+
+    result = receiver.materialize_checkpoint(
+        source_dir=str(configured_source),
+        local_checkpoint_dir=str(configured_local),
+        target_version=1,
+        expected_source_dir=str(configured_source),
+        expected_local_checkpoint_dir=str(configured_local),
+    )
+    assert result["status"] == "materialized"
+
+
+def test_materialize_rejects_source_symlink(tmp_path: Path):
+    source = tmp_path / "source"
+    _publish(source, 1)
+    source_link = tmp_path / "source-link"
+    try:
+        source_link.symlink_to(source, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+
+    with pytest.raises(receiver.CheckpointReceiveError, match="must not be a symlink"):
+        receiver.materialize_checkpoint(
+            source_dir=str(source_link),
+            local_checkpoint_dir=str(tmp_path / "local"),
+            target_version=1,
+        )
+
+
+def test_publish_checkpoint_directory_is_immutable_and_retryable(tmp_path: Path):
+    destination = tmp_path / "weight_v000001"
+    staging = tmp_path / ".weight_v000001.staging"
+    _publish(tmp_path / "first", 1).rename(staging)
+
+    assert receiver.publish_checkpoint_directory(staging, destination) == "published"
+    assert (destination / "model-00001.safetensors").read_bytes() == b"weights-v1"
+
+    retry_staging = tmp_path / ".weight_v000001.retry"
+    _publish(tmp_path / "retry", 1).rename(retry_staging)
+    assert receiver.publish_checkpoint_directory(retry_staging, destination) == "already_published"
+    assert retry_staging.exists()
+
+    conflict_staging = tmp_path / ".weight_v000001.conflict"
+    _publish(tmp_path / "conflict", 1, b"different").rename(conflict_staging)
+    with pytest.raises(receiver.CheckpointConflictError, match="different contents"):
+        receiver.publish_checkpoint_directory(conflict_staging, destination)
+    assert (destination / "model-00001.safetensors").read_bytes() == b"weights-v1"

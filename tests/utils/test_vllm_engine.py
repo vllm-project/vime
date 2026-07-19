@@ -326,6 +326,22 @@ def test_build_vllm_subprocess_env_no_batch_invariant_by_default(vllm_args, monk
 
 
 @pytest.mark.unit
+def test_build_vllm_subprocess_env_sets_checkpoint_roots(vllm_args):
+    vllm_args.update_weight_disk_dir = "/shared/weights"
+    vllm_args.update_weight_local_checkpoint_dir = "/local/weights"
+
+    env = mod._build_subprocess_env(
+        {
+            "_args": vllm_args,
+            "_visible_devices": "0",
+        }
+    )
+
+    assert env["VIME_WEIGHT_SOURCE_DIR"] == str(Path("/shared/weights"))
+    assert env["VIME_WEIGHT_LOCAL_CHECKPOINT_DIR"] == str(Path("/local/weights"))
+
+
+@pytest.mark.unit
 def test_build_vllm_subprocess_env_sets_disaggregation_side_channel(vllm_args):
     env = mod._build_subprocess_env(
         {
@@ -781,11 +797,11 @@ def test_update_weights_from_disk_posts_collective_rpc(vllm_engine, monkeypatch)
 
     def fake_post(url, *, params=None, timeout=30, json=None):
         seen.append((url, params, timeout, json))
-        return _MockResponse(json_data={"reloaded": True})
+        return _MockResponse(json_data={"results": [None]})
 
     monkeypatch.setattr(mod.requests, "post", fake_post)
 
-    assert vllm_engine.update_weights_from_disk("/tmp/model", weight_version="8") == {"reloaded": True}
+    assert vllm_engine.update_weights_from_disk("/tmp/model", weight_version="8") == {"results": [None]}
     assert seen[0][0] == "http://127.0.0.1:8765/collective_rpc"
     assert seen[0][3]["method"] == "reload_weights"
     assert seen[1][0] == "http://127.0.0.1:8765/update_weight_version"
@@ -861,8 +877,39 @@ def test_update_weights_from_disk_surfaces_http_error(vllm_engine, monkeypatch):
         return _MockResponse(text="boom", status_code=500)
 
     monkeypatch.setattr(mod.requests, "post", fake_post)
+    vllm_engine._weight_version = "7"
     with pytest.raises(requests.exceptions.HTTPError):
         vllm_engine.update_weights_from_disk("/tmp/model")
+    assert vllm_engine._weight_version is None
+
+
+@pytest.mark.unit
+def test_update_weights_from_disk_does_not_commit_version_for_invalid_success_body(vllm_engine, monkeypatch):
+    monkeypatch.setattr(
+        mod.requests,
+        "post",
+        lambda *args, **kwargs: _MockResponse(text="not-json", status_code=200),
+    )
+    vllm_engine._weight_version = "7"
+
+    with pytest.raises(RuntimeError, match="non-JSON success response"):
+        vllm_engine.update_weights_from_disk("/tmp/model", weight_version="8")
+
+    assert vllm_engine._weight_version is None
+
+
+@pytest.mark.unit
+def test_update_weights_from_disk_rejects_empty_rank_results(vllm_engine, monkeypatch):
+    monkeypatch.setattr(
+        mod.requests,
+        "post",
+        lambda *args, **kwargs: _MockResponse(json_data={"results": []}),
+    )
+
+    with pytest.raises(RuntimeError, match="invalid result"):
+        vllm_engine.update_weights_from_disk("/tmp/model", weight_version="8")
+
+    assert vllm_engine._weight_version is None
 
 
 @pytest.mark.unit

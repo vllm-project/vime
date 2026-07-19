@@ -166,11 +166,11 @@ class RayTrainGroup:
 
         weight_version = self._disk_weight_version + 1
         disk_weight_dir = Path(self.args.update_weight_disk_dir) / f"weight_v{weight_version:06d}"
-        ray.get([actor.update_weights.remote() for actor in self._actor_handlers])
-        self._disk_weight_version = weight_version
+        ray.get([actor.update_weights.remote(weight_version=weight_version) for actor in self._actor_handlers])
         if self._release_train_enabled():
             self.release()
         self._reload_rollout_weights_from_disk(disk_weight_dir, str(weight_version))
+        self._disk_weight_version = weight_version
 
     def onload(self):
         return ray.get([actor.wake_up.remote() for actor in self._actor_handlers])

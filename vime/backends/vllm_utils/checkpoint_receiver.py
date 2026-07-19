@@ -49,6 +49,8 @@ def materialize_checkpoint(
     local_checkpoint_dir: str,
     source_dir: str,
     target_version: int,
+    expected_local_checkpoint_dir: str | None = None,
+    expected_source_dir: str | None = None,
 ) -> dict[str, Any]:
     """Materialize one published checkpoint into a host-local directory.
 
@@ -59,11 +61,25 @@ def materialize_checkpoint(
     """
 
     version = _parse_version(target_version)
-    source_root = _resolve_existing_directory(source_dir, "source_dir")
+    if expected_source_dir is not None:
+        expected_source_root = _resolve_existing_directory(expected_source_dir, "configured source_dir")
+        source_root = _resolve_existing_directory(source_dir, "source_dir")
+        if source_root != expected_source_root:
+            raise CheckpointReceiveError("source_dir does not match the configured checkpoint source")
+    else:
+        source_root = _resolve_existing_directory(source_dir, "source_dir")
     version_dir = source_root / f"weight_v{version:06d}"
     version_dir = _resolve_existing_directory(version_dir, "checkpoint version")
 
-    local_dir = _prepare_local_directory(local_checkpoint_dir)
+    if expected_local_checkpoint_dir is not None:
+        expected_local_dir = _prepare_local_directory(expected_local_checkpoint_dir)
+        local_dir = _resolve_local_directory(local_checkpoint_dir)
+        if local_dir != expected_local_dir:
+            raise CheckpointReceiveError(
+                "local_checkpoint_dir does not match the configured local checkpoint destination"
+            )
+    else:
+        local_dir = _prepare_local_directory(local_checkpoint_dir)
     if local_dir.exists() and local_dir.resolve() == version_dir:
         raise CheckpointReceiveError("local_checkpoint_dir must differ from source checkpoint")
 
@@ -121,11 +137,13 @@ def _resolve_existing_directory(value: str | Path, name: str) -> Path:
     if not isinstance(value, (str, Path)) or not str(value).strip():
         raise CheckpointReceiveError(f"{name} must be a non-empty path")
     path = Path(value).expanduser()
+    if path.is_symlink():
+        raise CheckpointReceiveError(f"{name} must not be a symlink: {path}")
     try:
         resolved = path.resolve(strict=True)
     except OSError as exc:
         raise CheckpointReceiveError(f"{name} does not exist: {path}") from exc
-    if not resolved.is_dir() or resolved.is_symlink():
+    if not resolved.is_dir():
         raise CheckpointReceiveError(f"{name} must be a directory: {path}")
     return resolved
 
@@ -142,6 +160,52 @@ def _prepare_local_directory(value: str | Path) -> Path:
     except OSError as exc:
         raise CheckpointReceiveError(f"cannot prepare local checkpoint parent: {path.parent}") from exc
     return parent / path.name
+
+
+def _resolve_local_directory(value: str | Path) -> Path:
+    """Resolve an untrusted destination without creating caller-selected parents."""
+
+    if not isinstance(value, (str, Path)) or not str(value).strip():
+        raise CheckpointReceiveError("local_checkpoint_dir must be a non-empty path")
+    path = Path(value).expanduser()
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
+        raise CheckpointReceiveError(f"local_checkpoint_dir must be a directory: {path}")
+    try:
+        parent = path.parent.resolve(strict=True)
+    except OSError as exc:
+        raise CheckpointReceiveError(f"local checkpoint parent does not exist: {path.parent}") from exc
+    return parent / path.name
+
+
+def publish_checkpoint_directory(staging_dir: str | Path, destination_dir: str | Path) -> str:
+    """Publish an immutable checkpoint directory, allowing an identical retry."""
+
+    staging = _resolve_existing_directory(staging_dir, "checkpoint staging directory")
+    destination = _prepare_local_directory(destination_dir)
+    if staging.parent != destination.parent:
+        raise CheckpointReceiveError("checkpoint staging and destination directories must be siblings")
+
+    if destination.exists():
+        destination_manifest = _build_checkpoint_manifest(destination)
+        staging_manifest = _build_checkpoint_manifest(staging)
+        destination_hash = _manifest_hash(destination_manifest["files"])
+        staging_hash = _manifest_hash(staging_manifest["files"])
+        if destination_hash != staging_hash:
+            raise CheckpointConflictError(
+                f"published checkpoint already exists with different contents: {destination}"
+            )
+        return "already_published"
+
+    try:
+        os.replace(staging, destination)
+    except FileNotFoundError:
+        # On a shared filesystem another writer rank may have renamed the same
+        # staging directory after the distributed write barrier.
+        if destination.is_dir() and not destination.is_symlink():
+            return "published_by_peer"
+        raise
+    _fsync_directory(destination.parent)
+    return "published"
 
 
 def _build_checkpoint_manifest(root: Path) -> dict[str, Any]:
@@ -284,6 +348,20 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
         os.fsync(file.fileno())
 
 
+def _fsync_directory(path: Path) -> None:
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        logger.warning("Could not open checkpoint directory for fsync: %s", path, exc_info=True)
+        return
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _atomic_replace_directory(staging: Path, destination: Path) -> None:
     backup: Path | None = None
     if destination.exists() or destination.is_symlink():
@@ -297,6 +375,7 @@ def _atomic_replace_directory(staging: Path, destination: Path) -> None:
         if backup is not None and backup.exists() and not destination.exists():
             os.replace(backup, destination)
         raise
+    _fsync_directory(destination.parent)
     if backup is not None:
         try:
             shutil.rmtree(backup)

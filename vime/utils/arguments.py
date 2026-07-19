@@ -239,6 +239,9 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                     "reload from it. Required for --update-weight-mode=delta "
                     "--update-weight-transport=disk; optional for full disk sync (engines then "
                     "pull to local disk instead of reading the shared dir directly). The "
+                    "vLLM server pins these paths through VIME_WEIGHT_SOURCE_DIR and "
+                    "VIME_WEIGHT_LOCAL_CHECKPOINT_DIR; externally launched servers must set "
+                    "both variables to the corresponding rollout-host paths. The "
                     "read-side counterpart of --custom-update-weight-post-write-path is "
                     "--custom-update-weight-pre-read-path."
                 ),
