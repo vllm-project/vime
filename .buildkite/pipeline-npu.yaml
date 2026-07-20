@@ -140,6 +140,7 @@ steps:
       - label: ":pipeline: upload NPU suites"
         key: upload-npu-suites
         depends_on: 
+          - npu-gate
           - pre-commit-npu
         agents:
           queue: "ascend-a3"

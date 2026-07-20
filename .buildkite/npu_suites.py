@@ -61,7 +61,6 @@ def npu_step(suite: str, test_name: str, resource_class: str, extra_args: str, e
         "BUILDKITE_COMMIT": os.environ.get("BUILDKITE_COMMIT", ""),
         "HF_TOKEN": "${HF_TOKEN}",
         "HF_ENDPOINT": "https://hf-mirror.com",
-        "HF_HUB_OFFLINE": "0",  # image presets offline=1; let a missing model download via mirror
         "ASCEND_RT_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15",
         "IMAGE_REGISTRY": IMAGE_REGISTRY,
         "IMAGE_NAME": IMAGE_NAME,

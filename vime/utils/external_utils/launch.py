@@ -59,9 +59,10 @@ def registered_platforms() -> list[Platform]:
 def _detect_npu() -> bool:
     try:
         from vime.utils.common import is_npu
-    except ImportError:
+
+        return is_npu()
+    except (ImportError, RuntimeError):
         return False
-    return is_npu()
 
 
 register(Platform(name="cuda", ray_args="--num-gpus {n}"))  # default; other fields unused for cuda

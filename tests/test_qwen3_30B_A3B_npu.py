@@ -55,6 +55,7 @@ def execute():
         "--context-parallel-size 1 "
         "--expert-model-parallel-size 8 "
         "--expert-tensor-parallel-size 1 "
+        "--moe-token-dispatcher-type alltoall "
         "--recompute-granularity full "
         "--recompute-method uniform "
         "--recompute-num-layers 1 "
@@ -86,11 +87,11 @@ def execute():
     )
 
     vllm_args = (
-        "--rollout-num-gpus-per-engine 4 "
+        "--rollout-num-gpus-per-engine 8 "
+        "--vllm-enable-sleep-mode "
+        "--vllm-enable-expert-parallel "
+        "--vllm-enforce-eager "
         "--vllm-gpu-memory-utilization 0.7 "
-        "--vllm-cudagraph-capture-sizes "
-        "1 2 4 8 16 24 32 40 48 56 64 72 80 88 96 104 112 120 128 "
-        "136 144 152 160 168 176 184 192 200 208 216 224 232 240 248 256 "
     )
 
     model_args = (
