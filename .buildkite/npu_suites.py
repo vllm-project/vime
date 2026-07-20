@@ -24,12 +24,10 @@ IMAGE_NAME = "vime-ci-npu"
 VIME_IMAGE_TAG = os.environ.get("BUILDKITE_COMMIT", "latest")
 
 # (test_name, resource_class, extra_args, env_overrides)
-# The shared harness autodetects NPU via is_npu() on the CI node, so no device
-# override is needed here; use env_overrides only for per-test tuning.
 SUITES = {
     "smk": [
         ("test_qwen3_4B_npu.py", "npu-8", "", {}),
-        ("test_qwen3_30B_A3B_npu.py", "npu-16", "", {}),
+        ("test_qwen3_30B_A3B_npu.py", "npu-8", "", {}),
     ],
     "nightly": [],
 }

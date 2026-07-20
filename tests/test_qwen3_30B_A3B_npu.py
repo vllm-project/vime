@@ -60,7 +60,7 @@ def execute():
         "--recompute-method uniform "
         "--recompute-num-layers 1 "
         "--use-dynamic-batch-size "
-        "--max-tokens-per-gpu 20480 "
+        "--max-tokens-per-gpu 16384 "
         "--micro-batch-size 1 "
     )
 
@@ -105,11 +105,7 @@ def execute():
     )
 
     runtime_args = (
-        "--train-backend megatron "
-        "--actor-num-nodes 1 "
-        "--actor-num-gpus-per-node 8 "
-        "--rollout-num-gpus 8 "
-        "--ci-test "
+        "--train-backend megatron " "--actor-num-nodes 1 " "--actor-num-gpus-per-node 8 " "--colocate " "--ci-test "
     )
 
     train_args = (
@@ -124,11 +120,12 @@ def execute():
     )
     U.execute_train(
         train_args=train_args,
-        num_gpus_per_node=16,
+        num_gpus_per_node=8,
         megatron_model_type="qwen3-30B-A3B",
         extra_env_vars={
             "DISABLE_L2_CACHE": "1",
             "VLLM_USE_AOT_COMPILE": "0",
+            "RAY_memory_usage_threshold": "0.99",
         },
     )
 

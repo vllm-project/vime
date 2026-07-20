@@ -2,7 +2,7 @@ diff --git a/src/megatron/bridge/models/conversion/param_mapping.py b/src/megatr
 index a0421273..7f9203ab 100644
 --- a/src/megatron/bridge/models/conversion/param_mapping.py
 +++ b/src/megatron/bridge/models/conversion/param_mapping.py
-@@ -1097,15 +1097,19 @@ class AutoMapping(MegatronParamMapping[torch.Tensor]):
+@@ -1097,15 +1097,20 @@ class AutoMapping(MegatronParamMapping[torch.Tensor]):
              "LinearCrossEntropyModule",
              "TEColumnParallelLinear",
 +            "MindSpeedTEColumnParallelLinear",

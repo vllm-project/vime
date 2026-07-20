@@ -76,11 +76,9 @@ register(
         detect=_detect_npu,
         torch_dist_convert=False,  # torch_dist conversion fails on Ascend -> bridge load
         unsupported_features=frozenset({"deepep", "fp8_rollout"}),
-        # Ascend worker env. Paths are specific to the NPU CI image (quay.io/ascend/vime);
-        # megatron.bridge lives under Megatron-Bridge/src.
         env={
             "PYTHONPATH": (
-                "/root/Megatron-LM:/root/vllm_src:/root/vllm-ascend:/root/vime:"
+                "/root/Megatron-LM:/root/vime:"
                 "/root/Megatron-Bridge/src:/root/mbridge:/root/MindSpeed:"
                 "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:"
                 "/usr/local/Ascend/ascend-toolkit/latest/tools/ms_fmk_transplt/torch_npu_bridge"
@@ -157,8 +155,7 @@ def launch_commands(
             f"{exports}export PYTHONUNBUFFERED=1 && ray start --head --node-ip-address {master_addr} "
             f"{platform.ray_start_args(num_devices)} --disable-usage-stats"
         )
-    # Also carry the env in runtime_env: redundant with the export above, but the only channel
-    # when external_ray is True.
+
     runtime_env = {"env_vars": {"no_proxy": f"127.0.0.1,{master_addr}", "MASTER_ADDR": master_addr, **all_env}}
     src = f'source "{repo_base_dir}/scripts/models/{megatron_model_type}.sh" && ' if megatron_model_type else ""
     model_args = "${MODEL_ARGS[@]}" if megatron_model_type else ""
