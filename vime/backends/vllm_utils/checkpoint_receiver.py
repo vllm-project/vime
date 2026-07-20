@@ -91,9 +91,7 @@ def materialize_checkpoint(
         if current is not None:
             current_version = current["version"]
             if current_version > version:
-                raise StaleCheckpointError(
-                    f"stale checkpoint version {version}; active version is {current_version}"
-                )
+                raise StaleCheckpointError(f"stale checkpoint version {version}; active version is {current_version}")
             if current_version == version:
                 if current["manifest_sha256"] != source_manifest_hash:
                     raise CheckpointConflictError(
@@ -391,6 +389,8 @@ def _fsync_directory(path: Path) -> None:
         return
     try:
         os.fsync(descriptor)
+    except OSError:
+        logger.warning("Could not fsync checkpoint directory: %s", path, exc_info=True)
     finally:
         os.close(descriptor)
 

@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import time
@@ -8,6 +9,8 @@ from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from vime.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, add_default_ray_env_vars
+
+logger = logging.getLogger(__name__)
 
 
 class RayTrainGroup:
@@ -241,7 +244,7 @@ class RayTrainGroup:
                 [engine.pull_weights.remote(target_version=int(weight_version)) for engine in engines]
             )
             if not isinstance(pull_results, list) or len(pull_results) != len(engines):
-                raise RuntimeError(f"pull_weights returned one result per engine: {pull_results!r}")
+                raise RuntimeError(f"Expected one pull_weights result per engine, got: {pull_results!r}")
             model_paths = []
             for index, result in enumerate(pull_results):
                 if (
@@ -295,4 +298,8 @@ class RayTrainGroup:
                 except Exception as resume_error:
                     if reload_error is None:
                         raise
-                    reload_error.add_note(f"Failed to resume rollout engines after reload failure: {resume_error}")
+                    add_note = getattr(reload_error, "add_note", None)
+                    if callable(add_note):
+                        add_note(f"Failed to resume rollout engines after reload failure: {resume_error}")
+                    else:
+                        logger.exception("Failed to resume rollout engines after reload failure")

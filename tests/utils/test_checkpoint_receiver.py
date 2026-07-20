@@ -33,9 +33,7 @@ def test_materialize_is_atomic_and_repeated_pull_is_idempotent(tmp_path: Path):
     _publish(source, 1)
     local = tmp_path / "local"
 
-    first = receiver.materialize_checkpoint(
-        source_dir=str(source), local_checkpoint_dir=str(local), target_version=1
-    )
+    first = receiver.materialize_checkpoint(source_dir=str(source), local_checkpoint_dir=str(local), target_version=1)
     assert first["status"] == "materialized"
     assert (local / "model-00001.safetensors").read_bytes() == b"weights-v1"
 
@@ -203,3 +201,25 @@ def test_publish_checkpoint_directory_accepts_late_shared_fs_publisher(tmp_path:
     assert receiver.publish_checkpoint_directory(staging, destination) == "published"
     assert not staging.exists()
     assert receiver.publish_checkpoint_directory(staging, destination) == "published_by_peer"
+
+
+def test_fsync_directory_is_best_effort(tmp_path: Path, monkeypatch):
+    warnings = []
+    closed = []
+
+    def unsupported_fsync(descriptor):
+        assert descriptor == 7
+        raise OSError("unsupported")
+
+    monkeypatch.setattr(receiver.os, "O_DIRECTORY", 0, raising=False)
+    monkeypatch.setattr(receiver.os, "open", lambda *args: 7)
+    monkeypatch.setattr(receiver.os, "fsync", unsupported_fsync)
+    monkeypatch.setattr(receiver.os, "close", closed.append)
+    monkeypatch.setattr(receiver.logger, "warning", lambda *args, **kwargs: warnings.append((args, kwargs)))
+
+    receiver._fsync_directory(tmp_path)
+
+    assert closed == [7]
+    assert warnings[0][0][0] == "Could not fsync checkpoint directory: %s"
+    assert warnings[0][0][1] == tmp_path
+    assert warnings[0][1] == {"exc_info": True}

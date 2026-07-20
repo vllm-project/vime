@@ -209,6 +209,39 @@ def test_disk_reload_resumes_engines_after_failure(
     assert calls == expected_calls
 
 
+def test_disk_reload_preserves_primary_failure_without_exception_notes(
+    actor_group_module, tmp_path: Path, monkeypatch
+):
+    class LegacyRuntimeError(RuntimeError):
+        add_note = None
+
+    group = _make_group(actor_group_module, tmp_path)
+    group.args.offload_rollout = False
+    group.args.update_weight_local_checkpoint_dir = None
+    group.args.update_weight_disk_keep_files = True
+    group.args.ci_test = False
+    calls: list[str] = []
+    engine = _RolloutEngine(calls)
+    group._rollout_manager = _RolloutManager(engine)
+    logged = []
+    monkeypatch.setattr(actor_group_module.logger, "exception", logged.append)
+
+    def ray_get(refs):
+        if refs == ["reload"]:
+            raise LegacyRuntimeError("reload failed")
+        if refs == ["continue"]:
+            raise RuntimeError("continue failed")
+        return refs
+
+    actor_group_module.ray.get = ray_get
+
+    with pytest.raises(LegacyRuntimeError, match="reload failed"):
+        group._reload_rollout_weights_from_disk(tmp_path / "weight_v000001", "1")
+
+    assert calls == ["pause", "flush", "reload", "continue"]
+    assert logged == ["Failed to resume rollout engines after reload failure"]
+
+
 def test_disk_reload_uses_server_returned_local_path(actor_group_module, tmp_path: Path):
     group = _make_group(actor_group_module, tmp_path)
     group.args.offload_rollout = False
@@ -224,6 +257,21 @@ def test_disk_reload_uses_server_returned_local_path(actor_group_module, tmp_pat
     assert calls == ["pull", "pause", "flush", "reload", "continue"]
     assert engine.pull_weights.kwargs == [{"target_version": 1}]
     assert engine.update_weights_from_disk.kwargs[0]["model_path"] == "/remote/local"
+
+
+def test_disk_reload_rejects_missing_pull_result(actor_group_module, tmp_path: Path):
+    group = _make_group(actor_group_module, tmp_path)
+    group.args.offload_rollout = False
+    group.args.update_weight_local_checkpoint_dir = "/trainer/local"
+    group.args.update_weight_disk_keep_files = True
+    group.args.ci_test = False
+    engine = _RolloutEngine([])
+    group._rollout_manager = _RolloutManager(engine)
+
+    actor_group_module.ray.get = lambda refs: [] if refs == [engine.pull_weights.result] else refs
+
+    with pytest.raises(RuntimeError, match="Expected one pull_weights result per engine, got: \\[\\]"):
+        group._reload_rollout_weights_from_disk(tmp_path / "weight_v000001", "1")
 
 
 def test_disk_reload_fans_out_server_returned_local_paths(actor_group_module, tmp_path: Path):
