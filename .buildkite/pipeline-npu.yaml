@@ -45,97 +45,106 @@ steps:
             multiple: true
             required: true
             options:
+              - label: "run-npu-ci-image-build (test new image)"
+                value: image-build
               - label: "run-npu-ci-smk"
                 value: smk
               - label: "run-npu-ci-nightly"
                 value: nightly
 
-#      - label: ":buildkit: Build and Push NPU Test Image - A3"
-#        key: image-build-npu
-#        depends_on: pre-commit-npu
-#        if: __IMAGE_BUILD_IF__ == true
-#        timeout_in_minutes: 240
-#        agents:
-#          queue: "ascend-a3"
-#          resource_class: "npu-2"
-#        plugins:
-#          - kubernetes:
-#              metadata:
-#                annotations:
-#                  vault.hashicorp.com/agent-init-first: "true"
-#                  vault.hashicorp.com/agent-inject: "true"
-#                  vault.hashicorp.com/agent-inject-perms-ca.pem: "0400"
-#                  vault.hashicorp.com/agent-inject-perms-cert.pem: "0400"
-#                  vault.hashicorp.com/agent-inject-perms-config.json: "0400"
-#                  vault.hashicorp.com/agent-inject-perms-key.pem: "0400"
-#                  vault.hashicorp.com/agent-inject-secret-ca.pem: internal/data/ascend/buildkitd
-#                  vault.hashicorp.com/agent-inject-secret-cert.pem: internal/data/ascend/buildkitd
-#                  vault.hashicorp.com/agent-inject-secret-config.json: internal/data/ascend/buildkitd
-#                  vault.hashicorp.com/agent-inject-secret-key.pem: internal/data/ascend/buildkitd
-#                  vault.hashicorp.com/agent-inject-template-ca.pem: "{{- with secret \"internal/data/ascend/buildkitd\" -}}\n{{ .Data.data.RootCA }}\n{{- end }}"
-#                  vault.hashicorp.com/agent-inject-template-cert.pem: "{{- with secret \"internal/data/ascend/buildkitd\" -}}\n{{ .Data.data.ClientCaCert }}\n{{- end }}"
-#                  vault.hashicorp.com/agent-inject-template-config.json: "{{- with secret \"internal/data/ascend/buildkitd\" -}}\n{{ .Data.data.dockerConfig }}\n{{- end }}"
-#                  vault.hashicorp.com/agent-inject-template-key.pem: "{{- with secret \"internal/data/ascend/buildkitd\" -}}\n{{ .Data.data.ClientCaKey }}\n{{- end }}"
-#                  vault.hashicorp.com/agent-pre-populate-only: "true"
-#                  vault.hashicorp.com/agent-run-as-group: "1000"
-#                  vault.hashicorp.com/agent-run-as-user: "1000"
-#                  vault.hashicorp.com/agent-service-account-token-volume-name: token-vol
-#                  vault.hashicorp.com/role: ascend-gha-runners
-#                  vault.hashicorp.com/secret-volume-path: /home/user/.docker/
-#                  vault.hashicorp.com/tls-skip-verify: "true"
-#              podSpecPatch:
-#                volumes:
-#                - name: token-vol
-#                  projected:
-#                    defaultMode: 420
-#                    sources:
-#                    - serviceAccountToken:
-#                        audience: api
-#                        expirationSeconds: 600
-#                        path: token
-#        env:
-#          VIME_IMAGE_TAG: "${BUILDKITE_COMMIT}"
-#          IMAGE_NAME: "vime-ci-npu"
-#          IMAGE_REGISTRY: "swr.cn-southwest-2.myhuaweicloud.com/modelfoundry"
-#          BUILDKITD_ADDR: "tcp://buildkitd-service.buildkitd:1234"
-#        command: |
-#          set -ex
-#
-#          echo "--- Building and pushing NPU Test Image"
-#          echo "Image: $${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG}"
-#          echo "buildkitd address: $${BUILDKITD_ADDR}"
-#
-#          if ! command -v buildctl &> /dev/null; then
-#            echo "Installing buildctl..."
-#            mkdir -p /tmp/buildkit
-#            BUILDKIT_VERSION="v0.29.0"
-#            wget -q "https://gh-proxy.test.osinfra.cn/https://github.com/moby/buildkit/releases/download/$${BUILDKIT_VERSION}/buildkit-$${BUILDKIT_VERSION}.linux-arm64.tar.gz" -O /tmp/buildkit.tar.gz
-#            tar -xzf /tmp/buildkit.tar.gz -C /tmp/buildkit
-#            cp /tmp/buildkit/bin/buildctl /usr/local/bin/
-#          fi
-#
-#          sed -i '/^RUN git config --global http.sslVerify false/i RUN git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf "https://github.com/"' docker/Dockerfile.npu
-#          sed -i '/^# syntax=docker\/dockerfile:1\.7$$/d' docker/Dockerfile.npu
-#
-#          export DOCKER_CONFIG=/home/user/.docker
-#          buildctl \
-#            --addr="$${BUILDKITD_ADDR}" \
-#            --tlscacert=/home/user/.docker/ca.pem \
-#            --tlscert=/home/user/.docker/cert.pem \
-#            --tlskey=/home/user/.docker/key.pem \
-#            build \
-#            --frontend dockerfile.v0 \
-#            --local context=. \
-#            --local dockerfile=./docker \
-#            --opt filename=Dockerfile.npu \
-#            --opt build-arg:APTMIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081 \
-#            --opt build-arg:PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple \
-#            --secret id=dockerconfig,src=/home/user/.docker/config.json \
-#            --output type=image,name=$${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG},push=true \
-#            --progress=plain
-#
-#          echo "--- Image pushed successfully"
-#          echo "$${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG}"
+      - label: ":buildkit: Build and Push NPU Test Image - A3"
+        key: image-build-npu
+        depends_on: 
+          - pre-commit-npu
+          - npu-gate
+        timeout_in_minutes: 240
+        agents:
+          queue: "ascend-a3"
+          resource_class: "npu-2"
+        plugins:
+          - kubernetes:
+              metadata:
+                annotations:
+                  vault.hashicorp.com/agent-init-first: "true"
+                  vault.hashicorp.com/agent-inject: "true"
+                  vault.hashicorp.com/agent-inject-perms-ca.pem: "0400"
+                  vault.hashicorp.com/agent-inject-perms-cert.pem: "0400"
+                  vault.hashicorp.com/agent-inject-perms-config.json: "0400"
+                  vault.hashicorp.com/agent-inject-perms-key.pem: "0400"
+                  vault.hashicorp.com/agent-inject-secret-ca.pem: internal/data/ascend/buildkitd
+                  vault.hashicorp.com/agent-inject-secret-cert.pem: internal/data/ascend/buildkitd
+                  vault.hashicorp.com/agent-inject-secret-config.json: internal/data/ascend/buildkitd
+                  vault.hashicorp.com/agent-inject-secret-key.pem: internal/data/ascend/buildkitd
+                  vault.hashicorp.com/agent-inject-template-ca.pem: "{{- with secret \"internal/data/ascend/buildkitd\" -}}\n{{ .Data.data.RootCA }}\n{{- end }}"
+                  vault.hashicorp.com/agent-inject-template-cert.pem: "{{- with secret \"internal/data/ascend/buildkitd\" -}}\n{{ .Data.data.ClientCaCert }}\n{{- end }}"
+                  vault.hashicorp.com/agent-inject-template-config.json: "{{- with secret \"internal/data/ascend/buildkitd\" -}}\n{{ .Data.data.dockerConfig }}\n{{- end }}"
+                  vault.hashicorp.com/agent-inject-template-key.pem: "{{- with secret \"internal/data/ascend/buildkitd\" -}}\n{{ .Data.data.ClientCaKey }}\n{{- end }}"
+                  vault.hashicorp.com/agent-pre-populate-only: "true"
+                  vault.hashicorp.com/agent-run-as-group: "1000"
+                  vault.hashicorp.com/agent-run-as-user: "1000"
+                  vault.hashicorp.com/agent-service-account-token-volume-name: token-vol
+                  vault.hashicorp.com/role: ascend-gha-runners
+                  vault.hashicorp.com/secret-volume-path: /home/user/.docker/
+                  vault.hashicorp.com/tls-skip-verify: "true"
+              podSpecPatch:
+                volumes:
+                - name: token-vol
+                  projected:
+                    defaultMode: 420
+                    sources:
+                    - serviceAccountToken:
+                        audience: api
+                        expirationSeconds: 600
+                        path: token
+        env:
+          VIME_IMAGE_TAG: "${BUILDKITE_COMMIT}"
+          IMAGE_NAME: "vime-ci-npu"
+          IMAGE_REGISTRY: "swr.cn-southwest-2.myhuaweicloud.com/modelfoundry"
+          BUILDKITD_ADDR: "tcp://buildkitd-service.buildkitd:1234"
+        command: |
+          set -ex
+          NPU_SUITES=$$(buildkite-agent meta-data get "npu-suites" --default "")
+          if [[ "$$NPU_SUITES" != *"image-build"* ]]; then
+            echo "Skipping this step because image-build is not present in npu-suites."
+            exit 0
+          fi
+
+          echo "--- Building and pushing NPU Test Image"
+          echo "Image: $${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG}"
+          echo "buildkitd address: $${BUILDKITD_ADDR}"
+
+          if ! command -v buildctl &> /dev/null; then
+            echo "Installing buildctl..."
+            mkdir -p /tmp/buildkit
+            BUILDKIT_VERSION="v0.29.0"
+            wget -q "https://gh-proxy.test.osinfra.cn/https://github.com/moby/buildkit/releases/download/$${BUILDKIT_VERSION}/buildkit-$${BUILDKIT_VERSION}.linux-arm64.tar.gz" -O /tmp/buildkit.tar.gz
+            tar -xzf /tmp/buildkit.tar.gz -C /tmp/buildkit
+            cp /tmp/buildkit/bin/buildctl /usr/local/bin/
+          fi
+
+          sed -i '/^RUN git config --global http.sslVerify false/i RUN git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf "https://github.com/"' docker/Dockerfile.npu
+          sed -i '/^# syntax=docker\/dockerfile:1\.7$$/d' docker/Dockerfile.npu
+
+          export DOCKER_CONFIG=/home/user/.docker
+          buildctl \
+            --addr="$${BUILDKITD_ADDR}" \
+            --tlscacert=/home/user/.docker/ca.pem \
+            --tlscert=/home/user/.docker/cert.pem \
+            --tlskey=/home/user/.docker/key.pem \
+            build \
+            --frontend dockerfile.v0 \
+            --local context=. \
+            --local dockerfile=./docker \
+            --opt filename=Dockerfile.npu \
+            --opt build-arg:BASE_IMAGE=swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/vllm-ascend \
+            --opt build-arg:APTMIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081 \
+            --opt build-arg:PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple \
+            --secret id=dockerconfig,src=/home/user/.docker/config.json \
+            --output type=image,name=$${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG},push=true \
+            --progress=plain
+
+          echo "--- Image pushed successfully"
+          echo "$${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG}"
 
       - label: ":pipeline: upload NPU suites"
         key: upload-npu-suites
@@ -147,7 +156,5 @@ steps:
           resource_class: "npu-2"
         timeout_in_minutes: 180
         command:  |
-          export IMAGE_BUILD="quay.io/ascend/vime:0.3.0-a3-vllm0.22.1rc1"
-          echo "IMAGE_BUILD: $${IMAGE_BUILD}"
           python .buildkite/npu_suites.py | buildkite-agent pipeline upload
           

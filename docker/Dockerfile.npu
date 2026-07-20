@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7
 
-ARG BASE_IMAGE=quay.io/ascend/vllm-ascend:v0.22.1rc1-a3
-FROM ${BASE_IMAGE}
+ARG BASE_IMAGE=quay.io/ascend/vllm-ascend
+ARG BASE_IMAGE_TAG=v0.22.1rc1-a3
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 WORKDIR /root
@@ -11,6 +12,8 @@ ARG MEGATRON_BRIDGE_COMMIT=3fd3768045422d0aa5c97e90a4e6c659aea9acb9
 ARG MINDSPEED_COMMIT=fc63de5c48426dd019c3b3f39e65f5bdf56e4086
 ARG MBRIDGE_COMMIT=89eb10887887bc74853f89a4de258c0702932a1c
 ARG SOC_VERSION="ascend910_9391"
+ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+ARG APTMIRROR=""
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
@@ -33,21 +36,27 @@ COPY docker/npu_patch /tmp/npu_patch
 RUN git config --global http.sslVerify false
 
 # System and pip dependencies.
-RUN sed -i '/ports\.ubuntu\.com/ {h;s|ports\.ubuntu\.com|mirrors.tuna.tsinghua.edu.cn|g;G}' /etc/apt/sources.list && \
+RUN if [ -n "$APTMIRROR" ];then sed -i "s@^\(deb.*\)https\?://[a-z0-9.-]*\.ubuntu\.com@\1$APTMIRROR@g" /etc/apt/sources.list; \
+    else sed -i '/ports\.ubuntu\.com/ {h;s|ports\.ubuntu\.com|mirrors.tuna.tsinghua.edu.cn|g;G}' /etc/apt/sources.list; fi && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
       build-essential cmake curl git libnuma-dev ninja-build patch rsync wget && \
     rm -rf /var/lib/apt/lists/* && \
-    pip config set global.index-url \
-      https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple && \
+    pip config set global.index-url ${PIP_INDEX_URL} && \
+    if [ "${PIP_INDEX_URL#http://}" != "${PIP_INDEX_URL}" ]; then pip config set global.trusted-host "$(echo ${PIP_INDEX_URL} | awk -F/ '{print $3}')"; fi && \
     pip config set global.extra-index-url \
       "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi" && \
     git config --global http.version HTTP/1.1
 
 # vllm and vllm-ascend are installed editable (-e) in the base image; apply the
 # NPU colocate patches directly to their source trees.
-RUN git -C /vllm-workspace/vllm apply --whitespace=nowarn \
+RUN git -C /vllm-workspace/vllm apply --check --whitespace=nowarn \
       /tmp/npu_patch/vllm.patch && \
+    git -C /vllm-workspace/vllm apply --whitespace=nowarn \
+      /tmp/npu_patch/vllm.patch
+
+RUN git -C /vllm-workspace/vllm-ascend apply --check --whitespace=nowarn \
+      /tmp/npu_patch/vllm-ascend.patch && \
     git -C /vllm-workspace/vllm-ascend apply --whitespace=nowarn \
       /tmp/npu_patch/vllm-ascend.patch
 
@@ -100,8 +109,6 @@ RUN pip install --no-build-isolation "nvidia-modelopt[torch]>=0.37.0" && \
 
 # ring_flash_attn is a CUDA extension and is not used on Ascend.
 RUN pip install \
-      --index-url https://pypi.org/simple \
-      --trusted-host pypi.org \
       --constraint /tmp/vime-npu-constraints.txt \
       --requirement /root/vime/requirements.txt && \
     pip install --no-deps --no-build-isolation -e /root/vime
