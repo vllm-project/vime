@@ -27,7 +27,7 @@ VIME_IMAGE_TAG = os.environ.get("BUILDKITE_COMMIT", "latest")
 SUITES = {
     "smk": [
         ("test_qwen3_4B_npu.py", "npu-8", "", {}),
-        ("test_qwen3_30B_A3B_npu.py", "npu-8", "", {}),
+        ("test_qwen3_30B_A3B_npu.py", "npu-16", "", {}),
     ],
     "nightly": [],
 }
@@ -73,6 +73,9 @@ def npu_step(suite: str, test_name: str, resource_class: str, extra_args: str, e
             'if [ -n "${BUILDKITE_COMMIT}" ]; then',
             "  source /workspace/build/buildkite/.buildkite/scripts/update-npu-environment.sh",
             "fi",
+            'echo "=== POD MEM DIAG (cgroup limit in bytes; divide by 1073741824 for GB) ==="',
+            "cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || true",
+            "free -g || true",
             f"python tests/{test_name}{' ' + extra_args if extra_args else ''}",
         ]
     )
