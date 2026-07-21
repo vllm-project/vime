@@ -30,6 +30,7 @@ SUITES = {
     "smk": [
         ("test_qwen3_4B_npu.py", "npu-8", "", {}),
         ("test_qwen3_30B_A3B_npu.py", "npu-16", "", {}),
+        ("test_qwen3_vl_8B_npu.py", "npu-8", "", {}),
     ],
     "nightly": [],
 }
@@ -89,6 +90,7 @@ def npu_step(suite: str, test_name: str, resource_class: str, extra_args: str, e
             'if [ -n "${BUILDKITE_COMMIT}" ]; then',
             "  source /workspace/build/buildkite/.buildkite/scripts/update-npu-environment.sh",
             "fi",
+            "export HF_HUB_OFFLINE=0",
             f"python tests/{test_name}{' ' + extra_args if extra_args else ''}",
         ]
     )

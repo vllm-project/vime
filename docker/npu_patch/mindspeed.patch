@@ -15,13 +15,22 @@ index bb007b44..98708a5b 100644
          self.permute_idx_device = None
          input_chunk_idxs = torch.arange(
 diff --git a/mindspeed/core/megatron_basic/arguments_basic.py b/mindspeed/core/megatron_basic/arguments_basic.py
-index 8ea25b9f..04ad9663 100644
+index 8ea25b9f..7853bce4 100644
 --- a/mindspeed/core/megatron_basic/arguments_basic.py
 +++ b/mindspeed/core/megatron_basic/arguments_basic.py
-@@ -113,3 +113,26 @@ def transformer_config_init_wrapper(fn):
+@@ -113,3 +113,35 @@ def transformer_config_init_wrapper(fn):
          fn(self, *args, **known_config)
  
      return wrapper
++
++
++def transformer_config_getattr(self, name):
++    """Resolve MindSpeed extension fields for configs created before patching."""
++    full_args = vars(get_full_args())
++    if name in full_args:
++        return full_args[name]
++    raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
++
 +
 +def transformer_config_init_subclass(cls, **kwargs):
 +    mutable_types = (list, dict, set, bytearray)
@@ -45,25 +54,25 @@ index 8ea25b9f..04ad9663 100644
 +            else:
 +                value = value
 +            setattr(cls, key, value)
-\ No newline at end of file
 diff --git a/mindspeed/features_manager/megatron_basic/megatron_basic.py b/mindspeed/features_manager/megatron_basic/megatron_basic.py
-index 355913e1..18714baf 100644
+index 355913e1..41678a03 100644
 --- a/mindspeed/features_manager/megatron_basic/megatron_basic.py
 +++ b/mindspeed/features_manager/megatron_basic/megatron_basic.py
-@@ -43,8 +43,11 @@ class MegatronBasicFeature(MindSpeedFeature):
+@@ -43,8 +43,13 @@ class MegatronBasicFeature(MindSpeedFeature):
  
      def register_mcore_basic_patches(self, pm, args):
          # configuration patches
 -        from mindspeed.core.megatron_basic.arguments_basic import transformer_config_init_wrapper, transformer_config_post_init_wrapper
 +        from mindspeed.core.megatron_basic.arguments_basic import (transformer_config_init_wrapper,
++                                                                    transformer_config_getattr,
 +                                                                    transformer_config_post_init_wrapper,
 +                                                                    transformer_config_init_subclass)
          pm.register_patch("megatron.core.transformer.transformer_config.TransformerConfig.__init__", transformer_config_init_wrapper)
 +        pm.register_patch("megatron.core.transformer.transformer_config.TransformerConfig.__init_subclass__", classmethod(transformer_config_init_subclass))
++        pm.register_patch("megatron.core.transformer.transformer_config.TransformerConfig.__getattr__", transformer_config_getattr, create_dummy=True)
          pm.register_patch("megatron.core.transformer.transformer_config.MLATransformerConfig.__init__", transformer_config_init_wrapper)
          pm.register_patch("megatron.core.transformer.transformer_config.TransformerConfig.__post_init__", transformer_config_post_init_wrapper)
  
-
 diff --git a/mindspeed/patch_utils.py b/mindspeed/patch_utils.py
 index a489d58c..d9328555 100644
 --- a/mindspeed/patch_utils.py
