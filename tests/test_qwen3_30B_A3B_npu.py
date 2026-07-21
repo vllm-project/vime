@@ -104,11 +104,7 @@ def execute():
     )
 
     runtime_args = (
-        "--train-backend megatron "
-        "--actor-num-nodes 1 "
-        "--actor-num-gpus-per-node 8 "
-        "--rollout-num-gpus 8 "
-        "--ci-test "
+        "--train-backend megatron " "--actor-num-nodes 1 " "--actor-num-gpus-per-node 8 " "--colocate " "--ci-test "
     )
 
     train_args = (
@@ -123,7 +119,7 @@ def execute():
     )
     U.execute_train(
         train_args=train_args,
-        num_gpus_per_node=16,
+        num_gpus_per_node=8,
         megatron_model_type="qwen3-30B-A3B",
         extra_env_vars={
             "DISABLE_L2_CACHE": "1",
