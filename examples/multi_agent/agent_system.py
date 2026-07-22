@@ -27,12 +27,18 @@ def _inference_generate_tokens_and_logprobs(choice):
     return new_response_tokens, new_response_log_probs
 
 
-async def generate_response(args, prompt, key):
+async def generate_response(args, prompt, key, worker_id: int | None = None):
     try:
         sampling_params = args.sampling_params
         tokenizer = args.tokenizer
         max_context_length = args.rollout_max_context_len
         sample = deepcopy(args.sample)
+        sample.metadata = dict(sample.metadata or {})
+        sample.metadata["multi_agent_role"] = key
+        sample.metadata["multi_agent_parent_group_index"] = sample.group_index
+        sample.metadata["multi_agent_parent_index"] = sample.index
+        if worker_id is not None:
+            sample.metadata["multi_agent_worker_id"] = worker_id
 
         url = f"http://{args.vllm_router_ip}:{args.vllm_router_port}/inference/v1/generate"
 
@@ -105,11 +111,11 @@ class Agent:
     def __init__(self):
         pass
 
-    async def run(self, args, prompt, max_retries: int = 1, key: str = None) -> str:
+    async def run(self, args, prompt, max_retries: int = 1, key: str = None, worker_id: int | None = None) -> str:
         """Runs the agent by sending a prompt to the LLM."""
         for _i in range(max_retries):
             try:
-                response = await generate_response(args, prompt, key=key)
+                response = await generate_response(args, prompt, key=key, worker_id=worker_id)
                 return response
             except Exception as e:
                 print(f"Error querying LLM: {e}")
@@ -124,10 +130,10 @@ class SolverAgent(Agent):
     def __init__(self):
         super().__init__()
 
-    async def generate_initial_solution(self, args, problem_statement) -> str:
+    async def generate_initial_solution(self, args, problem_statement, worker_id: int) -> str:
         """Generates the first solution attempt."""
         prompt = SOLVER_PROMPT_TEMPLATE.format(problem_statement=problem_statement)
-        return await self.run(args, prompt, max_retries=3, key="solver")
+        return await self.run(args, prompt, max_retries=3, key="solver", worker_id=worker_id)
 
 
 class RewriterAgent(Agent):
@@ -136,7 +142,7 @@ class RewriterAgent(Agent):
     def __init__(self):
         super().__init__()
 
-    async def rewrite(self, args, problem_statement, previous_solutions: list[str]) -> str:
+    async def rewrite(self, args, problem_statement, previous_solutions: list[str], worker_id: int) -> str:
         """Generates the rewrited solution."""
 
         # Build the prompt template dynamically.
@@ -148,7 +154,7 @@ class RewriterAgent(Agent):
             format_params[f"solution{i+1}"] = solution
 
         prompt = template.format(**format_params)
-        return await self.run(args, prompt, max_retries=1, key="rewriter")
+        return await self.run(args, prompt, max_retries=1, key="rewriter", worker_id=worker_id)
 
 
 class SelectorAgent(Agent):
@@ -157,7 +163,7 @@ class SelectorAgent(Agent):
     def __init__(self):
         super().__init__()
 
-    async def select(self, args, problem_statement, candidate_solutions: list[str]) -> str:
+    async def select(self, args, problem_statement, candidate_solutions: list[str], worker_id: int = 0) -> str:
         """Generates the rewrited solution."""
 
         # Build the prompt template dynamically.
@@ -169,7 +175,7 @@ class SelectorAgent(Agent):
             format_params[f"solution{i+1}"] = solution
 
         prompt = template.format(**format_params)
-        return await self.run(args, prompt, max_retries=10, key="selector")
+        return await self.run(args, prompt, max_retries=10, key="selector", worker_id=worker_id)
 
     def extract_selected_solution_idx(self, response: str, candidate_solutions: list[str]) -> int:
         """Extracts the selected solution ID from the response."""
@@ -188,7 +194,7 @@ class SelectorAgent(Agent):
 
 async def rewrite_worker(args, previous_solutions, problem_statement, worker_id):
     rewriter = RewriterAgent()
-    new_solution = await rewriter.rewrite(args, problem_statement, previous_solutions)
+    new_solution = await rewriter.rewrite(args, problem_statement, previous_solutions, worker_id)
     return new_solution
 
 
@@ -199,7 +205,7 @@ async def solver_worker(args, problem_statement, worker_id):
 
     try:
         solver = SolverAgent()
-        current_solution = await solver.generate_initial_solution(args, problem_statement)
+        current_solution = await solver.generate_initial_solution(args, problem_statement, worker_id)
         return current_solution
 
     except Exception as e:
@@ -260,7 +266,7 @@ async def run_agent_system(args, sample):
 
     # Selection
     selector = SelectorAgent()
-    response = await selector.select(args, problem_statement, rewrited_solutions)
+    response = await selector.select(args, problem_statement, rewrited_solutions, worker_id=0)
     if len(args.results_dict["selector"]) == 0:
         reward_adjustment(args.results_dict["solver"], args.incorrect_reward_weight)
         reward_adjustment(args.results_dict["rewriter"], args.incorrect_reward_weight)
@@ -269,13 +275,18 @@ async def run_agent_system(args, sample):
     assert (
         len(args.results_dict["selector"]) == 1
     ), f"selector should only return one solution, but got {len(args.results_dict['selector'])}"
+    selector_sample = args.results_dict["selector"][0]
     if response is None:
-        args.results_dict["selector"][0].reward = 0
+        selector_sample.reward = 0
+        selector_sample.metadata["selector_parse_success"] = False
     else:
         selected_solution_idx = selector.extract_selected_solution_idx(response, rewrited_solutions)
         if selected_solution_idx is None:
-            args.results_dict["selector"][0].reward = 0
+            selector_sample.reward = 0
+            selector_sample.metadata["selector_parse_success"] = False
         else:
+            selector_sample.metadata["selector_parse_success"] = True
+            selector_sample.metadata["selector_choice"] = selected_solution_idx + 1
             selected_solution = rewrited_solutions[selected_solution_idx]
             for sample in args.results_dict["rewriter"]:
                 if sample.response_content is not None and selected_solution in sample.response_content:
