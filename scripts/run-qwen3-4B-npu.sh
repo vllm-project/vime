@@ -107,9 +107,7 @@ MISC_ARGS=(
    --use-flash-attn
 )
 
-export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
-
-ray start --head --node-ip-address ${MASTER_ADDR} --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+ray start --head --node-ip-address 127.0.0.1 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 
 ray job submit --address="http://127.0.0.1:8265" \
 -- python3 train.py \
