@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # for rerun the task
-pkill -9 -f "vllm serve"
+pkill -9 -f '[v]llm serve|VLL[M]::'
+pkill -9 -f VLLM
 sleep 3
 ray stop --force
 pkill -9 ray
@@ -9,25 +10,27 @@ pkill -9 python
 sleep 3
 pkill -9 ray
 pkill -9 python
+pkill -9 redis
 
 set -ex
 
-# will prevent ray from buffering stdout/stderr
 export PYTHONUNBUFFERED=1
 
 export SLIME_SCRIPT_TRAIN_BACKEND=megatron
-export PYTHONPATH="/workspace/issue205/Megatron-Bridge/src:/workspace/issue205/Megatron-Bridge:/workspace/issue205/Megatron-LM:/workspace/issue205/vime-ascend:${PYTHONPATH}"
-export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
+export PYTHONPATH="/workspace/wky/Megatron-Bridge/src:/workspace/wky/Megatron-LM/:${PYTHONPATH:-}"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
 export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
 export HYDRA_FULL_ERROR=1
-export MASTER_PORT="${MASTER_PORT:-$(shuf -i 20000-65000 -n 1)}"
 export DISABLE_L2_CACHE=1
 export VLLM_ASCEND_ENABLE_NZ=0
+export VLLM_USE_AOT_COMPILE=0
 
-VIME_ROOT="${VIME_ROOT:-/workspace/issue205/vime-ascend}"
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+
+VIME_ROOT="${VIME_ROOT:-/workspace/wky/vime-ascend}"
 SCRIPT_DIR="${VIME_ROOT}/scripts"
 WEIGHT_DIR="${WEIGHT_DIR:-/home/data/weights/Qwen3-4B}"
 DATA_FILE="${DATA_FILE:-/home/w00893744/dataset/dapo-math-17k.jsonl}"
@@ -126,11 +129,11 @@ MISC_ARGS=(
    --train-memory-margin-bytes 2147483648
 )
 
-# launch the master node of ray in container
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
-ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 8 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+ray start --head --node-ip-address ${MASTER_ADDR} --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 
-python "${VIME_ROOT}/train.py" \
+ray job submit --address="http://127.0.0.1:8265" \
+   -- python3 train.py \
    --train-backend megatron \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node 4 \
@@ -144,5 +147,4 @@ python "${VIME_ROOT}/train.py" \
    ${PERF_ARGS[@]} \
    ${EVAL_ARGS[@]} \
    ${VLLM_ARGS[@]} \
-   ${MISC_ARGS[@]} \
-   2>&1 | tee -a "${LOG_FILE}"
+   ${MISC_ARGS[@]}
