@@ -20,8 +20,7 @@ def _inference_generate_tokens_and_logprobs(choice):
     if isinstance(lp, dict):
         content_items = lp.get("content") or []
         new_response_log_probs = [
-            float(item.get("logprob", 0.0)) if isinstance(item, dict) else 0.0
-            for item in content_items
+            float(item.get("logprob", 0.0)) if isinstance(item, dict) else 0.0 for item in content_items
         ]
     if not new_response_log_probs:
         new_response_log_probs = [0.0] * len(new_response_tokens)

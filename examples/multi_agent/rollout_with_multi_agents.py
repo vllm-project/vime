@@ -34,11 +34,11 @@ async def generate_with_multi_agents(args, sample: Sample, sampling_params, eval
     compact_rollout_id = (
         sample.rollout_id
         if sample.rollout_id is not None
-        else sample.index
-        if sample.index is not None
-        else sample.group_index
-        if sample.group_index is not None
-        else id(sample)
+        else (
+            sample.index
+            if sample.index is not None
+            else sample.group_index if sample.group_index is not None else id(sample)
+        )
     )
     for sibling in samples:
         sibling.rollout_id = compact_rollout_id
