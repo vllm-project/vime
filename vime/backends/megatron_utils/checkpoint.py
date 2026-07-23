@@ -9,6 +9,10 @@ from megatron.training.checkpointing import save_checkpoint
 from megatron.training.global_vars import get_args
 
 from vime.utils import megatron_bridge_utils
+from vime.utils.common import is_npu
+
+logger = logging.getLogger(__name__)
+
 
 try:
     # Here we patch out the `validate_non_overlapping_shards_metadata` in both functions
@@ -21,6 +25,7 @@ try:
     from torch.distributed._shard.sharded_tensor.shard import Shard
     from torch.distributed._shard.sharded_tensor.utils import _parse_and_validate_remote_device
     from torch.distributed._shard.sharding_spec.api import EnumerableShardingSpec
+    from torch.distributed.checkpoint import default_planner
 
     def __post_init__(self):
         pass
@@ -86,10 +91,17 @@ try:
 
     ShardedTensor._init_from_local_shards_and_global_metadata = _init_from_local_shards_and_global_metadata
 
+    if is_npu() and hasattr(default_planner, "_validate_global_plan"):
+
+        def patched_validate_global_plan(global_plan, metadata):
+            logger.info("[Patch] Skipping validate_access_integrity")
+            return True
+
+        default_planner._validate_global_plan = patched_validate_global_plan
+
 except ImportError:
     pass
 
-logger = logging.getLogger(__name__)
 
 __all__ = ["save_checkpoint"]
 

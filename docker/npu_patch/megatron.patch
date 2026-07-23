@@ -551,3 +551,34 @@ index 95ad20382..c4d5e6f78 100644
  
  
  def append_to_progress_log(string, barrier=True):
+
+diff --git a/megatron/core/dist_checkpointing/validation.py b/megatron/core/dist_checkpointing/validation.py
+index 48f2bda87..028032cd8 100644
+--- a/megatron/core/dist_checkpointing/validation.py
++++ b/megatron/core/dist_checkpointing/validation.py
+@@ -440,6 +440,8 @@ def validate_sharding_integrity(
+     for key, shardings in key_shardings.items():
+         if isinstance(shardings[0][1], ShardedObject):
+             _validate_objects_for_key(shardings)
++        elif hasattr(shardings[0][1], "key") and "experts" in shardings[0][1].key:
++            continue
+         else:
+             _validate_sharding_for_key(shardings)
+
+diff --git a/megatron/core/optimizer/distrib_optimizer.py b/megatron/core/optimizer/distrib_optimizer.py
+index 4192b0bb7..6250f1a9b 100644
+--- a/megatron/core/optimizer/distrib_optimizer.py
++++ b/megatron/core/optimizer/distrib_optimizer.py
+@@ -1725,6 +1725,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+                     # The optimizer state of STEP is handled
+                     # specifically and is read from param_groups.
+                     continue
++                if "experts" in f'{prefix}.{state_key}.{sharded_metadata.key}':
++                    try:
++                        from megatron.core.parallel_state import get_expert_model_parallel_rank
++                        replica_id = (*replica_id[:2], get_expert_model_parallel_rank())
++                    except AssertionError:
++                        pass
+                 replace_kwargs = dict(
+                     key=f'{prefix}.{state_key}.{sharded_metadata.key}',
+                     data=state_ten,
