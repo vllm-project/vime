@@ -4,7 +4,9 @@ Colocated vLLM weight sync using native IPC transfer engines.
 
 from __future__ import annotations
 
+import logging
 import os
+import sys
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
@@ -25,6 +27,8 @@ from .update_weight_from_distributed import (
     post_process_weights,
     update_weights_from_distributed,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class UpdateWeightFromTensor:
@@ -284,6 +288,55 @@ class _VLLMHijack:
         NPUWorker._npu_worker_patched = True
 
     @staticmethod
+    def _patch_a3_moe_comm_selector() -> None:
+        """Force ALLGATHER for colocated MoE forwards on Ascend A3 (910C)."""
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+        if get_ascend_device_type() != AscendDeviceType.A3:
+            return
+
+        import vllm_ascend.ascend_forward_context as ascend_forward_context
+
+        original_selector = ascend_forward_context.select_moe_comm_method
+        if getattr(original_selector, "_vime_a3_moe_allgather_patched", False):
+            return
+
+        forced_moe_logged = False
+
+        def _select_allgather(num_tokens, vllm_config, is_draft_model=False):
+            nonlocal forced_moe_logged
+            native_moe_comm = original_selector(num_tokens, vllm_config, is_draft_model)
+            # The native selector returns None for non-MoE models. Keep that
+            # result unchanged so A3 colocated dense models are unaffected.
+            if native_moe_comm is None:
+                return None
+            if not forced_moe_logged:
+                logger.warning(
+                    "Colocated Ascend A3 MoE detected: forcing vLLM-Ascend communication "
+                    "from %s to MoECommType.ALLGATHER",
+                    native_moe_comm,
+                )
+                forced_moe_logged = True
+            return ascend_forward_context.MoECommType.ALLGATHER
+
+        _select_allgather._vime_a3_moe_allgather_patched = True
+
+        # model_runner_v1 imports the selector directly, so replacing only the
+        # defining module would leave its already-bound alias unchanged.
+        patched_modules = []
+        for module_name, module in tuple(sys.modules.items()):
+            if not module_name.startswith("vllm_ascend."):
+                continue
+            if getattr(module, "select_moe_comm_method", None) is original_selector:
+                module.select_moe_comm_method = _select_allgather
+                patched_modules.append(module_name)
+
+        logger.info(
+            "Colocated Ascend A3 detected: installed automatic MoE ALLGATHER selector in %s",
+            patched_modules,
+        )
+
+    @staticmethod
     def _patch_one_worker(worker_cls: type) -> None:
         import inspect
 
@@ -378,6 +431,7 @@ class vLLMColocateWorkerExtension:
 
     def __new__(cls, **kwargs):
         if is_npu():
+            _VLLMHijack._patch_a3_moe_comm_selector()
             _VLLMHijack._patch_npu_worker()
             _VLLMHijack._patch_npu_rotary_emb()
         return super().__new__(cls)
