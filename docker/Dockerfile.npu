@@ -45,7 +45,7 @@ RUN if [ -n "$APTMIRROR" ];then sed -i "s@^\(deb.*\)https\?://[a-z0-9.-]*\.ubunt
     pip config set global.index-url ${PIP_INDEX_URL} && \
     if [ "${PIP_INDEX_URL#http://}" != "${PIP_INDEX_URL}" ]; then pip config set global.trusted-host "$(echo ${PIP_INDEX_URL} | awk -F/ '{print $3}')"; fi && \
     pip config set global.extra-index-url \
-      "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi" && \
+      "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.aliyun.com/pypi/simple/" && \
     git config --global http.version HTTP/1.1
 
 # vllm and vllm-ascend are installed editable (-e) in the base image; apply the
