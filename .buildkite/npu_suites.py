@@ -29,7 +29,8 @@ BUILDKITE_SOURCE = os.environ.get("BUILDKITE_SOURCE", "")
 SUITES = {
     "smk": [
         ("test_qwen3_4B_npu.py", "npu-8", "", {}),
-        ("test_qwen3_30B_A3B_npu.py", "npu-16", "", {}),
+        ("test_qwen3_30B_A3B_npu.py", "npu-8", "--colocate", {}),
+        ("test_qwen3_30B_A3B_npu.py", "npu-16", "--disaggregated", {}),
     ],
     "nightly": [],
 }

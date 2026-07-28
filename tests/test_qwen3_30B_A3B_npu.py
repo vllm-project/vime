@@ -1,8 +1,8 @@
+import argparse
 import os
 import shlex
 
 import vime.utils.external_utils.command_utils as U
-
 
 TEST_ROOT = os.environ.get("HF_HOME") or "/root"
 MODEL_DIR = f"{TEST_ROOT}/models/Qwen3-30B-A3B"
@@ -20,7 +20,7 @@ def prepare():
     U.exec_command("hf download --repo-type dataset zhuzilin/dapo-math-17k " f"--local-dir {dataset_dir}")
 
 
-def execute():
+def execute(*, colocate: bool):
     model_dir = shlex.quote(MODEL_DIR)
     prompt_data = shlex.quote(f"{DATASET_DIR}/dapo-math-17k.jsonl")
 
@@ -86,8 +86,10 @@ def execute():
         "--use-precision-aware-optimizer "
     )
 
+    # Keep two TP4/EP4 rollout engines in both modes so colocation is the only
+    # topology variable between the two NPU CI jobs.
     vllm_args = (
-        "--rollout-num-gpus-per-engine 8 "
+        "--rollout-num-gpus-per-engine 4 "
         "--vllm-enable-sleep-mode "
         "--vllm-enable-expert-parallel "
         "--vllm-gpu-memory-utilization 0.7 "
@@ -110,6 +112,8 @@ def execute():
         "--rollout-num-gpus 8 "
         "--ci-test "
     )
+    if colocate:
+        runtime_args += "--colocate "
 
     train_args = (
         checkpoint_args
@@ -123,7 +127,7 @@ def execute():
     )
     U.execute_train(
         train_args=train_args,
-        num_gpus_per_node=16,
+        num_gpus_per_node=8 if colocate else 16,
         megatron_model_type="qwen3-30B-A3B",
         extra_env_vars={
             "DISABLE_L2_CACHE": "1",
@@ -132,11 +136,20 @@ def execute():
     )
 
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--colocate", action="store_true", dest="colocate")
+    mode.add_argument("--disaggregated", action="store_false", dest="colocate")
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
     prepare()
     for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         os.environ.pop(proxy_var, None)
-    execute()
+    execute(colocate=args.colocate)
 
 
 if __name__ == "__main__":
