@@ -284,6 +284,47 @@ class _VLLMHijack:
         NPUWorker._npu_worker_patched = True
 
     @staticmethod
+    def _patch_a3_moe_alltoall_expert_ids() -> None:
+        """Restore the ALLTOALL expert-ID template after colocated memory reuse."""
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+        if get_ascend_device_type() != AscendDeviceType.A3:
+            return
+
+        from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithAll2AllV
+
+        if getattr(TokenDispatcherWithAll2AllV, "_vime_expert_ids_patched", False):
+            return
+
+        original_dispatch_preprocess = TokenDispatcherWithAll2AllV._dispatch_preprocess
+        TokenDispatcherWithAll2AllV._vime_expert_ids_generation = 0
+
+        def _patched_dispatch_preprocess(self, hidden_states, topk_ids):
+            generation = TokenDispatcherWithAll2AllV._vime_expert_ids_generation
+            if self.num_local_experts > 1 and getattr(self, "_vime_seen_expert_ids_generation", -1) != generation:
+                expert_ids = self.expert_ids_per_ep_rank
+                self.expert_ids_per_ep_rank = torch.arange(
+                    self.num_experts,
+                    device=expert_ids.device,
+                    dtype=expert_ids.dtype,
+                ).remainder(self.num_local_experts)
+                self._vime_seen_expert_ids_generation = generation
+            return original_dispatch_preprocess(self, hidden_states, topk_ids)
+
+        TokenDispatcherWithAll2AllV._dispatch_preprocess = _patched_dispatch_preprocess
+        TokenDispatcherWithAll2AllV._vime_expert_ids_patched = True
+
+    @staticmethod
+    def _invalidate_moe_alltoall_expert_ids() -> None:
+        try:
+            from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithAll2AllV
+        except ImportError:
+            return
+
+        if getattr(TokenDispatcherWithAll2AllV, "_vime_expert_ids_patched", False):
+            TokenDispatcherWithAll2AllV._vime_expert_ids_generation += 1
+
+    @staticmethod
     def _patch_one_worker(worker_cls: type) -> None:
         import inspect
 
@@ -309,11 +350,13 @@ class _VLLMHijack:
         ) -> None:
             _VLLMHijack.patch_moe_weight_loader(self.model_runner.model)
             _orig(self, is_checkpoint_format=is_checkpoint_format)
+            _VLLMHijack._invalidate_moe_alltoall_expert_ids()
 
         def _patched_wake_up(self, tags=None, _orig=_orig_wake_up) -> None:
             quant_config = self.vllm_config.quant_config
             if quant_config is not None:
                 _orig(self, tags=tags)
+                _VLLMHijack._invalidate_moe_alltoall_expert_ids()
                 return
 
             # vllm-ascend transposes unquantized w13_weight/w2_weight in
@@ -324,6 +367,7 @@ class _VLLMHijack:
                 _orig(self, tags=tags)
             finally:
                 self.vllm_config.quant_config = quant_config
+            _VLLMHijack._invalidate_moe_alltoall_expert_ids()
 
         worker_cls.load_model = _patched_load_model  # type: ignore[attr-defined]
         worker_cls.start_weight_update = _patched_start_weight_update  # type: ignore[attr-defined]
@@ -378,6 +422,7 @@ class vLLMColocateWorkerExtension:
 
     def __new__(cls, **kwargs):
         if is_npu():
+            _VLLMHijack._patch_a3_moe_alltoall_expert_ids()
             _VLLMHijack._patch_npu_worker()
             _VLLMHijack._patch_npu_rotary_emb()
         return super().__new__(cls)

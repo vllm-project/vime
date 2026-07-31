@@ -87,7 +87,7 @@ def execute():
     )
 
     vllm_args = (
-        "--rollout-num-gpus-per-engine 8 "
+        "--rollout-num-gpus-per-engine 4 "
         "--vllm-enable-sleep-mode "
         "--vllm-enable-expert-parallel "
         "--vllm-gpu-memory-utilization 0.7 "
@@ -109,6 +109,7 @@ def execute():
         "--actor-num-gpus-per-node 8 "
         "--rollout-num-gpus 8 "
         "--ci-test "
+        "--colocate "
     )
 
     train_args = (
