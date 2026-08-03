@@ -271,11 +271,7 @@ class RolloutManager:
             monitor.resume()
 
     def check_weights(self, action: str):
-        server = self._get_updatable_server()
-        engines = server.engines if server is not None else []
-        if not engines:
-            raise RuntimeError("weight checking requires at least one updatable rollout engine")
-        return ray.get([engine.check_weights.remote(action=action) for engine in engines])
+        return ray.get([engine.check_weights.remote(action=action) for engine in self.rollout_engines])
 
     def _get_rollout_data(self, rollout_id):
         if self.args.load_debug_rollout_data:
