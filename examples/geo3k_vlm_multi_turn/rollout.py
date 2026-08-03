@@ -106,7 +106,7 @@ def _multimodal_train_inputs_from_features(features: Any) -> dict[str, torch.Ten
     if not isinstance(encoded_images, list):
         raise TypeError("vLLM features.kwargs_data.image must be a list")
 
-    from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item as vllm_decode
+    from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import decode_mm_kwargs_item as vllm_decode
 
     parts_by_key: dict[str, list[torch.Tensor]] = {}
     for encoded in encoded_images:
