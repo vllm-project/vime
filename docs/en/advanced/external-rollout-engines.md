@@ -15,7 +15,7 @@ This page is a roadmap. Use it to decide when to use `--rollout-external-engine-
 | Full checkpoints are too heavy for large-model cross-cluster or cross-DC sync | `--update-weight-mode delta --update-weight-transport disk` |
 | Rollout serving can use an independent vLLM environment, or even different GPU models/vendors | external engines + disk transport |
 | You want to validate delta wire/apply logic inside one datacenter | `--update-weight-mode delta --update-weight-transport nccl` |
-| You need frozen reference, reward, or tool-side models | Prefer `update_weights: false` in [vLLM Config](vllm-config.md#3-multi-model-serving) |
+| You need frozen reference, reward, or tool-side models | Prefer `update_weights: false` in [vLLM Config](vllm-config.md#4-multi-model-serving) |
 
 ## What External Engine Does
 

@@ -30,7 +30,7 @@ This is the lightweight path used by simple scripts. It is convenient when you o
 
 ### Advanced Path: `--vllm-config`
 
-For production rollout topologies, use [vLLM Config](vllm-config.md). It lets you configure prefill and decode groups independently, and can also express EPD-style layouts, heterogeneous server groups, multi-model serving, and per-group vLLM overrides.
+For production rollout topologies, use [vLLM Config](vllm-config.md). It lets you configure prefill and decode groups independently, and can also express EPD layouts, heterogeneous server groups, multi-model serving, and per-group vLLM overrides.
 
 Example:
 
@@ -60,6 +60,31 @@ python train.py \
   ...
 ```
 
+## EPD: Splitting the Vision Encoder
+
+For vision-language models, the vision tower is a third workload with its own profile — bursty, image-count-driven, and idle whenever a sample is text-only. Adding a `worker_type: encoder` group moves it onto dedicated engines that publish image embeddings to an encoder cache, which the language engines consume instead of running the vision tower themselves.
+
+EPD is orthogonal to PD, so the two compose:
+
+```yaml
+vllm:
+  - name: actor
+    update_weights: true
+    server_groups:
+      - worker_type: encoder
+        num_gpus: 2
+      - worker_type: prefill
+        num_gpus: 6
+      - worker_type: decode
+        num_gpus: 8
+```
+
+vime starts the encoder group first, then launches the prefill/decode groups with `language_only: true` and the encoder URLs injected. Encoder engines stay out of the router's worker registry — only prefill and decode serve routed traffic.
+
+Dropping the `decode` group gives you `encoder` + `regular`, which splits the vision tower without PD.
+
+See [EPD Disaggregation](vllm-config.md#3-epd-disaggregation-vision-encoder-split) for the full role matrix, the `prime_encoder` requirement for custom rollout functions, how to swap the encoder-cache connector, and current limitations.
+
 ## Why This Matters for RL
 
 RL rollout is often not a uniform batch of short completions. Agentic and verifier-based workloads commonly have:
@@ -77,7 +102,7 @@ PD lets vime keep the training loop unchanged while using a rollout topology tha
 - For new complex deployments, prefer `--vllm-config` over `--prefill-num-servers`.
 - Use router session affinity for multi-turn agents so turns from the same sample can reuse prefix cache. See [Session-Affinity Routing](vllm-config.md#session-affinity-routing-for-multi-turn-agents).
 - Keep `--rollout-num-gpus` equal to the total GPUs described by the vLLM config.
-- Do not mix `regular` workers with `prefill`/`decode` workers inside the same model entry.
+- Do not mix `regular` workers with `prefill`/`decode` workers inside the same model entry. `encoder` is the exception — it composes with either layout.
 - Tune prefill and decode TP separately when prompt processing and token generation have different bottlenecks.
 
 ## Related Docs

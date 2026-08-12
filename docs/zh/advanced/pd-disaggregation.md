@@ -30,7 +30,7 @@ vime 支持两种 PD 配置方式。
 
 ### 高级路径：`--vllm-config`
 
-生产级 rollout topology 推荐使用 [vLLM Config](vllm-config.md)。它可以独立配置 prefill 和 decode group，也能表达 EPD-style layout、heterogeneous server group、multi-model serving 和 per-group vLLM override。
+生产级 rollout topology 推荐使用 [vLLM Config](vllm-config.md)。它可以独立配置 prefill 和 decode group，也能表达 EPD layout、heterogeneous server group、multi-model serving 和 per-group vLLM override。
 
 示例：
 
@@ -60,6 +60,31 @@ python train.py \
   ...
 ```
 
+## EPD：拆分视觉编码器
+
+对视觉语言模型来说，vision tower 是第三种独立的 workload：突发式、由图像数量驱动、遇到纯文本样本时完全空闲。加入 `worker_type: encoder` 组即可把它放到专门的引擎上，由这些引擎把图像 embedding 写入 encoder cache，language 引擎直接消费，不再自己跑 vision tower。
+
+EPD 与 PD 正交，两者可以组合：
+
+```yaml
+vllm:
+  - name: actor
+    update_weights: true
+    server_groups:
+      - worker_type: encoder
+        num_gpus: 2
+      - worker_type: prefill
+        num_gpus: 6
+      - worker_type: decode
+        num_gpus: 8
+```
+
+vime 会先启动 encoder 组，再启动 prefill/decode 组，并为后者注入 `language_only: true` 和 encoder URL。encoder 引擎不会注册到 router 的 worker 列表中——只有 prefill 和 decode 承接路由流量。
+
+去掉 `decode` 组就得到 `encoder` + `regular`，即只拆 vision tower、不做 PD。
+
+完整的角色矩阵、自定义 rollout function 需要调用的 `prime_encoder`、如何替换 encoder cache connector 以及当前限制，见 [EPD 分离](vllm-config.md#3-epd-分离视觉编码器拆分)。
+
 ## 为什么这对 RL 重要
 
 RL rollout 往往不是一批短 completion。Agentic 和 verifier-based workload 常见特征包括：
@@ -77,7 +102,7 @@ PD 让 vime 在不改变 training loop 的情况下，使用更贴合真实 serv
 - 新的复杂部署优先使用 `--vllm-config`，而不是 `--prefill-num-servers`。
 - multi-turn agent 建议开启 router session affinity，使同一 sample 的多轮请求可以复用 prefix cache。见 [Session-Affinity Routing](vllm-config.md#session-affinity-routing-for-multi-turn-agents)。
 - `--rollout-num-gpus` 应等于 vLLM config 中描述的 GPU 总数。
-- 不要在同一个 model entry 中混用 `regular` worker 和 `prefill`/`decode` worker。
+- 不要在同一个 model entry 中混用 `regular` worker 和 `prefill`/`decode` worker。`encoder` 是例外——它可以与任一布局组合。
 - 当 prompt processing 和 token generation 的瓶颈不同时，分别调 prefill 和 decode 的 TP。
 
 ## 相关文档

@@ -1,6 +1,6 @@
 # vLLM Config: Advanced Engine Deployment
 
-`--vllm-config` is a YAML-based configuration system for fine-grained control over vLLM engine deployment in vime. It enables **multi-model serving**, **Prefill-Decode (PD) disaggregation**, **heterogeneous server groups**, and can even serve as a **standalone vLLM launcher** for complex inference topologies.
+`--vllm-config` is a YAML-based configuration system for fine-grained control over vLLM engine deployment in vime. It enables **multi-model serving**, **Prefill-Decode (PD) disaggregation**, **Encoder-Prefill-Decode (EPD) disaggregation** for vision-language models, **heterogeneous server groups**, and can even serve as a **standalone vLLM launcher** for complex inference topologies.
 
 ---
 
@@ -17,7 +17,7 @@ With `--vllm-config`, the vLLM deployment expands into a multi-model, multi-rout
 **Key design principles:**
 
 - **Each model gets its own router.** Models are isolated at the routing layer, allowing independent load balancing and fault tolerance.
-- **Server groups within a model can be heterogeneous.** Different groups can have different TP sizes, worker types (prefill/decode/regular), and vLLM engine argument overrides.
+- **Server groups within a model can be heterogeneous.** Different groups can have different TP sizes, worker types (prefill/decode/encoder/regular), and vLLM engine argument overrides.
 - **Weight sync is per-model.** Only models with `update_weights: true` receive weight updates from training. Frozen models (reference, reward, etc.) are served as-is.
 
 ---
@@ -33,7 +33,7 @@ vllm:
     update_weights: <bool>          # Optional. Whether to sync weights from training. Auto-inferred.
     num_gpus_per_engine: <int>      # Optional. Default TP size for all groups in this model.
     server_groups:                  # Required. List of server group configurations.
-      - worker_type: <type>         # Required. One of: regular, prefill, decode, placeholder.
+      - worker_type: <type>         # Required. One of: regular, prefill, decode, encoder, placeholder.
         num_gpus: <int>             # Required. Total GPUs allocated to this group.
         num_gpus_per_engine: <int>  # Optional. TP size override for this group.
         overrides: <dict>           # Optional. vLLM EngineArgs field overrides.
@@ -55,7 +55,7 @@ vllm:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `worker_type` | `str` | **Required** | Engine type: `regular` (standard), `prefill` (PD prefill worker), `decode` (PD decode worker), or `placeholder` (reserve GPU slots without launching engines). |
+| `worker_type` | `str` | **Required** | Engine type: `regular` (standard), `prefill` (PD prefill worker), `decode` (PD decode worker), `encoder` (EPD vision-encoder worker), or `placeholder` (reserve GPU slots without launching engines). |
 | `num_gpus` | `int` | **Required** | Total number of GPUs for this group. Must be > 0. |
 | `num_gpus_per_engine` | `int` | Model's `num_gpus_per_engine` | TP size override. Number of GPUs per engine instance. |
 | `overrides` | `dict` | `{}` | vLLM `EngineArgs` field overrides. Applied on top of `--vllm-*` CLI args with highest priority. |
@@ -67,6 +67,7 @@ vllm:
 | `regular` | Standard vLLM engine | Default mode, handles both prefill and decode |
 | `prefill` | PD disaggregation prefill worker | Dedicated to prompt processing; paired with `decode` workers |
 | `decode` | PD disaggregation decode worker | Dedicated to token generation; paired with `prefill` workers |
+| `encoder` | EPD disaggregation vision-encoder worker | Runs the vision tower for VLMs; paired with `prefill` or `regular` workers, which become `language_only` |
 | `placeholder` | Reserves GPU slots, no engine created | Reserve GPUs for training co-location or future use |
 
 ---
@@ -127,7 +128,73 @@ python train.py \
 
 > **Note:** PD disaggregation uses vllm-router with `pd_disaggregation=True`.
 
-### 3. Multi-Model Serving
+### 3. EPD Disaggregation (Vision Encoder Split)
+
+For vision-language models, `worker_type: encoder` moves the vision tower onto its own engines. Encoder engines compute image embeddings and publish them to an encoder cache; the language engines consume that cache instead of running the vision tower themselves.
+
+EPD composes with PD on an orthogonal axis. Pair `encoder` with `prefill` + `decode` for a full three-stage split:
+
+```yaml
+# vllm_epd.yaml
+vllm:
+  - name: actor
+    server_groups:
+      - worker_type: encoder
+        num_gpus: 1
+      - worker_type: prefill
+        num_gpus: 1
+      - worker_type: decode
+        num_gpus: 1
+```
+
+Or pair `encoder` with `regular` to split off the vision tower without PD:
+
+```yaml
+vllm:
+  - name: actor
+    server_groups:
+      - worker_type: encoder
+        num_gpus: 2
+      - worker_type: regular
+        num_gpus: 6
+```
+
+**Roles assigned automatically.** vime derives the encoder-cache (EC) wiring from the worker types, so you do not write `ec_transfer_config` by hand:
+
+| Worker type | `ec_role` | `kv_role` (when PD is also used) | Notes |
+|-------------|-----------|----------------------------------|-------|
+| `encoder` | `ec_producer` | — | Runs the vision tower. `enable_prefix_caching` is forced off (no language-model KV cache groups). Not registered with the router. |
+| `prefill` | `ec_consumer` | `kv_producer` | Started with `language_only: true` and `encoder_urls` pointing at the encoder engines. |
+| `regular` | `ec_consumer` | — | Same as prefill, when used without PD. |
+| `decode` | — | `kv_consumer` | Receives KV from prefill; never touches the encoder cache. |
+
+**Startup ordering.** Encoder groups are launched first and awaited synchronously, because their URLs must be injected into the language engines' server arguments before those engines start. The language engines then initialize in the usual deferred fashion.
+
+**Priming the encoder.** A request must reach the encoder before the language engines generate, so the embeddings are in the cache when the consumer looks them up. The built-in rollout paths do this for you — both `generate` and `generate_streaming` call `prime_encoder` on multimodal samples. In a custom rollout function, call it yourself before rendering:
+
+```python
+from vime.rollout.vllm_rollout import prime_encoder
+
+await prime_encoder(args, messages, model_name="actor")
+```
+
+`prime_encoder` is a no-op when the sample has no images or when the deployment has no encoder group, so it is safe to call unconditionally. Encoder endpoints are published at runtime on `args.vllm_model_encoder_endpoints`, a dict `{ model_name: (model_path, [endpoint, ...]) }`.
+
+**Swapping the connector.** By default vime uses upstream vLLM's `ECExampleConnector` over a per-deployment tmpfs directory (`/dev/shm/vime-ec-<uuid>`). An `ec_transfer_config` in a group's `overrides` **replaces** the generated one for that group, and is then layered over the auto-derived `ec_connector` / `ec_role` defaults — so your keys win, but nothing is deep-merged. Because the replacement is per-group, set it on *every* participating group (encoder and its consumers) with a matching `shared_storage_path`, or the producer and consumer will point at different caches:
+
+```yaml
+      - worker_type: encoder
+        num_gpus: 1
+        overrides:
+          ec_transfer_config:
+            ec_connector: MyProductionConnector
+            ec_connector_extra_config:
+              shared_storage_path: /mnt/shared/ec-cache
+```
+
+> **Limitations.** `ECExampleConnector` is upstream's reference implementation and is file-backed: the default `/dev/shm` path is node-local, so encoder and consumer engines must land on the same node unless you override `shared_storage_path` with a shared mount. EPD is also currently exercised in CI with `update_weights: false` (see [tests/test_qwen2.5_vl_3B_ep_disaggregation.py](https://github.com/vllm-project/vime/blob/main/tests/test_qwen2.5_vl_3B_ep_disaggregation.py)); weight sync into a split encoder/language-only deployment is not yet covered.
+
+### 4. Multi-Model Serving
 
 Deploy multiple models simultaneously, each behind its own router:
 
@@ -200,7 +267,7 @@ async def my_generate(args, sample, sampling_params):
 
 The `get_model_url()` helper reads from `args.vllm_model_routers`, a dict mapping model names to `(ip, port)` tuples that is automatically populated after engine startup.
 
-### 4. Multi-Model with PD Disaggregation
+### 5. Multi-Model with PD Disaggregation
 
 Combine multi-model and PD disaggregation for maximum flexibility:
 
@@ -226,7 +293,7 @@ vllm:
         num_gpus_per_engine: 2
 ```
 
-### 5. Placeholder Groups for GPU Reservation
+### 6. Placeholder Groups for GPU Reservation
 
 Use `placeholder` groups to reserve GPU slots without creating engines. This is useful for co-located training where some GPUs need to be reserved for training:
 
@@ -241,7 +308,7 @@ vllm:
         num_gpus: 2                   # reserve 2 GPUs (no engines created)
 ```
 
-### 6. Per-Group EngineArgs Overrides
+### 7. Per-Group EngineArgs Overrides
 
 Use `overrides` to apply vLLM `EngineArgs` fields to specific server groups without affecting others:
 
@@ -264,7 +331,7 @@ Overrides take **highest priority**, overriding both the base `--vllm-*` CLI arg
 - Different context lengths for prefill vs. decode
 - Enabling experimental features on specific groups
 
-### 7. Standalone vLLM Launcher
+### 8. Standalone vLLM Launcher
 
 While `--vllm-config` is designed for vime's training pipeline, it also works as a powerful launcher for pure inference scenarios using external engine addresses or by configuring vime to focus solely on serving.
 
@@ -449,6 +516,12 @@ async def generate_with_models(args, sample, sampling_params):
 ### Q: Can I mix PD and regular groups in the same model?
 
 No. PD disaggregation requires that a model's server groups are either all prefill/decode pairs or all regular. Mixing `regular` with `prefill`/`decode` in the same model is not supported.
+
+`encoder` is the exception: it is an orthogonal axis and may be added to either layout, giving `encoder` + `prefill` + `decode` (full EPD) or `encoder` + `regular` (vision split without PD). See [EPD Disaggregation](#3-epd-disaggregation-vision-encoder-split).
+
+### Q: Do encoder GPUs count toward `--rollout-num-gpus`?
+
+Yes. Total-GPU validation sums `num_gpus` across every group of every model, including `encoder` groups. A three-group EPD layout with one GPU each needs `--rollout-num-gpus 3`.
 
 ### Q: What happens if `num_gpus` is not divisible by `num_gpus_per_engine`?
 

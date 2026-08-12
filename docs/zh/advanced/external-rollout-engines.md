@@ -15,7 +15,7 @@ External rollout engine 指的是：vLLM engine 不由 vime 训练任务启动�
 | 大模型跨集群或跨数据中心同步，full checkpoint 太重 | `--update-weight-mode delta --update-weight-transport disk` |
 | rollout serving 想使用独立 vLLM 环境，甚至不同型号或不同厂家的 GPU | external engine + disk transport |
 | 想验证 delta wire/apply 逻辑，但仍在同一数据中心内 | `--update-weight-mode delta --update-weight-transport nccl` |
-| 需要 reference、reward、tool-side model 等冻结模型 | 优先用 [vLLM Config](vllm-config.md#3-多模型服务) 的 `update_weights: false` |
+| 需要 reference、reward、tool-side model 等冻结模型 | 优先用 [vLLM Config](vllm-config.md#4-多模型服务) 的 `update_weights: false` |
 
 ## External Engine 做了什么
 

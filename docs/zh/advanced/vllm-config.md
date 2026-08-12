@@ -1,6 +1,6 @@
 # vLLM Config：高级引擎部署
 
-`--vllm-config` 是一个基于 YAML 的配置系统，用于在 vime 中精细控制 vLLM 引擎的部署。它支持**多模型服务**、**Prefill-Decode (PD) 分离**、**异构服务器组**，甚至可以作为复杂推理拓扑的**独立 vLLM 启动器**。
+`--vllm-config` 是一个基于 YAML 的配置系统，用于在 vime 中精细控制 vLLM 引擎的部署。它支持**多模型服务**、**Prefill-Decode (PD) 分离**、面向视觉语言模型的 **Encoder-Prefill-Decode (EPD) 分离**、**异构服务器组**，甚至可以作为复杂推理拓扑的**独立 vLLM 启动器**。
 
 ---
 
@@ -17,7 +17,7 @@
 **核心设计原则：**
 
 - **每个模型拥有独立的 router。** 模型在路由层隔离，支持独立的负载均衡和容错。
-- **同一模型内的服务器组可以异构。** 不同组可以有不同的 TP 大小、worker 类型（prefill/decode/regular）和 vLLM server 参数覆盖。
+- **同一模型内的服务器组可以异构。** 不同组可以有不同的 TP 大小、worker 类型（prefill/decode/encoder/regular）和 vLLM server 参数覆盖。
 - **权重同步按模型维度。** 只有 `update_weights: true` 的模型会接收来自训练的权重更新。冻结的模型（reference、reward 等）保持原样。
 
 ---
@@ -33,7 +33,7 @@ vllm:
     update_weights: <bool>          # 可选。是否从训练同步权重。自动推断。
     num_gpus_per_engine: <int>      # 可选。该模型所有组的默认 TP 大小。
     server_groups:                  # 必填。服务器组配置列表。
-      - worker_type: <type>         # 必填。可选：regular、prefill、decode、placeholder。
+      - worker_type: <type>         # 必填。可选：regular、prefill、decode、encoder、placeholder。
         num_gpus: <int>             # 必填。分配给该组的 GPU 总数。
         num_gpus_per_engine: <int>  # 可选。该组的 TP 大小覆盖。
         overrides: <dict>           # 可选。vLLM EngineArgs 字段覆盖。
@@ -55,7 +55,7 @@ vllm:
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `worker_type` | `str` | **必填** | 引擎类型：`regular`（标准）、`prefill`（PD prefill worker）、`decode`（PD decode worker）或 `placeholder`（占位，不启动引擎）。 |
+| `worker_type` | `str` | **必填** | 引擎类型：`regular`（标准）、`prefill`（PD prefill worker）、`decode`（PD decode worker）、`encoder`（EPD 视觉编码器 worker）或 `placeholder`（占位，不启动引擎）。 |
 | `num_gpus` | `int` | **必填** | 该组的 GPU 总数。必须 > 0。 |
 | `num_gpus_per_engine` | `int` | 模型的 `num_gpus_per_engine` | TP 大小覆盖。每个引擎实例的 GPU 数量。 |
 | `overrides` | `dict` | `{}` | vLLM `EngineArgs` 字段覆盖。优先级最高，覆盖 `--vllm-*` CLI 参数和模型级默认值。 |
@@ -67,6 +67,7 @@ vllm:
 | `regular` | 标准 vLLM 引擎 | 默认模式，同时处理 prefill 和 decode |
 | `prefill` | PD 分离的 prefill worker | 专门处理 prompt；与 `decode` worker 配对 |
 | `decode` | PD 分离的 decode worker | 专门生成 token；与 `prefill` worker 配对 |
+| `encoder` | EPD 分离的视觉编码器 worker | 为 VLM 运行 vision tower；与 `prefill` 或 `regular` worker 配对，后者会变为 `language_only` |
 | `placeholder` | 占位，不创建引擎 | 为训练共置预留 GPU 或留作未来使用 |
 
 ---
@@ -127,7 +128,73 @@ python train.py \
 
 > **注意：** PD 分离使用 vllm-router，并设置 `pd_disaggregation=True`。
 
-### 3. 多模型服务
+### 3. EPD 分离（视觉编码器拆分）
+
+对于视觉语言模型，`worker_type: encoder` 会把 vision tower 拆到独立的引擎上。encoder 引擎负责计算图像 embedding 并写入 encoder cache；language 引擎直接消费该 cache，不再自己跑 vision tower。
+
+EPD 与 PD 是正交的两个维度。把 `encoder` 与 `prefill` + `decode` 搭配即可得到完整的三段式拆分：
+
+```yaml
+# vllm_epd.yaml
+vllm:
+  - name: actor
+    server_groups:
+      - worker_type: encoder
+        num_gpus: 1
+      - worker_type: prefill
+        num_gpus: 1
+      - worker_type: decode
+        num_gpus: 1
+```
+
+也可以把 `encoder` 与 `regular` 搭配，只拆分 vision tower 而不做 PD：
+
+```yaml
+vllm:
+  - name: actor
+    server_groups:
+      - worker_type: encoder
+        num_gpus: 2
+      - worker_type: regular
+        num_gpus: 6
+```
+
+**角色自动分配。** vime 会根据 worker 类型推导 encoder cache (EC) 的连接配置，无需手写 `ec_transfer_config`：
+
+| Worker 类型 | `ec_role` | `kv_role`（同时使用 PD 时） | 说明 |
+|-------------|-----------|------------------------------|------|
+| `encoder` | `ec_producer` | — | 运行 vision tower。强制关闭 `enable_prefix_caching`（没有语言模型的 KV cache group）。不注册到 router。 |
+| `prefill` | `ec_consumer` | `kv_producer` | 启动时带上 `language_only: true` 和指向 encoder 引擎的 `encoder_urls`。 |
+| `regular` | `ec_consumer` | — | 不使用 PD 时与 prefill 相同。 |
+| `decode` | — | `kv_consumer` | 从 prefill 接收 KV；不接触 encoder cache。 |
+
+**启动顺序。** encoder 组会先启动并同步等待就绪，因为它们的 URL 必须在 language 引擎启动前注入其 server 参数。之后 language 引擎按常规的延迟初始化方式启动。
+
+**预热 encoder。** 请求必须先到达 encoder，language 引擎生成时 embedding 才已经在 cache 中。内置 rollout 路径已经帮你做了这件事——`generate` 和 `generate_streaming` 都会对多模态样本调用 `prime_encoder`。在自定义 rollout function 中，需要在 render 之前自行调用：
+
+```python
+from vime.rollout.vllm_rollout import prime_encoder
+
+await prime_encoder(args, messages, model_name="actor")
+```
+
+当样本不含图像、或部署中没有 encoder 组时，`prime_encoder` 是空操作，因此可以无条件调用。encoder endpoint 在运行时发布在 `args.vllm_model_encoder_endpoints` 上，格式为 `{ model_name: (model_path, [endpoint, ...]) }`。
+
+**替换 connector。** vime 默认使用上游 vLLM 的 `ECExampleConnector`，存储目录是每次部署独立的 tmpfs 路径（`/dev/shm/vime-ec-<uuid>`）。在某个组的 `overrides` 中写入 `ec_transfer_config` 会**整体替换**该组自动生成的配置，然后再叠加到自动推导的 `ec_connector` / `ec_role` 默认值之上——即你写的键优先生效，但不做深度合并。由于替换是按组进行的，请为**每一个**参与的组（encoder 及其 consumer）都设置，并保持 `shared_storage_path` 一致，否则 producer 和 consumer 会指向不同的 cache：
+
+```yaml
+      - worker_type: encoder
+        num_gpus: 1
+        overrides:
+          ec_transfer_config:
+            ec_connector: MyProductionConnector
+            ec_connector_extra_config:
+              shared_storage_path: /mnt/shared/ec-cache
+```
+
+> **限制。** `ECExampleConnector` 是上游的参考实现，基于文件存储：默认的 `/dev/shm` 路径是节点本地的，因此除非用共享挂载覆盖 `shared_storage_path`，encoder 与 consumer 引擎必须落在同一个节点上。此外，目前 CI 中的 EPD 用例使用 `update_weights: false`（见 [tests/test_qwen2.5_vl_3B_ep_disaggregation.py](https://github.com/vllm-project/vime/blob/main/tests/test_qwen2.5_vl_3B_ep_disaggregation.py)）；向 encoder / language-only 拆分部署做权重同步尚未覆盖。
+
+### 4. 多模型服务
 
 同时部署多个模型，每个模型拥有独立的 router：
 
@@ -200,7 +267,7 @@ async def my_generate(args, sample, sampling_params):
 
 `get_model_url()` 从 `args.vllm_model_routers`（一个将模型名称映射到 `(ip, port)` 元组的字典）中读取，该字典在引擎启动后自动填充。
 
-### 4. 多模型 + PD 分离
+### 5. 多模型 + PD 分离
 
 将多模型与 PD 分离结合，实现最大灵活性：
 
@@ -226,7 +293,7 @@ vllm:
         num_gpus_per_engine: 2
 ```
 
-### 5. 占位组用于 GPU 预留
+### 6. 占位组用于 GPU 预留
 
 使用 `placeholder` 组来预留 GPU 而不创建引擎。这在共置训练场景中很有用，部分 GPU 需要为训练预留：
 
@@ -241,7 +308,7 @@ vllm:
         num_gpus: 2                   # 预留 2 个 GPU（不创建引擎）
 ```
 
-### 6. 按组覆盖 EngineArgs
+### 7. 按组覆盖 EngineArgs
 
 使用 `overrides` 将 vLLM `EngineArgs` 字段应用到特定服务器组，而不影响其他组：
 
@@ -264,7 +331,7 @@ vllm:
 - prefill 和 decode 使用不同的 context length
 - 在特定组上启用实验性功能
 
-### 7. 独立 vLLM 启动器
+### 8. 独立 vLLM 启动器
 
 虽然 `--vllm-config` 是为 vime 的训练流水线设计的，但它也可以作为纯推理场景的强大启动器，通过外部 engine 地址或配置 vime 仅关注推理服务。
 
@@ -448,6 +515,12 @@ async def generate_with_models(args, sample, sampling_params):
 ### Q: 同一模型内可以混用 PD 和 regular 组吗？
 
 不可以。PD 分离要求一个模型的服务器组要么全部是 prefill/decode 对，要么全部是 regular。不支持在同一模型内混用 `regular` 与 `prefill`/`decode`。
+
+`encoder` 是例外：它属于正交维度，可以加入上述任一布局，组成 `encoder` + `prefill` + `decode`（完整 EPD）或 `encoder` + `regular`（只拆 vision，不做 PD）。见 [EPD 分离](#3-epd-分离视觉编码器拆分)。
+
+### Q: encoder 的 GPU 计入 `--rollout-num-gpus` 吗？
+
+计入。GPU 总数校验会累加所有模型、所有组的 `num_gpus`，包括 `encoder` 组。三组各 1 张卡的 EPD 布局需要 `--rollout-num-gpus 3`。
 
 ### Q: 如果 `num_gpus` 不能被 `num_gpus_per_engine` 整除怎么办？
 
