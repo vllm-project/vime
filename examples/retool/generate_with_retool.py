@@ -112,12 +112,16 @@ def postprocess_predictions(prediction: str):
         try:
             import json
 
-            # Clean up the JSON string by removing newlines and extra
-            # whitespace
             json_str = tool_call_match.group(1)
-            # Replace newlines in string values with \n
-            json_str = json_str.replace("\n", "\\n")
-            tool_call_data = json.loads(json_str)
+            try:
+                tool_call_data = json.loads(json_str)
+            except json.JSONDecodeError:
+                # Some models emit raw newlines inside the "code" string, which is
+                # not valid JSON; escaping them recovers the call. Do this only as
+                # a fallback -- escaping unconditionally corrupts pretty-printed
+                # JSON, whose newlines sit *between* tokens rather than inside a
+                # string, and a backslash there is a parse error.
+                tool_call_data = json.loads(json_str.replace("\n", "\\n"))
             tool_name = tool_call_data.get("name")
             arguments = tool_call_data.get("arguments", {})
 

@@ -390,6 +390,22 @@ def test_postprocess_predictions(text, action, content):
     assert mod.postprocess_predictions(text) == (action, content)
 
 
+def test_postprocess_predictions_parses_pretty_printed_tool_call():
+    """Newlines *between* JSON tokens must not be escaped: a backslash outside a
+    string is a JSON parse error, and the dropped tool call would silently
+    degrade into the "invalid action" reprompt."""
+    text = '<tool_call>\n{\n  "name": "code_interpreter",\n  "arguments": {"code": "print(1)"}\n}\n</tool_call>'
+    assert mod.postprocess_predictions(text) == ("code", "print(1)")
+
+
+def test_postprocess_predictions_recovers_raw_newlines_inside_code():
+    """Raw newlines *inside* the code string are invalid JSON; escaping recovers them."""
+    text = '<tool_call>{"name": "code_interpreter", "arguments": {"code": "import math\nprint(math.sqrt(16))"}}</tool_call>'
+    action, code = mod.postprocess_predictions(text)
+    assert action == "code"
+    assert code == "import math\nprint(math.sqrt(16))"
+
+
 def test_postprocess_predictions_prefers_answer_over_code():
     text = "<code>print(1)</code>\nAnswer: \\boxed{7}"
     assert mod.postprocess_predictions(text) == ("answer", "7")
