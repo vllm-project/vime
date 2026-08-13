@@ -116,11 +116,9 @@ def postprocess_predictions(prediction: str):
             try:
                 tool_call_data = json.loads(json_str)
             except json.JSONDecodeError:
-                # Some models emit raw newlines inside the "code" string, which is
-                # not valid JSON; escaping them recovers the call. Do this only as
-                # a fallback -- escaping unconditionally corrupts pretty-printed
-                # JSON, whose newlines sit *between* tokens rather than inside a
-                # string, and a backslash there is a parse error.
+                # Raw newlines inside the "code" string are invalid JSON; escaping
+                # recovers them. Only as a fallback -- escaping unconditionally
+                # breaks pretty-printed JSON, whose newlines are between tokens.
                 tool_call_data = json.loads(json_str.replace("\n", "\\n"))
             tool_name = tool_call_data.get("name")
             arguments = tool_call_data.get("arguments", {})
@@ -194,11 +192,8 @@ async def execute_predictions(prediction: str) -> str:
         # postprocess_predictions)
         code = content.strip()
         if code:
-            # No SEMAPHORE acquire here: ``tool_registry.execute_tool`` already
-            # takes the same non-reentrant ``tool_sandbox.SEMAPHORE``. Acquiring
-            # it in both places needs 2 permits per call and hangs once enough
-            # tool calls are in flight (a single call self-deadlocks when
-            # ``tool_concurrency == 1``). The limit is owned by the registry.
+            # No SEMAPHORE acquire here: ``execute_tool`` already takes the same
+            # non-reentrant semaphore, and taking it twice deadlocks.
             result = await tool_registry.execute_tool("code_interpreter", {"code": code})
             next_obs = f"\n\n<interpreter>\n{result}\n</interpreter>\n\n"
             done = False
@@ -224,12 +219,6 @@ async def execute_predictions(prediction: str) -> str:
 def _parse_vllm_choice(choice: dict[str, Any]) -> tuple[list[int], list[float], dict[str, Any]]:
     """Parse one vLLM ``/inference/v1/generate`` choice into tokens, logprobs and meta.
 
-    Inlined rather than imported: #178 removed the shared
-    ``_inference_generate_tokens_and_logprobs`` / ``_vllm_meta_from_generate_choice``
-    helpers from ``vime.rollout.vllm_rollout``, and #184 established that callers
-    parse the choice locally (as ``vllm_streaming_rollout`` and
-    ``vime/agent/adapters/common.py`` both do).
-
     Returns ``log_probs=[]`` when the engine reports no per-token logprobs, so the
     caller can abort instead of training on fabricated values.
     """
@@ -241,8 +230,7 @@ def _parse_vllm_choice(choice: dict[str, Any]) -> tuple[list[int], list[float], 
         content_items = lp.get("content") or []
         log_probs = [float(item.get("logprob", 0.0)) if isinstance(item, dict) else 0.0 for item in content_items]
 
-    # Normalize the bare vLLM ``finish_reason`` string into slime's nested shape
-    # so the turn loop below reads the same as the upstream example.
+    # Normalize the bare vLLM ``finish_reason`` string into the nested shape.
     fr = choice.get("finish_reason") or "stop"
     if isinstance(fr, dict):
         finish = fr
@@ -313,9 +301,6 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
             remaining_budget,
         )
 
-        # Use token IDs instead of text. ``_build_inference_sampling_params``
-        # maps ``max_new_tokens`` -> ``max_tokens`` and requests ``logprobs: 1``,
-        # which replaces SGLang's ``return_logprob`` flag.
         current_token_ids = prompt_tokens_ids + response_token_ids
         payload = {
             "model": args.hf_checkpoint,
@@ -353,12 +338,9 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
             return sample
 
         if not cur_log_probs or len(cur_log_probs) != len(cur_response_token_ids):
-            # The engine returned tokens but no usable per-token logprobs. Unlike
-            # `vllm_rollout.generate`, do NOT substitute zeros: that would desync
-            # rollout_log_probs from response_token_ids and silently corrupt the
-            # importance ratio (and blow up `slice_log_prob_with_cp` downstream).
-            # Abort so the rollout manager returns the whole group to the buffer
-            # for retry instead of poisoning the trainer.
+            # Unlike `vllm_rollout.generate`, do NOT substitute zeros: fabricated
+            # logprobs silently corrupt the importance ratio. Abort so the group
+            # goes back to the buffer for retry.
             sample.status = Sample.Status.ABORTED
             return sample
 

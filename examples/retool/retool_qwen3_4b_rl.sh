@@ -40,11 +40,8 @@ ROLLOUT_ARGS=(
    --prompt-data /root/dapo-math-17k/dapo-math-17k.jsonl
    --input-key prompt
    --label-key label
-   # NO --apply-chat-template: generate_with_retool.format_conversation_with_tools
-   # renders the full <|im_start|>...<|im_end|> conversation itself. Enabling the
-   # flag templates the prompt in the data loader too, and the example then wraps
-   # that inside its own `user` turn -- producing nested `<|im_start|>user
-   # <|im_start|>user` plus an empty assistant turn.
+   # No --apply-chat-template: generate_with_retool renders the conversation
+   # itself, so enabling it here double-wraps the prompt.
    --rollout-shuffle
    --reward-key score
    --num-rollout 3000
@@ -105,8 +102,6 @@ WANDB_ARGS=(
    --use-wandb
    --wandb-project vime-dapo
    --wandb-group qwen3-4B-test-multi-turn
-   # Quoted: unquoted+unset expands to nothing, so --wandb-key would swallow
-   # the next flag (e.g. --tensor-model-parallel-size) as its value.
    --wandb-key "${WANDB_KEY}"
 )
 
@@ -135,9 +130,8 @@ CUSTOM_ARGS=(
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 4 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 
-# Build the runtime environment JSON with proper variable substitution.
 # SCRIPT_DIR is on PYTHONPATH so `generate_with_retool` resolves as a top-level
-# module (and can import its sibling `tool_sandbox`), matching examples/tau-bench.
+# module and can import its sibling `tool_sandbox` (as examples/tau-bench does).
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
     \"PYTHONPATH\": \"/root/Megatron-LM/:${SCRIPT_DIR}:${REPO_ROOT}\",

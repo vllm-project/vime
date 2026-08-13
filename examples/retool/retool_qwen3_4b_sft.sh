@@ -83,8 +83,6 @@ WANDB_ARGS=(
    --use-wandb
    --wandb-project vime-dev
    --wandb-group qwen3-4B-base-sft
-   # Quoted: unquoted+unset expands to nothing, so --wandb-key would swallow
-   # the next flag (e.g. --tensor-model-parallel-size) as its value.
    --wandb-key "${WANDB_KEY}"
 )
 

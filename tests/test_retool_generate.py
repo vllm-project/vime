@@ -203,19 +203,15 @@ def test_generate_prompt_includes_tool_specs(monkeypatch):
 
 
 def test_prompt_has_exactly_one_conversation_structure():
-    """The example renders the whole conversation itself, so the RL script must not
-    also pass --apply-chat-template. Guards against the nested
-    `<|im_start|>user<|im_start|>user` + empty-assistant-turn prompt that produces."""
+    """Guards against the nested-`user` prompt that --apply-chat-template produces."""
     rendered = mod.format_conversation_with_tools(prompt="2+2?", tools=mod.tool_registry.get_tool_specs())
 
     assert rendered.count("<|im_start|>system") == 1
     assert rendered.count("<|im_start|>user") == 1
-    # exactly one trailing generation turn, and nothing after it
     assert rendered.count("<|im_start|>assistant") == 1
     # Jinja strips the template's trailing newline, so the open generation turn is
     # `<|im_start|>assistant` with no "\n" (upstream behaviour, preserved).
     assert rendered.endswith("<|im_start|>assistant")
-    # system + user are closed; the assistant turn is left open for generation
     assert rendered.count("<|im_end|>") == 2
 
 
@@ -391,9 +387,8 @@ def test_postprocess_predictions(text, action, content):
 
 
 def test_postprocess_predictions_parses_pretty_printed_tool_call():
-    """Newlines *between* JSON tokens must not be escaped: a backslash outside a
-    string is a JSON parse error, and the dropped tool call would silently
-    degrade into the "invalid action" reprompt."""
+    """Newlines between JSON tokens must not be escaped -- that is a parse error,
+    and the dropped tool call silently degrades into the "invalid action" reprompt."""
     text = '<tool_call>\n{\n  "name": "code_interpreter",\n  "arguments": {"code": "print(1)"}\n}\n</tool_call>'
     assert mod.postprocess_predictions(text) == ("code", "print(1)")
 
@@ -479,9 +474,7 @@ def _stub_sandbox(monkeypatch, on_execute=None):
 
 
 def test_execute_predictions_takes_the_tool_semaphore_exactly_once(monkeypatch):
-    """`tool_sandbox.SEMAPHORE` is a plain asyncio.Semaphore, so nesting the
-    acquire in both the caller and ToolRegistry.execute_tool needs 2 permits
-    per call. Pinned to 1 permit, a double-acquire self-deadlocks."""
+    """Pinned to 1 permit, a double-acquire self-deadlocks."""
     sem = _install_semaphore(monkeypatch, 1)
     _stub_sandbox(monkeypatch)
 
