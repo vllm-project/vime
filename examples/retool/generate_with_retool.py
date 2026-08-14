@@ -59,6 +59,30 @@ For each function call, return a json object with function name and arguments wi
 """
 
 
+def split_prompt(prompt: Any) -> tuple[str | None, str]:
+    """Return ``(system_prompt, user_text)`` from a dataset prompt.
+
+    ``prompt`` is a plain string only when the data file stores one. Both datasets
+    this example uses -- DAPO-Math-17k and AIME-2024 -- store a list of chat
+    messages, and ``vime.utils.data._build_messages`` passes that list through
+    untouched unless ``--apply-chat-template`` is set. Rendering the list here
+    keeps the chat template applied exactly once (the flag would apply it a second
+    time in the data loader) and keeps ``reward_func`` working on a string.
+    """
+    if isinstance(prompt, str):
+        return None, prompt
+    if isinstance(prompt, list):
+        system = next(
+            (str(m.get("content", "")) for m in prompt if isinstance(m, dict) and m.get("role") == "system"),
+            None,
+        )
+        user = "\n".join(
+            str(m.get("content", "")) for m in prompt if isinstance(m, dict) and m.get("role") != "system"
+        )
+        return system, user
+    return None, str(prompt)
+
+
 def format_conversation_with_tools(
     prompt: str, tools: list[dict[str, Any]] = None, system_prompt: str = None, messages: list[dict[str, Any]] = None
 ) -> str:
@@ -264,7 +288,8 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
 
     # Set up the initial prompt with system prompt and tools (outside the loop)
     tool_specs = tool_registry.get_tool_specs()
-    prompt = format_conversation_with_tools(prompt=sample.prompt, tools=tool_specs)
+    system_prompt, user_text = split_prompt(sample.prompt)
+    prompt = format_conversation_with_tools(prompt=user_text, tools=tool_specs, system_prompt=system_prompt)
 
     prompt_tokens_ids = state.tokenizer(prompt, add_special_tokens=False)["input_ids"]
     sample.tokens = list(prompt_tokens_ids)
@@ -437,8 +462,8 @@ async def reward_func(args, sample, **kwargs):
     if not isinstance(sample, Sample):
         raise TypeError("Sample must be an instance of Sample class.")
 
-    # Build complete solution string
-    solution_str = sample.prompt + sample.response
+    # Build complete solution string. sample.prompt may be a chat-message list.
+    solution_str = split_prompt(sample.prompt)[1] + sample.response
 
     # Get ground truth answer - label is a string, not a dict
     ground_truth = sample.label if sample.label is not None else ""

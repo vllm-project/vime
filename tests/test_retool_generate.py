@@ -217,6 +217,61 @@ def test_generate_prompt_includes_tool_specs(monkeypatch):
     assert sample.payload_has_system is True
 
 
+# DAPO-Math-17k and AIME-2024 both store `prompt` as a chat-message list, and
+# `_build_messages` passes a list through untouched without --apply-chat-template.
+LIST_PROMPT = [{"role": "user", "content": "What is 2+2?"}]
+LIST_PROMPT_WITH_SYSTEM = [
+    {"role": "system", "content": "You are terse."},
+    {"role": "user", "content": "What is 2+2?"},
+]
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected"),
+    [
+        ("plain string", (None, "plain string")),
+        (LIST_PROMPT, (None, "What is 2+2?")),
+        (LIST_PROMPT_WITH_SYSTEM, ("You are terse.", "What is 2+2?")),
+        ([], (None, "")),
+    ],
+)
+def test_split_prompt_handles_both_dataset_shapes(prompt, expected):
+    assert mod.split_prompt(prompt) == expected
+
+
+def test_generate_accepts_a_chat_message_list_prompt(monkeypatch):
+    """The real datasets ship list prompts; rendering must still be single-templated."""
+    sample = Sample(prompt=LIST_PROMPT, label="4", status=Sample.Status.PENDING)
+    _, payloads = _run_generate(monkeypatch, [_choice("Answer: \\boxed{4}")], sample=sample)
+
+    rendered = _FakeTokenizer().decode(payloads[0]["payload"]["token_ids"])
+    assert "What is 2+2?" in rendered
+    assert rendered.count("<|im_start|>user") == 1, "list prompt must not double-wrap"
+    assert rendered.count("<|im_start|>assistant") == 1
+    # Passing the list straight to the template renders its repr, which still
+    # *contains* the question -- so assert the repr artifacts are absent instead.
+    assert "'role'" not in rendered, f"prompt list was rendered as a repr: {rendered[-200:]}"
+    assert "{'" not in rendered
+
+
+def test_generate_uses_a_system_message_from_the_prompt_list(monkeypatch):
+    sample = Sample(prompt=LIST_PROMPT_WITH_SYSTEM, label="4", status=Sample.Status.PENDING)
+    _, payloads = _run_generate(monkeypatch, [_choice("Answer: \\boxed{4}")], sample=sample)
+
+    rendered = _FakeTokenizer().decode(payloads[0]["payload"]["token_ids"])
+    assert "You are terse." in rendered
+    assert rendered.count("<|im_start|>system") == 1
+
+
+def test_reward_func_accepts_a_chat_message_list_prompt():
+    """Regression: `sample.prompt + sample.response` raised TypeError on the AIME
+    eval set, crashing RolloutManager.eval() at the first --eval-interval."""
+    sample = Sample(prompt=LIST_PROMPT, label="4", status=Sample.Status.COMPLETED)
+    sample.response = " Answer: \\boxed{4}"
+    result = asyncio.run(mod.reward_func(_args(), sample))
+    assert result["score"] > 0
+
+
 def test_prompt_has_exactly_one_conversation_structure():
     """Guards against the nested-`user` prompt that --apply-chat-template produces."""
     rendered = mod.format_conversation_with_tools(prompt="2+2?", tools=mod.tool_registry.get_tool_specs())
