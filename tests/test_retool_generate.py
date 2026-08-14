@@ -113,6 +113,21 @@ def _patch_state(monkeypatch):
     monkeypatch.setattr(mod, "GenerateState", _FakeState)
 
 
+@pytest.fixture(autouse=True)
+def _stub_tool_subprocess(monkeypatch):
+    """Keep the rollout tests off real `python3` subprocesses.
+
+    They exercise the turn loop, not the sandbox, and spawning a subprocess per
+    tool call makes them slow and dependent on the runner's environment.
+    `test_real_sandbox_executes_code` covers real execution explicitly.
+    """
+
+    async def fake_execute_code(code):
+        return "Output:\n4"
+
+    monkeypatch.setattr(tool_sandbox.tool_registry.python_sandbox, "execute_code", fake_execute_code)
+
+
 def _run_generate(monkeypatch, responses, *, args=None, sample=None, sampling_params=None):
     """Drive mod.generate with a scripted list of engine `choices`, capturing payloads."""
     payloads: list[dict] = []
@@ -490,26 +505,32 @@ def test_execute_predictions_takes_the_tool_semaphore_exactly_once(monkeypatch):
 def test_concurrent_tool_calls_reach_the_configured_concurrency(monkeypatch):
     """All `tool_concurrency` calls must be able to run at once.
 
-    A double-acquire burns two permits per call and halves the peak.
+    Gated on a barrier rather than a sleep: each call blocks inside the critical
+    section until `limit` of them are in there together. That makes the peak an
+    invariant instead of a scheduling race -- and a double-acquire, which only
+    fits limit//2 callers, can never fill the barrier and trips the timeout.
     """
     limit = 4
     sem = _install_semaphore(monkeypatch, limit)
 
     live = 0
     peak = 0
+    barrier = asyncio.Event()
 
     async def track():
         nonlocal live, peak
         live += 1
         peak = max(peak, live)
-        await asyncio.sleep(0.01)
+        if live >= limit:
+            barrier.set()
+        await asyncio.wait_for(barrier.wait(), timeout=10)
         live -= 1
 
     _stub_sandbox(monkeypatch, on_execute=track)
 
     async def run():
         tasks = [mod.execute_predictions("<code>print(2+2)</code>") for _ in range(limit * 3)]
-        return await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
+        return await asyncio.wait_for(asyncio.gather(*tasks), timeout=30)
 
     results = asyncio.run(run())
     assert len(results) == limit * 3
@@ -535,6 +556,22 @@ def test_sandbox_rejects_unsafe_code(code):
 def test_sandbox_allows_plain_math(code):
     ok, message = tool_sandbox.tool_registry.python_sandbox._check_code_safety(code)
     assert ok is True, message
+
+
+def test_real_sandbox_executes_code():
+    """The one test that actually spawns the sandbox subprocess.
+
+    A fresh PythonSandbox sidesteps the autouse stub on the registry's instance.
+    """
+    sandbox = tool_sandbox.PythonSandbox(timeout=60, memory_limit="1GB")
+    out = asyncio.run(sandbox.execute_code("print(2 + 2)"))
+    assert "4" in out, out
+
+
+def test_real_sandbox_reports_rejected_code():
+    sandbox = tool_sandbox.PythonSandbox(timeout=60, memory_limit="1GB")
+    out = asyncio.run(sandbox.execute_code("import os\nprint(os.getcwd())"))
+    assert "Error" in out and "not allowed" in out.lower() or "dangerous" in out.lower(), out
 
 
 def test_unknown_tool_is_reported_not_raised():
