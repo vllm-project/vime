@@ -79,4 +79,8 @@ def npu_dot_product_attention_forward(
 from megatron.core.transformer.dot_product_attention import DotProductAttention
 
 DotProductAttention.forward = npu_dot_product_attention_forward
-print("[NPU PATCH] DotProductAttention.forward replaced with npu_fusion_attention BEFORE mindspeed import", flush=True)
+print(
+    "[NPU PATCH] DotProductAttention.forward replaced with npu_fusion_attention "
+    "BEFORE megatron_adaptor import",
+    flush=True,
+)

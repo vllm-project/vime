@@ -14,7 +14,7 @@ import torch
 
 MODULE_PATH = "vime.backends.megatron_utils.update_weight.update_weight_from_tensor"
 
-_PURGE_PREFIXES = ("megatron", "mindspeed", "vime.backends.megatron_utils")
+_PURGE_PREFIXES = ("megatron", "megatron_adaptor", "vime.backends.megatron_utils")
 
 
 def _collect_subtree(prefix: str) -> list[str]:

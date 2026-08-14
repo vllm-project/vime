@@ -9,13 +9,13 @@ set -e
 
 VIME_DIR="/root/vime"
 
+PATCH_ORDER=(vllm.patch vllm-ascend.patch megatron_mainline.patch megatron.patch megatron-bridge.patch)
 declare -A PATCH_CONFIGS=(
     ["vllm.patch"]="/vllm-workspace/vllm"
     ["vllm-ascend.patch"]="/vllm-workspace/vllm-ascend"
-    ["megatron_comm.patch"]="/root/Megatron-LM"
+    ["megatron_mainline.patch"]="/root/Megatron-LM"
     ["megatron.patch"]="/root/Megatron-LM"
     ["megatron-bridge.patch"]="/root/Megatron-Bridge"
-    ["mindspeed.patch"]="/root/MindSpeed"
 )
 
 update_vime_code() {
@@ -47,6 +47,15 @@ get_patch_component() {
     local patch_name="$1"
     local config="${PATCH_CONFIGS[$patch_name]}"
     echo "$config"
+}
+
+get_patch_path() {
+    local patch_name="$1"
+    if [ "$patch_name" = "megatron_mainline.patch" ]; then
+        echo "${VIME_DIR}/docker/patch/latest/megatron.patch"
+    else
+        echo "${VIME_DIR}/docker/npu_patch/${patch_name}"
+    fi
 }
 
 is_patch_applied() {
@@ -97,8 +106,8 @@ save_old_patches() {
     echo "INFO: Saving old patches to $backup_dir..." >&2
     mkdir -p "$backup_dir"
 
-    for patch_name in "${!PATCH_CONFIGS[@]}"; do
-        local patch_path="${VIME_DIR}/docker/npu_patch/$patch_name"
+    for patch_name in "${PATCH_ORDER[@]}"; do
+        local patch_path=$(get_patch_path "$patch_name")
         if [ -f "$patch_path" ]; then
             cp "$patch_path" "$backup_dir/$patch_name"
             echo "INFO: Saved old $patch_name" >&2
@@ -115,9 +124,12 @@ revert_all_patches() {
 
     echo "INFO: Reverting all already applied patches..."
 
-    for patch_name in "${!PATCH_CONFIGS[@]}"; do
-        local component_dir=$(get_patch_component "$patch_name")
-        local old_patch_path="$old_patch_dir/$patch_name"
+    # Reverse the application order so stacked patches on the same component
+    # are removed from the top of the stack first.
+    for ((i=${#PATCH_ORDER[@]}-1; i>=0; i--)); do
+        patch_name="${PATCH_ORDER[$i]}"
+        component_dir=$(get_patch_component "$patch_name")
+        old_patch_path="$old_patch_dir/$patch_name"
 
         if is_patch_applied "$component_dir" "$old_patch_path"; then
             echo "INFO: $patch_name is currently applied, reverting..."
@@ -131,9 +143,9 @@ revert_all_patches() {
 apply_all_patches() {
     echo "INFO: Applying all patches..."
 
-    for patch_name in "${!PATCH_CONFIGS[@]}"; do
+    for patch_name in "${PATCH_ORDER[@]}"; do
         local component_dir=$(get_patch_component "$patch_name")
-        local patch_path="${VIME_DIR}/docker/npu_patch/$patch_name"
+        local patch_path=$(get_patch_path "$patch_name")
 
         if [ -f "$patch_path" ]; then
             apply_patch "$component_dir" "$patch_path" "$patch_name"

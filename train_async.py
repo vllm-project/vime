@@ -7,7 +7,7 @@ from vime.utils.logging_utils import configure_logger, finish_tracking, init_tra
 from vime.utils.misc import should_run_periodic_action
 
 if is_npu():
-    import mindspeed.megatron_adaptor  # noqa: F401
+    import megatron_adaptor  # noqa: F401
 
 
 # The framework supports other asynchronous approaches such as fully async (which is shown in examples/full_async).

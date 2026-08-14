@@ -7,9 +7,8 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG}
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 WORKDIR /root
 
-ARG MEGATRON_COMMIT=3714d81d418c9f1bca4594fc35f9e8289f652862
+ARG MEGATRON_COMMIT=1dcf0dafa884ad52ffb243625717a3471643e087
 ARG MEGATRON_BRIDGE_COMMIT=3fd3768045422d0aa5c97e90a4e6c659aea9acb9
-ARG MINDSPEED_COMMIT=fc63de5c48426dd019c3b3f39e65f5bdf56e4086
 ARG MBRIDGE_COMMIT=89eb10887887bc74853f89a4de258c0702932a1c
 ARG SOC_VERSION="ascend910_9391"
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
@@ -27,11 +26,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HCCL_NPU_SOCKET_PORT_RANGE=61000-61050 \
     PYTORCH_NPU_ALLOC_CONF=expandable_segments:True \
     HYDRA_FULL_ERROR=1 \
-    PYTHONPATH=/root/Megatron-Bridge/src:/root/Megatron-LM:/root/vime
+    PYTHONPATH=/root/Megatron-Bridge/src:/root/Megatron-LM:/root/MegatronAdaptor:/root/TransformerEngineNPU:/root/vime
 
 # Patches copied from build context; always apply from /tmp/npu_patch so local/PR
 # builds use the same files as the build context (not the later git-cloned vime tree).
 COPY docker/npu_patch /tmp/npu_patch
+COPY docker/patch/latest/megatron.patch /tmp/npu_patch/megatron_mainline.patch
 
 RUN git config --global http.sslVerify false
 
@@ -75,8 +75,8 @@ RUN git clone --branch bridge https://github.com/radixark/Megatron-Bridge.git \
       /root/Megatron-Bridge && \
     git -C /root/Megatron-Bridge checkout "${MEGATRON_BRIDGE_COMMIT}"
 
-RUN git clone https://gitcode.com/Ascend/MindSpeed.git /root/MindSpeed && \
-    git -C /root/MindSpeed checkout "${MINDSPEED_COMMIT}"
+RUN git clone https://gitcode.com/Ascend/MegatronAdaptor.git /root/MegatronAdaptor && \
+    git clone https://gitcode.com/Ascend/TransformerEngineNPU.git /root/TransformerEngineNPU
 
 RUN git clone https://github.com/ISEEKYAN/mbridge.git /root/mbridge && \
     git -C /root/mbridge checkout "${MBRIDGE_COMMIT}"
@@ -92,20 +92,19 @@ RUN for patch_file in /tmp/npu_patch/*.patch; do \
       fi; \
     done && \
     git -C /root/Megatron-LM apply --whitespace=nowarn \
-      /tmp/npu_patch/megatron_comm.patch && \
+      /tmp/npu_patch/megatron_mainline.patch && \
     git -C /root/Megatron-LM apply --whitespace=nowarn \
       /tmp/npu_patch/megatron.patch && \
     git -C /root/Megatron-Bridge apply --whitespace=nowarn \
-      /tmp/npu_patch/megatron-bridge.patch && \
-    git -C /root/MindSpeed apply --whitespace=nowarn \
-      /tmp/npu_patch/mindspeed.patch
+      /tmp/npu_patch/megatron-bridge.patch
 
 # Megatron-Bridge is used directly from PYTHONPATH. Installing its package
 # metadata would pull CUDA-only dependencies into the Ascend environment.
 RUN pip install --no-build-isolation "nvidia-modelopt[torch]>=0.37.0" && \
     pip install --no-deps --no-build-isolation -e /root/mbridge && \
     pip install --no-deps --no-build-isolation -e /root/Megatron-LM && \
-    pip install --no-deps --no-build-isolation -e /root/MindSpeed
+    pip install --no-deps --no-build-isolation -e /root/TransformerEngineNPU && \
+    pip install --no-deps --no-build-isolation -e /root/MegatronAdaptor
 
 # ring_flash_attn is a CUDA extension and is not used on Ascend.
 RUN pip install \
@@ -126,7 +125,7 @@ RUN git clone --depth 1 --branch 2026.6.0 \
 
 # Minimal import check.
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    python3 -c 'import megatron, mindspeed, torch_memory_saver, vime, vllm, vllm_ascend;'
+    python3 -c 'import megatron, megatron_adaptor, transformer_engine, torch_memory_saver, vime, vllm, vllm_ascend;'
 
 WORKDIR /root/vime
 ENTRYPOINT []

@@ -10,7 +10,10 @@ except ImportError:
 from vime.utils.common import is_npu
 
 if is_npu():
-    import mindspeed.megatron_adaptor  # noqa: F401
+    # MegatronAdaptor must run before Megatron imports so its dummy NPU modules
+    # are bound in Megatron tensor-parallel modules.
+    import megatron_adaptor  # noqa: F401
+    from . import npu_attention_patch  # noqa: F401
 
 try:
     import deep_ep

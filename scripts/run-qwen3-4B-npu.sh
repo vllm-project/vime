@@ -14,8 +14,10 @@ pkill -9 redis
 
 set -ex
 
+export VLLM_USE_V2_MODEL_RUNNER=1
+
 export PYTHONUNBUFFERED=1
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export ASCEND_RT_VISIBLE_DEVICES=12,13,14,15
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
@@ -24,7 +26,8 @@ export HYDRA_FULL_ERROR=1
 export DISABLE_L2_CACHE=1
 export VLLM_ASCEND_ENABLE_NZ=0
 export VLLM_USE_AOT_COMPILE=0
-export PYTHONPATH="/root/Megatron-Bridge/src:/root/Megatron-LM/:${PYTHONPATH:-}"
+export PYTHONPATH="/home/w00664509/vime-new/vime-proj/Megatron-Bridge/src:/home/w00664509/vime-new/vime-proj/Megatron-LM:/home/w00664509/vime-new/vime-proj/MegatronAdaptor:/home/w00664509/vime-new/vime-proj/TransformerEngineNPU:${PYTHONPATH:-}"
+export VLLM_ASCEND_BALANCE_SCHEDULING=0
 
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 
@@ -34,14 +37,14 @@ source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 DATA_ROOT="${DATA_ROOT:-/root}"
 
 CKPT_ARGS=(
-   --hf-checkpoint ${DATA_ROOT}/models/Qwen3-4B/
-   --load ${DATA_ROOT}/models/Qwen3-4B/
-   --ref-load ${DATA_ROOT}/models/Qwen3-4B/
+   --hf-checkpoint /home/vllm/weights//Qwen3-4B/
+   --load /home/vllm/weights/Qwen3-4B/
+   --ref-load /home/vllm/weights/Qwen3-4B/
    --megatron-to-hf-mode bridge
 )
 
 ROLLOUT_ARGS=(
-   --prompt-data ${DATA_ROOT}/datasets/dapo-math-17k/dapo-math-17k.jsonl
+   --prompt-data /home/c00944022/datasets/dapo-math-17k/dapo-math-17k.jsonl
    --input-key prompt
    --label-key label
    --apply-chat-template
@@ -113,7 +116,7 @@ ray job submit --address="http://127.0.0.1:8265" \
 -- python3 train.py \
 --actor-num-nodes 1 \
 --actor-num-gpus-per-node 4 \
---rollout-num-gpus 4 \
+--colocate \
 ${MODEL_ARGS[@]} \
 ${CKPT_ARGS[@]} \
 ${ROLLOUT_ARGS[@]} \

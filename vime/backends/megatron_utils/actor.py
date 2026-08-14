@@ -14,8 +14,19 @@ from vime.utils.common import is_npu
 if is_npu():
     import importlib
 
+    import megatron_adaptor  # noqa: F401
     importlib.import_module("vime.backends.megatron_utils.npu_attention_patch")
-    from mindspeed.megatron_adaptor import repatch
+    from megatron_adaptor.features_manager.features_manager import FeaturesManager
+    from megatron_adaptor.utils.args_utils import get_full_args
+
+    def _repatch_megatron_adaptor(args):
+        """Reapply MegatronAdaptor features after VIME has finalized args."""
+        full_args = get_full_args()
+        for key, value in vars(args).items():
+            setattr(full_args, key, value)
+        FeaturesManager.remove_patches()
+        FeaturesManager.apply_features_pre_patches(full_args)
+        FeaturesManager.apply_features_patches(full_args)
 
     _orig_npu_empty_cache = torch.npu.empty_cache
 
@@ -79,7 +90,7 @@ class MegatronTrainRayActor(TrainRayActor):
         init(args)
 
         if is_npu():
-            repatch(args)
+            _repatch_megatron_adaptor(args)
         if is_megatron_main_rank():
             init_tracking(args, primary=False, role=role)
 

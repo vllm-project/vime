@@ -1798,7 +1798,10 @@ def vime_validate_args(args):
     if args.use_critic:
         args.offload_train = True
 
-    if args.offload_train:
+    # Megatron mainline uses torch_memory_saver regions for these buffers.
+    # On NPU, the actor already owns the outer training region; opening nested
+    # NPU mem-pool regions causes beginAllocateToPool() failures.
+    if args.offload_train and not is_npu():
         args.disable_grad_buffers_cpu_backup = True
         args.disable_param_buffers_cpu_backup = True
 

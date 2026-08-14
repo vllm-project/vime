@@ -269,7 +269,7 @@ class _VLLMHijack:
       MoE weight_loader missing on EP (a vLLM bug where w13_weight/w2_weight
       params lack weight_loader attr when EP is enabled).
     - Patches ApplyRotaryEmb.__init__ to skip flash_attn import
-      (mindspeed/megatron backends introduce flash_attn as a dummy module,
+      (Megatron/NPU backends introduce flash_attn as a dummy module,
       but vllm_ascend does not use it).
     """
 

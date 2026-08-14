@@ -79,7 +79,8 @@ register(
         env={
             "PYTHONPATH": (
                 "/root/Megatron-LM:/root/vime:"
-                "/root/Megatron-Bridge/src:/root/mbridge:/root/MindSpeed:"
+                "/root/Megatron-Bridge/src:/root/mbridge:"
+                "/root/MegatronAdaptor:/root/TransformerEngineNPU:"
                 "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:"
                 "/usr/local/Ascend/ascend-toolkit/latest/tools/ms_fmk_transplt/torch_npu_bridge"
             ),

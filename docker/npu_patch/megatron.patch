@@ -25,6 +25,92 @@ index 8b422d73a..58fba4667 100644
  def fast_gelu(x: torch.Tensor) -> torch.Tensor:
      """Fast GELU activation"""
      return 0.5 * x * (1.0 + torch.tanh(x * 0.7978845608 * (1.0 + 0.044715 * x * x)))
+diff --git a/megatron/core/distributed/param_and_grad_buffer.py b/megatron/core/distributed/param_and_grad_buffer.py
+index a9982e176..807c4a88d 100644
+--- a/megatron/core/distributed/param_and_grad_buffer.py
++++ b/megatron/core/distributed/param_and_grad_buffer.py
+@@ -787,45 +787,19 @@ class _ParamAndGradBuffer:
+             # Individual param/grad contexts below handle TMS regions separately.
+             mem_alloc_context = nullcontext
+ 
+-        def _make_no_backup_context(tag, disable, flag_name="disable_grad_buffers_cpu_backup"):
+-            if disable:
+-                try:
+-                    from torch_memory_saver import torch_memory_saver
+-                except ImportError as e:
+-                    raise ImportError(
+-                        f"{flag_name}=True requires torch_memory_saver. "
+-                        "Install with: pip install torch-memory-saver"
+-                    ) from e
+-                return partial(
+-                    torch_memory_saver.region,
+-                    tag=tag,
+-                    enable_cpu_backup=False,
+-                )
+-            return nullcontext
+-        grad_mem_alloc_context = _make_no_backup_context(
+-            "grad_buffer", disable_grad_buffers_cpu_backup
+-        )
+-        param_mem_alloc_context = _make_no_backup_context(
+-            "param_buffer", disable_param_buffers_cpu_backup, "disable_param_buffers_cpu_backup"
+-        )
+-
++        # NPU already wraps model construction in the outer VIME training
++        # torch_memory_saver region. Do not open nested mem-pool regions here.
+         with mem_alloc_context():
+             # For MXFP8 param: Create a shared buffer for param AG and grad RS for memory efficiency
+             # The buffer is mapped to weight gradients whose dtype is either bf16 or FP32.
+             # It can be temporarily reused by param AG.
+             if self.ddp_config.use_distributed_optimizer and any(is_mxfp8tensor(p) for p in params):
+-                shared_mem_alloc_context = (
+-                    param_mem_alloc_context
+-                    if disable_param_buffers_cpu_backup
+-                    else grad_mem_alloc_context
++                self.shared_buffer = torch.zeros(
++                    self.numel,
++                    dtype=self.grad_dtype,
++                    device=torch.cuda.current_device(),
++                    requires_grad=False,
+                 )
+-                with shared_mem_alloc_context():
+-                    self.shared_buffer = torch.zeros(
+-                        self.numel,
+-                        dtype=self.grad_dtype,
+-                        device=torch.cuda.current_device(),
+-                        requires_grad=False,
+-                    )
+                 # For FP32 weight grads, only half of the buffer is used to store params in bf16.
+                 if self.grad_dtype == torch.float32:
+                     self.param_data = self.shared_buffer[: math.ceil(self.numel / 2)].view(
+@@ -837,20 +811,18 @@ class _ParamAndGradBuffer:
+             else:
+                 # Only re-map param tensors if using distributed optimizer.
+                 if self.ddp_config.use_distributed_optimizer:
+-                    with param_mem_alloc_context():
+-                        self.param_data = torch.zeros(
+-                            self.numel,
+-                            dtype=self.param_dtype,
+-                            device=torch.cuda.current_device(),
+-                            requires_grad=False,
+-                        )
+-                with grad_mem_alloc_context():
+-                    self.grad_data = torch.zeros(
++                    self.param_data = torch.zeros(
+                         self.numel,
+-                        dtype=self.grad_dtype,
++                        dtype=self.param_dtype,
+                         device=torch.cuda.current_device(),
+                         requires_grad=False,
+                     )
++                self.grad_data = torch.zeros(
++                    self.numel,
++                    dtype=self.grad_dtype,
++                    device=torch.cuda.current_device(),
++                    requires_grad=False,
++                )
+ 
+         self.grad_data_size = 0
+         self.param_data_size = 0
 diff --git a/megatron/core/fusions/fused_bias_dropout.py b/megatron/core/fusions/fused_bias_dropout.py
 index 336452562..614ee1a48 100644
 --- a/megatron/core/fusions/fused_bias_dropout.py
@@ -311,11 +397,29 @@ index 02dabc14c..137022386 100644
  def weighted_squared_relu_back(g: torch.Tensor, x: torch.Tensor, weights: torch.Tensor):
      """Backward for weighted Squared-ReLU.
  
+diff --git a/megatron/core/inference/contexts/dynamic_context.py b/megatron/core/inference/contexts/dynamic_context.py
+index 2b241c86d..cca4503d5 100644
+--- a/megatron/core/inference/contexts/dynamic_context.py
++++ b/megatron/core/inference/contexts/dynamic_context.py
+@@ -51,12 +51,8 @@ try:
+ except:
+     HAVE_PACKAGING = False
+ 
+-try:
+-    import flashinfer  # pylint: disable=unused-import
+ 
+-    HAVE_FLASHINFER = True
+-except ImportError:
+-    HAVE_FLASHINFER = False
++HAVE_FLASHINFER = False
+ 
+ try:
+     from torch_memory_saver import torch_memory_saver
 diff --git a/megatron/core/models/gpt/gpt_layer_specs.py b/megatron/core/models/gpt/gpt_layer_specs.py
-index 712793853..76ea4333b 100755
+index a9d3583e5..f2adaceb2 100755
 --- a/megatron/core/models/gpt/gpt_layer_specs.py
 +++ b/megatron/core/models/gpt/gpt_layer_specs.py
-@@ -219,7 +219,7 @@ def get_gpt_layer_with_transformer_engine_spec(
+@@ -209,7 +209,7 @@ def get_gpt_layer_with_transformer_engine_spec(
              'The fp8 argument in "get_gpt_layer_with_transformer_engine_spec" has been deprecated'
              " and will be removed soon. Please update your code accordingly."
          )
@@ -324,11 +428,38 @@ index 712793853..76ea4333b 100755
      if use_kitchen:
          assert HAVE_KITCHEN
          backend: BackendSpecProvider = KitchenSpecProvider(
+diff --git a/megatron/core/optimizer/distrib_optimizer.py b/megatron/core/optimizer/distrib_optimizer.py
+index dd8590a79..3736b0e31 100644
+--- a/megatron/core/optimizer/distrib_optimizer.py
++++ b/megatron/core/optimizer/distrib_optimizer.py
+@@ -659,10 +659,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+                     break
+         elif USING_TE_OPTIMIZER or USING_APEX_OPTIMIZER:
+             # Extract 'step', for TE FusedAdam support.
++            # Use int() to convert tensors to Python scalars so set() deduplicates
++            # by value (PyTorch tensor hashing is identity-based).
+             steps = list(
+                 set(
+                     [
+-                        g["step"]
++                        int(g["step"])
+                         for g in inner_state_dict["param_groups"]
+                         if len(g["params"]) > 0 and "step" in g
+                     ]
+@@ -824,7 +826,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+ 
+         # Extract 'step', for non-Apex/TE support.
+         if not HAVE_APEX_OR_TE:
+-            steps = list(set([g["step"] for g in state_dict["optimizer"]["param_groups"]]))
++            steps = list(set([int(g["step"]) for g in state_dict["optimizer"]["param_groups"]]))
+             assert len(steps) == 1
+             step = torch.tensor(steps[0], dtype=torch.float)
+ 
 diff --git a/megatron/core/ssm/gated_delta_net.py b/megatron/core/ssm/gated_delta_net.py
-index dfa6e4c35..8b3621819 100644
+index 601a72a43..ec114cf38 100644
 --- a/megatron/core/ssm/gated_delta_net.py
 +++ b/megatron/core/ssm/gated_delta_net.py
-@@ -413,7 +413,7 @@ class GatedDeltaNet(MegatronModule):
+@@ -465,7 +465,7 @@ class GatedDeltaNet(MegatronModule):
  
          return out, out_bias
  
@@ -338,10 +469,10 @@ index dfa6e4c35..8b3621819 100644
          # Output Norm
          x_dtype = x.dtype
 diff --git a/megatron/core/transformer/attention.py b/megatron/core/transformer/attention.py
-index 80e9ec6fc..b6bcef6a9 100644
+index bc5e4e2ee..d223e774e 100644
 --- a/megatron/core/transformer/attention.py
 +++ b/megatron/core/transformer/attention.py
-@@ -1026,7 +1026,7 @@ class Attention(MegatronModule, ABC):
+@@ -1219,7 +1219,7 @@ class Attention(MegatronModule, ABC):
  
          return output, bias
  
@@ -351,10 +482,10 @@ index 80e9ec6fc..b6bcef6a9 100644
          x_dtype = x.dtype
          gate = gate.contiguous()
 diff --git a/megatron/core/transformer/module.py b/megatron/core/transformer/module.py
-index 2330df91b..0446c9097 100644
+index c30c107e7..f4340f4d1 100644
 --- a/megatron/core/transformer/module.py
 +++ b/megatron/core/transformer/module.py
-@@ -16,9 +16,9 @@ from megatron.core.transformer.utils import (
+@@ -17,9 +17,9 @@ from megatron.core.transformer.utils import (
      sharded_state_dict_default,
  )
  
@@ -368,10 +499,10 @@ index 2330df91b..0446c9097 100644
  
  def param_is_not_shared(param):  # pylint: disable=missing-function-docstring
 diff --git a/megatron/core/transformer/moe/experts.py b/megatron/core/transformer/moe/experts.py
-index 5eeafdd8d..a4dce6970 100644
+index d8e753422..aff929985 100644
 --- a/megatron/core/transformer/moe/experts.py
 +++ b/megatron/core/transformer/moe/experts.py
-@@ -91,7 +91,7 @@ class GroupedMLP(MegatronModule):
+@@ -92,7 +92,7 @@ class GroupedMLP(MegatronModule):
              if self.config.activation_func not in (F.silu, F.gelu):
                  raise ValueError("Activation function must be silu or gelu when using GroupedMLP.")
  
@@ -380,7 +511,7 @@ index 5eeafdd8d..a4dce6970 100644
              def glu(x):
                  x = torch.chunk(x, 2, dim=-1)
                  return self.config.activation_func(x[0]) * x[1]
-@@ -108,7 +108,7 @@ class GroupedMLP(MegatronModule):
+@@ -109,7 +109,7 @@ class GroupedMLP(MegatronModule):
                  "moe_act recompute for fp8 or fp4 cannot work with the legacy GroupedMLP."
              )
  
@@ -389,24 +520,11 @@ index 5eeafdd8d..a4dce6970 100644
          def activation_func_with_probs(x, probs):
              dtype = x.dtype
              res = self.activation_func(x) * probs
-diff --git a/megatron/core/transformer/moe/router.py b/megatron/core/transformer/moe/router.py
-index 517944f25..2c5bc0728 100644
---- a/megatron/core/transformer/moe/router.py
-+++ b/megatron/core/transformer/moe/router.py
-@@ -472,7 +472,7 @@ class TopKRouter(Router):
-         else:
-             return input
- 
--    @jit_fuser
-+    
-     def _apply_expert_bias(self, routing_map: torch.Tensor):
-         """
-         Update expert bias and tokens_per_expert
 diff --git a/megatron/core/transformer/moe/token_dispatcher.py b/megatron/core/transformer/moe/token_dispatcher.py
-index d0da38d63..6d092c88f 100644
+index 327dbc8a3..b007d6662 100644
 --- a/megatron/core/transformer/moe/token_dispatcher.py
 +++ b/megatron/core/transformer/moe/token_dispatcher.py
-@@ -1403,7 +1403,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
+@@ -1402,7 +1402,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
          ).contiguous()
          return routing_map, probs
  
@@ -415,6 +533,18 @@ index d0da38d63..6d092c88f 100644
      def dispatch_preprocess(
          self, hidden_states: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor
      ):
+diff --git a/megatron/core/transformer/multi_token_prediction.py b/megatron/core/transformer/multi_token_prediction.py
+index 63f81465d..c47baeaea 100755
+--- a/megatron/core/transformer/multi_token_prediction.py
++++ b/megatron/core/transformer/multi_token_prediction.py
+@@ -7,6 +7,7 @@ from typing import Callable, List, Optional, Union
+ 
+ import torch
+ from torch import Tensor
++import warnings
+ 
+ from megatron.core import InferenceParams, parallel_state, tensor_parallel
+ from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 diff --git a/megatron/core/transformer/torch_norm.py b/megatron/core/transformer/torch_norm.py
 index d0ceca7af..f16796680 100644
 --- a/megatron/core/transformer/torch_norm.py
@@ -428,6 +558,27 @@ index d0ceca7af..f16796680 100644
      def _norm(self, x):
          """
          Performs the actual L2 normalization.
+diff --git a/megatron/core/transformer/transformer_layer.py b/megatron/core/transformer/transformer_layer.py
+index 227e95862..da4540185 100644
+--- a/megatron/core/transformer/transformer_layer.py
++++ b/megatron/core/transformer/transformer_layer.py
+@@ -775,6 +775,16 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
+                 self._set_fc2_residual(residual)
+             mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output, padding_mask=padding_mask)
+ 
++        mlp_output, mlp_output_bias = mlp_output_with_bias
++        mlp_output = self.post_mlp_layernorm(mlp_output)
++        mlp_output_with_bias = (mlp_output, mlp_output_bias)
++
++        if self.recompute_pre_mlp_layernorm:
++            # discard the output of the pre-mlp layernorm and register the recompute
++            # as a gradient hook of mlp_output_with_bias[0]
++            self.pre_mlp_norm_checkpoint.discard_output_and_register_recompute(
++                mlp_output_with_bias[0]
++            )
+         nvtx_range_pop(suffix="mlp")
+ 
+         if (
 diff --git a/megatron/core/transformer/utils.py b/megatron/core/transformer/utils.py
 index 880c53099..dbc95736e 100644
 --- a/megatron/core/transformer/utils.py
@@ -473,7 +624,7 @@ index e00e63148..ffe4b7ec6 100644
      x = bias + y
      tanh_out = torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x))
 diff --git a/megatron/legacy/model/transformer.py b/megatron/legacy/model/transformer.py
-index 2a662a55b..2fc3e1bfb 100644
+index ca3414eec..5dd9e4798 100644
 --- a/megatron/legacy/model/transformer.py
 +++ b/megatron/legacy/model/transformer.py
 @@ -856,7 +856,7 @@ def get_bias_dropout_add(training):
@@ -515,33 +666,12 @@ index 5762000d5..534858df7 100644
 +
  def erf_gelu(x):
      return x * 0.5 * (torch.erf(x / 1.41421).to(dtype=x.dtype)+torch.ones_like(x).to(dtype=x.dtype))
-
-
-diff --git a/megatron/core/inference/contexts/dynamic_context.py b/megatron/core/inference/contexts/dynamic_context.py
-index 9b855effb..90c37c8db 100644
---- a/megatron/core/inference/contexts/dynamic_context.py
-+++ b/megatron/core/inference/contexts/dynamic_context.py
-@@ -49,12 +49,8 @@ try:
- except:
-     HAVE_PACKAGING = False
  
--try:
--    import flashinfer  # pylint: disable=unused-import
- 
--    HAVE_FLASHINFER = True
--except ImportError:
--    HAVE_FLASHINFER = False
-+HAVE_FLASHINFER = False
- 
- try:
-     import wandb  # pylint: disable=unused-import
-
 diff --git a/megatron/training/utils.py b/megatron/training/utils.py
-index 95ad20382..c4d5e6f78 100644
+index 7709f6513..65b8f7fca 100644
 --- a/megatron/training/utils.py
 +++ b/megatron/training/utils.py
-@@ -445,6 +445,8 @@ def is_first_or_last_pipeline_stage(vp_stage):
- 
+@@ -446,6 +446,8 @@ def is_first_or_last_pipeline_stage(vp_stage):
  
  def get_device_arch_version():
      """Returns GPU arch version (8: Ampere, 9: Hopper, 10: Blackwell, ...)"""
@@ -550,35 +680,3 @@ index 95ad20382..c4d5e6f78 100644
      return torch.cuda.get_device_properties(torch.device("cuda:0")).major
  
  
- def append_to_progress_log(string, barrier=True):
-
-diff --git a/megatron/core/dist_checkpointing/validation.py b/megatron/core/dist_checkpointing/validation.py
-index 48f2bda87..028032cd8 100644
---- a/megatron/core/dist_checkpointing/validation.py
-+++ b/megatron/core/dist_checkpointing/validation.py
-@@ -440,6 +440,8 @@ def validate_sharding_integrity(
-     for key, shardings in key_shardings.items():
-         if isinstance(shardings[0][1], ShardedObject):
-             _validate_objects_for_key(shardings)
-+        elif hasattr(shardings[0][1], "key") and "experts" in shardings[0][1].key:
-+            continue
-         else:
-             _validate_sharding_for_key(shardings)
-
-diff --git a/megatron/core/optimizer/distrib_optimizer.py b/megatron/core/optimizer/distrib_optimizer.py
-index 4192b0bb7..6250f1a9b 100644
---- a/megatron/core/optimizer/distrib_optimizer.py
-+++ b/megatron/core/optimizer/distrib_optimizer.py
-@@ -1725,6 +1725,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
-                     # The optimizer state of STEP is handled
-                     # specifically and is read from param_groups.
-                     continue
-+                if "experts" in f'{prefix}.{state_key}.{sharded_metadata.key}':
-+                    try:
-+                        from megatron.core.parallel_state import get_expert_model_parallel_rank
-+                        replica_id = (*replica_id[:2], get_expert_model_parallel_rank())
-+                    except AssertionError:
-+                        pass
-                 replace_kwargs = dict(
-                     key=f'{prefix}.{state_key}.{sharded_metadata.key}',
-                     data=state_ten,
