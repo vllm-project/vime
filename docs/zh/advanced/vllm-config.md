@@ -304,8 +304,8 @@ vime 会自己启动 router，并把这些外部引擎注册进去。
 
 ```bash
 --router-policy round_robin     # 简单轮询
---router-policy consistent_hash # 多轮会话亲和（默认）
---router-policy cache_aware     # 缓存感知路由
+--router-policy consistent_hash # 多轮会话亲和
+--router-policy cache_aware     # 缓存感知路由（默认）
 ```
 
 ### 多轮 Agent 的会话亲和路由

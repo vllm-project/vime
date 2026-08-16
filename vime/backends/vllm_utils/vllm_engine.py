@@ -582,6 +582,9 @@ def _compute_server_args(
     vllm_overrides: dict | None = None,
     num_gpus_per_engine: int | None = None,
 ):
+    vllm_overrides = dict(vllm_overrides or {})
+    ec_transfer_override = vllm_overrides.pop("ec_transfer_config", None)
+
     _gpus_per_engine = num_gpus_per_engine or args.rollout_num_gpus_per_engine
     nnodes = max(1, _gpus_per_engine // args.num_gpus_per_node)
     node_rank = rank % nnodes
@@ -646,6 +649,13 @@ def _compute_server_args(
             "kv_role": "kv_consumer",
         }
 
+    if ec_transfer_override is not None and worker_type in ("encoder", "regular", "prefill"):
+        kwargs["ec_transfer_config"] = {
+            "ec_connector": "ECExampleConnector",
+            "ec_role": "ec_producer" if worker_type == "encoder" else "ec_consumer",
+            **ec_transfer_override,
+        }
+
     if args.use_rollout_routing_replay:
         kwargs["enable_return_routed_experts"] = True
     if args.fp16:
@@ -665,6 +675,12 @@ def _compute_server_args(
         kwargs["weight_transfer_config"] = {"backend": "ipc"}
     else:
         kwargs["weight_transfer_config"] = {"backend": "nccl"}
+
+    if worker_type == "encoder":
+        # vLLM EPD producers have no language-model KV cache groups. Prefix
+        # caching must therefore be disabled; vLLM's EPD reference launcher
+        # uses the same setting.
+        kwargs["enable_prefix_caching"] = False
 
     external_engine_need_check_fields = [k for k in kwargs.keys() if k not in _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS]
 

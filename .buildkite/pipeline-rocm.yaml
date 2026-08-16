@@ -1,0 +1,95 @@
+# Buildkite CI for vime — AMD ROCm GPU suites. See .buildkite/README.md.
+#
+# One step per test on the self-hosted gfx950 (MI350X) queue (queue=amd_gfx950,
+# docker access + ROCm devices /dev/kfd, /dev/dri). Each test runs in the
+# prebuilt ROCm image and takes the U.is_rocm() path; GPUs are arbitrated with
+# tests/ci/gpu_lock_exec.py on HIP_VISIBLE_DEVICES.
+#
+# Grading: fully_async gates the build; the gsm8k suites soft_fail (non-blocking)
+# until the vLLM/ROCm NaN-logprob divergence is fixed.
+
+env:
+  # Prebuilt ROCm image (built from docker/Dockerfile.rocm). Override per-agent
+  # via a pipeline/agent env var if the image is published elsewhere.
+  VIME_ROCM_IMAGE: "vllm/vime-rocm:latest"
+
+steps:
+  # Manual gate — the GPU suites are expensive, so they run on demand rather
+  # than on every commit (matches the CUDA pipeline.yml gate).
+  - block: ":amd: Run AMD ROCm GPU suites?"
+    key: rocm-gate
+    blocked_state: passed
+
+  - group: ":amd: ROCm GPU Tests"
+    depends_on: rocm-gate
+    steps:
+      - label: ":fire: short · fully_async 0.5B (4 GPU)"
+        key: rocm-fully-async-short
+        agents:
+          queue: amd_gfx950
+        timeout_in_minutes: 360
+        soft_fail: false
+        retry:
+          automatic:
+            - exit_status: -1  # agent lost (fresh instance failed to boot)
+              limit: 2
+        env:
+          TEST_FILE: "test_qwen2.5_0.5B_fully_async_short.py"
+          NUM_GPUS: "4"
+        # $$VAR / $$PWD are escaped so the buildkite-agent expands them at run
+        # time (from the step env / checkout) instead of Buildkite interpolating
+        # them to empty at pipeline-upload time. The inner `bash -lc` script is
+        # single-quoted, so $TEST_FILE / $NUM_GPUS are expanded by the container
+        # shell from the forwarded (-e) env, not the host.
+        command: &rocm_gpu_test |
+          docker run --rm \
+            --device=/dev/kfd --device=/dev/dri --group-add video --privileged \
+            --security-opt seccomp=unconfined --ipc=host --shm-size=16g \
+            --ulimit memlock=-1 --ulimit stack=67108864 --ulimit nofile=1048576:1048576 \
+            -e VIME_AMD_ROCM=1 -e VIME_TEST_DEVICE=rocm -e VIME_SCRIPT_EXTERNAL_RAY=0 \
+            -e HF_HOME=/root/.cache/huggingface \
+            -e GITHUB_COMMIT_NAME="$$BUILDKITE_COMMIT" \
+            -e TEST_FILE -e NUM_GPUS \
+            -v "/root/.cache/huggingface:/root/.cache/huggingface" \
+            -v "$$PWD:/root/vime" -w /root/vime \
+            --entrypoint bash "$$VIME_ROCM_IMAGE" -lc '
+              set -euo pipefail
+              pip install -e . --no-deps --break-system-packages
+              python tests/ci/gpu_lock_exec.py \
+                --count "$$NUM_GPUS" --target-env-name HIP_VISIBLE_DEVICES \
+                -- python "tests/$$TEST_FILE"
+            '
+
+      # gsm8k suites run on ROCm but aren't green yet: vLLM rollout returns NaN
+      # logprobs for Qwen3.5-0.8B on ROCm, so the train-vs-rollout logprob check
+      # diverges. Kept visible (orange) and non-blocking until fixed; drop
+      # soft_fail once each passes on the U.is_rocm() path.
+      - label: ":warning: short · gsm8k 0.8B (4 GPU) [soft-fail]"
+        key: rocm-gsm8k-short
+        agents:
+          queue: amd_gfx950
+        timeout_in_minutes: 360
+        soft_fail: true
+        retry:
+          automatic:
+            - exit_status: -1
+              limit: 2
+        env:
+          TEST_FILE: "test_qwen3.5_0.8B_gsm8k_short.py"
+          NUM_GPUS: "4"
+        command: *rocm_gpu_test
+
+      - label: ":warning: short · gsm8k_async 0.8B (4 GPU) [soft-fail]"
+        key: rocm-gsm8k-async-short
+        agents:
+          queue: amd_gfx950
+        timeout_in_minutes: 360
+        soft_fail: true
+        retry:
+          automatic:
+            - exit_status: -1
+              limit: 2
+        env:
+          TEST_FILE: "test_qwen3.5_0.8B_gsm8k_async_short.py"
+          NUM_GPUS: "4"
+        command: *rocm_gpu_test

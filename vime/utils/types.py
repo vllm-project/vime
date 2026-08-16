@@ -145,7 +145,7 @@ class Sample:
     # metadata used during training, e.g., what loss to use for this sample.
     train_metadata: dict | None = None
 
-    # Session ID for consistent hashing routing (used when router policy is consistent_hashing)
+    # Session ID for consistent hashing routing (used when router policy is consistent_hash).
     session_id: str | None = None
 
     non_generation_time: float = 0.0  # time spent in non-generation steps

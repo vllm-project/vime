@@ -305,8 +305,8 @@ You can configure the routing policy:
 
 ```bash
 --router-policy round_robin     # Simple round-robin
---router-policy consistent_hash # Session affinity for multi-turn (default)
---router-policy cache_aware     # Cache-aware routing
+--router-policy consistent_hash # Session affinity for multi-turn
+--router-policy cache_aware     # Cache-aware routing (default)
 ```
 
 ### Session-Affinity Routing for Multi-Turn Agents

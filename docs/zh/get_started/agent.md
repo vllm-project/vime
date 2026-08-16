@@ -59,7 +59,7 @@ segments = await adapter.finish_session(session_id)
 agentic rollout 往往比普通单轮 generation 更依赖 serving 配置：上下文更长、多轮请求更多、请求时长分布更重尾，并且可能同时需要 actor、reference、reward 或工具侧模型。
 
 - 常规 vLLM server 参数通过 `--vllm-*` 传入。例如 `--context-length` 在 vime 中写作 `--vllm-context-length`，`--gpu-memory-utilization` 写作 `--vllm-gpu-memory-utilization`。
-- router 参数通过 `--router-*` 传入。多轮 agent 可以考虑 `--router-policy consistent_hashing`，让同一个 `sample.session_id` 的多轮请求落到同一个 worker，提高 prefix cache 命中率。详见 [多轮 Agent 的会话亲和路由](../advanced/vllm-config.md#多轮-agent-的会话亲和路由)。
+- router 参数通过 `--router-*` 传入。多轮 agent 如果需要会话亲和，可以设置 `--router-policy consistent_hash`，让同一个 `sample.session_id` 的多轮请求落到同一个 worker，提高 prefix cache 命中率；否则可使用默认的 `cache_aware` 策略。详见 [多轮 Agent 的会话亲和路由](../advanced/vllm-config.md#多轮-agent-的会话亲和路由)。
 - 更复杂的拓扑使用 `--vllm-config`：它可以描述 PD 分离、多模型 serving、异构 server groups，以及每组不同的 vLLM overrides。
 - 多轮或 agentic RL 通常建议评估 PD 分离。prefill 与 decode 的负载形态不同，拆开后更容易分别扩展资源。
 - 对 rollout 吞吐敏感时，可以继续查看 [投机采样](../advanced/speculative-decoding.md) 和 [低精度训练](../advanced/low-precision.md)。

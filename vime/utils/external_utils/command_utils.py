@@ -18,6 +18,14 @@ _ = exec_command, dataclass_cli
 repo_base_dir = Path(os.path.abspath(__file__)).resolve().parents[3]
 
 
+def is_rocm() -> bool:
+    """True on AMD ROCm (torch built with HIP) — the same gate the framework
+    code uses (torch.version.hip)."""
+    import torch
+
+    return torch.version.hip is not None
+
+
 def convert_checkpoint(
     model_name,
     megatron_model_type,
@@ -166,15 +174,39 @@ def execute_train(
             if megatron_model_type is not None
             else ""
         )
-        exec_command(
-            f"export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && "
-            f"{cmd_megatron_model_source}"
-            f'ray job submit --address="http://127.0.0.1:8265" '
-            f"--runtime-env-json='{runtime_env_json}' "
-            f"-- python3 {train_script} "
-            f"{'${MODEL_ARGS[@]}' if megatron_model_type is not None else ''} "
-            f"{train_args}"
-        )
+        model_args = "${MODEL_ARGS[@]}" if megatron_model_type is not None else ""
+        if is_rocm():
+            # ROCm: `ray job submit` intermittently hits a "No available agent"
+            # race in the ROCm container. Run the train script directly against
+            # the ray head started above; pass the ray runtime-env as exports.
+            amd_env = {
+                "no_proxy": f"127.0.0.1,{master_addr}",
+                "PYTHONUNBUFFERED": "1",
+                "PYTHONPATH": f"{repo_base_dir}:/root/Megatron-LM/",
+                "RAY_USE_UVLOOP": "0",
+                "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+                "MASTER_ADDR": master_addr,
+                **extra_env_vars,
+                **_parse_extra_env_vars(config.extra_env_vars),
+            }
+            import shlex
+
+            amd_exports = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in amd_env.items())
+            exec_command(
+                f"export {amd_exports} && "
+                f"{cmd_megatron_model_source}"
+                f"python3 {train_script} {model_args} {train_args}"
+            )
+        else:
+            exec_command(
+                f"export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && "
+                f"{cmd_megatron_model_source}"
+                f'ray job submit --address="http://127.0.0.1:8265" '
+                f"--runtime-env-json='{runtime_env_json}' "
+                f"-- python3 {train_script} "
+                f"{model_args} "
+                f"{train_args}"
+            )
 
 
 def _parse_extra_env_vars(text: str):

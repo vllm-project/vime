@@ -80,6 +80,7 @@ SUITES = {
     "vime-customized": [
         ("test_qwen2_5_0_5B_non_colocate_pp.py", 4, "", {}),
         ("test_geo3k_vlm_multi_turn_e2e.py", 1, "", {}),
+        ("test_qwen2.5_vl_3B_ep_disaggregation.py", 3, "", {}),
     ],
     "precision": [
         ("test_qwen3_0.6B_parallel_check.py", 8, "", {}),

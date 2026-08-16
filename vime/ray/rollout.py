@@ -5,6 +5,7 @@ import multiprocessing
 import os
 import random
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -1058,7 +1059,9 @@ def _start_router(
         router_args.prefill_urls = prefill_urls
         router_args.decode_urls = decode_urls
 
-    # We will not use the circuit breaker from router.
+    # Disable circuit breaker to prevent RDMA transfer timeouts from
+    # marking workers as dead. Timeouts are transient (PCIe contention under
+    # high load) and do not indicate a dead server.
     router_args.disable_circuit_breaker = True
 
     logger.info(f"Launch router with args: {router_args}")
@@ -1108,6 +1111,7 @@ def start_rollout_servers(args, pg) -> tuple[dict[str, Any], list[Any]]:
     config = _resolve_vllm_config(args)
 
     servers: dict[str, RolloutServer] = {}
+    encoder_metadata: dict[str, tuple[str, list[str]]] = {}
     pending_init_handles: list[Any] = []
     gpu_offset = 0
     engine_offset = 0
@@ -1191,35 +1195,44 @@ def start_rollout_servers(args, pg) -> tuple[dict[str, Any], list[Any]]:
             return group
 
         if has_epd:
-            # --- Phase 1: start encoder groups, wait, collect URLs ---
-            # Encoder URLs are injected into the non-encoder workers' server args,
-            # so this phase must stay synchronous even though final LLM init is deferred.
-            encoder_urls: list[str] = []
+            overrides_extra = {
+                "ec_transfer_config": {
+                    "ec_connector_extra_config": {
+                        "shared_storage_path": f"/dev/shm/vime-ec-{uuid.uuid4().hex}",
+                    },
+                },
+            }
+            encoder_endpoints: list[str] = []
             for group_cfg in model_cfg.server_groups:
                 if group_cfg.worker_type != "encoder":
                     continue
-                group = _make_group(group_cfg, engine_router_ip, engine_router_port)
+                group = _make_group(group_cfg, engine_router_ip, engine_router_port, overrides_extra)
                 handles, port_cursors = group.start_engines(port_cursors)
                 if handles:
                     ray.get(handles)
-                urls = ray.get([e.get_url.remote() for e in group.engines])
-                encoder_urls.extend(u for u in urls if u is not None)
+                endpoints = ray.get([engine.get_url.remote() for engine in group.engines])
+                encoder_endpoints.extend(endpoint for endpoint in endpoints if endpoint is not None)
                 server_groups.append(group)
 
-            logger.info(f"EPD phase 1 done: collected {len(encoder_urls)} encoder URLs: {encoder_urls}")
+            logger.info("EPD phase 1 done: collected %d encoder endpoints", len(encoder_endpoints))
 
-            # --- Phase 2: start non-encoder groups, injecting encoder URLs into
-            # language-only LLM workers. Prefill groups use this for full EPD,
-            # while regular groups allow encoder/LLM split without PD.
             non_encoder_handles: list = []
             for group_cfg in model_cfg.server_groups:
                 if group_cfg.worker_type == "encoder":
                     continue
-                overrides_extra = {}
-                if encoder_urls and group_cfg.worker_type in ("prefill", "regular"):
-                    overrides_extra["language_only"] = True
-                    overrides_extra["encoder_urls"] = encoder_urls
-                group = _make_group(group_cfg, engine_router_ip, engine_router_port, overrides_extra=overrides_extra)
+                non_encoder_overrides = overrides_extra if group_cfg.worker_type in ("regular", "prefill") else None
+                if non_encoder_overrides is not None and encoder_endpoints:
+                    non_encoder_overrides = {
+                        **overrides_extra,
+                        "language_only": True,
+                        "encoder_urls": encoder_endpoints,
+                    }
+                group = _make_group(
+                    group_cfg,
+                    engine_router_ip,
+                    engine_router_port,
+                    non_encoder_overrides,
+                )
                 handles, port_cursors = group.start_engines(port_cursors)
                 non_encoder_handles.extend(handles)
                 server_groups.append(group)
@@ -1267,9 +1280,12 @@ def start_rollout_servers(args, pg) -> tuple[dict[str, Any], list[Any]]:
             update_weights=model_cfg.update_weights,
             prometheus_port=prom_port,
         )
+        if has_epd:
+            encoder_metadata[model_cfg.name] = (server_groups[0].model_path, encoder_endpoints)
 
     # Expose per-model router info for custom rollout functions.
     args.vllm_model_routers = {name: (srv.router_ip, srv.router_port) for name, srv in servers.items()}
+    args.vllm_model_encoder_endpoints = encoder_metadata
 
     return servers, pending_init_handles
 

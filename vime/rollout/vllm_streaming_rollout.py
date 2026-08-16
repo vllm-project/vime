@@ -41,6 +41,7 @@ from vime.rollout.vllm_rollout import (
     _coerce_flat_int_token_ids,
     _mm_render_response_to_generate_body,
     _prepare_prompt_ids,
+    prime_encoder,
 )
 from vime.utils import http_utils
 from vime.utils.processing_utils import build_processor_kwargs, encode_image_for_rollout_engine
@@ -124,6 +125,7 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
         for image in images:
             content.append({"type": "image_url", "image_url": {"url": encode_image_for_rollout_engine(image)}})
         render_payload = {"model": args.hf_checkpoint, "messages": [{"role": "user", "content": content}]}
+        await prime_encoder(args, render_payload["messages"])
         with trace_span(sample, "vllm_mm_render", attrs={"model": args.hf_checkpoint}):
             render_data = await http_utils.post(f"{base}/v1/chat/completions/render", render_payload, headers=headers)
         payload = _mm_render_response_to_generate_body(render_data, args.hf_checkpoint)

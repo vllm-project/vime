@@ -34,7 +34,7 @@ from vime.utils.types import Sample
 
 from .rm_hub import async_rm, batched_async_rm
 
-__all__ = ["generate_rollout", "get_model_url"]
+__all__ = ["generate_rollout", "get_model_url", "prime_encoder"]
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +100,45 @@ def get_model_url(args: Namespace, model_name: str, endpoint: str = "/inference/
         ip, port = routers[model_name]
         return f"http://{ip}:{port}{endpoint}"
     return f"http://{args.vllm_router_ip}:{args.vllm_router_port}{endpoint}"
+
+
+def _get_image_urls(messages: list[dict[str, Any]]) -> list[str]:
+    return [
+        image_url["url"]
+        for message in messages
+        if isinstance(message.get("content"), list)
+        for part in message["content"]
+        if isinstance(part, dict) and part.get("type") == "image_url"
+        for image_url in [part.get("image_url")]
+        if isinstance(image_url, dict) and isinstance(image_url.get("url"), str)
+    ]
+
+
+async def prime_encoder(args: Namespace, messages: list[dict[str, Any]], *, model_name: str = "default") -> None:
+    """Make EC producers compute the images before their consumers generate."""
+    image_urls = _get_image_urls(messages)
+    encoders = (getattr(args, "vllm_model_encoder_endpoints", None) or {}).get(model_name)
+    if encoders is None and model_name == "default":
+        metadata = getattr(args, "vllm_model_encoder_endpoints", None) or {}
+        if len(metadata) == 1:
+            encoders = next(iter(metadata.values()))
+    if not image_urls or encoders is None or not encoders[1]:
+        return
+    model, endpoints = encoders
+
+    async def prime(index: int, image_url: str) -> None:
+        await post(
+            f"{endpoints[index % len(endpoints)].rstrip('/')}/v1/chat/completions",
+            {
+                "model": model,
+                "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_url}}]}],
+                "max_tokens": 1,
+                "stream": False,
+            },
+            headers={"x-request-id": str(uuid.uuid4())},
+        )
+
+    await asyncio.gather(*(prime(index, url) for index, url in enumerate(image_urls)))
 
 
 def _rollout_model_name(args: Namespace) -> str:
@@ -335,6 +374,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
             "model": _rollout_model_name(args),
             "messages": [{"role": "user", "content": content}],
         }
+        await prime_encoder(args, render_payload["messages"])
         render_url = f"{base}/v1/chat/completions/render"
         with trace_span(sample, "vllm_mm_render", attrs={"model": args.hf_checkpoint}):
             render_data = await post(render_url, render_payload, headers=headers)
