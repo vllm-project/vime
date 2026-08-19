@@ -19,7 +19,7 @@ import subprocess
 import sys
 
 NPU_QUEUE = "ascend-a3"
-DEFAULT_CI_IMAGE = "quay.io/ascend/vime:0.3.0-a3-vllm0.22.1rc1"
+DEFAULT_CI_IMAGE = "quay.io/ascend/vime:vime-latest"
 IMAGE_REGISTRY = "swr.cn-southwest-2.myhuaweicloud.com/modelfoundry"
 IMAGE_NAME = "vime-ci-npu"
 VIME_IMAGE_TAG = os.environ.get("BUILDKITE_COMMIT", "latest")

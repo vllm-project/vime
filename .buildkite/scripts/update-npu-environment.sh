@@ -34,12 +34,12 @@ load_series() {
     local series_file="$1"
     local line target image_patch source_patch extra
 
+    SERIES_ENTRIES=()
     if [ ! -f "$series_file" ]; then
         echo "ERROR: Patch series not found: $series_file" >&2
         return 1
     fi
 
-    SERIES_ENTRIES=()
     while IFS= read -r line || [ -n "$line" ]; do
         if [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]]; then
             continue
@@ -124,7 +124,6 @@ apply_series() {
         patch_path="${source_root}/${source_patch}"
         validate_series_entry "$target" "$patch_path"
         echo "INFO: Applying $source_patch to $target"
-        git -C "$target" apply --check --whitespace=nowarn "$patch_path"
         git -C "$target" apply --whitespace=nowarn "$patch_path"
     done
 }
@@ -141,7 +140,6 @@ revert_series() {
         patch_path="${image_root}/${image_patch}"
         validate_series_entry "$target" "$patch_path"
         echo "INFO: Reverting $image_patch from $target"
-        git -C "$target" apply --reverse --check --whitespace=nowarn "$patch_path"
         git -C "$target" apply --reverse --whitespace=nowarn "$patch_path"
     done
 }
