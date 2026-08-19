@@ -21,23 +21,37 @@ from vime.utils.distributed_utils import get_gloo_group
 
 from ..megatron_to_hf import convert_to_hf
 from .common import all_gather_param, named_params_and_buffers
+from .coordinator import WeightUpdateCoordinator
+from .coordinator import post_process_weights as _post_process_weights
 from .hf_weight_iterator_base import HfWeightIteratorBase
 
 logger = logging.getLogger(__name__)
+# Compatibility re-export for callers that imported the old helper location.
+post_process_weights = _post_process_weights
 
 
-def _begin_vllm_weight_update_session(rollout_engines: Sequence[ActorHandle]) -> None:
+def _begin_vllm_weight_update_session(
+    rollout_engines: Sequence[ActorHandle],
+    *,
+    draft: bool = False,
+) -> None:
     if dist.get_rank() == 0:
-        logger.info("vLLM weight update: start_weight_update")
-        ray.get([engine.start_weight_update.remote(is_checkpoint_format=True) for engine in rollout_engines])
+        if draft:
+            logger.info("vLLM weight update: start_draft_weight_update")
+            ray.get([engine.start_draft_weight_update.remote() for engine in rollout_engines])
+        else:
+            logger.info("vLLM weight update: start_weight_update")
+            ray.get([engine.start_weight_update.remote(is_checkpoint_format=True) for engine in rollout_engines])
     dist.barrier(group=get_gloo_group())
 
 
 def _end_vllm_weight_update_session(rollout_engines: Sequence[ActorHandle]) -> None:
-    if dist.get_rank() == 0:
-        logger.info("vLLM weight update: finish_weight_update")
-        ray.get([engine.finish_weight_update.remote() for engine in rollout_engines])
-    dist.barrier(group=get_gloo_group())
+    try:
+        if dist.get_rank() == 0:
+            logger.info("vLLM weight update: finish_weight_update")
+            ray.get([engine.finish_weight_update.remote() for engine in rollout_engines])
+    finally:
+        dist.barrier(group=get_gloo_group())
 
 
 class UpdateWeightFromDistributed:
@@ -138,52 +152,59 @@ class UpdateWeightFromDistributed:
         out, self.update_weight_metrics = self.update_weight_metrics, {}
         return out
 
+    def _get_weight_update_commit(self) -> Callable[[], None] | None:
+        """Return an optional source commit run before publish and resume."""
+        return None
+
     @torch.no_grad()
     def update_weights(self) -> None:
-        """
-        Pause → flush → _send_weights → continue. Progress on PP source.
-        """
-        self.weight_version += 1
+        """Run one coordinated weight update and commit on success."""
+        committed_version = self.weight_version
+        coordinator = WeightUpdateCoordinator(self.rollout_engines, self.quantization_config)
 
-        if dist.get_rank() == 0:
-            ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
-            ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
+        def transfer_target(candidate_version: int) -> None:
+            # Existing bucket senders read ``self.weight_version``. It is
+            # provisional until the coordinator returns and is restored on any
+            # failure below.
+            self.weight_version = candidate_version
+            self._run_weight_update_session()
 
-            # int4/fp4 pre_process
-            if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
-                post_process_weights(
-                    restore_weights_before_load=True,
-                    post_process_quantization=False,
-                    rollout_engines=self.rollout_engines,
-                )
-        dist.barrier(group=get_gloo_group())
+        draft_transfer: Callable[[int], None] | None = None
+        if self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp":
 
-        _begin_vllm_weight_update_session(self.rollout_engines)
+            def transfer_draft(candidate_version: int) -> None:
+                assert candidate_version == self.weight_version
+                self._run_weight_update_session(draft=True)
+
+            draft_transfer = transfer_draft
+
+        try:
+            self.weight_version = coordinator.run(
+                current_version=committed_version,
+                transfer_target=transfer_target,
+                transfer_draft=draft_transfer,
+                commit=self._get_weight_update_commit(),
+            )
+        except BaseException:
+            self.weight_version = committed_version
+            raise
+
+    def _run_weight_update_session(self, *, draft: bool = False) -> None:
+        _begin_vllm_weight_update_session(self.rollout_engines, draft=draft)
         try:
             self._send_weights_to_rollout_engines()
-        finally:
-            _end_vllm_weight_update_session(self.rollout_engines)
-
-        if self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp":
-            if dist.get_rank() == 0:
-                ray.get([engine.start_draft_weight_update.remote() for engine in self.rollout_engines])
-            dist.barrier(group=get_gloo_group())
+        except BaseException:
+            # A failed vLLM update RPC clears its own active session, while a
+            # local conversion/NCCL failure may leave the session active. Try
+            # both cases and never replace the primary transfer exception with
+            # a cleanup error such as "finish without start".
             try:
-                self._send_weights_to_rollout_engines()
-            finally:
                 _end_vllm_weight_update_session(self.rollout_engines)
-
-        dist.barrier(group=get_gloo_group())
-        if dist.get_rank() == 0:
-            # int4/fp4 post_process
-            if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
-                post_process_weights(
-                    restore_weights_before_load=False,
-                    post_process_quantization=True,
-                    rollout_engines=self.rollout_engines,
-                )
-            ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
-        dist.barrier(group=get_gloo_group())
+            except BaseException:
+                logger.warning("Failed to finalize vLLM session after weight transfer error", exc_info=True)
+            raise
+        else:
+            _end_vllm_weight_update_session(self.rollout_engines)
 
     def _send_weights_to_rollout_engines(self) -> None:
         if self._uses_persistent_group():
@@ -383,16 +404,18 @@ class UpdateWeightFromDistributed:
         while not ray.get(self.rollout_engine_lock.acquire.remote()):
             time.sleep(0.1)
 
-        refs = update_weights_from_distributed(
-            self._model_update_groups,
-            self.weight_version,
-            self.rollout_engines,
-            converted_named_tensors,
-        )
-
-        ray.get(refs)
-        converted_named_tensors.clear()
-        ray.get(self.rollout_engine_lock.release.remote())
+        try:
+            refs = update_weights_from_distributed(
+                self._model_update_groups,
+                self.weight_version,
+                self.rollout_engines,
+                converted_named_tensors,
+                record_weight_version=False,
+            )
+            ray.get(refs)
+            converted_named_tensors.clear()
+        finally:
+            ray.get(self.rollout_engine_lock.release.remote())
         pbar.update(1)
 
 
@@ -492,6 +515,8 @@ def update_weights_from_distributed(
     weight_version: int,
     rollout_engines: Sequence[ActorHandle],
     converted_named_tensors: Sequence[tuple[str, torch.Tensor]],
+    *,
+    record_weight_version: bool = True,
 ) -> list[ObjectRef]:
     """
     Send metadata (Ray), broadcast tensors (NCCL rank 0 → engines).
@@ -505,6 +530,7 @@ def update_weights_from_distributed(
             dtypes=[param.dtype for _, param in converted_named_tensors],
             shapes=[param.shape for _, param in converted_named_tensors],
             weight_version=str(weight_version),
+            record_weight_version=record_weight_version,
         )
         for engine in rollout_engines
     ]
@@ -519,22 +545,3 @@ def update_weights_from_distributed(
     )
 
     return refs
-
-
-def post_process_weights(
-    restore_weights_before_load: bool,
-    post_process_quantization: bool,
-    rollout_engines: Sequence[ActorHandle],
-):
-    """
-    Trigger post-process for int4/fp4 quantization on all rollout engines.
-    """
-    ray.get(
-        [
-            engine.post_process_weights.remote(
-                restore_weights_before_load=restore_weights_before_load,
-                post_process_quantization=post_process_quantization,
-            )
-            for engine in rollout_engines
-        ]
-    )

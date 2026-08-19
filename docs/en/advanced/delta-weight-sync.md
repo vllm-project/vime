@@ -5,15 +5,24 @@ that changed between two syncs, instead of a full checkpoint each time. It targe
 training/inference disaggregation across clusters or datacenters, where writing the whole actor
 every sync is the dominant cost.
 
-It is **disk-transport only**. The trainer publishes each sync as a canonical HF checkpoint
+> **Status:** `--update-weight-mode delta` selects the **direct NCCL** delta implementation
+> (`--update-weight-transport nccl`): the trainer diffs against a checkpoint-coordinate
+> snapshot and ships only changed values over the existing NCCL channel into vLLM's
+> checkpoint weight patch API. See
+> [`examples/delta_weight_sync/README.md`](https://github.com/vllm-project/vime/blob/main/examples/delta_weight_sync/README.md)
+> for requirements and configuration. The **disk-based** design documented
+> below is reserved and not implemented: `--update-weight-mode delta
+> --update-weight-transport disk` raises `NotImplementedError`.
+
+The disk-based design is **disk-transport** based. The trainer publishes each sync as a canonical HF checkpoint
 directory; the engine's `/pull_weights` endpoint (shipped in vime's vllm patch) fans the
 apply out to **every host the engine spans** and verifies it, then the engine reloads the
 patched local checkpoint through the **ordinary** `update_weights_from_disk` endpoint. vime
 only ever talks to one endpoint per engine, so multi-node serving and external rollout engines
 need nothing extra on the vime side.
 
-Vime currently guards this mechanically synchronized path with a `NotImplementedError` when
-`--update-weight-mode=delta` is selected; the implementation below remains upstream reference code.
+Vime guards this path with a `NotImplementedError` when `--update-weight-transport=disk` is
+combined with delta mode; the implementation below remains upstream reference code.
 
 ## Configuration
 

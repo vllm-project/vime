@@ -19,6 +19,17 @@ from vime.utils.http_utils import _wrap_ipv6, get_host_info
 logger = logging.getLogger(__name__)
 
 _VLLM_WAKE_TAGS = frozenset({"weights", "kv_cache"})
+_DIRECT_DELTA_BACKEND = "vime_delta_nccl"
+_DIRECT_DELTA_WORKER_EXTENSION = (
+    "vime.backends.vllm_utils.checkpoint_delta.VimeDeltaWorkerExtension"
+)
+
+
+def _uses_direct_delta(args) -> bool:
+    return (
+        getattr(args, "update_weight_mode", "full") == "delta"
+        and getattr(args, "update_weight_transport", "nccl") == "nccl"
+    )
 
 
 def get_base_gpu_id(args, rank):
@@ -66,13 +77,14 @@ def _build_subprocess_env(server_args_dict: dict[str, Any]) -> dict[str, str]:
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")
     if getattr(args, "vllm_enable_deterministic_inference", False):
         env["VLLM_BATCH_INVARIANT"] = "1"
-    if getattr(args, "colocate", False):
+    if getattr(args, "colocate", False) or _uses_direct_delta(args):
         import vime
 
         vime_root = os.path.dirname(os.path.dirname(os.path.abspath(vime.__file__)))
         existing_pp = env.get("PYTHONPATH", "")
         if vime_root not in {p for p in existing_pp.split(os.pathsep) if p}:
             env["PYTHONPATH"] = os.pathsep.join(filter(None, [vime_root, existing_pp]))
+    if getattr(args, "colocate", False):
         env.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     worker_type = server_args_dict.get("_worker_type", "regular")
@@ -130,6 +142,7 @@ class VLLMEngine(RayActor):
         self.vllm_overrides = vllm_overrides or {}
         self.num_gpus_per_engine = num_gpus_per_engine
         self._weight_version: str | None = None
+        self._server_version_endpoint_missing = False
 
     def init(
         self,
@@ -270,6 +283,7 @@ class VLLMEngine(RayActor):
         tensor_sizes: list[int],
         weight_version: str,
         flush_cache: bool = False,
+        record_weight_version: bool = True,
     ):
         payload: dict = {
             "names": names,
@@ -282,7 +296,8 @@ class VLLMEngine(RayActor):
         if flush_cache:
             self.flush_cache()
         result = self._make_request("update_weights", {"update_info": payload})
-        self._weight_version = str(weight_version)
+        if record_weight_version:
+            self._weight_version = str(weight_version)
         return result
 
     def flush_cache(self):
@@ -331,7 +346,28 @@ class VLLMEngine(RayActor):
         return self._weight_version
 
     def set_weight_version(self, new_version: str):
-        self._weight_version = str(new_version)
+        new_version = str(new_version)
+        result = None
+        try:
+            result = self._make_request(
+                "update_weight_version",
+                {"new_version": new_version},
+            )
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            # Direct DWU publishes versions through the server tag as part of its
+            # commit protocol; every other mode only mirrors the local marker, so
+            # a vLLM without the endpoint (< 0.27.2) must not break weight sync.
+            if _uses_direct_delta(self.args) or status not in (404, 405):
+                raise
+            if not self._server_version_endpoint_missing:
+                self._server_version_endpoint_missing = True
+                logger.warning(
+                    "vLLM server has no update_weight_version endpoint; "
+                    "tracking weight versions locally only"
+                )
+        self._weight_version = new_version
+        return result
 
     def release_memory_occupation(self, level: int = 2):
         self.flush_cache()
@@ -424,6 +460,7 @@ class VLLMEngine(RayActor):
         *,
         flush_cache=False,
         weight_version: str,
+        record_weight_version: bool = True,
     ):
         if flush_cache:
             self.flush_cache()
@@ -435,8 +472,13 @@ class VLLMEngine(RayActor):
             "packed": True,
         }
         result = self._make_request("update_weights", {"update_info": update_info})
-        self._weight_version = str(weight_version)
+        if record_weight_version:
+            self._weight_version = str(weight_version)
         return result
+
+    def update_checkpoint_delta_from_distributed(self, *, update_info: dict):
+        """Send one direct-DWU metadata chunk without publishing a version."""
+        return self._make_request("update_weights", {"update_info": update_info})
 
     def pause_generation(self):
         if self.node_rank != 0:
@@ -622,7 +664,25 @@ def _compute_server_args(
     ):
         kwargs["max_model_len"] = args.rollout_max_context_len
 
-    if args.colocate:
+    direct_delta = _uses_direct_delta(args)
+    if direct_delta and args.colocate:
+        raise ValueError("VIME direct DWU requires non-colocated rollout engines")
+
+    configured_extension = getattr(args, "vllm_worker_extension_cls", "")
+    if direct_delta and configured_extension not in (
+        "",
+        None,
+        _DIRECT_DELTA_WORKER_EXTENSION,
+    ):
+        raise ValueError(
+            "VIME direct DWU owns --vllm-worker-extension-cls; "
+            f"got {configured_extension!r}"
+        )
+
+    if direct_delta:
+        kwargs["weight_transfer_config"] = {"backend": _DIRECT_DELTA_BACKEND}
+        kwargs["worker_extension_cls"] = _DIRECT_DELTA_WORKER_EXTENSION
+    elif args.colocate:
         kwargs["weight_transfer_config"] = {"backend": "ipc"}
     else:
         kwargs["weight_transfer_config"] = {"backend": "nccl"}
@@ -663,6 +723,19 @@ def _compute_server_args(
                 )
             if normalized_key in ("model_path",) or normalized_key.startswith("disaggregation"):
                 continue
+            if direct_delta and normalized_key in {
+                "weight_transfer_config",
+                "worker_extension_cls",
+            }:
+                required = {
+                    "weight_transfer_config": {"backend": _DIRECT_DELTA_BACKEND},
+                    "worker_extension_cls": _DIRECT_DELTA_WORKER_EXTENSION,
+                }[normalized_key]
+                if value != required:
+                    raise ValueError(
+                        f"VIME direct DWU requires {normalized_key}={required!r}; "
+                        f"got {value!r}"
+                    )
             if normalized_key in kwargs:
                 logger.info(
                     f"vllm_overrides: overriding {normalized_key}={kwargs[normalized_key]} -> {value} (rank={rank})"

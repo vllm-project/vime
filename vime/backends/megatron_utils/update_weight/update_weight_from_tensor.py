@@ -13,6 +13,7 @@ https://docs.vllm.ai/en/stable/examples/rl/rlhf_ipc/
 
 from __future__ import annotations
 
+import logging
 import os
 from argparse import Namespace
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -27,15 +28,16 @@ from ray.actor import ActorHandle
 
 from vime.utils.distributed_utils import get_gloo_group
 
+from .coordinator import WeightUpdateCoordinator
 from .hf_weight_iterator_base import HfWeightIteratorBase
 from .update_weight_from_distributed import (
     connect_rollout_engines_from_distributed,
     disconnect_rollout_engines_from_distributed,
-    post_process_weights,
     update_weights_from_distributed,
 )
 
 _MAX_COLOCATED_UPDATES_INFLIGHT = 4
+logger = logging.getLogger(__name__)
 
 
 def _build_packed_ipc_update_info(
@@ -160,6 +162,7 @@ class UpdateWeightFromTensor:
         Split colocated/distributed engines. Global source rank (DP=TP=PP=0) creates NCCL
         for distributed. Map ranks to colocated IPC engines.
         """
+        self._all_rollout_engines = list(rollout_engines)
         self.rollout_engines = rollout_engines
 
         if engine_gpu_counts is None:
@@ -203,6 +206,8 @@ class UpdateWeightFromTensor:
                     self.distributed_rollout_engines,
                     engine_gpu_counts=distributed_gpu_counts,
                 )
+        else:
+            self.distributed_rollout_engines = []
 
         colocate_gpu_offsets = engine_gpu_offsets[:colocate_engine_nums]
         colocate_gpu_counts = engine_gpu_counts[:colocate_engine_nums]
@@ -243,68 +248,100 @@ class UpdateWeightFromTensor:
 
     @torch.no_grad()
     def update_weights(self) -> None:
-        """
-        version++, flush caches, process buckets. Progress on rank 0.
-        """
-        self.weight_version += 1
+        """Run one coordinated full-weight update and commit on success."""
+        committed_version = self.weight_version
+        rollout_engines = getattr(self, "_all_rollout_engines", self.rollout_engines)
+        coordinator = WeightUpdateCoordinator(rollout_engines, self.quantization_config)
+        megatron_local_weights = None
 
-        rank = dist.get_rank()
-        if rank == 0:
-            ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
-            ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
-            if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
-                post_process_weights(
-                    restore_weights_before_load=True,
-                    post_process_quantization=False,
-                    rollout_engines=self.rollout_engines,
-                )
-        dist.barrier(group=get_gloo_group())
+        def transfer_target(candidate_version: int) -> None:
+            nonlocal megatron_local_weights
+            self.weight_version = candidate_version
+            megatron_local_weights = self._run_weight_update_session()
 
-        # vLLM #39212: enter weight-update mode on each slot leader.
-        if self._ipc_engine is not None and rank == self._ipc_gather_src:
-            ray.get(self._ipc_engine.start_weight_update.remote(is_checkpoint_format=True))
-        dist.barrier(group=get_gloo_group())
-
-        megatron_local_weights = self.weights_getter()
-        self._send_weight_chunks(megatron_local_weights)
-
-        dist.barrier(group=get_gloo_group())
-        # After the barrier all engines have returned, so every rank's last-chunk
-        # IPC handles are now released by the consumers.  Clean them up.
-        torch.cuda.ipc_collect()
-
-        # vLLM #39212: exit weight-update mode.
-        if self._ipc_engine is not None and rank == self._ipc_gather_src:
-            ray.get(self._ipc_engine.finish_weight_update.remote())
-        dist.barrier(group=get_gloo_group())
-
+        draft_transfer: Callable[[int], None] | None = None
         if (
             not self.use_distribute
             and self.args.enable_mtp_training
             and (self.args.vllm_speculative_config or {}).get("method") == "mtp"
         ):
-            if self._ipc_engine is not None and rank == self._ipc_gather_src:
-                ray.get(self._ipc_engine.start_draft_weight_update.remote())
-            dist.barrier(group=get_gloo_group())
 
+            def transfer_draft(candidate_version: int) -> None:
+                assert candidate_version == self.weight_version
+                assert megatron_local_weights is not None
+                self._run_weight_update_session(megatron_local_weights, draft=True)
+
+            draft_transfer = transfer_draft
+
+        try:
+            self.weight_version = coordinator.run(
+                current_version=committed_version,
+                transfer_target=transfer_target,
+                transfer_draft=draft_transfer,
+            )
+        except BaseException:
+            self.weight_version = committed_version
+            raise
+
+    def _run_weight_update_session(
+        self,
+        megatron_local_weights: Mapping[str, torch.Tensor] | None = None,
+        *,
+        draft: bool = False,
+    ) -> Mapping[str, torch.Tensor]:
+        self._start_weight_update_session(draft=draft)
+        try:
+            # Preserve the colocated memory order: vLLM first enters layerwise
+            # reload mode, then Megatron materializes the source weights.
+            if megatron_local_weights is None:
+                megatron_local_weights = self.weights_getter()
             self._send_weight_chunks(megatron_local_weights)
-
             dist.barrier(group=get_gloo_group())
+            # Every engine has returned, so the consumers have released the
+            # final chunk's IPC handles.
             torch.cuda.ipc_collect()
-            if self._ipc_engine is not None and rank == self._ipc_gather_src:
-                ray.get(self._ipc_engine.finish_weight_update.remote())
-            dist.barrier(group=get_gloo_group())
+        except BaseException:
+            try:
+                self._finish_weight_update_session()
+            except BaseException:
+                logger.warning("Failed to finalize vLLM session after weight transfer error", exc_info=True)
+            raise
+        else:
+            self._finish_weight_update_session()
+        return megatron_local_weights
 
-        # int4/fp4 post_process
-        if rank == 0:
-            if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
-                post_process_weights(
-                    restore_weights_before_load=False,
-                    post_process_quantization=True,
-                    rollout_engines=self.rollout_engines,
+    def _start_weight_update_session(self, *, draft: bool = False) -> None:
+        rank = dist.get_rank()
+        refs = []
+        if self._ipc_engine is not None and rank == self._ipc_gather_src:
+            if draft:
+                refs.append(self._ipc_engine.start_draft_weight_update.remote())
+            else:
+                refs.append(self._ipc_engine.start_weight_update.remote(is_checkpoint_format=True))
+        if self.use_distribute and self._is_distributed_src_rank:
+            if draft:
+                refs.extend(engine.start_draft_weight_update.remote() for engine in self.distributed_rollout_engines)
+            else:
+                refs.extend(
+                    engine.start_weight_update.remote(is_checkpoint_format=True)
+                    for engine in self.distributed_rollout_engines
                 )
-            ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
+        if refs:
+            ray.get(refs)
         dist.barrier(group=get_gloo_group())
+
+    def _finish_weight_update_session(self) -> None:
+        rank = dist.get_rank()
+        refs = []
+        if self._ipc_engine is not None and rank == self._ipc_gather_src:
+            refs.append(self._ipc_engine.finish_weight_update.remote())
+        if self.use_distribute and self._is_distributed_src_rank:
+            refs.extend(engine.finish_weight_update.remote() for engine in self.distributed_rollout_engines)
+        try:
+            if refs:
+                ray.get(refs)
+        finally:
+            dist.barrier(group=get_gloo_group())
 
     def _send_weight_chunks(self, megatron_local_weights) -> None:
         max_inflight = 1 if self.use_distribute else _MAX_COLOCATED_UPDATES_INFLIGHT
@@ -343,6 +380,7 @@ class UpdateWeightFromTensor:
                 self.weight_version,
                 self.distributed_rollout_engines,
                 hf_named_tensors,
+                record_weight_version=False,
             )
             if refs_distributed:
                 all_refs.extend(refs_distributed)
@@ -367,7 +405,11 @@ def _send_to_colocated_engine(
 
     slot_size = dist.get_world_size(ipc_gather_group)
     if slot_size <= 1:
-        ref = ipc_engine.update_weights_from_tensor.remote(**local_info, weight_version=str(weight_version))
+        ref = ipc_engine.update_weights_from_tensor.remote(
+            **local_info,
+            weight_version=str(weight_version),
+            record_weight_version=False,
+        )
         return [ref], weight_ref
 
     payload = _serialize_ipc_update_info(local_info)
@@ -381,6 +423,12 @@ def _send_to_colocated_engine(
             raise RuntimeError(f"Missing IPC payloads in slot {ipc_gather_src}; got {gathered_payloads!r}")
         slot_infos = [_deserialize_ipc_update_info(p) for p in gathered_payloads]
         merged = _merge_ipc_update_infos(slot_infos)
-        refs.append(ipc_engine.update_weights_from_tensor.remote(**merged, weight_version=str(weight_version)))
+        refs.append(
+            ipc_engine.update_weights_from_tensor.remote(
+                **merged,
+                weight_version=str(weight_version),
+                record_weight_version=False,
+            )
+        )
 
     return refs, weight_ref

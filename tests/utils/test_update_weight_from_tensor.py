@@ -20,6 +20,7 @@ import pytest
 import torch
 
 MODULE_PATH = "vime.backends.megatron_utils.update_weight.update_weight_from_tensor"
+COORDINATOR_MODULE = "vime.backends.megatron_utils.update_weight.coordinator"
 
 NUM_GPUS = 0
 
@@ -37,11 +38,13 @@ def _install_stubs():
     dist_stub.get_process_group_ranks.return_value = [0, 1]
     dist_stub.barrier = MagicMock()
     dist_stub.all_gather_object = MagicMock()
+    dist_stub.broadcast_object_list = MagicMock()
     _dist.get_rank = dist_stub.get_rank
     _dist.get_world_size = dist_stub.get_world_size
     _dist.get_process_group_ranks = dist_stub.get_process_group_ranks
     _dist.barrier = dist_stub.barrier
     _dist.all_gather_object = dist_stub.all_gather_object
+    _dist.broadcast_object_list = dist_stub.broadcast_object_list
 
     hf_iter_stub = MagicMock()
     hf_iter_stub.get_hf_weight_chunks.return_value = iter([])
@@ -81,10 +84,18 @@ _STUBBED_MODULES = (
     "ray",
     "ray.actor",
     "vime.utils.distributed_utils",
+    COORDINATOR_MODULE,
     "vime.backends.megatron_utils.update_weight.hf_weight_iterator_base",
     "vime.backends.megatron_utils.update_weight.update_weight_from_distributed",
 )
-_DIST_ATTRS = ("get_rank", "get_world_size", "get_process_group_ranks", "barrier", "all_gather_object")
+_DIST_ATTRS = (
+    "get_rank",
+    "get_world_size",
+    "get_process_group_ranks",
+    "barrier",
+    "all_gather_object",
+    "broadcast_object_list",
+)
 
 
 @pytest.fixture(scope="module")
@@ -133,6 +144,7 @@ class RecordingVLLMEngine:
     update_weights_from_tensor: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     pause_generation: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     flush_cache: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
+    set_weight_version: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     continue_generation: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
 
 
@@ -175,6 +187,7 @@ def _make_instance(upw_vllm, args=None):
 def _bind_single_slot(obj, engine, *, src=0):
     """Bind ``obj`` to one colocated engine forming a slot whose leader rank is ``src``."""
     obj.rollout_engines = [engine]
+    obj._all_rollout_engines = [engine]
     obj._ipc_engine = engine
     obj._ipc_gather_group = "slot_group"
     obj._ipc_gather_src = src
@@ -239,7 +252,10 @@ def test_colocated_lifecycle_uses_pause_flush_and_weight_transfer_apis(upw_vllm)
     assert len(engine.start_weight_update.calls) == 1
     assert engine.start_weight_update.calls[0].kwargs.get("is_checkpoint_format") is True
     assert len(engine.finish_weight_update.calls) == 1
+    assert len(engine.set_weight_version.calls) == 1
+    assert engine.set_weight_version.calls[0].args == ("1",)
     assert len(engine.continue_generation.calls) == 1
+    assert obj.weight_version == 1
     # Both chunks are kept alive until the bounded in-flight batch drains.
     assert counters["ipc_collect"] == 2
     # lifecycle barriers (no per-chunk barrier).
@@ -273,6 +289,63 @@ def test_colocated_mtp_updates_target_then_draft_from_fresh_weight_stream(upw_vl
     assert len(engine.finish_weight_update.calls) == 2
     assert len(engine.update_weights_from_tensor.calls) == 4
     assert obj._hf_weight_iterator.get_hf_weight_chunks.call_count == 2
+    assert obj.weight_version == 1
+
+
+@pytest.mark.unit
+def test_mixed_colocated_and_remote_engines_share_control_plane(upw_vllm):
+    obj = _make_instance(upw_vllm)
+    colocated = RecordingVLLMEngine()
+    remote = RecordingVLLMEngine()
+    obj.rollout_engines = [colocated]
+    obj.distributed_rollout_engines = [remote]
+    obj._all_rollout_engines = [colocated, remote]
+    obj.use_distribute = True
+    obj._is_distributed_src_rank = True
+    obj._ipc_engine = colocated
+    obj._ipc_gather_group = "slot_group"
+    obj._ipc_gather_src = 0
+    obj._send_weight_chunks = MagicMock()
+
+    _run_update(obj)
+
+    for engine in (colocated, remote):
+        assert len(engine.pause_generation.calls) == 1
+        assert len(engine.flush_cache.calls) == 1
+        assert len(engine.start_weight_update.calls) == 1
+        assert len(engine.finish_weight_update.calls) == 1
+        assert len(engine.set_weight_version.calls) == 1
+        assert engine.set_weight_version.calls[0].args == ("1",)
+        assert len(engine.continue_generation.calls) == 1
+    assert obj.weight_version == 1
+
+    # The remote leg defers version publication to the coordinator: the NCCL
+    # send itself must not record a version on the engines.
+    sender = _make_instance(upw_vllm)
+    deferred_remote = RecordingVLLMEngine()
+    sender.use_distribute = True
+    sender._is_distributed_src_rank = True
+    sender._model_update_groups = "groups"
+    sender.distributed_rollout_engines = [deferred_remote]
+    tensors = _chunks(1)[0]
+    with patch(
+        f"{MODULE_PATH}._send_to_colocated_engine",
+        return_value=(["ipc-ref"], ["keepalive"]),
+    ), patch(
+        f"{MODULE_PATH}.update_weights_from_distributed",
+        return_value=["nccl-ref"],
+    ) as send_distributed:
+        refs, keepalive = sender._send_hf_params(tensors)
+
+    assert refs == ["ipc-ref", "nccl-ref"]
+    assert keepalive == ["keepalive"]
+    send_distributed.assert_called_once_with(
+        "groups",
+        0,
+        [deferred_remote],
+        tensors,
+        record_weight_version=False,
+    )
 
 
 @pytest.mark.unit
@@ -306,8 +379,10 @@ def test_send_via_ipc_dispatches_update_weights_from_tensor_with_version(upw_vll
     assert kwargs["dtype_names"] == dummy_info["dtype_names"]
     assert kwargs["shapes"] == dummy_info["shapes"]
     assert kwargs["ipc_handles"] is dummy_info["ipc_handles"]
-    # weight_version is the trainer's post-increment version (0 + 1 = 1) as a str
+    # Chunks carry the candidate version but do not publish it before the
+    # coordinator commits the complete update.
     assert kwargs["weight_version"] == "1"
+    assert kwargs["record_weight_version"] is False
     # finish_weight_update is a stateless bookend now — no kwargs
     assert len(engine.finish_weight_update.calls) == 1
     assert engine.finish_weight_update.calls[0].kwargs == {}
@@ -359,6 +434,7 @@ def test_send_via_ipc_dispatches_update_weights_from_tensor_coordinator_multi_gp
     assert kwargs["shapes"] == dummy_info_0["shapes"]
     assert set(kwargs["ipc_handles"]) == {"uuid-gpu0", "uuid-gpu1"}
     assert kwargs["weight_version"] == "1"
+    assert kwargs["record_weight_version"] is False
 
 
 @pytest.mark.unit
@@ -469,6 +545,7 @@ def test_connect_binds_engine_and_slot_leader_per_gpu_slot(upw_vllm):
         assert obj._ipc_gather_src == expected_src
         is_coordinator = rank == obj._ipc_gather_src
         assert is_coordinator is (rank in (0, 2))
+        assert obj._all_rollout_engines == engines
         assert obj.use_distribute is False
         assert obj.distributed_rollout_engines == []
         # vLLM #39212: init_weight_transfer_engine fires once during connect (rank 0 only).

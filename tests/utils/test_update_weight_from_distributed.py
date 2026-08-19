@@ -20,9 +20,11 @@ import torch
 from vime.utils.types import ParamInfo
 
 MODULE_PATH = "vime.backends.megatron_utils.update_weight.update_weight_from_distributed"
+COORDINATOR_MODULE = "vime.backends.megatron_utils.update_weight.coordinator"
 COMMON_MODULE = "vime.backends.megatron_utils.update_weight.common"
 DIRECT_MODULE = "vime.backends.megatron_utils.update_weight.hf_weight_iterator_direct"
 CONVERTER_MODULE = "vime.backends.megatron_utils.megatron_to_hf"
+CHECKPOINT_DELTA_UPDATER_MODULE = "vime.backends.megatron_utils.update_weight.update_weight_from_checkpoint_delta"
 
 NUM_GPUS = 0
 
@@ -54,6 +56,8 @@ _STUBBED_MODULES = (
     "vllm.distributed.weight_transfer.nccl_engine",
     "triton",
     "triton.language",
+    COORDINATOR_MODULE,
+    CHECKPOINT_DELTA_UPDATER_MODULE,
 )
 
 
@@ -137,7 +141,15 @@ class RecordingEngine:
         default_factory=lambda: RecordingRemoteMethod("destroy_ref")
     )
     start_weight_update: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod("start_ref"))
+    start_draft_weight_update: RecordingRemoteMethod = field(
+        default_factory=lambda: RecordingRemoteMethod("draft_ref")
+    )
     finish_weight_update: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod("finish_ref"))
+    pause_generation: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod("pause_ref"))
+    flush_cache: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod("flush_ref"))
+    post_process_weights: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod("post_ref"))
+    set_weight_version: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod("version_ref"))
+    continue_generation: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod("continue_ref"))
 
 
 @dataclass
@@ -199,7 +211,15 @@ def _patch_trainer_send(monkeypatch, upw, seen: list[dict]) -> None:
 
 def _make_instance(upw):
     obj = object.__new__(upw.UpdateWeightFromDistributed)
-    obj.args = type("Args", (), {"update_weight_buffer_size": 1 << 30})()
+    obj.args = type(
+        "Args",
+        (),
+        {
+            "update_weight_buffer_size": 1 << 30,
+            "enable_mtp_training": False,
+            "vllm_speculative_config": None,
+        },
+    )()
     obj.model = []
     obj.weights_getter = lambda: {}
     obj.model_name = "test"
@@ -292,6 +312,7 @@ def test_remote_kwargs_are_always_packed(upw, monkeypatch):
     assert "packed" not in kw
     assert "group_name" not in kw
     assert kw["weight_version"] == "42"
+    assert kw["record_weight_version"] is True
     assert kw["names"] == ["layer.0.weight"]
     assert kw["shapes"] == [torch.Size([2, 2])]
     assert kw["dtypes"] == [torch.float32]
@@ -686,22 +707,178 @@ def test_weight_update_session_calls_start_and_finish(upw, monkeypatch):
 
     upw._begin_vllm_weight_update_session(engines)
     upw._end_vllm_weight_update_session(engines)
+    upw._begin_vllm_weight_update_session(engines, draft=True)
 
     assert len(engines[0].start_weight_update.calls) == 1
     assert engines[0].start_weight_update.calls[0].kwargs["is_checkpoint_format"] is True
     assert len(engines[1].start_weight_update.calls) == 1
     assert len(engines[0].finish_weight_update.calls) == 1
     assert len(engines[1].finish_weight_update.calls) == 1
-    assert barrier_calls == ["dummy-gloo-group", "dummy-gloo-group"]
+    assert len(engines[0].start_draft_weight_update.calls) == 1
+    assert len(engines[1].start_draft_weight_update.calls) == 1
+    assert barrier_calls == ["dummy-gloo-group", "dummy-gloo-group", "dummy-gloo-group"]
 
 
 @pytest.mark.unit
-def test_source_wraps_sync_with_weight_update_session(upw):
-    src = inspect.getsource(upw.UpdateWeightFromDistributed.update_weights)
-    assert "_begin_vllm_weight_update_session" in src
-    assert "start_draft_weight_update" in src
-    assert "_end_vllm_weight_update_session" in src
-    assert src.count("_send_weights_to_rollout_engines") == 2
+def test_distributed_adapter_follows_coordinator_outcome(upw, monkeypatch):
+    obj = _make_instance(upw)
+    sessions = []
+
+    class RecordingCoordinator:
+        def __init__(self, rollout_engines, quantization_config):
+            assert rollout_engines is obj.rollout_engines
+            assert quantization_config is None
+
+        def run(self, *, current_version, transfer_target, transfer_draft, commit):
+            assert current_version == 0
+            assert transfer_draft is None
+            assert commit is None
+            transfer_target(1)
+            return 1
+
+    monkeypatch.setattr(upw, "WeightUpdateCoordinator", RecordingCoordinator)
+    monkeypatch.setattr(
+        obj,
+        "_run_weight_update_session",
+        lambda *, draft=False: sessions.append((obj.weight_version, draft)),
+    )
+
+    obj.update_weights()
+
+    assert sessions == [(1, False)]
+    assert obj.weight_version == 1
+
+    # A later failing update restores the adapter's committed version marker.
+    class FailingCoordinator:
+        def __init__(self, rollout_engines, quantization_config):
+            pass
+
+        def run(self, *, current_version, transfer_target, transfer_draft, commit):
+            transfer_target(current_version + 1)
+            raise RuntimeError("transfer failed")
+
+    monkeypatch.setattr(upw, "WeightUpdateCoordinator", FailingCoordinator)
+
+    with pytest.raises(RuntimeError, match="transfer failed"):
+        obj.update_weights()
+
+    assert obj.weight_version == 1
+
+
+@pytest.mark.unit
+def test_distributed_adapter_runs_target_then_mtp_draft(upw, monkeypatch):
+    obj = _make_instance(upw)
+    obj.args.enable_mtp_training = True
+    obj.args.vllm_speculative_config = {"method": "mtp"}
+    sessions = []
+
+    class RecordingCoordinator:
+        def __init__(self, rollout_engines, quantization_config):
+            pass
+
+        def run(self, *, current_version, transfer_target, transfer_draft, commit):
+            assert transfer_draft is not None
+            assert commit is None
+            transfer_target(current_version + 1)
+            transfer_draft(current_version + 1)
+            return current_version + 1
+
+    monkeypatch.setattr(upw, "WeightUpdateCoordinator", RecordingCoordinator)
+    monkeypatch.setattr(
+        obj,
+        "_run_weight_update_session",
+        lambda *, draft=False: sessions.append((obj.weight_version, draft)),
+    )
+
+    obj.update_weights()
+
+    assert sessions == [(1, False), (1, True)]
+    assert obj.weight_version == 1
+
+
+@pytest.fixture
+def checkpoint_delta_updater(upw):
+    del upw
+    sys.modules.pop(CHECKPOINT_DELTA_UPDATER_MODULE, None)
+    try:
+        yield importlib.import_module(CHECKPOINT_DELTA_UPDATER_MODULE)
+    finally:
+        sys.modules.pop(CHECKPOINT_DELTA_UPDATER_MODULE, None)
+
+
+@pytest.mark.unit
+def test_checkpoint_delta_snapshot_follows_coordinator_outcome(
+    upw,
+    checkpoint_delta_updater,
+    monkeypatch,
+):
+    events = []
+
+    class Source:
+        is_seed_update = True
+        total_elements = 4
+        changed_elements = 4
+        wire_bytes = 8
+
+        def begin_update(self, *, base_version, target_version):
+            events.append(("begin", base_version, target_version))
+
+        def commit(self):
+            events.append(("commit",))
+
+        def abort(self):
+            events.append(("abort",))
+
+    obj = object.__new__(checkpoint_delta_updater.UpdateWeightFromCheckpointDelta)
+    obj.weight_version = 0
+    obj._is_pp_src_rank = True
+    obj._delta_source = Source()
+    obj.update_weight_metrics = {}
+
+    def coordinator_success(_self):
+        events.append(("coordinator-enter",))
+        commit = _self._get_weight_update_commit()
+        assert commit is not None
+        commit()
+        events.append(("coordinator-success",))
+        obj.weight_version = 1
+
+    monkeypatch.setattr(
+        upw.UpdateWeightFromDistributed,
+        "update_weights",
+        coordinator_success,
+    )
+
+    obj.update_weights()
+
+    assert events == [
+        ("begin", 0, 1),
+        ("coordinator-enter",),
+        ("commit",),
+        ("coordinator-success",),
+    ]
+
+    # Coordinator failure aborts the pending snapshot instead of committing it.
+    events.clear()
+
+    def coordinator_failure(_self):
+        events.append(("coordinator-failure",))
+        raise RuntimeError("publish failed")
+
+    monkeypatch.setattr(
+        upw.UpdateWeightFromDistributed,
+        "update_weights",
+        coordinator_failure,
+    )
+
+    with pytest.raises(RuntimeError, match="publish failed"):
+        obj.update_weights()
+
+    assert events == [
+        ("begin", 1, 2),
+        ("coordinator-failure",),
+        ("abort",),
+    ]
 
 
 @pytest.mark.unit

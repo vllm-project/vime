@@ -307,18 +307,94 @@ def test_vime_validate_args_preserves_zero_rollout_gpus_without_colocate(monkeyp
 
 
 @pytest.mark.unit
-def test_update_weight_delta_disabled(monkeypatch):
+def test_update_weight_direct_delta_allowed(monkeypatch):
     module = load_vime_arguments_module(monkeypatch)
-    for transport, colocate in (("nccl", False), ("tensor", False), ("nccl", True)):
-        args = types.SimpleNamespace(
-            update_weight_mode="delta",
-            update_weight_transport=transport,
-            update_weight_disk_dir=None,
-            update_weight_delta_dir=None,
-            colocate=colocate,
-        )
-        with pytest.raises(NotImplementedError, match="unverified on vime"):
-            module._validate_update_weight_args(args)
+    args = types.SimpleNamespace(
+        update_weight_mode="delta",
+        update_weight_transport="nccl",
+        colocate=False,
+        rollout_external=False,
+        train_backend="megatron",
+        offload_rollout=False,
+        enable_mtp_training=False,
+        vllm_speculative_config=None,
+        fp16=False,
+        pipeline_model_parallel_size=1,
+        virtual_pipeline_model_parallel_size=None,
+        num_layers_per_virtual_pipeline_stage=None,
+        vllm_pipeline_parallel_size=1,
+        vllm_data_parallel_size=1,
+        update_weight_start_version=0,
+        vllm_worker_extension_cls="",
+    )
+
+    module._validate_update_weight_args(args)
+
+
+@pytest.mark.unit
+def test_update_weight_delta_disk_is_reserved(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = types.SimpleNamespace(
+        update_weight_mode="delta",
+        update_weight_transport="disk",
+    )
+
+    with pytest.raises(NotImplementedError, match="reserved but not implemented"):
+        module._validate_update_weight_args(args)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"colocate": True}, "non-colocated"),
+        ({"rollout_external": True}, "VIME-launched"),
+        ({"use_fault_tolerance": True}, "replacement rollout workers"),
+        ({"offload_rollout": True}, "rollout offload"),
+        ({"fp16": True}, "BF16"),
+        ({"pipeline_model_parallel_size": 2}, "Megatron PP=1"),
+        ({"vllm_pipeline_parallel_size": 2}, "vLLM PP=1"),
+        ({"vllm_data_parallel_size": 2}, "vLLM DP=1"),
+        (
+            {"vllm_enable_deterministic_inference": True},
+            "batch-invariant deterministic inference",
+        ),
+        ({"update_weight_start_version": 4}, "version 0"),
+        ({"vllm_speculative_config": {"method": "mtp"}}, "speculative"),
+        (
+            {"rollout_function_path": "vime.rollout.fully_async_rollout.generate_rollout_fully_async"},
+            "fully-async",
+        ),
+    ],
+)
+def test_update_weight_direct_delta_rejects_unsupported_mvp_modes(
+    monkeypatch,
+    override,
+    message,
+):
+    module = load_vime_arguments_module(monkeypatch)
+    values = dict(
+        update_weight_mode="delta",
+        update_weight_transport="nccl",
+        colocate=False,
+        rollout_external=False,
+        train_backend="megatron",
+        offload_rollout=False,
+        enable_mtp_training=False,
+        vllm_speculative_config=None,
+        fp16=False,
+        pipeline_model_parallel_size=1,
+        virtual_pipeline_model_parallel_size=None,
+        num_layers_per_virtual_pipeline_stage=None,
+        vllm_pipeline_parallel_size=1,
+        vllm_data_parallel_size=1,
+        update_weight_start_version=0,
+        vllm_worker_extension_cls="",
+    )
+    values.update(override)
+
+    with pytest.raises((ValueError, NotImplementedError), match=message):
+        module._validate_update_weight_args(types.SimpleNamespace(**values))
 
 
 if __name__ == "__main__":

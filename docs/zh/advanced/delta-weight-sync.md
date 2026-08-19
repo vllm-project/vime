@@ -2,9 +2,16 @@
 
 Delta 权重同步只发送两次同步之间发生变化的字节，而不是每次都写一份完整 checkpoint，以此让非 colocate 的 rollout engine 保持最新。它面向大模型、跨集群或跨数据中心的训推解耦场景——这种场景下每次都写整份 actor 权重是主要开销。
 
-它**只支持 disk transport**。训练端把每次同步发布为一份 canonical HF checkpoint 目录；engine 的 `/pull_weights` 端点（随 vime 的 vllm patch 提供）把 apply 扇出到 **engine 覆盖的每一个 host** 并校验，随后 engine 通过**原生**的 `update_weights_from_disk` 端点 reload 打过补丁的本地 checkpoint。vime 对每个 engine 只与一个端点通信，所以多节点 serving 和外部 rollout engine 在 vime 侧都不需要任何额外支持。
+> **状态：**`--update-weight-mode delta` 现在选择的是**直连 NCCL** 的 delta 实现
+> (`--update-weight-transport nccl`)：训练端基于 checkpoint 坐标快照做 diff，只把变化的
+> 权重通过既有 NCCL 通道送进 vLLM 的 checkpoint weight patch API。环境要求和配置方式见
+> [`examples/delta_weight_sync/README.md`](https://github.com/vllm-project/vime/blob/main/examples/delta_weight_sync/README.md)。
+> 下文描述的**基于磁盘**的设计为保留设计、尚未实现：`--update-weight-mode delta
+> --update-weight-transport disk` 会抛出 `NotImplementedError`。
 
-Vime 当前在选择 `--update-weight-mode=delta` 时会通过 `NotImplementedError` guard 拒绝该路径；下文保留为机械同步的上游参考实现。
+磁盘方案基于 **disk transport**。训练端把每次同步发布为一份 canonical HF checkpoint 目录；engine 的 `/pull_weights` 端点（随 vime 的 vllm patch 提供）把 apply 扇出到 **engine 覆盖的每一个 host** 并校验，随后 engine 通过**原生**的 `update_weights_from_disk` 端点 reload 打过补丁的本地 checkpoint。vime 对每个 engine 只与一个端点通信，所以多节点 serving 和外部 rollout engine 在 vime 侧都不需要任何额外支持。
+
+Vime 在 delta 模式与 `--update-weight-transport=disk` 组合时会通过 `NotImplementedError` guard 拒绝该路径；下文保留为上游参考实现。
 
 ## 配置
 

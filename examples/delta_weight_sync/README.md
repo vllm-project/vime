@@ -1,44 +1,110 @@
 # Delta Weight Sync
 
-Non-colocated weight sync that ships only the **changed bytes** between two syncs instead of a
-full checkpoint, for training/inference disaggregation across clusters or datacenters. The
-trainer publishes per-tensor deltas to a shared filesystem as a canonical HF checkpoint
-directory; each engine's `/pull_weights` applies them into a host-local checkpoint on every
-host it spans, and the engines reload through the ordinary `update_weights_from_disk` path —
-vime only ever talks to one endpoint per engine.
+VIME currently provides a direct delta-weight-update (DWU) MVP for a
+non-colocated Megatron trainer and VIME-launched vLLM rollout engines. The
+trainer exports canonical Hugging Face/checkpoint-coordinate tensors, keeps a
+committed CPU snapshot, and sends:
 
-Vime currently rejects `--update-weight-mode delta` with a `NotImplementedError`; this example
-is retained as mechanically synchronized upstream reference material.
+- a dense BF16 seed for version 1; then
+- absolute BF16 values plus flattened `int32` checkpoint indices for elements
+  whose bit patterns changed after a committed optimizer step.
 
-See [Delta Weight Sync](../../docs/en/advanced/delta-weight-sync.md) for the full mechanism,
-encodings, integrity checks, and shared-filesystem visibility hooks.
+The vLLM worker applies those patches through the model's native
+`load_weights()` mapping. Consequently, VIME does not need to know vLLM's
+runtime QKV/gate-up packing or tensor-parallel parameter names.
 
-## Try it
+```text
+Megatron TP/DP weights
+        -> canonical HF export
+        -> dense seed or absolute sparse checkpoint patches
+        -> NCCL
+        -> vLLM CheckpointWeightPatch
+        -> native model.load_weights()
+```
 
-`run-glm4.7-30B-A3B-delta.sh` runs the disk delta path on GLM-4.7-Flash, non-colocated across a
-2-node (16-GPU) Ray cluster. See its header for prerequisites.
+## vLLM dependency
 
-## Minimal flags
+Direct DWU requires a vLLM build that contains the checkpoint weight patch
+API (`CheckpointWeightPatch` and `load_checkpoint_weight_patches()` in
+`vllm.model_executor.model_loader.checkpoint_weight_patch`) from
+[vLLM PR #50723](https://github.com/vllm-project/vllm/pull/50723).
 
-Add to a non-colocated training run (the trainer and engines only need to share the filesystem
-at `--update-weight-disk-dir`):
+Until #50723 merges, no vLLM release contains that API; build vLLM from the
+PR branch. This path was tested at PR commit
+`fd07acd5b596c11f949fa71b5f0ee926b9e6bf17`; vime fails fast at engine startup
+if the patch API is missing.
+
+## Enabling direct DWU
+
+Add to a non-colocated Megatron training run (vime starts and owns the vLLM
+engines; do not set `--rollout-external`):
 
 ```bash
 --update-weight-mode delta \
---update-weight-transport disk \
---update-weight-disk-dir   /shared/fs/delta-updates \
---update-weight-local-checkpoint-dir /local/nvme/rollout-ckpt \
---update-weight-delta-encoding xor \
---update-weight-delta-checksum xxh3-128
+--update-weight-transport nccl
 ```
 
-- `--update-weight-disk-dir` — shared directory the trainer writes deltas to and the hosts read.
-- `--update-weight-local-checkpoint-dir` — host-local full HF checkpoint the delta patches in
-  place; materialized from the engine's model path on the first `/pull_weights`.
-- `--update-weight-delta-encoding` — `xor` (smallest/fastest) or `overwrite` (idempotent).
-- `--update-weight-delta-checksum` — `xxh3-128` (default), `blake3`, or `adler32`.
+The first sync ships a mandatory dense seed (start version 0) that aligns the
+rollout weights with the trainer checkpoint; every later sync ships only the
+weights whose BF16 bits changed.
 
-For object-store-backed volumes that need an explicit commit/refresh to make writes visible
-across hosts, supply `--custom-update-weight-post-write-path` (trainer side) /
-`--vllm-custom-pull-weights-pre-read-hook` (engine side) — no vendor-specific code lives in vime
-or vllm; see the doc.
+## Current MVP boundary
+
+The direct path currently requires:
+
+- `--train-backend megatron`;
+- non-colocated, VIME-launched rollout engines;
+- BF16, unquantized weights;
+- Megatron PP=1 and VPP=1;
+- vLLM PP=1 and DP=1;
+- no rollout offload, speculative decoding, MTP draft update, fault-tolerant
+  worker replacement, or fully-async rollout; and
+- version 0 startup followed by a mandatory dense seed.
+
+The source currently performs a full canonical-HF export and keeps the
+committed weights in CPU memory. Steady-state network traffic is sparse, but
+source traversal and snapshot memory are not yet sparse or sharded.
+
+Delta over disk is only a reserved interface. The current argument validator
+rejects:
+
+```bash
+--update-weight-mode delta --update-weight-transport disk
+```
+
+with `NotImplementedError`. The existing GLM disk script is retained as
+historical interface material; it is not a runnable path for the current MVP.
+
+## Verifying a run
+
+A successful direct-DWU run must show all of the following in the Ray job
+log:
+
+1. Version 1 logs `dense_seed=True` with `changed == total`.
+2. After a real optimizer step, version 2 or later logs
+   `dense_seed=False`, `0 < changed < total`, and a smaller `wire_bytes` than
+   the dense seed.
+3. Training reports a finite, nonzero `train/grad_norm`.
+4. Rollout generation succeeds after the sparse commit and no worker reports a
+   base-version, sequence, final-manifest, or failed-session error.
+
+The updater exports these step metrics after a committed update:
+
+```text
+weight_sync/is_dense_seed
+weight_sync/total_elements
+weight_sync/changed_elements
+weight_sync/delta_density
+weight_sync/wire_bytes
+weight_sync/seconds
+```
+
+Its summary line has this form:
+
+```text
+Direct DWU committed version=<N> dense_seed=<bool> changed=<M>/<T> \
+density=<ratio> wire_bytes=<bytes> seconds=<seconds>
+```
+
+Process launch, a dense seed alone, or static tests do not by themselves
+demonstrate a working delta path; check all four criteria above.
