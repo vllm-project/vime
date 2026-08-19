@@ -7,7 +7,8 @@
 set -e -o pipefail
 
 VIME_DIR="${VIME_DIR:-/root/vime}"
-VIME_NPU_PATCH_STATE_DIR="${VIME_NPU_PATCH_STATE_DIR:-/opt/vime-npu/patch-state}"
+VIME_NPU_PATCH_STATE_DIR="${VIME_NPU_PATCH_STATE_DIR:-/opt/npu_patch}"
+VIME_NPU_PATCH_SOURCE_ROOT="${VIME_NPU_PATCH_SOURCE_ROOT:-${VIME_DIR}}"
 PATCH_SERIES_RELATIVE_PATH="docker/npu_patch/series.conf"
 
 sha256_stdin() {
@@ -31,7 +32,7 @@ SERIES_ENTRIES=()
 
 load_series() {
     local series_file="$1"
-    local line target patch_file extra
+    local line target image_patch source_patch extra
 
     if [ ! -f "$series_file" ]; then
         echo "ERROR: Patch series not found: $series_file" >&2
@@ -44,16 +45,20 @@ load_series() {
             continue
         fi
 
-        IFS='|' read -r target patch_file extra <<< "$line"
-        if [ -z "$target" ] || [ -z "$patch_file" ] || [ -n "$extra" ]; then
+        IFS='|' read -r target image_patch source_patch extra <<< "$line"
+        if [ -z "$target" ] || [ -z "$image_patch" ] || [ -z "$source_patch" ] || [ -n "$extra" ]; then
             echo "ERROR: Invalid patch series entry: $line" >&2
             return 1
         fi
-        if [[ "$patch_file" = /* || "/$patch_file/" = *"/../"* ]]; then
-            echo "ERROR: Patch path must stay under the source root: $patch_file" >&2
+        if [[ "$image_patch" = */* ]]; then
+            echo "ERROR: Image patch must be a flat file name: $image_patch" >&2
             return 1
         fi
-        SERIES_ENTRIES+=("${target}|${patch_file}")
+        if [[ "$source_patch" = /* || "/$source_patch/" = *"/../"* ]]; then
+            echo "ERROR: Source patch must stay under the VIME root: $source_patch" >&2
+            return 1
+        fi
+        SERIES_ENTRIES+=("${target}|${image_patch}|${source_patch}")
     done < "$series_file"
 }
 
@@ -73,13 +78,19 @@ validate_series_entry() {
 
 series_digest() {
     local series_file="$1"
-    local source_root="$2"
-    local entry target patch_file patch_path patch_sha
+    local patch_root="$2"
+    local path_kind="$3"
+    local entry target image_patch source_patch patch_ref patch_path patch_sha
 
     load_series "$series_file"
     for entry in "${SERIES_ENTRIES[@]}"; do
-        IFS='|' read -r target patch_file <<< "$entry"
-        patch_path="${source_root}/${patch_file}"
+        IFS='|' read -r target image_patch source_patch <<< "$entry"
+        case "$path_kind" in
+            image) patch_ref="$image_patch" ;;
+            source) patch_ref="$source_patch" ;;
+            *) echo "ERROR: Unknown patch path kind: $path_kind" >&2; return 1 ;;
+        esac
+        patch_path="${patch_root}/${patch_ref}"
         if [ ! -f "$patch_path" ]; then
             echo "ERROR: Patch file not found: $patch_path" >&2
             return 1
@@ -89,10 +100,15 @@ series_digest() {
     {
         printf 'vime-npu-patch-series-v1\0'
         for entry in "${SERIES_ENTRIES[@]}"; do
-            IFS='|' read -r target patch_file <<< "$entry"
-            patch_path="${source_root}/${patch_file}"
+            IFS='|' read -r target image_patch source_patch <<< "$entry"
+            if [ "$path_kind" = "image" ]; then
+                patch_ref="$image_patch"
+            else
+                patch_ref="$source_patch"
+            fi
+            patch_path="${patch_root}/${patch_ref}"
             patch_sha=$(sha256_file "$patch_path")
-            printf '%s\0%s\0%s\0' "$target" "$patch_file" "$patch_sha"
+            printf '%s\0%s\0%s\0%s\0' "$target" "$image_patch" "$source_patch" "$patch_sha"
         done
     } | sha256_stdin
 }
@@ -100,14 +116,14 @@ series_digest() {
 apply_series() {
     local series_file="$1"
     local source_root="$2"
-    local entry target patch_file patch_path
+    local entry target image_patch source_patch patch_path
 
     load_series "$series_file"
     for entry in "${SERIES_ENTRIES[@]}"; do
-        IFS='|' read -r target patch_file <<< "$entry"
-        patch_path="${source_root}/${patch_file}"
+        IFS='|' read -r target image_patch source_patch <<< "$entry"
+        patch_path="${source_root}/${source_patch}"
         validate_series_entry "$target" "$patch_path"
-        echo "INFO: Applying $patch_file to $target"
+        echo "INFO: Applying $source_patch to $target"
         git -C "$target" apply --check --whitespace=nowarn "$patch_path"
         git -C "$target" apply --whitespace=nowarn "$patch_path"
     done
@@ -115,16 +131,16 @@ apply_series() {
 
 revert_series() {
     local series_file="$1"
-    local source_root="$2"
-    local i entry target patch_file patch_path
+    local image_root="$2"
+    local i entry target image_patch source_patch patch_path
 
     load_series "$series_file"
     for ((i=${#SERIES_ENTRIES[@]}-1; i>=0; i--)); do
         entry="${SERIES_ENTRIES[$i]}"
-        IFS='|' read -r target patch_file <<< "$entry"
-        patch_path="${source_root}/${patch_file}"
+        IFS='|' read -r target image_patch source_patch <<< "$entry"
+        patch_path="${image_root}/${image_patch}"
         validate_series_entry "$target" "$patch_path"
-        echo "INFO: Reverting $patch_file from $target"
+        echo "INFO: Reverting $image_patch from $target"
         git -C "$target" apply --reverse --check --whitespace=nowarn "$patch_path"
         git -C "$target" apply --reverse --whitespace=nowarn "$patch_path"
     done
@@ -137,8 +153,8 @@ reconcile_series() {
     local new_root="$4"
     local old_digest new_digest
 
-    old_digest=$(series_digest "$old_series" "$old_root")
-    new_digest=$(series_digest "$new_series" "$new_root")
+    old_digest=$(series_digest "$old_series" "$old_root" image)
+    new_digest=$(series_digest "$new_series" "$new_root" source)
     if [ "$old_digest" = "$new_digest" ]; then
         echo "INFO: Patch series is unchanged"
         return
@@ -176,8 +192,8 @@ sort_ascend_visible_devices() {
 }
 
 main() {
-    local old_series="${VIME_NPU_PATCH_STATE_DIR}/${PATCH_SERIES_RELATIVE_PATH}"
-    local new_series="${VIME_DIR}/${PATCH_SERIES_RELATIVE_PATH}"
+    local old_series="${VIME_NPU_PATCH_STATE_DIR}/series.conf"
+    local new_series="${VIME_NPU_PATCH_SOURCE_ROOT}/${PATCH_SERIES_RELATIVE_PATH}"
 
     echo "=== Step 1: Sort ASCEND_VISIBLE_DEVICES ==="
     sort_ascend_visible_devices
@@ -192,7 +208,7 @@ main() {
     fi
 
     echo "=== Step 3: Reconcile image patches with current VIME patches ==="
-    reconcile_series "$old_series" "$VIME_NPU_PATCH_STATE_DIR" "$new_series" "$VIME_DIR"
+    reconcile_series "$old_series" "$VIME_NPU_PATCH_STATE_DIR" "$new_series" "$VIME_NPU_PATCH_SOURCE_ROOT"
 
     echo "=== Step 4: Install current VIME code ==="
     install_vime_code
@@ -203,11 +219,11 @@ main() {
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     case "${1:-}" in
         series-digest)
-            if [ "$#" -ne 3 ]; then
-                echo "Usage: $0 series-digest SERIES_FILE SOURCE_ROOT" >&2
+            if [ "$#" -ne 4 ]; then
+                echo "Usage: $0 series-digest SERIES_FILE PATCH_ROOT image|source" >&2
                 exit 2
             fi
-            series_digest "$2" "$3"
+            series_digest "$2" "$3" "$4"
             exit
             ;;
         reconcile)

@@ -1,8 +1,8 @@
 # Usage:  buildkite-agent pipeline upload .buildkite/pipeline-npu.yaml
 #
 # This pipeline is for running NPU tests on PRs.
-# Scheduled builds always build an image. PR builds use the pre-built default
-# image unless the contributor explicitly selects the image-build option.
+# Scheduled builds always build a fresh image. PR builds reuse DEFAULT_CI_IMAGE
+# unless image-build is selected; patch-only changes are reconciled at runtime.
 
 steps:
   - group: ":pipeline: Run NPU test"
