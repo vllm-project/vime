@@ -1,13 +1,8 @@
 # Usage:  buildkite-agent pipeline upload .buildkite/pipeline-npu.yaml
 #
 # This pipeline is for running NPU tests on PRs.
-# Before execution, it checks:
-#   1. Trigger type: PR trigger or scheduled trigger
-#   2. Changed files: whether docker/Dockerfile.npu is modified (PR trigger only)
-# Based on the check results:
-#   - Image build decision: scheduled trigger always builds; PR trigger builds only if Dockerfile.npu is modified
-#   - Test image selection: uses newly built image ($IMAGE_REGISTRY/$IMAGE_NAME:$VIME_IMAGE_TAG) when build is required,
-#     otherwise uses pre-built default image (quay.io/ascend/vime:0.3.0-a3-vllm0.22.1rc1) 
+# Scheduled builds always build an image. PR builds use the pre-built default
+# image unless the contributor explicitly selects the image-build option.
 
 steps:
   - group: ":pipeline: Run NPU test"

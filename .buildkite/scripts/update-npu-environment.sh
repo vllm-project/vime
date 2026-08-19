@@ -1,39 +1,171 @@
 #!/bin/bash
-# Purpose: Updates NPU test environment to match PR changes
-#          - Saves and reverts all old patches before code update (for proper revert)
-#          - Updates VIME code to the specified commit
-#          - Applies all new patches to corresponding components
-#          - Sorts ASCEND_VISIBLE_DEVICES for consistent device ordering
+# Purpose: Updates an NPU test container to match the requested VIME commit.
+#          - Reads the image's persisted OLD patch series and exact patch bytes
+#          - Updates VIME, then reconciles OLD -> NEW in declared series order
+#          - Installs the current VIME checkout and normalizes visible devices
 # Usage: Called by Buildkite pipeline during NPU test runs
-set -e
+set -e -o pipefail
 
-VIME_DIR="/root/vime"
+VIME_DIR="${VIME_DIR:-/root/vime}"
+VIME_NPU_PATCH_STATE_DIR="${VIME_NPU_PATCH_STATE_DIR:-/opt/vime-npu/patch-state}"
+PATCH_SERIES_RELATIVE_PATH="docker/npu_patch/series.conf"
 
-declare -A PATCH_CONFIGS=(
-    ["vllm.patch"]="/vllm-workspace/vllm"
-    ["vllm-ascend.patch"]="/vllm-workspace/vllm-ascend"
-    ["megatron_comm.patch"]="/root/Megatron-LM"
-    ["megatron.patch"]="/root/Megatron-LM"
-    ["megatron-bridge.patch"]="/root/Megatron-Bridge"
-    ["mindspeed.patch"]="/root/MindSpeed"
-)
+sha256_stdin() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{print $1}'
+    else
+        shasum -a 256 | awk '{print $1}'
+    fi
+}
+
+sha256_file() {
+    local path="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$path" | awk '{print $1}'
+    else
+        shasum -a 256 "$path" | awk '{print $1}'
+    fi
+}
+
+SERIES_ENTRIES=()
+
+load_series() {
+    local series_file="$1"
+    local line target patch_file extra
+
+    if [ ! -f "$series_file" ]; then
+        echo "ERROR: Patch series not found: $series_file" >&2
+        return 1
+    fi
+
+    SERIES_ENTRIES=()
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]]; then
+            continue
+        fi
+
+        IFS='|' read -r target patch_file extra <<< "$line"
+        if [ -z "$target" ] || [ -z "$patch_file" ] || [ -n "$extra" ]; then
+            echo "ERROR: Invalid patch series entry: $line" >&2
+            return 1
+        fi
+        if [[ "$patch_file" = /* || "/$patch_file/" = *"/../"* ]]; then
+            echo "ERROR: Patch path must stay under the source root: $patch_file" >&2
+            return 1
+        fi
+        SERIES_ENTRIES+=("${target}|${patch_file}")
+    done < "$series_file"
+}
+
+validate_series_entry() {
+    local target="$1"
+    local patch_path="$2"
+
+    if ! git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "ERROR: Patch target is not a Git worktree: $target" >&2
+        return 1
+    fi
+    if [ ! -f "$patch_path" ]; then
+        echo "ERROR: Patch file not found: $patch_path" >&2
+        return 1
+    fi
+}
+
+series_digest() {
+    local series_file="$1"
+    local source_root="$2"
+    local entry target patch_file patch_path patch_sha
+
+    load_series "$series_file"
+    for entry in "${SERIES_ENTRIES[@]}"; do
+        IFS='|' read -r target patch_file <<< "$entry"
+        patch_path="${source_root}/${patch_file}"
+        if [ ! -f "$patch_path" ]; then
+            echo "ERROR: Patch file not found: $patch_path" >&2
+            return 1
+        fi
+    done
+
+    {
+        printf 'vime-npu-patch-series-v1\0'
+        for entry in "${SERIES_ENTRIES[@]}"; do
+            IFS='|' read -r target patch_file <<< "$entry"
+            patch_path="${source_root}/${patch_file}"
+            patch_sha=$(sha256_file "$patch_path")
+            printf '%s\0%s\0%s\0' "$target" "$patch_file" "$patch_sha"
+        done
+    } | sha256_stdin
+}
+
+apply_series() {
+    local series_file="$1"
+    local source_root="$2"
+    local entry target patch_file patch_path
+
+    load_series "$series_file"
+    for entry in "${SERIES_ENTRIES[@]}"; do
+        IFS='|' read -r target patch_file <<< "$entry"
+        patch_path="${source_root}/${patch_file}"
+        validate_series_entry "$target" "$patch_path"
+        echo "INFO: Applying $patch_file to $target"
+        git -C "$target" apply --check --whitespace=nowarn "$patch_path"
+        git -C "$target" apply --whitespace=nowarn "$patch_path"
+    done
+}
+
+revert_series() {
+    local series_file="$1"
+    local source_root="$2"
+    local i entry target patch_file patch_path
+
+    load_series "$series_file"
+    for ((i=${#SERIES_ENTRIES[@]}-1; i>=0; i--)); do
+        entry="${SERIES_ENTRIES[$i]}"
+        IFS='|' read -r target patch_file <<< "$entry"
+        patch_path="${source_root}/${patch_file}"
+        validate_series_entry "$target" "$patch_path"
+        echo "INFO: Reverting $patch_file from $target"
+        git -C "$target" apply --reverse --check --whitespace=nowarn "$patch_path"
+        git -C "$target" apply --reverse --whitespace=nowarn "$patch_path"
+    done
+}
+
+reconcile_series() {
+    local old_series="$1"
+    local old_root="$2"
+    local new_series="$3"
+    local new_root="$4"
+    local old_digest new_digest
+
+    old_digest=$(series_digest "$old_series" "$old_root")
+    new_digest=$(series_digest "$new_series" "$new_root")
+    if [ "$old_digest" = "$new_digest" ]; then
+        echo "INFO: Patch series is unchanged"
+        return
+    fi
+
+    revert_series "$old_series" "$old_root"
+    apply_series "$new_series" "$new_root"
+}
 
 update_vime_code() {
     echo "INFO: Updating VIME code..."
-    cd "$VIME_DIR"
 
-    if [ -n "${BUILDKITE_COMMIT}" ]; then
+    if [ -n "${BUILDKITE_COMMIT:-}" ]; then
         echo "INFO: Fetching and checking out commit ${BUILDKITE_COMMIT}"
-        git fetch origin "${BUILDKITE_COMMIT}"
-        git checkout "${BUILDKITE_COMMIT}"
-        pip install -e . --no-deps --break-system-packages || pip install -e . --no-deps
+        git -C "$VIME_DIR" fetch origin "${BUILDKITE_COMMIT}"
+        git -C "$VIME_DIR" checkout "${BUILDKITE_COMMIT}"
     else
         echo "INFO: BUILDKITE_COMMIT not set, skipping code update"
     fi
 }
 
+install_vime_code() {
+    pip install -e "$VIME_DIR" --no-deps --break-system-packages || pip install -e "$VIME_DIR" --no-deps
+}
+
 sort_ascend_visible_devices() {
-    export ASCEND_VISIBLE_DEVICES="${ASCEND_VISIBLE_DEVICES:-$ASCEND_RT_VISIBLE_DEVICES}"
+    export ASCEND_VISIBLE_DEVICES="${ASCEND_VISIBLE_DEVICES:-${ASCEND_RT_VISIBLE_DEVICES:-}}"
     echo "Value: ${ASCEND_VISIBLE_DEVICES}"
     if [ -n "${ASCEND_VISIBLE_DEVICES}" ]; then
         SORTED_DEVICES=$(echo "${ASCEND_VISIBLE_DEVICES}" | tr ',' '\n' | sort -n | tr '\n' ',')
@@ -43,123 +175,50 @@ sort_ascend_visible_devices() {
     fi
 }
 
-get_patch_component() {
-    local patch_name="$1"
-    local config="${PATCH_CONFIGS[$patch_name]}"
-    echo "$config"
-}
-
-is_patch_applied() {
-    local component_dir="$1"
-    local patch_path="$2"
-
-    if git -C "$component_dir" apply --reverse --check --whitespace=nowarn "$patch_path"; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-revert_patch() {
-    local component_dir="$1"
-    local patch_name="$2"
-    local old_patch_path="$3"
-
-    if [ -f "$old_patch_path" ]; then
-        echo "INFO: Attempting to reverse-apply old patch from $old_patch_path"
-        if git -C "$component_dir" apply --reverse --whitespace=nowarn "$old_patch_path"; then
-            echo "INFO: Successfully reverted old $patch_name"
-        else
-            echo "WARNING: Failed to reverse-apply old patch $patch_name, skipping"
-        fi
-    else
-        echo "INFO: Old patch $patch_name not found at $old_patch_path, skipping revert"
-    fi
-}
-
-apply_patch() {
-    local component_dir="$1"
-    local patch_path="$2"
-    local patch_name="$3"
-
-    echo "INFO: Applying $patch_name to $component_dir"
-    if git -C "$component_dir" apply --whitespace=nowarn "$patch_path"; then
-        echo "INFO: Successfully applied $patch_name"
-    else
-        echo "ERROR: Failed to apply $patch_name to $component_dir"
-        exit 1
-    fi
-}
-
-save_old_patches() {
-    local backup_dir="${VIME_DIR}/.old_patches"
-
-    echo "INFO: Saving old patches to $backup_dir..." >&2
-    mkdir -p "$backup_dir"
-
-    for patch_name in "${!PATCH_CONFIGS[@]}"; do
-        local patch_path="${VIME_DIR}/docker/npu_patch/$patch_name"
-        if [ -f "$patch_path" ]; then
-            cp "$patch_path" "$backup_dir/$patch_name"
-            echo "INFO: Saved old $patch_name" >&2
-        else
-            echo "WARNING: Patch file $patch_path not found, skipping backup" >&2
-        fi
-    done
-
-    echo "$backup_dir"
-}
-
-revert_all_patches() {
-    local old_patch_dir="$1"
-
-    echo "INFO: Reverting all already applied patches..."
-
-    for patch_name in "${!PATCH_CONFIGS[@]}"; do
-        local component_dir=$(get_patch_component "$patch_name")
-        local old_patch_path="$old_patch_dir/$patch_name"
-
-        if is_patch_applied "$component_dir" "$old_patch_path"; then
-            echo "INFO: $patch_name is currently applied, reverting..."
-            revert_patch "$component_dir" "$patch_name" "$old_patch_path"
-        else
-            echo "INFO: $patch_name is not currently applied, nothing to revert"
-        fi
-    done
-}
-
-apply_all_patches() {
-    echo "INFO: Applying all patches..."
-
-    for patch_name in "${!PATCH_CONFIGS[@]}"; do
-        local component_dir=$(get_patch_component "$patch_name")
-        local patch_path="${VIME_DIR}/docker/npu_patch/$patch_name"
-
-        if [ -f "$patch_path" ]; then
-            apply_patch "$component_dir" "$patch_path" "$patch_name"
-        else
-            echo "WARNING: Patch file $patch_path not found, skipping"
-        fi
-    done
-}
-
 main() {
+    local old_series="${VIME_NPU_PATCH_STATE_DIR}/${PATCH_SERIES_RELATIVE_PATH}"
+    local new_series="${VIME_DIR}/${PATCH_SERIES_RELATIVE_PATH}"
+
     echo "=== Step 1: Sort ASCEND_VISIBLE_DEVICES ==="
     sort_ascend_visible_devices
 
-    echo "=== Step 2: Save all old patches before code update ==="
-    local old_patch_dir=$(save_old_patches)
-
-    echo "=== Step 3: Update VIME code ==="
+    echo "=== Step 2: Update VIME code ==="
     update_vime_code
 
-    echo "=== Step 4: Revert all already applied patches ==="
-    revert_all_patches "$old_patch_dir"
+    if [ ! -f "$old_series" ]; then
+        echo "ERROR: The selected image does not contain NPU patch state: $old_series" >&2
+        echo "ERROR: Build a patch-state-enabled NPU image before running this commit." >&2
+        return 1
+    fi
 
-    echo "=== Step 5: Apply all patches ==="
-    apply_all_patches
+    echo "=== Step 3: Reconcile image patches with current VIME patches ==="
+    reconcile_series "$old_series" "$VIME_NPU_PATCH_STATE_DIR" "$new_series" "$VIME_DIR"
+
+    echo "=== Step 4: Install current VIME code ==="
+    install_vime_code
 
     echo "INFO: NPU environment update completed successfully"
 }
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    case "${1:-}" in
+        series-digest)
+            if [ "$#" -ne 3 ]; then
+                echo "Usage: $0 series-digest SERIES_FILE SOURCE_ROOT" >&2
+                exit 2
+            fi
+            series_digest "$2" "$3"
+            exit
+            ;;
+        reconcile)
+            if [ "$#" -ne 5 ]; then
+                echo "Usage: $0 reconcile OLD_SERIES OLD_ROOT NEW_SERIES NEW_ROOT" >&2
+                exit 2
+            fi
+            reconcile_series "$2" "$3" "$4" "$5"
+            exit
+            ;;
+    esac
+fi
 
 main

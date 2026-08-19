@@ -86,7 +86,22 @@ list in `SUITES`.
 
 ## Adding or removing a patch
 
-Patches live in `docker/npu_patch/` and are registered in the `PATCH_CONFIGS`
-dict in [`update-npu-environment.sh`](./scripts/update-npu-environment.sh).
-Update both when adding or removing a patch.
+Patches are applied explicitly by [`docker/Dockerfile.npu`](../docker/Dockerfile.npu)
+and reconciled at runtime in the order declared by
+[`docker/npu_patch/series.conf`](../docker/npu_patch/series.conf).
 
+When adding a patch file, add the matching Dockerfile apply operation and the
+`series.conf` entry in the same order. When deleting a patch, remove the
+Dockerfile operation and `series.conf` entry before deleting the patch file;
+the previous image retains the OLD bytes required for runtime revert. Rename
+and reorder changes must likewise update both declarations. Ordinary patch
+changes must not add patch-specific branches to the CI script.
+
+Patch-only changes reuse the default image and are reconciled when the test
+container starts. Changes to repositories, dependencies, or the Docker build
+environment require the contributor to select `image-build`.
+
+The initial rollout of this mechanism requires publishing a new default image
+that contains `/opt/vime-npu/patch-state/docker/npu_patch/series.conf`, then
+updating `DEFAULT_CI_IMAGE` in `npu_suites.py`. The legacy default image does not
+contain the OLD patch state and cannot run this reconciler.
