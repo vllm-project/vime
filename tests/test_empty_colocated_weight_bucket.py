@@ -112,6 +112,8 @@ def _install_fake_deps(monkeypatch):
     update_from_distributed_mod.disconnect_rollout_engines_from_distributed = lambda *args, **kwargs: None
     update_from_distributed_mod.post_process_weights = lambda *args, **kwargs: None
     update_from_distributed_mod.update_weights_from_distributed = lambda *args, **kwargs: []
+    coordinator_mod = types.ModuleType("vime.backends.megatron_utils.update_weight.coordinator")
+    coordinator_mod.WeightUpdateCoordinator = object
 
     monkeypatch.setitem(sys.modules, "vime", vime_pkg)
     monkeypatch.setitem(sys.modules, "vime.backends", vime_backends_pkg)
@@ -131,6 +133,11 @@ def _install_fake_deps(monkeypatch):
         sys.modules,
         "vime.backends.megatron_utils.update_weight.update_weight_from_distributed",
         update_from_distributed_mod,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "vime.backends.megatron_utils.update_weight.coordinator",
+        coordinator_mod,
     )
 
     return dist_state

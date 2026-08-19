@@ -139,8 +139,9 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 default="full",
                 help=(
                     "Weight sync strategy. 'full' (default) broadcasts every parameter "
-                    "every sync. 'delta' diffs each sync against a pinned-CPU snapshot of the "
-                    "previous one and ships only the changed bytes (disk transport only)."
+                    "every sync. 'delta' emits checkpoint-coordinate absolute patches: the "
+                    "first sync is a dense seed and later syncs contain only BF16 elements "
+                    "whose bit patterns changed since the last committed update."
                 ),
             )
             parser.add_argument(
@@ -150,8 +151,8 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Carrier for weight sync. In full mode, 'nccl' broadcasts chunks and "
                     "'disk' writes a complete HF checkpoint under --update-weight-disk-dir "
-                    "before engines reload it. Delta mode is 'disk' only: each host applies the "
-                    "published deltas into its local checkpoint and reloads via update_weights_from_disk."
+                    "before engines reload it. Delta mode currently supports direct NCCL only; "
+                    "the disk choice is reserved for a future sink using the same delta protocol."
                 ),
             )
             parser.add_argument(
@@ -169,8 +170,8 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=(
                     "Filesystem directory for disk-backed weight sync. In --update-weight-mode=full, "
-                    "one complete HF checkpoint directory is written per sync. In delta mode, "
-                    "one delta directory (changed tensors only) is written per sync."
+                    "one complete HF checkpoint directory is written per sync. Delta disk output "
+                    "is reserved and is not implemented yet."
                 ),
             )
             parser.add_argument(
@@ -187,7 +188,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 choices=["xor", "overwrite"],
                 default="xor",
                 help=(
-                    "On-disk delta encoding for --update-weight-mode=delta --update-weight-transport=disk. "
+                    "Reserved encoding for a future delta disk sink; direct NCCL delta sync ignores it. "
                     "'xor' (default): new ^ old — smallest wire and fastest, but an involution that must be "
                     "applied exactly once against the correct base (applying it twice reverts). 'overwrite': "
                     "changed positions + new absolute values — larger, but idempotent (re-applicable any "
@@ -200,7 +201,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 choices=["xxh3-128", "blake3", "adler32"],
                 default="xxh3-128",
                 help=(
-                    "Per-tensor integrity checksum for disk delta apply. The checksum is not the "
+                    "Reserved checksum for a future delta disk sink. The checksum is not the "
                     "apply bottleneck (the apply is decompress + XOR bound), so this is a digest-"
                     "property choice, not a speed one. 'xxh3-128' (default): widest fast non-"
                     "cryptographic digest, negligible accidental-corruption collisions. 'blake3': "
@@ -229,8 +230,8 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                     "Rollout-host-local directory (NVMe) holding a full HF checkpoint kept in "
                     "sync by each engine's pull_weights: every host copies a published full "
                     "checkpoint as-is or patches published deltas in place, and the engines "
-                    "reload from it. Required for --update-weight-mode=delta "
-                    "--update-weight-transport=disk; optional for full disk sync (engines then "
+                    "reload from it. Reserved for the future delta disk sink; optional for full "
+                    "disk sync (engines then "
                     "pull to local disk instead of reading the shared dir directly). The "
                     "read-side counterpart of --custom-update-weight-post-write-path is "
                     "--vllm-custom-pull-weights-pre-read-hook."
@@ -1734,15 +1735,56 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
 
 
 def _validate_update_weight_args(args) -> None:
+    if args.update_weight_mode == "delta":
+        if args.update_weight_transport == "disk":
+            raise NotImplementedError(
+                "Delta disk transport is reserved but not implemented; "
+                "use --update-weight-mode=delta --update-weight-transport=nccl."
+            )
+        if args.update_weight_transport != "nccl":
+            raise ValueError("Direct delta weight sync requires NCCL transport")
+        if getattr(args, "train_backend", "megatron") != "megatron":
+            raise NotImplementedError("Direct delta weight sync currently requires the Megatron trainer")
+        if getattr(args, "colocate", False):
+            raise NotImplementedError("Direct delta weight sync currently requires non-colocated rollout engines")
+        if getattr(args, "rollout_external", False):
+            raise NotImplementedError("Direct delta weight sync currently requires VIME-launched rollout engines")
+        if getattr(args, "use_fault_tolerance", False):
+            raise NotImplementedError("Direct delta weight sync does not yet support replacement rollout workers")
+        if "fully_async" in getattr(args, "rollout_function_path", ""):
+            raise NotImplementedError("Direct delta weight sync does not yet support fully-async rollout")
+        if getattr(args, "offload_rollout", False):
+            raise NotImplementedError("Direct delta weight sync does not yet support rollout offload")
+        if getattr(args, "enable_mtp_training", False) or getattr(args, "vllm_speculative_config", None):
+            raise NotImplementedError("Direct delta weight sync does not yet support speculative or MTP models")
+        if getattr(args, "fp16", False):
+            raise NotImplementedError("Direct delta weight sync currently supports BF16 only")
+        if getattr(args, "pipeline_model_parallel_size", 1) != 1:
+            raise NotImplementedError("Direct delta weight sync currently requires Megatron PP=1")
+        if getattr(args, "virtual_pipeline_model_parallel_size", None) not in (None, 1):
+            raise NotImplementedError("Direct delta weight sync currently requires Megatron VPP=1")
+        if getattr(args, "num_layers_per_virtual_pipeline_stage", None) is not None:
+            raise NotImplementedError("Direct delta weight sync currently requires Megatron VPP=1")
+        if getattr(args, "vllm_pipeline_parallel_size", 1) != 1:
+            raise NotImplementedError("Direct delta weight sync currently requires vLLM PP=1")
+        if getattr(args, "vllm_data_parallel_size", 1) != 1:
+            raise NotImplementedError("Direct delta weight sync currently requires vLLM DP=1")
+        if getattr(args, "vllm_enable_deterministic_inference", False):
+            raise NotImplementedError(
+                "Direct delta weight sync does not support batch-invariant deterministic inference"
+            )
+        if getattr(args, "update_weight_start_version", 0) != 0:
+            raise ValueError("Direct delta weight sync must start from version 0 and dense-seed the workers")
+        worker_extension = getattr(args, "vllm_worker_extension_cls", "")
+        expected_extension = "vime.backends.vllm_utils.checkpoint_delta.VimeDeltaWorkerExtension"
+        if worker_extension not in ("", None, expected_extension):
+            raise ValueError("Direct delta weight sync owns --vllm-worker-extension-cls")
+        return
+
     if args.update_weight_transport == "disk" and not args.update_weight_disk_dir:
         raise ValueError(
             "--update-weight-transport=disk requires --update-weight-disk-dir to point at "
             "a filesystem shared between the trainer and the rollout engines."
-        )
-
-    if args.update_weight_mode == "delta":
-        raise NotImplementedError(
-            "--update-weight-mode=delta is unverified on vime+vLLM and is disabled; " "use --update-weight-mode=full."
         )
 
 

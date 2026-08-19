@@ -52,6 +52,9 @@ def vllm_args() -> SimpleNamespace:
         vllm_pipeline_parallel_size=1,
         vllm_data_parallel_size=1,
         vllm_dp_size=1,
+        update_weight_mode="full",
+        update_weight_transport="nccl",
+        vllm_worker_extension_cls="",
     )
 
 
@@ -248,6 +251,51 @@ def test_compute_server_args_external_check_fields_skip_orchestration_fields(vll
 
 
 @pytest.mark.unit
+def test_direct_delta_server_config_and_env(vllm_args, monkeypatch):
+    vllm_args.rollout_external = False
+    vllm_args.update_weight_mode = "delta"
+
+    sa, check_fields = mod._compute_server_args(
+        vllm_args,
+        rank=0,
+        dist_init_addr=None,
+        host="127.0.0.1",
+        port=8000,
+    )
+    assert sa["weight_transfer_config"] == {"backend": "vime_delta_nccl"}
+    assert sa["worker_extension_cls"] == (
+        "vime.backends.vllm_utils.checkpoint_delta.VimeDeltaWorkerExtension"
+    )
+    assert "weight_transfer_config" in check_fields
+    assert "worker_extension_cls" in check_fields
+
+    # Delta mode owns the worker extension slot.
+    vllm_args.vllm_worker_extension_cls = "custom.WorkerExtension"
+    with pytest.raises(ValueError, match="owns --vllm-worker-extension-cls"):
+        mod._compute_server_args(
+            vllm_args,
+            rank=0,
+            dist_init_addr=None,
+            host="127.0.0.1",
+            port=8000,
+        )
+    vllm_args.vllm_worker_extension_cls = ""
+
+    # The worker subprocess must see vime on PYTHONPATH to import the extension.
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.delenv("VLLM_ALLOW_INSECURE_SERIALIZATION", raising=False)
+    env = mod._build_subprocess_env(
+        {
+            "_args": vllm_args,
+            "_visible_devices": "6,7",
+        }
+    )
+    assert "PYTHONPATH" in env
+    assert env["CUDA_VISIBLE_DEVICES"] == "6,7"
+    assert "VLLM_ALLOW_INSECURE_SERIALIZATION" not in env
+
+
+@pytest.mark.unit
 def test_build_vllm_subprocess_env_colocate(vllm_args, monkeypatch):
     vllm_args.colocate = True
     monkeypatch.delenv("PYTHONPATH", raising=False)
@@ -439,6 +487,54 @@ def test_get_weight_version_worker_rank_returns_none_without_raise(vllm_engine):
     vllm_engine.node_rank = 1
     vllm_engine._weight_version = None
     assert vllm_engine.get_weight_version() is None
+
+
+@pytest.mark.unit
+def test_set_weight_version_commits_engine_core_before_wrapper(vllm_engine, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        vllm_engine,
+        "_make_request",
+        lambda endpoint, payload: calls.append((endpoint, payload)) or {"ok": True},
+    )
+    vllm_engine._weight_version = "old"
+
+    assert vllm_engine.set_weight_version("8") == {"ok": True}
+    assert calls == [("update_weight_version", {"new_version": "8"})]
+    assert vllm_engine._weight_version == "8"
+
+    # A server-side failure must not advance the local marker.
+    monkeypatch.setattr(
+        vllm_engine,
+        "_make_request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("core failed")),
+    )
+    with pytest.raises(RuntimeError, match="core failed"):
+        vllm_engine.set_weight_version("9")
+    assert vllm_engine._weight_version == "8"
+
+
+@pytest.mark.unit
+def test_set_weight_version_missing_endpoint_degrades_except_for_direct_delta(vllm_engine, monkeypatch):
+    """vLLM < 0.27.2 has no update_weight_version endpoint: non-delta modes fall
+    back to local version tracking; direct DWU publishes through the server tag
+    and must fail-stop."""
+
+    def raise_404(*_args, **_kwargs):
+        _MockResponse(status_code=404).raise_for_status()
+
+    monkeypatch.setattr(vllm_engine, "_make_request", raise_404)
+    vllm_engine._weight_version = "old"
+
+    assert vllm_engine.set_weight_version("8") is None
+    assert vllm_engine.set_weight_version("9") is None
+    assert vllm_engine._weight_version == "9"
+
+    vllm_engine.args.update_weight_mode = "delta"
+    vllm_engine.args.update_weight_transport = "nccl"
+    with pytest.raises(requests.exceptions.HTTPError):
+        vllm_engine.set_weight_version("10")
+    assert vllm_engine._weight_version == "9"
 
 
 @pytest.mark.unit
