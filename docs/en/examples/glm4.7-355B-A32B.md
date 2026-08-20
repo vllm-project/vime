@@ -89,6 +89,8 @@ GLM-4.7 is a Mixture-of-Experts (MoE) model with 160 routed experts (top-8 activ
    VLLM_ARGS=(
       --rollout-num-gpus-per-engine 32
       --vllm-gpu-memory-utilization 0.7
+      --vllm-data-parallel-size 4
+      --vllm-enable-expert-parallel
       ...
    )
    ```
@@ -101,7 +103,7 @@ GLM-4.7 includes MTP (Multi-Token Prediction) layers that can be used for specul
 VLLM_ARGS=(
    ...
    # MTP speculative decoding
-   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":4}'
 )
 ```
 
@@ -128,7 +130,7 @@ MTP_ARGS=(
 - `--enable-mtp-training`: Enables gradient computation for MTP layers. Without this flag, the MTP layer is loaded but frozen.
 - `--mtp-loss-scaling-factor 0.2`: Weight of the MTP loss relative to the main policy loss. Default is 0.2.
 
-> **Note**: MTP training for GLM-4.7 relies on `GLM4MoEBridge` (in `vime_plugins/mbridge/glm4moe.py`) to map regular and MTP weights between HuggingFace and Megatron formats.
+> **Note**: The native loader in `vime/backends/megatron_utils/hf_to_megatron/glm.py` maps both regular and MTP weights.
 
 #### Multi-Node Support
 
@@ -163,7 +165,10 @@ An example FP8 `VLLM_ARGS` setup is:
 VLLM_ARGS=(
    --rollout-num-gpus-per-engine 32
    --vllm-gpu-memory-utilization 0.7
-   --vllm-max-cudagraph-capture-size 64
-   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
+   --vllm-data-parallel-size 32
+   --vllm-enable-expert-parallel
+   --vllm-cudagraph-capture-sizes 5 10 20 40 $(seq 80 40 640)
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":4}'
+   --vllm-all2all-backend deepep_high_throughput
 )
 ```

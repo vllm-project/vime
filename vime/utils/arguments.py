@@ -6,7 +6,6 @@ import os
 from typing import Any
 
 import yaml
-from vllm_router.launch_router import RouterArgs
 
 from vime.backends.vllm_utils.arguments import validate_args as vllm_validate_args
 from vime.backends.vllm_utils.arguments import vllm_parse_args
@@ -50,7 +49,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                     "Number of GPUs for inference. Note that when using --colocate, "
                     "i.e. the training and the inference engines are on the same gpus, this param will be set as "
                     "actor_num_gpus_per_node * actor_num_nodes unless it is explicitly set. "
-                    "Set it to 0 to launch routers without local vLLM engines."
+                    "Set it to 0 to launch routers without local VLLM engines."
                 ),
             )
             parser.add_argument(
@@ -119,18 +118,6 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 type=json.loads,
                 default="{}",
                 help="Extra environment variables for training process, e.g. PyTorch memory management ones.",
-            )
-            parser.add_argument(
-                "--train-memory-margin-bytes",
-                type=int,
-                default=1024**3,
-                help="Add margin for train memory allocation. By default we will reserve 1GB as margin.",
-            )
-            parser.add_argument(
-                "--megatron-to-hf-mode",
-                choices=["raw", "bridge"],
-                default="raw",
-                help="The method to convert megatron weights to hugging face weights for vLLM.",
             )
             # Delta weight sync.
             parser.add_argument(
@@ -222,6 +209,16 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--custom-update-weight-pre-read-path",
+                type=str,
+                default=None,
+                help=(
+                    "Path to a custom function called on each rollout host before it reads a "
+                    "published disk weight version. Signature: "
+                    "``def hook(source_dir: str, target_version: int) -> None``."
+                ),
+            )
+            parser.add_argument(
                 "--update-weight-local-checkpoint-dir",
                 type=str,
                 default=None,
@@ -233,7 +230,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                     "--update-weight-transport=disk; optional for full disk sync (engines then "
                     "pull to local disk instead of reading the shared dir directly). The "
                     "read-side counterpart of --custom-update-weight-post-write-path is "
-                    "--vllm-custom-pull-weights-pre-read-hook."
+                    "--custom-update-weight-pre-read-path."
                 ),
             )
             parser.add_argument(
@@ -261,7 +258,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 nargs="*",
                 default=None,
-                help="""List of regex patterns of parameter names to TRAIN. All other parameters will be FROZEN. 
+                help=r"""List of regex patterns of parameter names to TRAIN. All other parameters will be FROZEN.
                         Supports Python regex syntax (re.search).
 
                         Examples:
@@ -281,7 +278,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 nargs="*",
                 default=None,
-                help="""List of regex patterns of parameter names to FREEZE. Other parameters will remain trainable.
+                help=r"""List of regex patterns of parameter names to FREEZE. Other parameters will remain trainable.
                         Supports Python regex syntax (re.search).
 
                         Examples:
@@ -294,6 +291,17 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                         3. Freeze specific projection layers (e.g., all Gate/Up projections):
                             --freeze-params-name-list linear_fc1
                         """,
+            )
+            reset_arg(
+                parser,
+                "--freeze-indexer",
+                action="store_true",
+                default=False,
+                help=(
+                    "Freeze DSA indexer parameters while leaving the rest of the model "
+                    "trainable. This supports both the GLM plugin indexer names and "
+                    "Megatron's upstream DSA indexer module."
+                ),
             )
             parser.add_argument(
                 "--lora-rank",
@@ -378,8 +386,8 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=(
                     "The huggingface checkpoint of the trained model. "
-                    "This is used to initialize vLLM and also provide the tokenizer. "
-                    "Note that, we will always update the parameters in vLLM with that of megatron before training, "
+                    "This is used to initialize vllm and also provide the tokenizer. "
+                    "Note that, we will always update the parameters in vllm with that of megatron before training, "
                     "so you only need to provide a huggingface checkpoint that has the same architecture as the model you want to train. "
                     "It doesn't necessary need to contain the most up-to-date parameters."
                 ),
@@ -502,7 +510,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "This defines the granularity of the sampling batch in the rollout function. "
                     "When the number of available samples falls below the target, a sampling "
-                    "operation of size over_sampling_batch_size will be triggered."
+                    "operation of size over_sampling_batch_size will be triggered. "
                     "Regardless of whether partial rollout is used or filters are applied, "
                     "the sampling granularity is always determined by this value. "
                     "If this value is None, rollout_batch_size will be used as the default over_sampling_batch_size."
@@ -514,9 +522,11 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=(
                     "This is the filter function for dynamic sampling. "
-                    "It should be able to judge whether the result of a prompt should be selected or not."
-                    "We will do dynamic filter for sampling as in DAPO. e.g. not all correct or all wrong samples."
-                    "You could use `vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std` as an example."
+                    "It should be able to judge whether the result of a prompt should be selected or not. "
+                    "We will do dynamic filter for sampling as in DAPO. e.g. not all correct or all wrong samples. "
+                    "You could use `vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std` as an example. "
+                    "To avoid another sampling round when the oversampled candidates cannot fill rollout_batch_size, "
+                    "use `vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std_with_fallback`."
                 ),
             )
 
@@ -547,6 +557,16 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Only substitue the `def generate(args, sample, sampling_params)` function within the example rollout function. "
                     "This should be useful if you need to implement some special rollout logic, e.g. multi-turn, function calling."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-sample-hook-path",
+                action="append",
+                default=[],
+                help=(
+                    "Import path to a hook applied to each generated rollout Sample before reward computation. "
+                    "May be repeated. Hooks may be sync or async and have signature "
+                    "hook(args, sample, *, rollout_id=None, evaluation=False) -> Sample | None."
                 ),
             )
             parser.add_argument(
@@ -928,8 +948,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Path to save the model in HuggingFace format when using Megatron backend. "
                     "The model will be saved to `save_hf.format(rollout_id)`. "
-                    "In raw Megatron-to-HF mode, weights are saved with the same quantization config "
-                    "as `--hf-checkpoint`. "
+                    "Weights are saved with the same quantization config as `--hf-checkpoint`. "
                 ),
             )
             reset_arg(parser, "--seed", type=int, default=1234)
@@ -1191,7 +1210,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=(
                     "Type of on-policy distillation. "
-                    "'vllm': Teacher log-probs are obtained from external vLLM server during rollout. "
+                    "'vllm': Teacher log-probs are obtained from external VLLM server during rollout. "
                     "'megatron': Teacher model is loaded via --opd-teacher-load and forwarded during training."
                 ),
             )
@@ -1224,10 +1243,6 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                     "hf_checkpoint, which would mis-name a teacher!=student server."
                 ),
             )
-            return parser
-
-        def add_router_arguments(parser):
-            RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
             return parser
 
         # wandb
@@ -1340,7 +1355,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                     "a literal file and reused across every rollout_id; a path containing {rollout_id} "
                     "loads a per-rollout file (with eval_<id>.pt for the eval pipeline). Unlike "
                     "--load-debug-rollout-data, this does NOT force debug_train_only / skip_vllm -- "
-                    "vLLM servers, router, weight_update and the colocate offload/onload dance all "
+                    "vllm servers, router, weight_update and the colocate offload/onload dance all "
                     "stay live, which is the point (memory measurement at long context)."
                 ),
             )
@@ -1355,8 +1370,9 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 default=None,
                 help=(
-                    "Save the train data to this path for debugging. "
-                    "The file will be saved to `save_debug_train_data.format(rollout_id)`."
+                    "Save one train-side debug file containing all DP shards. CP-sharded fields are restored "
+                    "to a uniform full-response format first. The path may contain `{rollout_id}` and the "
+                    "single writer's `{rank}` placeholders."
                 ),
             )
             parser.add_argument(
@@ -1488,7 +1504,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 "--loss-mask-type",
                 type=str,
                 default="qwen",
-                choices=["qwen", "qwen3", "qwen3_5", "gemma4", "distill_qwen"],
+                choices=["qwen", "qwen3", "qwen3_5", "distill_qwen"],
                 help="Loss mask type",
             )
             parser.add_argument(
@@ -1541,6 +1557,38 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 default=None,
             )
+            parser.add_argument(
+                "--megatron-deepgemm-forward-layers",
+                nargs="+",
+                type=int,
+                default=None,
+                help=(
+                    "Global zero-based decoder layers whose selected TE linears use "
+                    "the VLLM-compatible block-FP8 DeepGEMM forward."
+                ),
+            )
+            parser.add_argument(
+                "--megatron-deepgemm-forward-modules",
+                nargs="+",
+                default=None,
+                help="Optional module-name suffixes to replace in the selected dense layers.",
+            )
+            parser.add_argument(
+                "--megatron-deepgemm-moe-forward-layers",
+                nargs="+",
+                type=int,
+                default=None,
+                help=(
+                    "Global zero-based MoE decoder layers whose TEGroupedMLP uses "
+                    "the VLLM-compatible grouped DeepGEMM forward."
+                ),
+            )
+            parser.add_argument(
+                "--megatron-deepgemm-moe-forward-modules",
+                nargs="+",
+                default=None,
+                help="Optional TEGroupedMLP module-name suffixes; defaults to mlp.experts.",
+            )
             return parser
 
         def add_mtp_training_arguments(parser):
@@ -1564,6 +1612,15 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--ci-disable-kl-checker",
                 action="store_true",
+            )
+            parser.add_argument(
+                "--ci-train-rollout-logprob-abs-diff-threshold",
+                type=float,
+                default=0.1,
+                help=(
+                    "Upper bound asserted on train/train_rollout_logprob_abs_diff when --ci-test is set. "
+                    "Defaults to 0.1; tighten it (e.g. 1e-6) for deterministic train/rollout alignment gates."
+                ),
             )
             parser.add_argument(
                 "--ci-save-grad-norm",
@@ -1752,11 +1809,6 @@ def parse_megatron_role_args(base_args, megatron_config_path, role):
     return role_args
 
 
-def parse_critic_args(actor_args, megatron_config_path):
-    """Backward-compatible wrapper for critic-specific Megatron role parsing."""
-    return parse_megatron_role_args(actor_args, megatron_config_path, role="critic")
-
-
 def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
     """
     Build evaluation dataset configurations from either --eval-config or --eval-prompt-data.
@@ -1800,19 +1852,6 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
     return eval_datasets
 
 
-def _validate_update_weight_args(args) -> None:
-    if args.update_weight_transport == "disk" and not args.update_weight_disk_dir:
-        raise ValueError(
-            "--update-weight-transport=disk requires --update-weight-disk-dir to point at "
-            "a filesystem shared between the trainer and the rollout engines."
-        )
-
-    if args.update_weight_mode == "delta":
-        raise NotImplementedError(
-            "--update-weight-mode=delta is unverified on vime+vLLM and is disabled; " "use --update-weight-mode=full."
-        )
-
-
 def vime_validate_args(args):
     args.eval_datasets = _resolve_eval_datasets(args)
 
@@ -1825,10 +1864,10 @@ def vime_validate_args(args):
     if args.lora_rank > 0:
         from vime.backends.megatron_utils.lora_utils import normalize_target_modules
 
-        if args.megatron_to_hf_mode != "bridge":
-            raise ValueError("--lora-rank requires --megatron-to-hf-mode bridge.")
         if not args.colocate:
             raise ValueError("--lora-rank currently requires colocated vLLM rollout (--colocate).")
+        if args.update_weight_mode != "full" or args.update_weight_transport != "nccl":
+            raise ValueError("--lora-rank requires full tensor weight sync (--update-weight-mode full).")
         if args.custom_model_provider_path is not None:
             raise ValueError("--lora-rank is only supported by the built-in Bridge model provider.")
         args.target_modules = normalize_target_modules(args.target_modules, args.exclude_modules)
@@ -1891,31 +1930,27 @@ def vime_validate_args(args):
         if args.opd_teacher_load is not None:
             raise ValueError("--opd-teacher-load is set but --use-opd is not enabled. Please add --use-opd flag.")
 
-    if args.megatron_to_hf_mode == "bridge":
-        if (
-            args.load is not None
-            and os.path.exists(args.load)
-            and os.path.exists(os.path.join(args.load, "latest_checkpointed_iteration.txt"))
-        ):
-            # If is a Megatron checkpoint, won't use bridge to load hf weight.
-            pass
-        else:
-            if args.load is None:
-                args.load = args.ref_load or args.hf_checkpoint
-            # If is a HF checkpoint, set start_rollout_id to 0 here.
-            args.start_rollout_id = 0
-    else:
-        if (
-            args.load is None
-            or not os.path.exists(args.load)
-            or not os.path.exists(os.path.join(args.load, "latest_checkpointed_iteration.txt"))
-        ):
-            args.no_load_optim = True
-            args.no_load_rng = True
-            args.finetune = True
+    load_is_megatron = (
+        args.load is not None
+        and os.path.exists(args.load)
+        and os.path.exists(os.path.join(args.load, "latest_checkpointed_iteration.txt"))
+    )
+    load_is_hf = (
+        args.load is not None and os.path.isdir(args.load) and os.path.exists(os.path.join(args.load, "config.json"))
+    )
+    if load_is_hf:
+        from vime.backends.megatron_utils.hf_to_megatron import supports_hf_weight_loading
+
+        load_is_hf = supports_hf_weight_loading(args.load)
+    if not load_is_megatron:
+        args.no_load_optim = True
+        args.no_load_rng = True
+        args.finetune = True
+        if not load_is_hf:
             args.load = args.ref_load
-            if args.ref_ckpt_step is not None:
-                args.ckpt_step = args.ref_ckpt_step
+        if args.ref_ckpt_step is not None:
+            args.ckpt_step = args.ref_ckpt_step
+        if args.start_rollout_id is None:
             args.start_rollout_id = 0
 
     if args.eval_interval is not None:
@@ -1970,12 +2005,15 @@ def vime_validate_args(args):
 
     if args.dump_details is not None:
         args.save_debug_rollout_data = f"{args.dump_details}/rollout_data/{{rollout_id}}.pt"
-        args.save_debug_train_data = f"{args.dump_details}/train_data/{{rollout_id}}_{{rank}}.pt"
+        args.save_debug_train_data = f"{args.dump_details}/train_data/{{rollout_id}}.pt"
+
+    if args.save_debug_train_data is not None and args.save_debug_train_data == args.save_debug_rollout_data:
+        raise ValueError("--save-debug-train-data must not be equal to --save-debug-rollout-data.")
 
     if args.load_debug_rollout_data is not None:
         logger.info(
             f"load_debug_rollout_data {args.load_debug_rollout_data} is set, "
-            "will not instantiate vLLM servers and will only run the training process."
+            "will not instantiate vllm servers and will only run the training process."
         )
         args.debug_train_only = True
 
@@ -1995,7 +2033,9 @@ def vime_validate_args(args):
     del args.offload
 
     if args.debug_rollout_only:
-        if args.colocate and args.rollout_num_gpus is None:
+        if args.rollout_external:
+            pass
+        elif args.colocate and args.rollout_num_gpus is None:
             args.rollout_num_gpus = args.actor_num_gpus_per_node * args.actor_num_nodes
             if args.num_gpus_per_node != args.actor_num_gpus_per_node:
                 logger.info(
@@ -2012,9 +2052,6 @@ def vime_validate_args(args):
             args.actor_num_nodes = args.rollout_num_gpus // args.actor_num_gpus_per_node
         args.colocate = False
         args.offload_train = args.offload_rollout = False
-        if args.train_memory_margin_bytes > 0:
-            logger.warning("Force train_memory_margin_bytes=0 since debug_rollout_only does not support it")
-            args.train_memory_margin_bytes = 0
 
     assert not (args.debug_rollout_only and args.debug_train_only), (
         "debug_rollout_only and debug_train_only cannot be set at the same time, " "please set only one of them."
@@ -2023,7 +2060,7 @@ def vime_validate_args(args):
     # Colocate normally offloads Megatron between rollout and train. Release-train
     # destroys Megatron actors instead, so only rollout needs memory-saver offload.
     if args.colocate:
-        if getattr(args, "release_train", False):
+        if args.release_train:
             if args.offload_train:
                 logger.info("Ignoring --offload-train because --release-train releases train actors instead.")
             args.offload_train = False
@@ -2040,10 +2077,10 @@ def vime_validate_args(args):
                 f"actor_num_gpus_per_node {args.actor_num_gpus_per_node} (per-physical-node GPU count)."
             )
             args.num_gpus_per_node = args.actor_num_gpus_per_node
-        if args.rollout_num_gpus == 0:
-            logger.info("rollout_num_gpus is 0 under colocate; no local vLLM engines will be launched.")
-        elif args.rollout_num_gpus != args.actor_num_gpus_per_node * args.actor_num_nodes:
+        if args.rollout_num_gpus is None:
             args.rollout_num_gpus = args.actor_num_gpus_per_node * args.actor_num_nodes
+        elif args.rollout_num_gpus == 0:
+            logger.info("rollout_num_gpus is 0 under colocate; no local VLLM engines will be launched.")
 
     if args.offload_train is None:
         args.offload_train = False
@@ -2129,7 +2166,13 @@ def vime_validate_args(args):
     if args.only_train_params_name_list and args.freeze_params_name_list:
         raise ValueError("You can only specify ONE of: --only-train-params-name-list, or --freeze-params-name-list.")
 
-    if getattr(args, "release_train", False):
+    # disk-backed sync (full or delta) writes on the trainer and reads on the engines: needs a shared dir
+    if args.update_weight_transport == "disk" and not args.update_weight_disk_dir:
+        raise ValueError(
+            "--update-weight-transport=disk requires --update-weight-disk-dir to point at "
+            "a filesystem shared between the trainer and the rollout engines."
+        )
+    if args.release_train:
         if args.train_backend != "megatron":
             raise ValueError("--release-train is only supported with the Megatron train backend.")
         if args.use_critic:
@@ -2142,5 +2185,20 @@ def vime_validate_args(args):
             args.save_interval = 1
         if args.update_weight_mode != "full" or args.update_weight_transport != "disk":
             raise ValueError("--release-train requires --update-weight-mode=full and --update-weight-transport=disk.")
-
-    _validate_update_weight_args(args)
+    if args.update_weight_mode == "delta":
+        if args.update_weight_transport != "disk":
+            raise ValueError(
+                "--update-weight-mode=delta requires --update-weight-transport=disk, "
+                f"got {args.update_weight_transport!r}."
+            )
+        if args.colocate:
+            raise ValueError(
+                "--update-weight-mode=delta is not supported with --colocate. Colocate transfers "
+                "weights via CUDA IPC (only a handle crosses processes), so the delta bookkeeping "
+                "(snapshot + diff + encode) is pure overhead."
+            )
+        if not args.update_weight_local_checkpoint_dir:
+            raise ValueError(
+                "--update-weight-mode=delta requires --update-weight-local-checkpoint-dir "
+                "(a rollout-host-local NVMe directory)."
+            )

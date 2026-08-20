@@ -4,8 +4,6 @@ Delta 权重同步只发送两次同步之间发生变化的字节，而不是�
 
 它**只支持 disk transport**。训练端把每次同步发布为一份 canonical HF checkpoint 目录；engine 的 `/pull_weights` 端点（随 vime 的 vllm patch 提供）把 apply 扇出到 **engine 覆盖的每一个 host** 并校验，随后 engine 通过**原生**的 `update_weights_from_disk` 端点 reload 打过补丁的本地 checkpoint。vime 对每个 engine 只与一个端点通信，所以多节点 serving 和外部 rollout engine 在 vime 侧都不需要任何额外支持。
 
-Vime 当前在选择 `--update-weight-mode=delta` 时会通过 `NotImplementedError` guard 拒绝该路径；下文保留为机械同步的上游参考实现。
-
 ## 配置
 
 ```bash
@@ -58,4 +56,4 @@ delta 始终用 zstd（level 1）压缩；profiling 显示对这类数据它在 
 在 POSIX 共享文件系统（NFS、Lustre……）上不需要额外步骤。对于需要显式 commit/refresh 才能让写入跨 host 可见的对象存储挂载，可以提供两个可选 hook（通过 import 路径加载——vime 和 vllm 里都不存在任何厂商特定代码）：
 
 - `--custom-update-weight-post-write-path`（vime，训练端）：在一个版本的文件写完之后、通知 engine 读取之前调用（例如把待写入数据上传到底层对象存储）。签名：`hook(args, version_dir, rollout_engines)`。
-- `--vllm-custom-pull-weights-pre-read-hook`（vllm server 参数，engine 端）：在每个 host 上、`/pull_weights` 读取 delta 目录之前于 engine 内部调用（例如刷新挂载视图）。签名：`hook(delta_dir, target_version)`。
+- `--custom-update-weight-pre-read-path`（vime，engine 端）：在每个 host 上、`/pull_weights` 读取 delta 目录之前于 engine 内部调用（例如刷新挂载视图）。签名：`hook(delta_dir, target_version)`。

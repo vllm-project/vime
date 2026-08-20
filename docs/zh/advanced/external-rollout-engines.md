@@ -14,7 +14,6 @@ External rollout engine 指的是：vLLM engine 不由 vime 训练任务启动�
 | 训练器和 external engine 不能建立 NCCL group，但能共享同一路径的文件系统 | `--update-weight-mode full --update-weight-transport disk` |
 | 大模型跨集群或跨数据中心同步，full checkpoint 太重 | `--update-weight-mode delta --update-weight-transport disk` |
 | rollout serving 想使用独立 vLLM 环境，甚至不同型号或不同厂家的 GPU | external engine + disk transport |
-| 想验证 delta wire/apply 逻辑，但仍在同一数据中心内 | `--update-weight-mode delta --update-weight-transport nccl` |
 | 需要 reference、reward、tool-side model 等冻结模型 | 优先用 [vLLM Config](vllm-config.md#3-多模型服务) 的 `update_weights: false` |
 
 ## External Engine 做了什么
@@ -22,8 +21,8 @@ External rollout engine 指的是：vLLM engine 不由 vime 训练任务启动�
 使用 external engine 时，先独立启动 vLLM server：
 
 ```bash
-python -m vllm.launch_server --model-path /path/to/model --port 10090 ...
-python -m vllm.launch_server --model-path /path/to/model --port 10091 ...
+VLLM_SERVER_DEV_MODE=1 vllm serve /path/to/model --port 10090 ...
+VLLM_SERVER_DEV_MODE=1 vllm serve /path/to/model --port 10091 ...
 ```
 
 训练任务里传入这些地址：

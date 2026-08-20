@@ -593,6 +593,9 @@ def train_one_step(
                     "rollout_log_probs",
                     "teacher_log_probs",
                     "rollout_mask_sums",
+                    # Only present when dumping train debug data; lets the loss
+                    # snapshot each sample's log_probs keyed by rollout position.
+                    *(["partition"] if args.save_debug_train_data is not None else []),
                 ],
             ),
             args.data_pad_size_multiplier,
@@ -624,9 +627,8 @@ def train_one_step(
                 "loss_mask": batch["full_loss_masks"],
             }
 
-            # vime-patch: mcore MambaModel.forward (hybrid NemotronH) has no
-            # loss_mask kwarg (GPTModel does). Drop it when unsupported; loss
-            # masking happens in vime's own loss fn, not the model.
+            # MCore MambaModel.forward does not accept loss_mask; masking is
+            # applied by the loss function instead.
             _m = model
             while hasattr(_m, "module"):
                 _m = _m.module
@@ -870,15 +872,15 @@ def train(
                     torch.distributed.all_reduce(values, group=tracker.get("reduce_group"))
                 if tracker.get("avg_group") is not None:
                     torch.distributed.all_reduce(values, group=tracker["avg_group"], op=torch.distributed.ReduceOp.AVG)
-                # here we assume only one mtp layer
-                mtp_losses = (tracker["values"] * mtp_loss_scale).item()
+                # Multi-head MTP: tracker["values"] is [num_mtp_layers]; aggregate below.
+                mtp_losses = tracker["values"] * mtp_loss_scale
                 MTPLossLoggingHelper.clean_loss_in_tracker()
 
                 # CI check: verify MTP loss is within expected bounds
                 if args.ci_test:
                     from vime.backends.megatron_utils.ci_utils import check_mtp_loss
 
-                    check_mtp_loss(mtp_losses)
+                    check_mtp_loss(mtp_losses.sum().item())
 
         # per train step log.
         if (
@@ -895,7 +897,9 @@ def train(
             }
             log_dict[f"train/{role_tag}grad_norm"] = grad_norm
             if args.enable_mtp_training:
-                log_dict[f"train/{role_tag}mtp_loss"] = mtp_losses
+                for _i in range(mtp_losses.shape[0]):
+                    log_dict[f"train/{role_tag}mtp_{_i + 1}_loss"] = mtp_losses[_i].item()
+                log_dict[f"train/{role_tag}mtp_loss"] = mtp_losses.sum().item()
 
             for param_group_id, param_group in enumerate(optimizer.param_groups):
                 log_dict[f"train/{role_tag}lr-pg_{param_group_id}"] = opt_param_scheduler.get_lr(param_group)
@@ -906,7 +910,8 @@ def train(
             logging_utils.log(args, log_dict, step_key="train/step")
 
             if args.ci_test and "train/train_rollout_logprob_abs_diff" in log_dict:
-                assert log_dict["train/train_rollout_logprob_abs_diff"] <= 0.1, f"{log_dict=}"
+                threshold = args.ci_train_rollout_logprob_abs_diff_threshold
+                assert log_dict["train/train_rollout_logprob_abs_diff"] <= threshold, f"{threshold=} {log_dict=}"
 
             if args.ci_test and not args.ci_disable_kl_checker:
                 if step_id == 0 and "train/ppo_kl" in log_dict and "train/pg_clipfrac" in log_dict:
@@ -967,9 +972,9 @@ def save(
     args = get_args()
     if should_disable_forward_pre_hook(args):
         disable_forward_pre_hook(model)
-    from .lora_utils import is_lora_enabled, save_lora_adapter_for_vllm
+    from .lora_utils import is_lora_model, save_lora_adapter_for_vllm
 
-    if is_lora_enabled(args):
+    if is_lora_model(model):
         save_lora_adapter_for_vllm(model, args, iteration)
     save_checkpoint_with_lora(iteration, model, optimizer, opt_param_scheduler)
     if should_disable_forward_pre_hook(args):
@@ -996,7 +1001,7 @@ def initialize_model_and_optimizer(
         from vime.utils.rocm_checkpoint_writer import ROCmFileSystemWriterAsync
 
         filesystem_async_module.FileSystemWriterAsync = ROCmFileSystemWriterAsync
-        logger.info("[ROCm] Applied FileSystemWriterAsync patch for HIP compatibility")
+        print("[ROCm] Applied FileSystemWriterAsync patch for HIP compatibility")
 
     model, optimizer, opt_param_scheduler = setup_model_and_optimizer(args, role)
     model[0].role = role

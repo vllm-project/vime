@@ -25,6 +25,26 @@ class ExternalEngineInfo:
     def is_pd_worker(self) -> bool:
         return self.worker_type in ("prefill", "decode")
 
+    @property
+    def parallel_config(self) -> dict[str, int | bool]:
+        pp_size = int(self.server_info.get("pp_size") or self.server_info.get("pipeline_parallel_size") or 1)
+        pcp_size = int(self.server_info.get("pcp_size") or self.server_info.get("prefill_context_parallel_size") or 1)
+        dp_size = int(self.server_info.get("dp_size") or self.server_info.get("data_parallel_size") or 1)
+        tp_size = int(
+            self.server_info.get("tp_size")
+            or self.server_info.get("tensor_parallel_size")
+            or self.num_gpus // (pp_size * pcp_size * dp_size)
+        )
+        enable_expert_parallel = bool(self.server_info.get("enable_expert_parallel", False))
+        return {
+            "tp_size": tp_size,
+            "pp_size": pp_size,
+            "pcp_size": pcp_size,
+            "dp_size": dp_size,
+            "enable_expert_parallel": enable_expert_parallel,
+            "ep_size": tp_size * pcp_size * dp_size if enable_expert_parallel else 1,
+        }
+
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
 
@@ -137,8 +157,14 @@ def discover_external_engines(addrs: list[str], timeout: float = 30.0) -> list[E
         server_info = get_server_info(url, timeout=timeout)
 
         pp_size = int(server_info.get("pp_size") or server_info.get("pipeline_parallel_size") or 1)
+        pcp_size = int(server_info.get("pcp_size") or server_info.get("prefill_context_parallel_size") or 1)
+        dp_size = int(server_info.get("dp_size") or server_info.get("data_parallel_size") or 1)
         tp_size = int(server_info.get("tp_size") or server_info.get("tensor_parallel_size") or 1)
-        num_gpus = int(server_info.get("num_gpus") or server_info.get("num_gpus_per_engine") or tp_size * pp_size)
+        num_gpus = int(
+            server_info.get("num_gpus")
+            or server_info.get("num_gpus_per_engine")
+            or tp_size * pp_size * pcp_size * dp_size
+        )
         bootstrap_port = server_info.get("disaggregation_bootstrap_port")
         bootstrap_port = int(bootstrap_port) if bootstrap_port is not None else None
 
@@ -190,6 +216,7 @@ class ExternalRolloutServer:
     engines: list
     engine_gpu_counts: list[int]
     engine_gpu_offsets: list[int]
+    engine_parallel_configs: list[dict[str, int]]
     router_ip: str | None = None
     router_port: int | None = None
     model_name: str = "default"
@@ -282,6 +309,7 @@ def start_external_rollout_servers(args, *, start_router) -> tuple[dict[str, Ext
             engines=engines,
             engine_gpu_counts=engine_gpu_counts,
             engine_gpu_offsets=engine_gpu_offsets,
+            engine_parallel_configs=[info.parallel_config for info in infos],
             router_ip=router_ip,
             router_port=router_port,
             model_name="default",

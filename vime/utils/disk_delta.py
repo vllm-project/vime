@@ -12,9 +12,9 @@ import numpy as np
 # so a thread pool over tensors recovers the bandwidth one thread leaves idle.
 NUM_WORKERS = min(32, (os.cpu_count() or 8))
 
-# Trainer-side helpers for disk-level delta weight sync. Vime's client calls a /pull_weights
-# receiver, but the current vLLM image patch does not install that endpoint. Argument validation
-# therefore keeps this mode disabled until the receiver is ported to vLLM and verified end to end.
+# Trainer-side helpers for disk-level delta weight sync. The receive side — materializing the
+# host-local checkpoint and applying published deltas in place — lives in vLLM behind its
+# /pull_weights endpoint, so it runs on every host while Vime only talks to one endpoint per engine.
 
 
 def overwrite_encode(new: np.ndarray, changed_mask: np.ndarray) -> np.ndarray:

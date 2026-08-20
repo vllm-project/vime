@@ -26,11 +26,6 @@ Currently stable, production-ready hardware includes:
 - Other GPUs (e.g., A100/A800) may also run, but are not actively maintained
 
 
-**Ascend NPU**:
-
-- See [Ascend NPU Usage Tutorial](../platform_support/ascend_tutorial.md).
-- NPU scripts and patches live on the [ascend](https://github.com/vllm-project/vime/tree/ascend) branch.
-
 **AMD GPU**:
 
 See [AMD Usage Tutorial](../platform_support/amd_tutorial.md).
@@ -301,8 +296,8 @@ OPTIMIZER_ARGS=(
 ### VLLM_ARGS: vLLM Service Parameters
 
 This part of parameters is used to configure the vLLM inference service.
-- `--rollout-num-gpus-per-engine`: Equivalent to vLLM's `tp_size`.
-- Other vLLM parameters can be passed to vime by adding the `--vllm-` prefix, and vime will automatically forward them to vLLM. For example, to set vLLM's `--log-level INFO` parameter, just use `--vllm-log-level INFO`.
+- `--rollout-num-gpus-per-engine`: Total worker GPUs used by one rollout engine. It equals vLLM's `tensor_parallel_size` only when data and pipeline parallelism are both 1.
+- Other vLLM parameters can be passed to vime by adding the `--vllm-` prefix, and vime will automatically forward them to vLLM. For example, to set vLLM's `--uvicorn-log-level info` parameter, use `--vllm-uvicorn-log-level info`.
 
 > ⚠️ **Note**:
 > vime uses `vllm-router` to schedule multiple vLLM engines. `dp_size` is calculated through `rollout-num-gpus / rollout-num-gpus-per-engine`.

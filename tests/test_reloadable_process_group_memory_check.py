@@ -120,8 +120,8 @@ def test_world_and_subgroups_follow_destroy_reload_order(monkeypatch):
     monkeypatch.setattr(rpg, "init_gloo_group", lambda: events.append(("init_canonical_gloo",)))
     monkeypatch.setattr(
         rpg.ReloadableProcessGroup,
-        "destroy_process_groups",
-        staticmethod(lambda: events.append(("destroy_subgroups",))),
+        "invalidate_process_groups",
+        staticmethod(lambda: events.append(("invalidate_subgroups",))),
     )
     monkeypatch.setattr(
         rpg.ReloadableProcessGroup,
@@ -135,9 +135,8 @@ def test_world_and_subgroups_follow_destroy_reload_order(monkeypatch):
     assert state.generation == 1
     assert events == [
         ("barrier", "canonical-gloo"),
-        ("destroy_subgroups",),
-        ("barrier", "canonical-gloo"),
         ("destroy_world",),
+        ("invalidate_subgroups",),
         ("set_gloo", None),
         (
             "init",

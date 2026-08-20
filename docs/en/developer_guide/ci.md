@@ -1,122 +1,47 @@
 # CI (Continuous Integration)
 
-vime uses GitHub Actions for CI. Tests are triggered by **PR labels** — adding a specific label to a PR will run the corresponding test suite.
+Vime uses Buildkite for continuous integration. The committed pipeline is
+`.buildkite/pipeline.yml`.
 
-## How It Works
+## Always-on checks
 
-The workflow is defined in `.github/workflows/pr-test.yml` (auto-generated from `pr-test.yml.j2`). Each CI job:
+Every pull request runs these CPU steps:
 
-1. Runs on a self-hosted GPU runner via `docker run`; most tests use `vllm/vime:latest`, while image validation uses `vllm/vime:test-latest`.
-2. Installs vime with `pip install -e . --no-deps`.
-3. Acquires the required GPUs via `tests/ci/gpu_lock_exec.py --count <num_gpus>`.
-4. Executes the test file: `python <test_path>.py` or `python tests/<test_file>.py`, depending on whether the test lives under `tests/` or a subdirectory such as `tests/plugin_contracts/`.
+| Step | Coverage |
+|---|---|
+| `pre-commit` | formatting, lint, and repository policy |
+| `plugin-contracts` | customization contracts and CPU tests |
+| `agent-adapter` | agent adapter behavior |
+| `upstream-sync-cpu` | CPU tests synchronized from upstream |
+| `utils` | `tests/utils` |
 
-Each test file follows a standard pattern: a `prepare()` function downloads models/datasets, and an `execute()` function builds CLI arguments and calls `U.execute_train(...)`.
+The authoritative commands and queue configuration are in
+`.buildkite/pipeline.yml`.
 
-## CI Labels
+## GPU suites
 
-Add a label to your PR to trigger the corresponding test suite:
+After the CPU steps pass, the Buildkite build exposes a block step named
+`Run GPU test suites?`. Select one or more suites:
 
-| Label | Job | Description |
-|---|---|---|
-| `run-ci-short` | `e2e-test-short` | Lightweight smoke tests with Qwen2.5-0.5B (4 GPUs). Fast feedback loop. |
-| `run-ci-megatron` | `e2e-test-megatron` | Core Megatron training tests covering dense, MoE, PPO, MTP, etc. |
-| `run-ci-precision` | `e2e-test-precision` | Numerical precision validation (parallel check). |
-| `run-ci-ckpt` | `e2e-test-ckpt` | Checkpoint save/load correctness (sync and async-save). |
-| `run-ci-image` | `e2e-test-image` | Full test suite run on `vllm/vime:test-latest` image (for image validation). |
-| `run-ci-changed` | `e2e-test-changed` | **Dynamically** detects new/modified test files in the PR and runs only those. |
+- `short`
+- `vllm-config`
+- `megatron`
+- `vime-customized`
+- `precision`
+- `ckpt`
 
-All labels also run when triggered via `workflow_dispatch` (manual run from the Actions tab).
+`.buildkite/gpu_suites.py` expands each selected suite into one Buildkite job
+per test. GPU tests use `vllm/vime:latest`; rebuild and publish that image
+before validating a Dockerfile or vLLM patch change.
 
-## Key Labels Explained
+## Registering tests
 
-### `run-ci-changed` — Run Only New or Modified Tests
+- Add always-on CPU tests to the appropriate command in
+  `.buildkite/pipeline.yml`.
+- Add GPU tests to a suite in `.buildkite/gpu_suites.py` and update the suite
+  count shown by `.buildkite/pipeline.yml`.
+- Keep `.buildkite/README.md` synchronized with pipeline behavior.
 
-This is the most useful label for development. When you add a new test file or modify an existing one, just add `run-ci-changed` to your PR and CI will:
-
-1. **Detect** which `tests/test_*.py` or `tests/plugin_contracts/test_*.py` files are added or modified relative to `origin/main` (via `git diff --diff-filter=AM`).
-2. **Extract** the `NUM_GPUS` value from each detected test file automatically.
-3. **Build** a dynamic GitHub Actions matrix and run each test in parallel.
-
-This means you don't need to manually register your new test in the workflow — just make sure your test file has a top-level `NUM_GPUS = <N>` constant and `run-ci-changed` will pick it up.
-
-**Example**: If your PR adds `tests/test_mimo_7B_mtp_only_grad.py` with `NUM_GPUS = 8`, adding the `run-ci-changed` label will automatically run that test on 8 GPUs.
-
-### `run-ci-image` — Full Suite on Test Image
-
-This runs **all** registered tests on the `vllm/vime:test-latest` Docker image. Use this label to:
-
-- Validate a newly built Docker image before release.
-- Run the entire test suite for a comprehensive pre-merge check.
-
-Since this includes every test, it consumes significant GPU time — use it sparingly and prefer more targeted labels for routine development.
-
-### `run-ci-megatron` — Core Megatron Tests
-
-This is the primary label for validating Megatron-backend changes. It covers:
-
-- Dense models: GLM4-9B, Qwen3-4B (PPO)
-- MoE models: Qwen3-30B-A3B (with DeepEP), Qwen3.6-35B-A3B PD + Mooncake, Moonlight-16B-A3B
-- Specialized: MiMo-7B MTP, Qwen2.5-0.5B debug rollout-then-train
-
-All tests use 8 GPUs. If you are modifying Megatron training logic, loss computation, or checkpoint conversion, this is the label to use.
-
-## Writing a New Test
-
-1. Create `tests/test_<your_test_name>.py` following the standard pattern:
-
-```python
-import os
-import vime.utils.external_utils.command_utils as U
-
-MODEL_NAME = "Qwen2.5-0.5B-Instruct"
-MODEL_TYPE = "qwen2.5-0.5B"
-NUM_GPUS = 4  # This constant is used by run-ci-changed
-
-def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    # Download datasets as needed ...
-
-def execute():
-    # Build argument strings and call U.execute_train(...)
-    ...
-
-if __name__ == "__main__":
-    prepare()
-    for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
-        os.environ.pop(proxy_var, None)
-    execute()
-```
-
-2. **For quick validation**: Just push your test file and add `run-ci-changed` to the PR. It will be auto-detected.
-
-3. **To register in a permanent label group**: Edit `.github/workflows/pr-test.yml.j2`, add an entry to the desired job's `tests` list, then regenerate:
-
-```bash
-cd .github/workflows && python generate_github_workflows.py
-```
-
-Remember to commit both the `.j2` and the generated `.yml` file.
-
-## Workflow Generation
-
-The workflow file `pr-test.yml` is auto-generated from the Jinja2 template `pr-test.yml.j2`. **Do not edit `pr-test.yml` directly.** To make changes:
-
-1. Edit `.github/workflows/pr-test.yml.j2`.
-2. Run `python .github/workflows/generate_github_workflows.py`.
-3. Commit both files.
-
-## Customization Contract Tests
-
-For CPU-only contract tests that validate hooks loaded from function paths, run:
-
-```bash
-python -m pytest \
-  tests/plugin_contracts/test_plugin_rollout_contracts.py \
-  tests/plugin_contracts/test_plugin_generate_contracts.py \
-  tests/plugin_contracts/test_plugin_path_loading_contracts.py \
-  tests/plugin_contracts/test_plugin_runtime_hook_contracts.py
-```
-
-These files also support direct execution as `python tests/plugin_contracts/<file>.py`. They declare `NUM_GPUS = 0`, so `run-ci-changed` can pick them up without treating them as GPU-heavy end-to-end tests.
+Run the exact command locally before triggering its remote Buildkite job. For
+GPU failures, reproduce on an H200 node with the same image and environment,
+then rerun the remote suite only after the local test passes.

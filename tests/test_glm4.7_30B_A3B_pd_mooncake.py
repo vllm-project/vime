@@ -69,7 +69,7 @@ def execute():
         "--n-samples-per-prompt 2 "
         "--rollout-max-response-len 512 "
         "--rollout-temperature 1.0 "
-        "--rollout-top-p 0.95 "
+        "--rollout-top-p 1.0 "
         "--global-batch-size 8 "
     )
     optimizer_args = (
@@ -113,8 +113,8 @@ def execute():
         "--vllm-enable-expert-parallel "
         "--vllm-gpu-memory-utilization 0.45 "
         "--vllm-max-num-seqs 16 "
-        "--vllm-max-cudagraph-capture-size 8 "
-        '--vllm-speculative-config \'{"method":"mtp","num_speculative_tokens":3}\' '
+        "--vllm-max-cudagraph-capture-size 40 "
+        '--vllm-speculative-config \'{"method":"mtp","num_speculative_tokens":4}\' '
         "--router-request-timeout-secs 1200 "
         f"--vllm-config {vllm_config} "
     )

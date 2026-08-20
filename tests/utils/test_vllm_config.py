@@ -167,6 +167,137 @@ class TestZeroGpuRolloutConfig:
         assert args.vllm_router_port == 3456
         assert args.vllm_model_routers == {"default": ("127.0.0.1", 3456)}
 
+    def test_server_group_parallel_config_derives_tp_from_overridden_pp(self):
+        from vime.ray.rollout import ServerGroup
+
+        args = Namespace(
+            num_gpus_per_node=8,
+            vllm_pipeline_parallel_size=1,
+            vllm_prefill_context_parallel_size=1,
+            vllm_data_parallel_size=1,
+            vllm_dp_size=1,
+            vllm_enable_expert_parallel=True,
+        )
+
+        group = ServerGroup(
+            args=args,
+            pg=None,
+            all_engines=[object()],
+            num_gpus_per_engine=32,
+            num_new_engines=1,
+            vllm_overrides={"pipeline_parallel_size": 2},
+        )
+
+        assert group.parallel_config() == {
+            "tp_size": 16,
+            "pp_size": 2,
+            "pcp_size": 1,
+            "dp_size": 1,
+            "enable_expert_parallel": True,
+            "ep_size": 16,
+        }
+
+    def test_server_group_parallel_config_derives_tp_from_overridden_pcp(self):
+        from vime.ray.rollout import ServerGroup
+
+        args = Namespace(
+            num_gpus_per_node=8,
+            vllm_pipeline_parallel_size=1,
+            vllm_prefill_context_parallel_size=1,
+            vllm_data_parallel_size=1,
+            vllm_dp_size=1,
+            vllm_enable_expert_parallel=True,
+        )
+        group = ServerGroup(
+            args=args,
+            pg=None,
+            all_engines=[object()],
+            num_gpus_per_engine=8,
+            num_new_engines=1,
+            vllm_overrides={"prefill_context_parallel_size": 2, "data_parallel_size": 2},
+        )
+
+        assert group.parallel_config() == {
+            "tp_size": 2,
+            "pp_size": 1,
+            "pcp_size": 2,
+            "dp_size": 2,
+            "enable_expert_parallel": True,
+            "ep_size": 8,
+        }
+
+    def test_vllm_server_args_derive_tp_from_overridden_pp(self, monkeypatch):
+        from vime.backends.vllm_utils import vllm_engine
+
+        monkeypatch.setattr(vllm_engine, "_VLLM_SERVER_FIELDS", frozenset())
+
+        args = Namespace(
+            hf_checkpoint="/tmp/hf",
+            seed=1,
+            offload_rollout=False,
+            rollout_num_gpus_per_engine=32,
+            num_gpus_per_node=8,
+            vllm_pipeline_parallel_size=1,
+            vllm_prefill_context_parallel_size=1,
+            vllm_data_parallel_size=1,
+            vllm_dp_size=1,
+            vllm_enable_expert_parallel=True,
+            use_rollout_routing_replay=False,
+            fp16=False,
+            colocate=False,
+            rollout_max_context_len=None,
+            vllm_max_model_len=None,
+        )
+
+        kwargs, _ = vllm_engine._compute_server_args(
+            args,
+            rank=0,
+            dist_init_addr="127.0.0.1:12345",
+            host="127.0.0.1",
+            port=30000,
+            base_gpu_id=0,
+            vllm_overrides={"pipeline_parallel_size": 2},
+            num_gpus_per_engine=32,
+        )
+
+        assert kwargs["pipeline_parallel_size"] == 2
+        assert kwargs["tensor_parallel_size"] == 16
+
+    def test_offload_rollout_enables_vllm_sleep_mode(self, monkeypatch):
+        from vime.backends.vllm_utils import vllm_engine
+
+        monkeypatch.setattr(vllm_engine, "_VLLM_SERVER_FIELDS", frozenset())
+
+        args = Namespace(
+            hf_checkpoint="/tmp/hf",
+            seed=1,
+            offload_rollout=True,
+            rollout_num_gpus_per_engine=1,
+            num_gpus_per_node=8,
+            vllm_pipeline_parallel_size=1,
+            vllm_prefill_context_parallel_size=1,
+            vllm_data_parallel_size=1,
+            vllm_dp_size=1,
+            vllm_enable_expert_parallel=False,
+            use_rollout_routing_replay=False,
+            fp16=False,
+            colocate=False,
+            rollout_max_context_len=None,
+            vllm_max_model_len=None,
+            vllm_enable_sleep_mode=False,
+        )
+        compute_kwargs = {
+            "rank": 0,
+            "dist_init_addr": "127.0.0.1:12345",
+            "host": "127.0.0.1",
+            "port": 30000,
+            "base_gpu_id": 0,
+        }
+
+        kwargs, _ = vllm_engine._compute_server_args(args, **compute_kwargs)
+        assert kwargs["enable_sleep_mode"] is True
+        assert args.vllm_enable_sleep_mode is True
+
     def test_start_rollout_servers_defers_engine_wait(self, monkeypatch):
         from vime.ray import rollout as rollout_module
 

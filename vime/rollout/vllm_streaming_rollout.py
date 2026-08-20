@@ -98,10 +98,9 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
     if len(sample.response) > 0:
         params["max_new_tokens"] -= len(sample.tokens) - len(base_prompt_ids)
 
-    assert params["max_new_tokens"] >= 0, (
-        f"max_new_tokens: {params['max_new_tokens']} should not be less than 0 "
-        f"(after partial continuation adjustment; tokens={len(sample.tokens)}, base_prompt={len(base_prompt_ids)})"
-    )
+    assert (
+        params["max_new_tokens"] >= 0
+    ), f"max_new_tokens: {params['max_new_tokens']} should not be less than 0 (after partial continuation adjustment; tokens={len(sample.tokens)}, base_prompt={len(base_prompt_ids)})"
     if params["max_new_tokens"] == 0:
         sample.status = Sample.Status.TRUNCATED
         return sample
@@ -161,6 +160,9 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
     call_log_probs: list[float] = []
     last_choice: dict[str, Any] | None = None
     last_usage: dict[str, Any] | None = None
+    weight_version: str | None = None
+    request_spec_decode_stats: dict[str, int] | None = None
+    sampling_mask: list[list[int]] | None = None
     finish_reason: Any = None
 
     client = http_utils._http_client
@@ -183,6 +185,11 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
                     logger.warning("vllm_streaming: skipping non-JSON chunk: %r", data_str[:120])
                     continue
 
+                if chunk.get("weight_version") is not None:
+                    weight_version = str(chunk["weight_version"])
+                if chunk.get("request_spec_decode_stats") is not None:
+                    request_spec_decode_stats = chunk["request_spec_decode_stats"]
+
                 choices = chunk.get("choices") or []
                 if not choices:
                     # usage-only / keepalive chunk
@@ -191,6 +198,10 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
                     continue
                 choice = choices[0]
                 last_choice = choice
+                if choice.get("sampling_mask") is not None:
+                    if sampling_mask is None:
+                        sampling_mask = []
+                    sampling_mask.extend(choice["sampling_mask"])
                 if chunk.get("usage"):
                     last_usage = chunk["usage"]
                 if choice.get("finish_reason"):
@@ -250,10 +261,16 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
         else:
             finish = {"type": "stop"}
         meta: dict[str, Any] = {"finish_reason": finish}
+        if weight_version is not None:
+            meta["weight_version"] = weight_version
         if last_usage:
             meta["prompt_tokens"] = last_usage.get("prompt_tokens", 0)
             meta["completion_tokens"] = last_usage.get("completion_tokens", 0)
             meta["cached_tokens"] = (last_usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+        if request_spec_decode_stats:
+            meta["spec_accept_token_num"] = request_spec_decode_stats.get("num_accepted_tokens", 0)
+            meta["spec_draft_token_num"] = request_spec_decode_stats.get("num_draft_tokens", 0)
+            meta["spec_verify_ct"] = request_spec_decode_stats.get("num_verify_steps", 0)
         if new_response_tokens:
             meta["output_token_logprobs"] = [
                 [float(lp), int(tid)] for lp, tid in zip(new_response_log_probs, new_response_tokens, strict=True)
@@ -264,9 +281,23 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
         if last_choice.get("routed_experts") is not None:
             raw = base64.b64decode(last_choice["routed_experts"].encode("ascii"), validate=True)
             meta["routed_experts"] = np.load(io.BytesIO(raw), allow_pickle=False)
+        if sampling_mask is not None:
+            top_p_meta = {"top_p_token_ids": [token_id for token_ids in sampling_mask for token_id in token_ids]}
+            offsets = [0]
+            for token_ids in sampling_mask:
+                offsets.append(offsets[-1] + len(token_ids))
+            top_p_meta["top_p_token_offsets"] = offsets
+            sample._apply_meta_info(
+                args,
+                top_p_meta,
+                new_token_count=len(new_response_tokens),
+                update_terminal_info=False,
+            )
         # tokens already accumulated above; finalize metadata only (no token re-append).
         sample.append_response_tokens(args, meta_info=meta)
     elif state.aborted:
+        if weight_version is not None:
+            sample.weight_versions.append(weight_version)
         sample.status = Sample.Status.ABORTED
 
     return sample

@@ -468,12 +468,10 @@ publish the writes on a non-POSIX shared filesystem — e.g. upload pending writ
 backing object store — where another host cannot see the files without an explicit sync. The hook is called
 on every rank and must gate itself (e.g. once per container).
 
-The read-side counterpart runs inside the inference engine, on every host it spans, and is
-therefore an vllm server argument rather than a vime hook: pass
-`--vllm-custom-pull-weights-pre-read-hook <import.path>` with signature
-`hook(source_dir: str, target_version: int)` — called before `/pull_weights` reads the
-published weights (e.g. refresh the mount's view). See
-[Delta Weight Sync](../advanced/delta-weight-sync.md) for the full mechanism.
+The post-write hook must make the completed version directory visible before it
+returns. Host-local full-checkpoint copies then use that published directory as
+their source. See [Delta Weight Sync](../advanced/delta-weight-sync.md) for the
+delta mechanism.
 
 ## Testing Custom Function Paths
 
@@ -500,9 +498,8 @@ python -m pytest \
   tests/plugin_contracts/test_plugin_runtime_hook_contracts.py
 ```
 
-Each test file can also be executed directly with `python tests/plugin_contracts/<file>.py`, which keeps them compatible with `run-ci-changed`.
-
-A dedicated `run-ci-plugin-contracts` CI label is also available. Adding it to a PR triggers all four contract test files in parallel (no GPU required).
+Each test file can also be executed directly with `python tests/plugin_contracts/<file>.py`.
+Buildkite runs all four contract files in its always-on `plugin-contracts` CPU step.
 
 For user-defined implementations, you can either export environment variables such as `VIME_CONTRACT_ROLLOUT_FUNCTION_PATH` and `VIME_CONTRACT_CUSTOM_RM_PATH`, or pass overrides directly when running a test file, for example:
 

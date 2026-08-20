@@ -10,7 +10,7 @@ from megatron.training.global_vars import get_args
 
 from vime.utils import megatron_bridge_utils
 
-from .lora_utils import is_lora_enabled, is_lora_model, load_lora_adapter, save_lora_checkpoint
+from .lora_utils import is_lora_model, load_lora_adapter, save_lora_checkpoint
 
 try:
     # Here we patch out the `validate_non_overlapping_shards_metadata` in both functions
@@ -123,7 +123,7 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_con
 
     # LoRA resume needs both halves: the frozen base loaded above, and the trained
     # adapter overlaid here.
-    if is_lora_enabled(args):
+    if is_lora_model(ddp_model):
         adapter_path = getattr(args, "lora_adapter_path", None)
         if adapter_path is not None:
             loaded, iteration = load_lora_adapter(
@@ -184,18 +184,21 @@ def _is_megatron_checkpoint(path: str | Path) -> bool:
 
 
 def _load_checkpoint_hf(ddp_model, optimizer, args, load_path: str):
-    assert args.megatron_to_hf_mode == "bridge", "Only bridge mode is supported for loading HF checkpoint"
-    from megatron.bridge import AutoBridge
-
-    import vime_plugins.megatron_bridge  # noqa: F401
-
     logger.info(f"Load checkpoint from HuggingFace model into Megatron (path={load_path})")
+    if is_lora_model(ddp_model):
+        from megatron.bridge import AutoBridge
 
-    with megatron_bridge_utils.patch_megatron_model(ddp_model):
-        bridge = megatron_bridge_utils.patch_auto_bridge_hf_config(
-            AutoBridge.from_hf_pretrained(load_path, trust_remote_code=True)
-        )
-        bridge.load_hf_weights(ddp_model)
+        import vime_plugins.megatron_bridge  # noqa: F401
+
+        with megatron_bridge_utils.patch_megatron_model(ddp_model):
+            bridge = megatron_bridge_utils.patch_auto_bridge_hf_config(
+                AutoBridge.from_hf_pretrained(load_path, trust_remote_code=True)
+            )
+            bridge.load_hf_weights(ddp_model)
+    else:
+        from vime.backends.megatron_utils.hf_to_megatron import load_hf_weights
+
+        load_hf_weights(args, ddp_model, load_path)
 
     # Copied from Megatron-core :: load_checkpoint (with simplifications)
     if (args.fp16 or args.bf16) and optimizer is not None:

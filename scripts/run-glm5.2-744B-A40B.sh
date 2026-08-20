@@ -125,7 +125,7 @@ WANDB_ARGS=(
 VLLM_CONFIG_FILE=$(mktemp /tmp/vllm_glm52_744B_A40B_XXXXXX.yaml)
 # PD disaggregation: 1 prefill engine (64 GPU) + 3 decode engines (192 GPU) = 256.
 # Each engine spans 64 GPUs (EP=64, within DeepEP's supported rank set). Prefill
-# uses the auto DeepEP path; decode uses low_latency + deep_gemm for throughput.
+# uses the high-throughput DeepEP backend; decode uses the low-latency backend.
 cat > "${VLLM_CONFIG_FILE}" <<CFG
 vllm:
   - name: default
@@ -140,6 +140,11 @@ vllm:
           max_num_batched_tokens: 131072
           max_num_seqs: 512
           all2all_backend: deepep_high_throughput
+          kv_transfer_config:
+            kv_connector: MooncakeConnector
+            kv_role: kv_producer
+            kv_connector_extra_config:
+              device_name: "mlx5_100,mlx5_101,mlx5_102,mlx5_103,mlx5_104,mlx5_105,mlx5_106,mlx5_107"
       - worker_type: decode
         num_gpus: 192
         num_gpus_per_engine: 64
@@ -148,7 +153,13 @@ vllm:
           data_parallel_size: 64
           enable_expert_parallel: true
           max_num_seqs: 768
+          max_cudagraph_capture_size: 72
           all2all_backend: deepep_low_latency
+          kv_transfer_config:
+            kv_connector: MooncakeConnector
+            kv_role: kv_consumer
+            kv_connector_extra_config:
+              device_name: "mlx5_100,mlx5_101,mlx5_102,mlx5_103,mlx5_104,mlx5_105,mlx5_106,mlx5_107"
 CFG
 
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=3600
@@ -157,11 +168,11 @@ VLLM_ARGS=(
    --rollout-num-gpus-per-engine 64
    --vllm-gpu-memory-utilization 0.70
    --vllm-kv-cache-dtype fp8_e4m3
-   --vllm-max-cudagraph-capture-size 8
+   --vllm-max-cudagraph-capture-size 48
    --vllm-config "${VLLM_CONFIG_FILE}"
 
    # MTP / EAGLE speculative decoding uses the model's own next-token-prediction layer.
-   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":5}'
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":5}'
 )
 
 MISC_ARGS=(
@@ -223,8 +234,6 @@ RUNTIME_ENV_JSON=$(cat <<EOF_JSON
     "INDEXER_ROPE_NEOX_STYLE": "0",
     "MC_IB_PCI_RELAXED_ORDERING": "1",
     "MLP_SKIP_SORT_RDMA": "true",
-    "VLLM_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK": "64",
-    "VLLM_JIT_DEEPGEMM_PRECOMPILE": "true",
     "NVSHMEM_DISABLE_NCCL": "1"
   }
 }

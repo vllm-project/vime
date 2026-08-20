@@ -469,10 +469,9 @@ engine 读取之前，在每个训练 rank 上调用。用于在非 POSIX 共享
 一个对象存储挂载——否则其他 host 无法看到这些文件。hook 会在每个 rank 上被调用，需要自行去重
 （例如每个容器只执行一次）。
 
-读取侧的对应 hook 运行在推理引擎内部、engine 覆盖的每个 host 上，因此它是一个 vllm server
-参数而不是 vime hook：传入 `--vllm-custom-pull-weights-pre-read-hook <import.path>`，签名为
-`hook(source_dir: str, target_version: int)`——在 `/pull_weights` 读取已发布权重之前调用
-（例如刷新挂载视图）。完整机制见 [Delta 权重同步](../advanced/delta-weight-sync.md)。
+post-write hook 返回前必须保证完整版本目录对读取端可见。host-local 的完整 checkpoint
+复制随后直接使用该目录作为来源。delta 机制见
+[Delta 权重同步](../advanced/delta-weight-sync.md)。
 
 ## 自定义函数路径的测试
 
@@ -499,9 +498,8 @@ python -m pytest \
   tests/plugin_contracts/test_plugin_runtime_hook_contracts.py
 ```
 
-每个测试文件也支持直接通过 `python tests/plugin_contracts/<file>.py` 执行，这样可以和 `run-ci-changed` 保持兼容。
-
-CI 中也提供了独立的 `run-ci-plugin-contracts` label，给 PR 打上该标签后会并行运行上述全部四个契约测试（无需 GPU）。
+每个测试文件也支持直接通过 `python tests/plugin_contracts/<file>.py` 执行。
+Buildkite 会在始终运行的 `plugin-contracts` CPU step 中执行全部四个契约测试。
 
 如果你要验证自己的自定义实现，可以直接设置环境变量，例如 `VIME_CONTRACT_ROLLOUT_FUNCTION_PATH`、`VIME_CONTRACT_CUSTOM_RM_PATH`，也可以在直接运行测试文件时传参，例如：
 

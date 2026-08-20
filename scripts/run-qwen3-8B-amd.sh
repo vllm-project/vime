@@ -125,7 +125,6 @@ MISC_ARGS=(
    --accumulate-allreduce-grads-in-fp32
    --attention-softmax-in-fp32
    --attention-backend flash
-   --train-memory-margin-bytes 2147483648
    # APEX not installed on this ROCm image -> disable fused grad accumulation.
    --no-gradient-accumulation-fusion
    # Keep train state resident: the colocate offload path leaks VRAM on ROCm gfx950

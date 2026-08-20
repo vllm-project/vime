@@ -175,7 +175,9 @@ def execute_train(
             else ""
         )
         model_args = "${MODEL_ARGS[@]}" if megatron_model_type is not None else ""
-        if is_rocm():
+        import torch
+
+        if torch.version.hip is not None:
             # ROCm: `ray job submit` intermittently hits a "No available agent"
             # race in the ROCm container. Run the train script directly against
             # the ray head started above; pass the ray runtime-env as exports.
@@ -255,7 +257,7 @@ def create_run_id() -> str:
 _warned_bool_env_var_keys = set()
 
 
-# copied from SGLang
+# copied from VLLM
 def get_bool_env_var(name: str, default: str = "false") -> bool:
     value = os.getenv(name, default)
     value = value.lower()

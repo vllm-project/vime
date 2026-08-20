@@ -12,9 +12,6 @@ patched local checkpoint through the **ordinary** `update_weights_from_disk` end
 only ever talks to one endpoint per engine, so multi-node serving and external rollout engines
 need nothing extra on the vime side.
 
-Vime currently guards this mechanically synchronized path with a `NotImplementedError` when
-`--update-weight-mode=delta` is selected; the implementation below remains upstream reference code.
-
 ## Configuration
 
 ```bash
@@ -102,6 +99,6 @@ optional hooks, loaded by import path — no vendor-specific code lives in vime 
 - `--custom-update-weight-post-write-path` (vime, trainer side): called after a version's files are
   written, before the engines are told to read it (e.g. upload pending writes to the backing object store).
   Signature: `hook(args, version_dir, rollout_engines)`.
-- `--vllm-custom-pull-weights-pre-read-hook` (vllm server arg, engine side): called on each host
+- `--custom-update-weight-pre-read-path` (vime, engine side): called on each host
   inside the engine before `/pull_weights` reads the delta directory (e.g. refresh the mount's view).
   Signature: `hook(delta_dir, target_version)`.

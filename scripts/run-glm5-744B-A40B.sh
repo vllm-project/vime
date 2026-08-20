@@ -116,10 +116,10 @@ VLLM_ARGS=(
 
    # dsa
    --vllm-attention-backend nsa
-   --vllm-max-cudagraph-capture-size 8
+   --vllm-max-cudagraph-capture-size 40
 
    --vllm-max-num-seqs 512
-   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":4}'
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":4}'
 
 )
 

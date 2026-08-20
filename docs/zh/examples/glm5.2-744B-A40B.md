@@ -18,7 +18,7 @@ hf download zai-org/GLM-5.2 --local-dir $BASE_DIR/GLM-5.2
 hf download zai-org/GLM-5.2-FP8 --local-dir $BASE_DIR/GLM-5.2-FP8
 ```
 
-开源 GLM-5.2 的 config 使用 `model_type: glm_moe_dsa`，vime 将其映射到 DeepSeek-V3.2 的 bridge（`vime_plugins.mbridge.deepseek_v32`），因为两者共享相同的 DSA 权重布局。
+开源 GLM-5.2 的 config 使用 `model_type: glm_moe_dsa`，vime 将其映射到原生 DeepSeek-V3.2 loader，因为两者共享相同的 DSA 权重布局。
 
 ### 转换 Checkpoint
 
@@ -121,7 +121,7 @@ ROLLOUT_ARGS=(
 
 #### vLLM 配置
 
-rollout 侧采用 **prefill/decode (PD) 分离**:1 个 prefill engine(64 卡)+ 3 个 decode engine(192 卡)= 256 卡(必须等于 colocate 的 `rollout_num_gpus`)。每个 engine 64 卡,开 DP attention、`EP=64`(DeepEP 的 dispatch config map 只支持到 160 个 EP rank,所以单个 256 卡 engine 非法)。prefill 用 `auto` DeepEP 路径,decode 用 `low_latency` + `deep_gemm`。切分通过 `--vllm-config` YAML 配置:
+rollout 侧采用 **prefill/decode (PD) 分离**:1 个 prefill engine(64 卡)+ 3 个 decode engine(192 卡)= 256 卡(必须等于 colocate 的 `rollout_num_gpus`)。每个 engine 使用 64 卡 data parallel 和 vLLM expert parallel。prefill 使用 DeepEP high-throughput backend，decode 使用 low-latency backend。切分通过 `--vllm-config` YAML 配置:
 
 ```yaml
 vllm:
@@ -130,45 +130,36 @@ vllm:
       - worker_type: prefill
         num_gpus: 64
         num_gpus_per_engine: 64
-        overrides: { deepep_mode: auto, ... }
+        overrides: { data_parallel_size: 64, enable_expert_parallel: true, all2all_backend: deepep_high_throughput, kv_transfer_config: { kv_connector: MooncakeConnector, kv_role: kv_producer, ... }, ... }
       - worker_type: decode
         num_gpus: 192
         num_gpus_per_engine: 64
-        overrides: { deepep_mode: low_latency, moe_runner_backend: deep_gemm, ... }
+        overrides: { data_parallel_size: 64, enable_expert_parallel: true, max_cudagraph_capture_size: 72, all2all_backend: deepep_low_latency, kv_transfer_config: { kv_connector: MooncakeConnector, kv_role: kv_consumer, ... }, ... }
 ```
 
-PD 传输走 RDMA/IB,使用 mooncake backend:
+上游的 `mooncake` 传输对应 vLLM 的 `MooncakeConnector`。上游的 IB device 列表对应 `kv_connector_extra_config.device_name`；prefill 和 decode group 分别使用 `kv_producer` 与 `kv_consumer`。
 
-```bash
---vllm-disaggregation-transfer-backend mooncake
---vllm-disaggregation-ib-device mlx5_100,...,mlx5_107
-```
-
-其余 rollout 配置使用 FP8 KV cache 和 NSA + DeepEP backend:
+共享 rollout 参数使用 vLLM 原生的 FP8 KV cache 和 CUDA graph 配置:
 
 ```bash
 VLLM_ARGS=(
-   --vllm-enable-dp-attention
-   --vllm-ep-size 64
-   --vllm-dp-size 64
+   --rollout-num-gpus-per-engine 64
+   --vllm-gpu-memory-utilization 0.70
    --vllm-kv-cache-dtype fp8_e4m3
-   --vllm-nsa-decode-backend flashmla_kv
-   --vllm-nsa-prefill-backend flashmla_sparse
-   --vllm-attention-backend nsa
-   ...
+   --vllm-max-cudagraph-capture-size 48
+   --vllm-config "${VLLM_CONFIG_FILE}"
 )
 ```
 
 MTP / EAGLE speculative decoding 直接使用模型自带的 next-token-prediction 层（GLM-5.2 checkpoint 自带 MTP 层），因此不需要单独的 draft model：
 
 ```bash
---vllm-speculative-algorithm EAGLE
---vllm-speculative-num-steps 4
---vllm-speculative-eagle-topk 1
---vllm-speculative-num-draft-tokens 5
+--vllm-speculative-config '{"method":"mtp","num_speculative_tokens":5}'
 ```
 
-`VLLM_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK` 需要覆盖最大的 decode batch:`max cuda_graph_max_bs (decode 组 = 12) * speculative_num_draft_tokens (5) = 60`,向上取整到 `64`。低于该值会在 decode 组 CUDA graph capture 时触发 DeepEP low-latency dispatch buffer 的断言。
+vLLM 的 CUDA graph capture size 按展开后的 query token 数计算。启用 5 个 speculative token 后，每个 decode 请求对应 `1 + 5 = 6` 个 query token，因此共享上限 `48` 可覆盖 8 个请求，decode group 的覆盖值 `72` 可覆盖 12 个请求。vLLM 会根据 scheduler token capacity 自动推导 DeepEP dispatch buffer 大小。
+
+`VLLM_ENGINE_ITERATION_TIMEOUT_S=3600` 会为这个长时间运行的多节点任务提高 vLLM engine watchdog 的超时时间。
 
 #### 网络
 

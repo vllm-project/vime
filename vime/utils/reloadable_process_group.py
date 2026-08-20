@@ -30,7 +30,13 @@ class _DefaultProcessGroupState:
 
 
 def register_default_process_group(timeout: timedelta) -> None:
-    """Register WORLD's rendezvous state so it can be rebuilt after sleep."""
+    """Register the NCCL WORLD group so it can be destroyed and rebuilt.
+
+    Keeping a reference to the rendezvous store is intentional.  It keeps the
+    rank-0 TCPStore alive after ``destroy_process_group()`` and lets every
+    generation use a fresh PrefixStore namespace, avoiding stale rendezvous
+    keys when WORLD is recreated repeatedly.
+    """
     if not dist.is_initialized():
         raise RuntimeError("Cannot register WORLD before torch.distributed is initialized")
 
@@ -73,8 +79,19 @@ def _destroy_default_nccl_process_group() -> None:
     if state is None or state.nccl_world_destroyed or not _uses_nccl(state.backend):
         return
 
+    # Pure PP=4 exposed a teardown ordering deadlock here.  Pipeline ranks own
+    # different overlapping subsets of singleton, embedding, and PP groups, so
+    # destroying the local wrapper list one group at a time let rank 0 enter
+    # subgroup reload while another rank was still shutting down.  The first
+    # rank then blocked forever in new_group(), waiting for the others.
+    #
+    # Destroying WORLD once makes PyTorch shut down every registered NCCL and
+    # Gloo backend in its global process-group order.  This still releases all
+    # communicator memory; invalidating the wrappers below only drops stale
+    # Python handles after their native backends have already been shut down.
     dist.barrier(group=get_gloo_group())
     dist.destroy_process_group()
+    ReloadableProcessGroup.invalidate_process_groups()
     set_gloo_group(None)
 
     _new_default_process_group(state, backend="gloo")
@@ -92,6 +109,8 @@ def _reload_default_process_group() -> None:
     if state is None or not state.nccl_world_destroyed:
         return
 
+    # WORLD uses Gloo while the NCCL WORLD is destroyed, so this barrier does
+    # not allocate CUDA or recreate an NCCL communicator before all ranks are ready.
     dist.barrier()
     dist.destroy_process_group()
     set_gloo_group(None)
@@ -139,8 +158,10 @@ def monkey_patch_torch_dist():
         explicit_backend = args[2] if len(args) >= 3 else kwargs.get("backend")
         backend = str(explicit_backend) if explicit_backend is not None else str(dist.get_backend())
 
-        # Once WORLD is reloadable, destroying it invalidates every cached
-        # subgroup, including Gloo and singleton groups.
+        # Before WORLD is registered, preserve the historical behavior of
+        # leaving CPU groups and singleton groups untouched.  Afterwards every
+        # cached subgroup must be reloadable because destroying WORLD
+        # invalidates all of them, including Gloo and singleton groups.
         if backend == "gloo" and pid not in default_process_group_states:
             return group
 
@@ -153,6 +174,12 @@ def monkey_patch_torch_dist():
             # If no ranks specified, use all ranks in world
             ranks = list(range(dist.get_world_size()))
 
+        # Historically singleton groups were left unwrapped because they do
+        # not own a useful communicator.  Once WORLD itself is destroyed,
+        # however, PyTorch invalidates *every* registered subgroup, including
+        # singleton groups cached by Megatron.  Wrap them for actors that have
+        # registered a reloadable WORLD so those cached references remain
+        # usable after wake-up.  Preserve the old behavior for other callers.
         if len(ranks) == 1 and pid not in default_process_group_states:
             return group
 
@@ -287,6 +314,13 @@ class ReloadableProcessGroup(torch.distributed.ProcessGroup):
             reloadable_group.group = None
 
     @staticmethod
+    def invalidate_process_groups():
+        """Drop handles after destroying WORLD, which already shut down every subgroup."""
+        pid = os.getpid()
+        for reloadable_group in ReloadableProcessGroup.GROUPS.get(pid, []):
+            reloadable_group.group = None
+
+    @staticmethod
     def reload_process_groups():
         pid = os.getpid()
         reloadable_groups = ReloadableProcessGroup.GROUPS.get(pid, [])
@@ -344,6 +378,9 @@ class ReloadableProcessGroup(torch.distributed.ProcessGroup):
     def barrier(self, *a, **kw):
         return self._fwd("barrier", *a, **kw)
 
+    def monitored_barrier(self, *a, **kw):
+        return self._fwd("monitored_barrier", *a, **kw)
+
     def broadcast(self, *a, **kw):
         return self._fwd("broadcast", *a, **kw)
 
@@ -368,6 +405,12 @@ class ReloadableProcessGroup(torch.distributed.ProcessGroup):
     def allgather_into_tensor_coalesced(self, *a, **kw):
         return self._fwd("allgather_into_tensor_coalesced", *a, **kw)
 
+    def all_gather_single(self, *a, **kw):
+        return self._fwd("all_gather_single", *a, **kw)
+
+    def all_gather_single_coalesced(self, *a, **kw):
+        return self._fwd("all_gather_single_coalesced", *a, **kw)
+
     def gather(self, *a, **kw):
         return self._fwd("gather", *a, **kw)
 
@@ -376,6 +419,12 @@ class ReloadableProcessGroup(torch.distributed.ProcessGroup):
 
     def reduce_scatter(self, *a, **kw):
         return self._fwd("reduce_scatter", *a, **kw)
+
+    def reduce_scatter_single(self, *a, **kw):
+        return self._fwd("reduce_scatter_single", *a, **kw)
+
+    def reduce_scatter_single_coalesced(self, *a, **kw):
+        return self._fwd("reduce_scatter_single_coalesced", *a, **kw)
 
     def _reduce_scatter_base(self, *a, **kw):
         return self._fwd("_reduce_scatter_base", *a, **kw)
@@ -423,12 +472,12 @@ class ReloadableProcessGroup(torch.distributed.ProcessGroup):
 
 
 def destroy_process_groups():
-    """Destroy subgroups and replace NCCL WORLD with a temporary Gloo WORLD."""
+    """Destroy registered subgroups and replace NCCL WORLD with a temporary Gloo WORLD."""
     state = default_process_group_states.get(os.getpid())
     if state is not None and not state.nccl_world_destroyed and _uses_nccl(state.backend):
-        dist.barrier(group=get_gloo_group())
-    ReloadableProcessGroup.destroy_process_groups()
-    _destroy_default_nccl_process_group()
+        _destroy_default_nccl_process_group()
+    else:
+        ReloadableProcessGroup.destroy_process_groups()
 
 
 def reload_process_groups():

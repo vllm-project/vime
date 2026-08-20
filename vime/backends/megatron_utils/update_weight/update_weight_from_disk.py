@@ -15,7 +15,7 @@ from ..hf_checkpoint_saver import save_hf_model_to_path
 
 
 class UpdateWeightFromDisk:
-    """Full-weight sync through a shared filesystem and vLLM disk reload."""
+    """Full-weight sync through a shared filesystem and VLLM disk reload."""
 
     def __init__(
         self,
@@ -50,6 +50,7 @@ class UpdateWeightFromDisk:
         rollout_engine_lock: ActorHandle,
         engine_gpu_counts: Sequence[int] | None = None,
         engine_gpu_offsets: Sequence[int] | None = None,
+        engine_parallel_configs: Sequence[Mapping[str, object]] | None = None,
     ) -> None:
         self.rollout_engines = rollout_engines
         self.rollout_engine_lock = rollout_engine_lock
@@ -89,6 +90,6 @@ class UpdateWeightFromDisk:
             self._post_write_hook(self.args, str(version_dir), list(self.rollout_engines))
         dist.barrier(group=get_gloo_group())
 
-        # vLLM reload is orchestrated by RayTrainGroup after the checkpoint
+        # VLLM reload is orchestrated by RayTrainGroup after the checkpoint
         # is fully written, so training-side lifecycle can decide whether
         # Megatron actors are still alive.

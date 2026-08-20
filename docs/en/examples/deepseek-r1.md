@@ -168,7 +168,7 @@ OPTIMIZER_ARGS=(
 
 #### VLLM\_ARGS
 
-These are the parameters required by vllm. Here, `--rollout-num-gpus-per-engine` basically corresponds to vllm's `tp_size`. Other vllm parameters are passed to vime by adding a `--vllm-` prefix. To fully leverage vLLM's large EP inference capabilities, we enable `--vllm-enable-expert-parallel` for expert parallelism and `--vllm-data-parallel-size 8` for data-parallel attention. DeepEP is available but disabled by default (see commented flags in the script).
+These are the parameters required by vLLM. `--rollout-num-gpus-per-engine` is the total worker GPU count for one engine; here it is `tensor_parallel_size * data_parallel_size`, not just the tensor-parallel size. Other vLLM parameters are passed to vime by adding the `--vllm-` prefix. To fully leverage vLLM's large EP inference capabilities, we enable `--vllm-enable-expert-parallel` for expert parallelism and `--vllm-data-parallel-size 8` for data-parallel attention. DeepEP is available but disabled by default (see commented flags in the script).
 
 The final `--vllm-server-concurrency` is a parameter specific to vime. It is used to prevent the vllm server's concurrent requests from becoming too large and crashing the HTTP server. The default is 512. However, since we now have one server for 8 nodes, we have adjusted it to 1024 to ensure that each dp rank can have a concurrency of 128.
 
@@ -187,7 +187,7 @@ VLLM_ARGS=(
 
     # make every dp rank has 128 concurrency
     --vllm-server-concurrency 1024
-    --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":4}'
+    --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":4}'
 )
 ```
 

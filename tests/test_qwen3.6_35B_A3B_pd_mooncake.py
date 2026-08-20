@@ -99,8 +99,8 @@ def execute():
         "--vllm-data-parallel-size 4 "
         "--vllm-enable-expert-parallel "
         "--vllm-max-num-seqs 512 "
-        "--vllm-cudagraph-capture-sizes 1 2 4 8 16 24 32 "
-        '--vllm-speculative-config \'{"method":"mtp","num_speculative_tokens":3}\' '
+        "--vllm-cudagraph-capture-sizes 5 10 20 40 80 "
+        '--vllm-speculative-config \'{"method":"mtp","num_speculative_tokens":4}\' '
         "--prefill-num-servers 1 "
     )
 

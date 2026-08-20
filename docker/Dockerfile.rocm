@@ -154,7 +154,7 @@ RUN F=$(find /usr/local/lib/python3.12/dist-packages/ -path "*transformer_engine
 # ======================================== vLLM ================================
 FROM te AS install_vllm
 
-ARG VLLM_TAG="43914dd74"
+ARG VLLM_TAG="6e448d0ea9bf3d88d898b65449ca6dc2aec170ac"
 ARG MAX_JOBS=
 RUN --mount=type=cache,target=/root/.cache/ccache \
     pip install setuptools_scm && \
@@ -219,7 +219,6 @@ RUN cd /root/Megatron-LM && \
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --ignore-installed PyJWT && \
     pip install flash-linear-attention==0.4.2 && \
-    pip install git+https://github.com/ISEEKYAN/mbridge.git@89eb10887887bc74853f89a4de258c0702932a1c --no-deps && \
     pip install git+https://github.com/radixark/Megatron-Bridge.git@bridge --no-deps --no-build-isolation && \
     pip install megatron-energon --no-deps && \
     pip install multi-storage-client --no-deps

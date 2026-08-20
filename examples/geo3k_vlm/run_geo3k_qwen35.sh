@@ -4,16 +4,9 @@
 
 pip install -U transformers
 
-# IMPORTANT: This branch is specially modified for vime's current Megatron
-# version and Qwen3.5 from the main Megatron Bridge. Other models are not verified!
-# To restore the original Megatron Bridge, run:
-#   pip install git+https://github.com/fzyzcjy/Megatron-Bridge.git@dev_rl --no-build-isolation
-# TODO: Remove this once Megatron & Megatron Bridge are upgraded upstream.
-pip install git+https://github.com/andakai/Megatron-Bridge.git@qwen35 --no-build-isolation
-
 # Configuration
 TRAIN_BACKEND="megatron"
-MODEL_NAME="Qwen3_5-35B-A3B"
+MODEL_NAME="Qwen3.5-35B-A3B"
 DATASET_NAME=${VIME_SCRIPT_DATASET_NAME:-"chenhegu/geo3k_imgurl"}
 NUM_GPUS=${VIME_SCRIPT_NUM_GPUS:-8}
 DATASET_LOCAL_NAME=$(basename "$DATASET_NAME")
@@ -68,7 +61,6 @@ fi
 CKPT_ARGS=(
    --hf-checkpoint /root/models/${MODEL_NAME}
    --load /root/models/${MODEL_NAME}
-   --megatron-to-hf-mode bridge
 )
 
 ROLLOUT_ARGS=(
@@ -119,7 +111,7 @@ VLLM_ARGS=(
    --rollout-num-gpus-per-engine 8
    --vllm-gpu-memory-utilization 0.7
    --vllm-enable-expert-parallel
-   --vllm-cudagraph-capture-sizes 1 2 4 8 $(seq 16 8 256)
+   --vllm-cudagraph-capture-sizes 4 8 16 32 $(seq 64 32 1024)
 
    # MTP speculative decoding
    --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
@@ -168,7 +160,7 @@ BACKEND_ARGS=(
 )
 
 VIME_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." &>/dev/null && pwd)"
-source "${VIME_DIR}/scripts/models/qwen3.5-35B-A3B.sh"
+source "${VIME_DIR}/scripts/models/qwen3.5-35B-A3B-vl.sh"
 
 # Start Ray if not using external Ray
 if [ "$USE_EXTERNAL_RAY" = "0" ]; then

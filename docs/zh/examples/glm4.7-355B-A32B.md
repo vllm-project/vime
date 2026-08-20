@@ -89,6 +89,8 @@ GLM-4.7 是一个 MoE（混合专家）模型，包含 160 个路由专家（top
    VLLM_ARGS=(
       --rollout-num-gpus-per-engine 32
       --vllm-gpu-memory-utilization 0.7
+      --vllm-data-parallel-size 4
+      --vllm-enable-expert-parallel
       ...
    )
    ```
@@ -101,7 +103,7 @@ GLM-4.7 包含 MTP（Multi-Token Prediction）层，可以在推理阶段用于�
 VLLM_ARGS=(
    ...
    # MTP 投机解码
-   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":4}'
 )
 ```
 
@@ -128,7 +130,7 @@ MTP_ARGS=(
 - `--enable-mtp-training`：启用 MTP 层的梯度计算；不设置时 MTP 层会被加载但保持冻结。
 - `--mtp-loss-scaling-factor 0.2`：MTP loss 相对主策略 loss 的权重，默认值为 0.2。
 
-> **注意**：GLM-4.7 的 MTP 训练依赖 `GLM4MoEBridge`（位于 `vime_plugins/mbridge/glm4moe.py`）在 HuggingFace 与 Megatron 格式之间正确映射普通层和 MTP 层权重。
+> **注意**：`vime/backends/megatron_utils/hf_to_megatron/glm.py` 中的原生 loader 会同时映射普通层和 MTP 层权重。
 
 #### 多机支持
 
@@ -163,7 +165,10 @@ python tools/convert_hf_to_fp8.py \
 VLLM_ARGS=(
    --rollout-num-gpus-per-engine 32
    --vllm-gpu-memory-utilization 0.7
-   --vllm-max-cudagraph-capture-size 64
-   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
+   --vllm-data-parallel-size 32
+   --vllm-enable-expert-parallel
+   --vllm-cudagraph-capture-sizes 5 10 20 40 $(seq 80 40 640)
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":4}'
+   --vllm-all2all-backend deepep_high_throughput
 )
 ```

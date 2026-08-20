@@ -20,17 +20,17 @@ def _extract_rollout_top_p_token_data(
     if token_ids is None and offsets is None:
         return None
     if token_ids is None or offsets is None:
-        raise ValueError("vLLM top-p token replay must include both token ids and offsets.")
+        raise ValueError("VLLM top-p token replay must include both token ids and offsets.")
     if offsets.numel() == 0 or int(offsets[0]) != 0:
-        raise ValueError(f"vLLM top-p token offsets must start with 0, got {offsets[:1].tolist()}.")
+        raise ValueError(f"VLLM top-p token offsets must start with 0, got {offsets[:1].tolist()}.")
     if int(offsets[-1]) != token_ids.numel():
         raise ValueError(
-            "vLLM top-p token ids/offsets mismatch: "
+            "VLLM top-p token ids/offsets mismatch: "
             f"offsets[-1]={int(offsets[-1])}, len(token_ids)={token_ids.numel()}."
         )
     if expected_num_tokens is not None and offsets.numel() != expected_num_tokens + 1:
         raise ValueError(
-            "vLLM top-p token offsets length must equal generated token count + 1: "
+            "VLLM top-p token offsets length must equal generated token count + 1: "
             f"len(offsets)={offsets.numel()}, generated={expected_num_tokens}."
         )
     return token_ids, offsets
@@ -264,7 +264,7 @@ class Sample:
         """
         Append response-side tokens and keep training metadata aligned.
 
-        Model-generated tokens should pass ``trainable=True`` plus vLLM
+        Model-generated tokens should pass ``trainable=True`` plus VLLM
         ``meta_info`` and log probabilities. Tool/environment tokens should pass
         ``trainable=False``; they receive loss-mask zeros and empty top-p spans
         when top-p replay is active.
@@ -356,13 +356,13 @@ class Sample:
             routed_experts_start_len = int(meta_info.get("routed_experts_start_len", 0) or 0)
             if routed_experts_start_len < 0:
                 raise ValueError(
-                    f"vLLM routed_experts_start_len must be non-negative, got {routed_experts_start_len}."
+                    f"VLLM routed_experts_start_len must be non-negative, got {routed_experts_start_len}."
                 )
             expected_rows = max(0, len(self.tokens) - 1 - routed_experts_start_len)
             expected_numel = expected_rows * args.num_layers * args.moe_router_topk
             if routed_experts.numel() != expected_numel:
                 raise ValueError(
-                    "vLLM routed_experts element count does not match sample tokens: "
+                    "VLLM routed_experts element count does not match sample tokens: "
                     f"got={routed_experts.numel()}, expected={expected_numel} "
                     f"(tokens={len(self.tokens)}, routed_experts_start_len={routed_experts_start_len}, "
                     f"num_layers={args.num_layers}, "

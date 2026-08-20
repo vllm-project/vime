@@ -193,7 +193,7 @@ OPTIMIZER_ARGS=(
 
 #### VLLM_ARGS
 
-vLLM 推理所需的参数。vime 默认使用 vLLM 作为 rollout 后端（`rollout.py` 启动 `VLLMEngine`，默认 rollout 函数为 `vime.rollout.vllm_rollout.generate_rollout`），无需额外指定 backend。`--rollout-num-gpus-per-engine` 对应每个 vLLM engine 的 `tensor_parallel_size`；除此之外的 vLLM 参数均通过添加 `--vllm-` 前缀传给 vime（例如 `--vllm-max-model-len`）。
+vLLM 推理所需的参数。在默认并行配置下，`--rollout-num-gpus-per-engine` 对应 vLLM 的 `tensor_parallel_size`；除此之外的 vLLM 参数均通过添加 `--vllm-` 前缀传给 vime。
 
 ```bash
 VLLM_ARGS=(
@@ -202,9 +202,7 @@ VLLM_ARGS=(
 )
 ```
 
-rollout 并发较高时，还可以通过 `--vllm-` 前缀调节 vLLM scheduler，例如 `--vllm-max-num-seqs`、`--vllm-max-num-batched-tokens`；调试或规避 CUDA graph 相关限制时可加 `--vllm-enforce-eager`。
-
-⚠️  vime 会用 vLLM router 来调度多个 vLLM server。训推一体（`--colocate`）时，训练与推理权重经 CUDA IPC 同步；训推分离时，训练侧经 NCCL 与 vLLM engine 同步权重。
+⚠️  vime 会用 vllm-router 来调度多个 vLLM server。
 
 ### dynamic sampling
 
@@ -265,7 +263,7 @@ ray job submit ... \
    ...
 ```
 
-即开启训推一体（colocate），并且训练部分会使用 1 机 8 卡，推理会和训练共同使用这 8 张卡张卡。
+即开启训推一体（colocate），并且训练部分会使用 1 机 8 卡，推理会和训练共同使用这 8 张卡。
 
 如果想使用训推分离的功能，需要去掉 `--colocate` 并配置上 `--rollout-num-gpus`，例如：
 
@@ -278,25 +276,26 @@ ray job submit ... \
    ...
 ```
 
-此时，就会分配 2 张卡给训练，6 张卡给推理。`--rollout-num-gpus` 与 `--actor-num-gpus-per-node` 一样，是传给 `train.py` 的 **Ray 资源参数**：框架据此创建 placement group，并把前若干 bundle 分给训练 actor、后续 bundle 分给 rollout engine（见 `vime/ray/placement_group.py`）。**共卡模式（`--colocate`）下该参数会被忽略**，并自动设为 `actor_num_gpus_per_node * actor_num_nodes`。请勿把 `--rollout-num-gpus` 写在 `VLLM_ARGS` 中。
+此时，就会分配 2 张卡给训练，6 张卡给推理。
 
-训推分离时，`VLLM_ARGS` 仅需配置推理后端相关参数，例如：
+⚠️  训推分离时，如果每个 vLLM server 上的并发度太大，超过已配置的 CUDA graph capture size，会影响推理速度。可以用以下 2 种方式进行调整：
 
-```bash
-VLLM_ARGS=(
-   --rollout-num-gpus-per-engine 2
-   --vllm-gpu-memory-utilization 0.9
-   --vllm-max-num-seqs 256
-   --vllm-max-num-batched-tokens 8192
-)
-```
+1. 通过 `--vllm-server-concurrency` 限制发给一个 vLLM server 的最大并发量，例如：
 
-如需调试或规避 CUDA graph 相关限制，可额外加上 `--vllm-enforce-eager`。
+   ```bash
+   --vllm-server-concurrency 160
+   ```
 
-⚠️  在训推一体的训练时，megatron 始终会占据一些显存，需要通过 `--vllm-gpu-memory-utilization` 来降低 vLLM 占据的显存比例，并配合 `--train-memory-margin-bytes` 为训练侧预留空间。
+2. 使用 `--vllm-cudagraph-capture-sizes` 配置 vLLM 初始化的 CUDA graph size，例如：
+
+   ```bash
+   --vllm-cudagraph-capture-sizes 1 2 4 8 $(seq 16 8 256)
+   ```
 
 ### 异步训练
 
 当进行训推分离时，你会发现训练和推理的 GPU 总是相互等待着，为了避免这种资源空闲，我们可以开启异步训练。开启的方式即为将启动脚本中的 `train.py` 改变为 `train_async.py`。这样 vime 就会在进行当前 rollout 的训练时进行下一个 rollout 的数据生成了。
+
+⚠️  异步训练时，vLLM 的性能统计日志与训练日志可能混在一起。可通过 `--vllm-disable-log-stats` 关闭性能统计，并用 `--vllm-uvicorn-log-level warning` 降低服务日志量。
 
 `train.py` 和 `train_async.py` 的差别只在于 train loop 的同步逻辑，我们通过 ray 的异步（`.remote`, `ray.get`）实现了这点。

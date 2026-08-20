@@ -19,7 +19,7 @@ hf download zai-org/GLM-5.2-FP8 --local-dir $BASE_DIR/GLM-5.2-FP8
 ```
 
 The open-source GLM-5.2 config uses `model_type: glm_moe_dsa`, which vime maps onto
-the DeepSeek-V3.2 bridge (`vime_plugins.mbridge.deepseek_v32`) since the two share the
+the native DeepSeek-V3.2 loader since the two share the
 same DSA weight layout.
 
 ### Convert Checkpoint
@@ -123,7 +123,7 @@ ROLLOUT_ARGS=(
 
 #### vLLM Configuration
 
-The rollout side runs with **prefill/decode (PD) disaggregation**: 1 prefill engine (64 GPU) + 3 decode engines (192 GPU) = 256 GPUs total (which must equal the colocated `rollout_num_gpus`). Each engine spans 64 GPUs with DP attention and `EP=64` (DeepEP's dispatch config map supports up to 160 EP ranks, so a single 256-GPU engine would be invalid). Prefill uses the `auto` DeepEP path; decode uses `low_latency` + `deep_gemm`. The split is configured via the `--vllm-config` YAML:
+The rollout side runs with **prefill/decode (PD) disaggregation**: 1 prefill engine (64 GPU) + 3 decode engines (192 GPU) = 256 GPUs total (which must equal the colocated `rollout_num_gpus`). Each engine spans 64 GPUs with data parallelism and vLLM expert parallelism. Prefill uses the high-throughput DeepEP backend; decode uses the low-latency backend. The split is configured via the `--vllm-config` YAML:
 
 ```yaml
 vllm:
@@ -132,45 +132,36 @@ vllm:
       - worker_type: prefill
         num_gpus: 64
         num_gpus_per_engine: 64
-        overrides: { deepep_mode: auto, ... }
+        overrides: { data_parallel_size: 64, enable_expert_parallel: true, all2all_backend: deepep_high_throughput, kv_transfer_config: { kv_connector: MooncakeConnector, kv_role: kv_producer, ... }, ... }
       - worker_type: decode
         num_gpus: 192
         num_gpus_per_engine: 64
-        overrides: { deepep_mode: low_latency, moe_runner_backend: deep_gemm, ... }
+        overrides: { data_parallel_size: 64, enable_expert_parallel: true, max_cudagraph_capture_size: 72, all2all_backend: deepep_low_latency, kv_transfer_config: { kv_connector: MooncakeConnector, kv_role: kv_consumer, ... }, ... }
 ```
 
-PD transfer runs over RDMA/IB with the mooncake backend:
+The source `mooncake` transport maps to vLLM's `MooncakeConnector`. The source IB-device list maps to `kv_connector_extra_config.device_name`; the prefill and decode groups use `kv_producer` and `kv_consumer`, respectively.
 
-```bash
---vllm-disaggregation-transfer-backend mooncake
---vllm-disaggregation-ib-device mlx5_100,...,mlx5_107
-```
-
-The rest of the rollout uses FP8 KV cache and the NSA + DeepEP backends:
+The shared rollout arguments use vLLM-native FP8 KV cache and CUDA-graph settings:
 
 ```bash
 VLLM_ARGS=(
-   --vllm-enable-dp-attention
-   --vllm-ep-size 64
-   --vllm-dp-size 64
+   --rollout-num-gpus-per-engine 64
+   --vllm-gpu-memory-utilization 0.70
    --vllm-kv-cache-dtype fp8_e4m3
-   --vllm-nsa-decode-backend flashmla_kv
-   --vllm-nsa-prefill-backend flashmla_sparse
-   --vllm-attention-backend nsa
-   ...
+   --vllm-max-cudagraph-capture-size 48
+   --vllm-config "${VLLM_CONFIG_FILE}"
 )
 ```
 
 MTP / EAGLE speculative decoding is enabled using the model's own next-token-prediction layer (the GLM-5.2 checkpoint ships an MTP layer), so no separate draft model is needed:
 
 ```bash
---vllm-speculative-algorithm EAGLE
---vllm-speculative-num-steps 4
---vllm-speculative-eagle-topk 1
---vllm-speculative-num-draft-tokens 5
+--vllm-speculative-config '{"method":"mtp","num_speculative_tokens":5}'
 ```
 
-`VLLM_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK` must cover the largest decode batch: `max cuda_graph_max_bs (decode group = 12) * speculative_num_draft_tokens (5) = 60`, rounded up to `64`. A value below this trips the DeepEP low-latency dispatch buffer assertion during the decode group's CUDA-graph capture.
+vLLM measures CUDA-graph capture size in flattened query tokens. With five speculative tokens, each decode request contributes `1 + 5 = 6` query tokens. The shared limit `48` therefore covers 8 requests, while the decode-group override `72` covers 12 requests. vLLM derives the DeepEP dispatch-buffer size from its scheduler token capacity.
+
+`VLLM_ENGINE_ITERATION_TIMEOUT_S=3600` raises vLLM's engine watchdog for this long-running multi-node workload.
 
 #### Networking
 

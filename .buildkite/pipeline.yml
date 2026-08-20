@@ -26,6 +26,10 @@ steps:
       automatic:
         - exit_status: -1  # agent lost (fresh instance failed to boot)
           limit: 2
+        - exit_status: 1  # transient package-index failure
+          limit: 2
+        - exit_status: 3  # pre-commit environment install failure
+          limit: 2
     command: |
       docker run --rm \
         -e GIT_CONFIG_PARAMETERS="'safe.directory=/workspace'" \
@@ -45,6 +49,8 @@ steps:
     retry:
       automatic:
         - exit_status: -1
+          limit: 2
+        - exit_status: 1
           limit: 2
     command: |
       # GLOO/TP_SOCKET_IFNAME=lo: the torch.distributed tests (e.g.
@@ -83,6 +89,7 @@ steps:
           python tests/test_cispo_loss.py
           python tests/test_logprob_response_spans.py
           python tests/test_empty_colocated_weight_bucket.py
+          python tests/test_expert_routing.py
           python tests/test_reloadable_process_group_memory_check.py
           python tests/test_ppo_logprob_entropy.py
           python tests/utils/test_hf_checkpoint_saver.py
@@ -97,6 +104,8 @@ steps:
     retry:
       automatic:
         - exit_status: -1
+          limit: 2
+        - exit_status: 1
           limit: 2
     command: |
       docker run --rm --shm-size=2g \
@@ -114,6 +123,56 @@ steps:
           python tests/test_agent/test_agent_rollout_cpu.py
         '
 
+  - label: ":pytest: synchronized upstream CPU tests"
+    key: upstream-sync-cpu
+    depends_on: pre-commit
+    agents:
+      queue: medium_cpu_queue_premerge
+    timeout_in_minutes: 45
+    retry:
+      automatic:
+        - exit_status: -1
+          limit: 2
+        - exit_status: 1
+          limit: 2
+    command: |
+      docker run --rm --network host --ipc=host \
+        -e GIT_CONFIG_PARAMETERS="'safe.directory=/workspace'" \
+        -e GLOO_SOCKET_IFNAME=lo -e TP_SOCKET_IFNAME=lo \
+        -v "$$PWD:/workspace" -w /workspace \
+        vllm/vime:latest bash -lc '
+          set -euo pipefail
+          pip install -q -e . --no-deps --break-system-packages
+          for test_file in \
+            tests/test_advantage_whiten_cp.py \
+            tests/test_block_fp8_zero_block.py \
+            tests/test_deep_ep_tms_patch.py \
+            tests/test_discounted_returns.py \
+            tests/test_eval_config.py \
+            tests/test_filter_long_prompt.py \
+            tests/test_fully_async_rollout.py \
+            tests/test_glm52_layerwise_comparison.py \
+            tests/test_glm5_indexer_q_norm.py \
+            tests/test_glm5_indexer_short_context.py \
+            tests/test_hf_to_megatron.py \
+            tests/test_layerwise_alignment.py \
+            tests/test_model_provider_freeze.py \
+            tests/test_policy_loss.py \
+            tests/test_process_rollout_data.py \
+            tests/test_qwen3_5_vl_native.py \
+            tests/test_read_file_slicing.py \
+            tests/test_reloadable_process_group_world.py \
+            tests/test_rollout_routing_replay_validation.py \
+            tests/test_rollout_sample_hooks.py \
+            tests/test_vllm_rollout.py \
+            tests/test_agent/test_sandbox_exec_and_wait.py \
+            tests/test_stateless_adam.py \
+            tests/test_tau_bench_token_delta.py \
+            tests/test_train_dump.py; do
+            python -m pytest "$$test_file"
+          done
+        '
+
   - label: ":pytest: utils tests"
     key: utils
     depends_on: pre-commit
@@ -123,6 +182,8 @@ steps:
     retry:
       automatic:
         - exit_status: -1
+          limit: 2
+        - exit_status: 1
           limit: 2
     command: |
       docker run --rm --network host --ipc=host \
@@ -155,9 +216,9 @@ steps:
             value: short
           - label: "run-ci-vllm-config — 8 GPU, 4 tests"
             value: vllm-config
-          - label: "run-ci-megatron — up to 8 GPU, 20 runs"
+          - label: "run-ci-megatron — up to 8 GPU, 21 runs"
             value: megatron
-          - label: "run-ci-vime-customized — 1–4 GPU, 3 tests"
+          - label: "run-ci-vime-customized — 1–8 GPU, 6 tests"
             value: vime-customized
           - label: "run-ci-precision — 8 GPU, 1 test"
             value: precision

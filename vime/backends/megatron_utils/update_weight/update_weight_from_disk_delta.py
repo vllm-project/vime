@@ -16,7 +16,6 @@ import safetensors.numpy
 import torch
 import torch.distributed as dist
 import zstandard
-from megatron.core import mpu
 from ray.actor import ActorHandle
 
 from vime.utils.disk_delta import NUM_WORKERS, checksum, make_tensor_reader, overwrite_encode
@@ -67,13 +66,12 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
         rollout_engine_lock: ActorHandle,
         engine_gpu_counts: Sequence[int] | None = None,
         engine_gpu_offsets: Sequence[int] | None = None,
+        engine_parallel_configs: Sequence[Mapping[str, object]] | None = None,
     ) -> None:
         # The rollout_engine_lock the NCCL path uses isn't needed — the engine-side apply is
         # serialized by a per-host flock.
         self.rollout_engines = rollout_engines
-        self._is_pp_src_rank = (
-            mpu.get_data_parallel_rank(with_context_parallel=True) == 0 and mpu.get_tensor_model_parallel_rank() == 0
-        )
+        self._is_pp_src_rank = dist.get_rank() == 0
 
     def disconnect_rollout_engines(self) -> None:
         pass  # no NCCL groups to tear down
@@ -189,11 +187,10 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
         dist.barrier(group=get_gloo_group())
 
     def _iter_hf_tensors(self):
-        """Yield (name, gathered HF tensor) for every param: base-class TP then EP gather passes."""
-        for chunk_iter in (self._iter_non_expert_chunks(), self._iter_expert_chunks()):
-            for hf_chunk in chunk_iter:
-                yield from hf_chunk
-            dist.barrier(group=get_gloo_group())
+        """Yield gathered HF tensors on the publishing rank."""
+        for name, tensor in self._source:
+            if self._is_pp_src_rank:
+                yield name, tensor
 
     def _encode_delta(self) -> None:
         """Diff each gathered HF tensor against the snapshot, keeping the changed ones (compressed)

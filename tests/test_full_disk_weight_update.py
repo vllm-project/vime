@@ -84,8 +84,7 @@ def execute():
             "--rollout-num-gpus-per-engine 1 "
             "--rollout-num-gpus 3 "
             "--vllm-gpu-memory-utilization 0.7 "
-            "--vllm-cuda-graph-max-bs 32 "
-            "--vllm-enable-metrics "
+            "--vllm-max-cudagraph-capture-size 32 "
         )
 
         disk_update_args = (

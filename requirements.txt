@@ -23,5 +23,5 @@ tensorboard
 transformers
 vllm-router>=0.1.15
 wandb
-xxhash  # disk delta weight sync (checksum + codec)
+xxhash  # disk delta weight sync checksum
 zstandard

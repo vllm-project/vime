@@ -193,7 +193,7 @@ OPTIMIZER_ARGS=(
 
 #### VLLM\_ARGS
 
-Parameters required by vllm. Here, `--rollout-num-gpus-per-engine` basically corresponds to vllm's `tp_size`. Other vllm parameters are passed to vime by adding the `--vllm-` prefix.
+These are the parameters required by vLLM. With the default parallel settings, `--rollout-num-gpus-per-engine` corresponds to vLLM's `tensor_parallel_size`. Other vLLM parameters are passed to vime by adding the `--vllm-` prefix.
 
 ```bash
 VLLM_ARGS=(

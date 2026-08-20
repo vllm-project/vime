@@ -101,7 +101,7 @@ def execute():
         "--rollout-num-gpus-per-engine 1 "
         "--vllm-gpu-memory-utilization 0.7 "
         "--vllm-max-num-seqs 32 "
-        "--vllm-max-cudagraph-capture-size 16 "
+        "--vllm-max-cudagraph-capture-size 32 "
         f"--vllm-config {config_path} "
     )
 
@@ -117,7 +117,6 @@ def execute():
         "--actor-num-nodes 1 "
         "--actor-num-gpus-per-node 4 "
         "--rollout-num-gpus 4 "
-        "--megatron-to-hf-mode bridge "
     )
 
     train_args = (

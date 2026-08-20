@@ -58,7 +58,7 @@ segments = await adapter.finish_session(session_id)
 
 agentic rollout 往往比普通单轮 generation 更依赖 serving 配置：上下文更长、多轮请求更多、请求时长分布更重尾，并且可能同时需要 actor、reference、reward 或工具侧模型。
 
-- 常规 vLLM server 参数通过 `--vllm-*` 传入。例如 `--context-length` 在 vime 中写作 `--vllm-context-length`，`--gpu-memory-utilization` 写作 `--vllm-gpu-memory-utilization`。
+- 常规 vLLM server 参数通过 `--vllm-*` 传入。例如 `--max-model-len` 在 vime 中写作 `--vllm-max-model-len`，`--gpu-memory-utilization` 写作 `--vllm-gpu-memory-utilization`。
 - router 参数通过 `--router-*` 传入。多轮 agent 如果需要会话亲和，可以设置 `--router-policy consistent_hash`，让同一个 `sample.session_id` 的多轮请求落到同一个 worker，提高 prefix cache 命中率；否则可使用默认的 `cache_aware` 策略。详见 [多轮 Agent 的会话亲和路由](../advanced/vllm-config.md#多轮-agent-的会话亲和路由)。
 - 更复杂的拓扑使用 `--vllm-config`：它可以描述 PD 分离、多模型 serving、异构 server groups，以及每组不同的 vLLM overrides。
 - 多轮或 agentic RL 通常建议评估 PD 分离。prefill 与 decode 的负载形态不同，拆开后更容易分别扩展资源。
@@ -70,4 +70,4 @@ agentic rollout 往往比普通单轮 generation 更依赖 serving 配置：上�
 
 这个样例也演示了 agent fan-out 的训练方式：middleware 会把 trajectory 切成 `subagent`、`wipe`（compact 前被冻结的链）和 `final` 等片段，`generate()` 返回 `list[Sample]`，并让这些片段共享同一个 `rollout_id`。
 
-如果你只需要更轻量的入门例子，可以先看 [`examples/search-r1`](../_examples_synced/search-r1/README.md) 的多轮工具调用、[`examples/retool`](../_examples_synced/retool/README.md) 的工具增强生成、以及 [`examples/multi_agent`](../_examples_synced/multi_agent/README.md) 的多 agent 模式。
+如果你只需要更轻量的入门例子，可以先看 [`examples/multi_agent`](../_examples_synced/multi_agent/README.md) 的多 agent 模式。

@@ -19,7 +19,7 @@ There are four main parameters for cluster resource allocation:
   - `--actor-num-nodes`: The number of nodes required for RL actor training.
   - `--actor-num-gpus-per-node`: The number of GPUs per node for RL actor training.
   - `--rollout-num-gpus`: The total number of GPUs required for rollout (inference). Set it to `0` to still parse vLLM arguments and launch the router without launching local vLLM servers.
-  - `--rollout-num-gpus-per-engine`: The number of GPUs per inference engine. This parameter is similar to vLLM's `tp_size`. When performing multi-node serving, this value should be the total number of GPUs. For example, if serving one model with 2 nodes and 16 GPUs, this value should be 16.
+  - `--rollout-num-gpus-per-engine`: The total worker GPU count for one inference engine. It equals vLLM's `tensor_parallel_size` only when data and pipeline parallelism are both 1. For example, if one model is served across 2 nodes and 16 GPUs, this value should be 16.
 
 With the default configuration, we use these parameters to allocate `actor_num_nodes * actor_num_gpus_per_node` GPUs for training and `rollout_num_gpus` GPUs for inference via Ray, thus achieving a separation of training and inference resources.
 
@@ -234,35 +234,17 @@ To use PPO, set:
 --advantage-estimator ppo
 ```
 
-**Note: In PPO, the Critic and Actor request GPUs in parallel**, which should be considered when allocating resources. Specifically:
+**Note: In PPO, the critic and actor share the same training GPU group.** You do not need to reserve a separate set of GPUs for the critic. Specifically:
 
-- The critic model occupies a separate set of GPUs, independent from the actor's GPU resources.
-- You can configure critic resources using `--critic-num-nodes` and `--critic-num-gpus-per-node`.
-- If critic resource parameters are not configured, the same resource configuration as the actor will be used by default.
+- PPO creates separate actor and critic training process groups, but places them on the same train placement group.
+- The critic training scale follows the actor configuration, and the actor / critic Megatron parallel topology must currently stay identical.
+- PPO forces train-side offload so that actor and critic can wake up and release memory on the same GPUs in turn.
+- There are currently no separate CLI arguments for configuring critic training resources; the critic node count and GPUs per node are derived from the actor configuration.
 
-Cluster resource allocation example:
-
-```bash
-# Actor uses 1 node, 4 GPUs
---actor-num-nodes 1
---actor-num-gpus-per-node 4
-
-# Critic uses 1 node, 4 GPUs (parallel to Actor)
---critic-num-nodes 1
---critic-num-gpus-per-node 4
-
-# Rollout uses 8 GPUs
---rollout-num-gpus 8
-```
-
-With the above configuration, a total of `4 (actor) + 4 (critic) + 8 (rollout) = 16` GPUs are required.
 
 PPO-related parameters:
 
-- `--critic-load`: Checkpoint path for the critic model.
-- `--critic-save`: Save path for the critic model.
-- `--critic-lr`: Learning rate for the critic model.
-- `--critic-lr-warmup-iters`: Number of warmup steps for the critic model.
+- `--megatron-config-path`: YAML config for role-specific Megatron overrides, such as setting critic-specific `load`, `save`, `lr`, or warmup parameters.
 - `--num-critic-only-steps`: Number of steps to train only the critic at the beginning of training.
 - `--eps-clip`: PPO clip range.
 - `--value-clip`: Clip range for value loss.
@@ -341,7 +323,6 @@ vime supports customizing data generation (rollout) to various degrees.
         output = await post(
             f"http://{args.vllm_router_ip}:{args.vllm_router_port}/inference/v1/generate",
             {
-                "model": args.hf_checkpoint,
                 "token_ids": prompt_token_ids,
                 "sampling_params": {"max_tokens": sampling_params["max_new_tokens"]},
             }
@@ -424,7 +405,7 @@ Each model gets its own router. The per-model router info is accessible via `arg
 **Server group features:**
 - `worker_type`: `regular`, `prefill`, `decode`, or `placeholder` (reserves GPU slots without creating engines)
 - `overrides`: Dict of vLLM `EngineArgs` field overrides applied on top of `--vllm-*` CLI args
-- `num_gpus_per_engine`: Per-group TP size override
+- `num_gpus_per_engine`: Per-group total worker GPU count override
 
 ## How to Use Megatron
 

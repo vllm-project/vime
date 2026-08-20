@@ -22,8 +22,8 @@ vime leverages this mechanism by **hijacking the spec generation stage to replac
     * **Corresponding File**: `vime_plugins/models/hf_attention.py`
 
 3.  **Aligning Model Weights**
-    Once the model architecture is integrated, we must ensure that the weights can be loaded correctly. We use the [mbridge](https://github.com/ISEEKYAN/mbridge) library, through our `Qwen3NextBridge`, to establish a naming map between the HuggingFace checkpoint and Megatron's parameters, enabling seamless, bidirectional conversion.
-    * **Corresponding File**: `vime_plugins/mbridge/qwen3_next.py`
+    Once the model architecture is integrated, we must ensure that the weights can be loaded correctly. vime keeps the HuggingFace-to-Megatron name mapping and tensor transforms next to its checkpoint loader.
+    * **Corresponding File**: `vime/backends/megatron_utils/hf_to_megatron/qwen3_next.py`
 
 Through the coordination of these three components, we can successfully run a complex model architecture not natively supported by Megatron—using its HuggingFace implementation as the vehicle—on top of Megatron's parallel framework. This is achieved while fully retaining all key capabilities like model parallelism, MoE acceleration, and pipeline scheduling.
 

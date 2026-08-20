@@ -240,6 +240,11 @@ def install_vllm_cli_stubs() -> None:
     utils_mod = types.ModuleType("vllm.utils")
     utils_mod.__path__ = []
     argparse_utils = types.ModuleType("vllm.utils.argparse_utils")
+    deep_gemm = types.ModuleType("vllm.utils.deep_gemm")
+    deep_gemm.get_mn_major_tma_aligned_packed_ue8m0_tensor = MagicMock()
+    deep_gemm.get_tma_aligned_size = MagicMock()
+    deep_gemm.is_deep_gemm_e8m0_used = MagicMock(return_value=False)
+    deep_gemm.per_block_cast_to_fp8 = MagicMock()
 
     import argparse
 
@@ -248,6 +253,7 @@ def install_vllm_cli_stubs() -> None:
 
     argparse_utils.FlexibleArgumentParser = FlexibleArgumentParser
     utils_mod.argparse_utils = argparse_utils
+    utils_mod.deep_gemm = deep_gemm
 
     engine_mod = types.ModuleType("vllm.engine")
     engine_mod.__path__ = []
@@ -303,6 +309,7 @@ def install_vllm_cli_stubs() -> None:
     sys.modules["vllm"] = vllm_mod
     sys.modules["vllm.utils"] = utils_mod
     sys.modules["vllm.utils.argparse_utils"] = argparse_utils
+    sys.modules["vllm.utils.deep_gemm"] = deep_gemm
     sys.modules["vllm.utils.system_utils"] = system_utils_mod
     sys.modules["vllm.engine"] = engine_mod
     sys.modules["vllm.engine.arg_utils"] = arg_utils

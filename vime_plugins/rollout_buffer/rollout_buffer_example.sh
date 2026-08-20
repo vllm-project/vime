@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # for rerun the task
-pkill -9 -f '[v]llm serve|VLL[M]::'
+pkill -9 vllm
 sleep 3
 ray stop --force
 pkill -9 ray

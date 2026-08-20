@@ -66,7 +66,6 @@ CKPT_ARGS=(
    --load /root/Qwen3-8B_torch_dist
    --save /root/Qwen3-8B_vime/
    --save-interval 20
-   --megatron-to-hf-mode bridge
 )
 
 ROLLOUT_ARGS=(
@@ -148,7 +147,7 @@ WANDB_ARGS=(
 
 VLLM_ARGS=(
    --rollout-num-gpus-per-engine 1
-   --vllm-gpu-memory-utilization 0.25
+   --vllm-gpu-memory-utilization 0.4
 )
 
 MISC_ARGS=(

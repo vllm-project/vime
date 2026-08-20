@@ -33,7 +33,10 @@ def _ns(**overrides):
     base = dict(
         vllm_data_parallel_size=1,
         vllm_pipeline_parallel_size=1,
+        vllm_prefill_context_parallel_size=1,
         rollout_num_gpus_per_engine=4,
+        rollout_top_k=-1,
+        rollout_top_p=1.0,
         vllm_router_ip=None,
     )
     base.update(overrides)
@@ -52,7 +55,7 @@ def test_validate_args_pp1(args_mod):
 @pytest.mark.unit
 def test_validate_args_records_pp_dp_but_no_global_tp(args_mod):
     # validate_args records pp/dp on the namespace but must not precompute a global TP, even when
-    # pp>1 and dp>1. Per-engine TP = gpus_per_engine // (pp * dp) is resolved at launch time.
+    # pp>1 and dp>1. Per-engine TP = gpus_per_engine // (pp * pcp * dp) is resolved at launch time.
     ns = _ns(vllm_pipeline_parallel_size=2, vllm_data_parallel_size=2)
     args_mod.validate_args(ns)
     assert ns.vllm_pp_size == 2
@@ -93,6 +96,17 @@ def test_validate_args_router_none_noop(args_mod):
     ns = _ns(vllm_router_ip=None)
     args_mod.validate_args(ns)
     assert ns.vllm_router_ip is None
+
+
+@pytest.mark.unit
+def test_validate_args_rejects_unbounded_top_p_replay(args_mod):
+    with pytest.raises(ValueError, match="requires --rollout-top-k > 0"):
+        args_mod.validate_args(_ns(rollout_top_p=0.95))
+
+
+@pytest.mark.unit
+def test_validate_args_accepts_bounded_top_p_replay(args_mod):
+    args_mod.validate_args(_ns(rollout_top_p=0.95, rollout_top_k=20))
 
 
 @pytest.mark.unit
@@ -238,7 +252,7 @@ def test_parse_args_default_attribute_set_even_without_register(args_mod, monkey
 
 @pytest.mark.unit
 def test_parse_args_tp_default_with_dp(args_mod, monkeypatch):
-    """TP auto-compute must divide by DP: TP = gpus / (PP * DP)."""
+    """TP auto-compute must divide by DP: TP = gpus / (PP * PCP * DP)."""
     monkeypatch.setattr(args_mod, "add_vllm_arguments", lambda p: p)
     monkeypatch.setattr(
         sys,
@@ -247,6 +261,28 @@ def test_parse_args_tp_default_with_dp(args_mod, monkeypatch):
     )
     ns = args_mod.vllm_parse_args()
     assert ns.vllm_tensor_parallel_size == 2  # 8 / (1 * 4) = 2
+
+
+@pytest.mark.unit
+def test_parse_args_tp_default_with_pcp_and_dp(args_mod, monkeypatch):
+    monkeypatch.setattr(args_mod, "add_vllm_arguments", lambda p: p)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train.py",
+            "--rollout-num-gpus-per-engine",
+            "8",
+            "--vllm-prefill-context-parallel-size",
+            "2",
+            "--vllm-data-parallel-size",
+            "2",
+        ],
+    )
+
+    ns = args_mod.vllm_parse_args()
+
+    assert ns.vllm_tensor_parallel_size == 2
 
 
 @pytest.mark.unit

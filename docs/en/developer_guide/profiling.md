@@ -47,18 +47,18 @@ Common JSON fields:
 | `max_iterations` | Worker auto-stops and flushes after more than N steps (condition is `> N`) |
 | `ignore_frontend` | Recommended `true`: profile workers only, lower frontend overhead |
 
-**Avoid RPC timeout on `stop_profile`:** vLLM APIServer talks to EngineCore/workers over internal RPC. Manually calling `stop_profile` to flush traces can take minutes, while the default `VLLM_RPC_TIMEOUT` is only **10 seconds** (10000 ms), which can interrupt flush or leave traces incomplete. For profiling, set **30 minutes** (1800000 ms).
+The `/stop_profile` request waits for EngineCore and all workers to finish
+flushing their traces. Large profiles can therefore take several minutes; do
+not interrupt the request while the trace files are being written.
 
-Set this variable **before starting train and launching vLLM**, in the Ray worker environment (a local shell `export` may not reach the Ray job). Pass it via `runtime-env-json` on `ray job submit`, for example:
+Pass the regular worker environment through `runtime-env-json` on
+`ray job submit`, for example:
 
 ```bash
-export VLLM_RPC_TIMEOUT="${VLLM_RPC_TIMEOUT:-1800000}"
-
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
     \"PYTHONPATH\": \"/root/Megatron-LM\",
-    \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
-    \"VLLM_RPC_TIMEOUT\": \"${VLLM_RPC_TIMEOUT}\"
+    \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\"
   }
 }"
 
@@ -164,7 +164,7 @@ python tools/analyze_profile.py --profile-dir /root/logs/vllm_profile --all-rank
 | `POST /start_profile` 404 | Pass `--vllm-profiler-config` as JSON; restart the job |
 | Start OK but empty output dir | Confirm curl hits a worker and returns 200; if `max_iterations=3`, send 4 requests or call `stop_profile` manually |
 | Router 503 | Confirm the current job's router port; connect directly to a worker |
-| Slow or timed-out stop | Increase `VLLM_RPC_TIMEOUT`; reduce request count |
+| Slow stop | Wait for trace flushing to finish; reduce request count |
 
 ## 8. Full Runnable Example
 
@@ -205,20 +205,17 @@ launch_train_for_profiling() {
 
   # Clean up old Ray / vLLM processes (comment out if not needed)
   ray stop --force || true
-  pkill -9 vllm || true
+  pkill -9 -f '[v]llm serve|VLL[M]::' || true
   sleep 2
 
   ray start --head --node-ip-address 127.0.0.1 --num-gpus 2 --disable-usage-stats
 
   source "${VIME_ROOT}/scripts/models/qwen3-4B.sh"
 
-  export VLLM_RPC_TIMEOUT="${VLLM_RPC_TIMEOUT:-1800000}"
-
   RUNTIME_ENV_JSON="{
     \"env_vars\": {
       \"PYTHONPATH\": \"/root/Megatron-LM\",
-      \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
-      \"VLLM_RPC_TIMEOUT\": \"${VLLM_RPC_TIMEOUT}\"
+      \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\"
     }
   }"
 

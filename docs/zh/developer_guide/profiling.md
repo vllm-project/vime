@@ -47,18 +47,16 @@ vLLM只有在启动时配置了`--profiler-config`，才会注册`/start_profile
 | `max_iterations` | worker记录超过N步后自动stop并写入 trace（条件为`> N`） |
 | `ignore_frontend` | 建议`true`，仅profile worker，降低前端开销 |
 
-**防止`stop_profile`时RPC超时：** vLLM APIServer与EngineCore/worker之间通过内部RPC通信。手动调用`stop_profile`把 trace 写出来可能耗时数分钟，而默认`VLLM_RPC_TIMEOUT`仅**10秒**（10000 ms），容易导致flush中断或trace不完整。Profiling时建议设为**30分钟**（1800000 ms）。
+`/stop_profile` 会等待 EngineCore 和全部 worker 完成 trace 写盘，因此较大的
+profile 可能需要数分钟；trace 文件写完前不要中断该请求。
 
-该变量须在**启动train、拉起vLLM之前**传入Ray worker环境（仅在本机shell `export`不一定会进入Ray job）。在`ray job submit`的`runtime-env-json`中写入，例如：
+常规 worker 环境仍通过 `ray job submit` 的 `runtime-env-json` 传入，例如：
 
 ```bash
-export VLLM_RPC_TIMEOUT="${VLLM_RPC_TIMEOUT:-1800000}"
-
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
     \"PYTHONPATH\": \"/root/Megatron-LM\",
-    \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
-    \"VLLM_RPC_TIMEOUT\": \"${VLLM_RPC_TIMEOUT}\"
+    \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\"
   }
 }"
 
@@ -164,7 +162,7 @@ python tools/analyze_profile.py --profile-dir /root/logs/vllm_profile --all-rank
 | `POST /start_profile` 404 | 用JSON传`--vllm-profiler-config`；重启job |
 | start成功但目录为空 | 确认curl打到worker且返回200；若 `max_iterations=3`，请发 4 条请求，或手动执行 `stop_profile` |
 | router 503 | 确认当前job的router端口；改直连worker |
-| stop很慢或超时 | 增大`VLLM_RPC_TIMEOUT`；减少请求条数 |
+| stop 很慢 | 等待 trace 写盘完成；减少请求条数 |
 
 ## 8. 完整可运行示例
 
@@ -205,20 +203,17 @@ launch_train_for_profiling() {
 
   # 清理旧 Ray / vLLM 进程（按需注释）
   ray stop --force || true
-  pkill -9 vllm || true
+  pkill -9 -f '[v]llm serve|VLL[M]::' || true
   sleep 2
 
   ray start --head --node-ip-address 127.0.0.1 --num-gpus 2 --disable-usage-stats
 
   source "${VIME_ROOT}/scripts/models/qwen3-4B.sh"
 
-  export VLLM_RPC_TIMEOUT="${VLLM_RPC_TIMEOUT:-1800000}"
-
   RUNTIME_ENV_JSON="{
     \"env_vars\": {
       \"PYTHONPATH\": \"/root/Megatron-LM\",
-      \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
-      \"VLLM_RPC_TIMEOUT\": \"${VLLM_RPC_TIMEOUT}\"
+      \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\"
     }
   }"
 

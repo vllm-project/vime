@@ -43,12 +43,13 @@ vllm:
         num_gpus: 4
         num_gpus_per_engine: 2
         overrides:
-          chunked_prefill_size: 8192
+          enable_chunked_prefill: true
+          max_num_batched_tokens: 8192
       - worker_type: decode
         num_gpus: 12
         num_gpus_per_engine: 4
         overrides:
-          mem_fraction_static: 0.88
+          gpu_memory_utilization: 0.88
 ```
 
 启动：

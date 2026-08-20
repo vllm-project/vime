@@ -127,12 +127,12 @@ VLLM_ARGS=(
    --rollout-num-gpus-per-engine 8
    --vllm-gpu-memory-utilization 0.8
    --vllm-enable-expert-parallel
-   --vllm-cudagraph-capture-sizes 1 2 4 8 $(seq 16 8 128)
+   --vllm-cudagraph-capture-sizes 5 10 20 40 $(seq 80 40 640)
 
    # mtp
 
    --vllm-max-num-seqs 256
-   --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":4}'
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":4}'
 )
 
 MISC_ARGS=(

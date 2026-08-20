@@ -8,6 +8,7 @@ from vime.ray.ray_actor import RayActor
 # Refer to
 # https://github.com/ray-project/ray/blob/161849364a784442cc659fb9780f1a6adee85fce/python/ray/_private/accelerators/nvidia_gpu.py#L95-L96
 # https://github.com/ray-project/ray/blob/161849364a784442cc659fb9780f1a6adee85fce/python/ray/_private/accelerators/amd_gpu.py#L102-L103
+# https://github.com/ray-project/ray/blob/161849364a784442cc659fb9780f1a6adee85fce/python/ray/_private/accelerators/npu.py#L94-L95
 # https://github.com/ray-project/ray/blob/161849364a784442cc659fb9780f1a6adee85fce/python/ray/_private/accelerators/hpu.py#L116-L117
 # https://github.com/ray-project/ray/blob/161849364a784442cc659fb9780f1a6adee85fce/python/ray/_private/accelerators/neuron.py#L108-L109
 # https://github.com/ray-project/ray/blob/161849364a784442cc659fb9780f1a6adee85fce/python/ray/_private/accelerators/tpu.py#L171-L172
@@ -15,6 +16,7 @@ from vime.ray.ray_actor import RayActor
 NOSET_VISIBLE_DEVICES_ENV_VARS_LIST = [
     "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
     "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES",
+    "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES",
     "RAY_EXPERIMENTAL_NOSET_HABANA_VISIBLE_MODULES",
     "RAY_EXPERIMENTAL_NOSET_NEURON_RT_VISIBLE_CORES",
     "RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS",

@@ -25,11 +25,6 @@
 - 其它卡（如A100/A800）也可以运行，但暂不进行功能维护
 
 
-**Ascend NPU**：
-
-- 使用说明请参考 [Ascend NPU 教程](../platform_support/ascend_tutorial.md)。
-- NPU 脚本与 patch 位于 [ascend](https://github.com/vllm-project/vime/tree/ascend) 分支。
-
 **AMD GPU**：
 
 请参考 [AMD 使用教程](../../en/platform_support/amd_tutorial.md)。
@@ -300,8 +295,8 @@ OPTIMIZER_ARGS=(
 ### VLLM_ARGS: vLLM 服务参数
 
 这部分参数用于配置 vLLM 推理服务。
-- `--rollout-num-gpus-per-engine`: 等同于 vLLM 的 `tp_size`。
-- 其他 vLLM 参数可以通过添加 `--vllm-` 前缀传递给 vime，vime 会自动透传给 vLLM。例如，要设置 vLLM 的 `--log-level INFO` 参数，只需使用 `--vllm-log-level INFO` 即可。
+- `--rollout-num-gpus-per-engine`：单个 rollout engine 使用的 worker GPU 总数；只有 data parallel 和 pipeline parallel 都为 1 时，它才等于 vLLM 的 `tensor_parallel_size`。
+- 其他 vLLM 参数可以通过添加 `--vllm-` 前缀传递给 vime，vime 会自动透传给 vLLM。例如，要设置 vLLM 的 `--uvicorn-log-level info` 参数，只需使用 `--vllm-uvicorn-log-level info`。
 
 > ⚠️ **注意**：
 > vime 使用 `vllm-router` 调度多个 vLLM 引擎。`dp_size` 会通过 `rollout-num-gpus / rollout-num-gpus-per-engine` 计算得到。

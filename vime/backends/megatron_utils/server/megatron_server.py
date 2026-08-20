@@ -304,7 +304,7 @@ def _merge_log_probs(logp_parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _run_stats_printer(sample_manager, interval=1.0):
-    """像 vLLM 一样每隔一段时间打印系统状态"""
+    """像 VLLM 一样每隔一段时间打印系统状态"""
     last_time = time.time()
     last_reqs = 0
     last_tokens = 0

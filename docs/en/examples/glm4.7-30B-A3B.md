@@ -71,8 +71,9 @@ GLM-4.7-Flash is a Mixture-of-Experts (MoE) model with 64 routed experts (top-4 
     ```bash
     VLLM_ARGS=(
        --rollout-num-gpus-per-engine 8
-       --vllm-gpu-memory-utilization 0.8
+       --vllm-gpu-memory-utilization 0.7
        --vllm-data-parallel-size 8
+       --vllm-enable-expert-parallel
        ...
     )
     ```
@@ -85,7 +86,7 @@ GLM-4.7-Flash includes 1 MTP (Multi-Token Prediction) layer, which can be used f
 VLLM_ARGS=(
    ...
    # MTP speculative decoding
-   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":4}'
 )
 ```
 
@@ -112,7 +113,7 @@ SPEC_ARGS=(
 - `--enable-mtp-training`: Enables gradient computation for MTP layers. Without this flag, the MTP layer is loaded but frozen.
 - `--mtp-loss-scaling-factor 0.2`: Weight of the MTP loss relative to the main policy loss. Default is 0.2.
 
-> **Note**: MTP training requires the MTP checkpoint bridge to properly convert weights between HuggingFace and Megatron formats. The `GLM4MoELiteBridge` (in `vime_plugins/mbridge/glm4moe_lite.py`) extends the DeepSeek V3 bridge with dynamic MTP layer indexing to support GLM-4.7-Flash's 47-layer architecture.
+> **Note**: The native DeepSeek-layout loader uses the model's configured layer count when mapping MTP weights, including GLM-4.7-Flash's 47-layer architecture.
 >
 > For other models with MTP training support (e.g., MiMo), see `scripts/run-mimo-7B-rl-eagle.sh` as a reference.
 
@@ -139,6 +140,8 @@ When the total number of GPUs is not a multiple or divisor of the total number o
 VLLM_ARGS=(
    --rollout-num-gpus-per-engine 24
    --vllm-gpu-memory-utilization 0.7
+   --vllm-data-parallel-size 3
+   --vllm-enable-expert-parallel
    --vllm-eplb-config '{"num_redundant_experts": 16}'
 )
 ```

@@ -1,6 +1,6 @@
 # External Rollout Engines Roadmap
 
-An external rollout engine is an vLLM engine that is not launched by the vime training job. Another system deploys and owns the engine lifecycle; vime connects to those engines during training, registers a router, and syncs updated actor weights when needed.
+An external rollout engine is a vLLM engine that is not launched by the vime training job. Another system deploys and owns the engine lifecycle; vime connects to those engines during training, registers a router, and syncs updated actor weights when needed.
 
 This page is a roadmap. Use it to decide when to use `--rollout-external-engine-addrs`, when to stay with `--vllm-config`, and which weight-update path to pick for external deployments.
 
@@ -14,7 +14,6 @@ This page is a roadmap. Use it to decide when to use `--rollout-external-engine-
 | Trainer and external engines cannot form an NCCL group, but can see the same filesystem path | `--update-weight-mode full --update-weight-transport disk` |
 | Full checkpoints are too heavy for large-model cross-cluster or cross-DC sync | `--update-weight-mode delta --update-weight-transport disk` |
 | Rollout serving can use an independent vLLM environment, or even different GPU models/vendors | external engines + disk transport |
-| You want to validate delta wire/apply logic inside one datacenter | `--update-weight-mode delta --update-weight-transport nccl` |
 | You need frozen reference, reward, or tool-side models | Prefer `update_weights: false` in [vLLM Config](vllm-config.md#3-multi-model-serving) |
 
 ## What External Engine Does
@@ -22,8 +21,8 @@ This page is a roadmap. Use it to decide when to use `--rollout-external-engine-
 First launch vLLM servers independently:
 
 ```bash
-python -m vllm.launch_server --model-path /path/to/model --port 10090 ...
-python -m vllm.launch_server --model-path /path/to/model --port 10091 ...
+VLLM_SERVER_DEV_MODE=1 vllm serve /path/to/model --port 10090 ...
+VLLM_SERVER_DEV_MODE=1 vllm serve /path/to/model --port 10091 ...
 ```
 
 Then pass those addresses to the training job:

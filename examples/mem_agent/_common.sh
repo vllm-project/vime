@@ -135,7 +135,6 @@ mem_agent_train_args() {
     --accumulate-allreduce-grads-in-fp32
     --attention-softmax-in-fp32
     --attention-backend flash
-    --train-memory-margin-bytes 2147483648
     --actor-num-nodes 1
     --actor-num-gpus-per-node "${NUM_GPUS}"
     --colocate

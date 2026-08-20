@@ -186,7 +186,6 @@ def make_vime_validate_args(**overrides):
         use_opd=False,
         opd_type=None,
         opd_teacher_load=None,
-        megatron_to_hf_mode="raw",
         load=None,
         hf_checkpoint="/tmp/hf",
         ref_ckpt_step=None,
@@ -229,7 +228,6 @@ def make_vime_validate_args(**overrides):
         debug_rollout_only=False,
         colocate=False,
         rollout_num_gpus=8,
-        train_memory_margin_bytes=0,
         eval_function_path=None,
         rollout_function_path="custom.rollout",
         num_steps_per_rollout=None,
@@ -265,6 +263,42 @@ def make_vime_validate_args(**overrides):
 
 
 @pytest.mark.unit
+def test_vime_validate_args_preserves_explicit_start_rollout_id(monkeypatch):
+    """``--start-rollout-id`` is only a fallback when the user did not set it.
+
+    An explicit value is needed when there is no resumable Megatron checkpoint.
+    """
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(start_rollout_id=100)
+
+    module.vime_validate_args(args)
+
+    assert args.start_rollout_id == 100
+
+
+@pytest.mark.unit
+def test_vime_validate_args_defaults_start_rollout_id_to_zero(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(start_rollout_id=None)
+
+    module.vime_validate_args(args)
+
+    assert args.start_rollout_id == 0
+
+
+@pytest.mark.unit
+def test_vime_validate_args_rejects_equal_debug_data_paths(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(
+        save_debug_rollout_data="/tmp/debug_{rollout_id}.pt",
+        save_debug_train_data="/tmp/debug_{rollout_id}.pt",
+    )
+
+    with pytest.raises(ValueError, match="--save-debug-train-data must not be equal"):
+        module.vime_validate_args(args)
+
+
+@pytest.mark.unit
 def test_vime_validate_args_preserves_zero_rollout_gpus_under_colocate(monkeypatch):
     module = load_vime_arguments_module(monkeypatch)
     args = make_vime_validate_args(colocate=True, rollout_num_gpus=0)
@@ -277,7 +311,7 @@ def test_vime_validate_args_preserves_zero_rollout_gpus_under_colocate(monkeypat
 
 
 @pytest.mark.unit
-def test_vime_validate_args_rederives_mismatched_rollout_gpus_under_colocate(monkeypatch):
+def test_vime_validate_args_preserves_larger_rollout_gpus_under_colocate(monkeypatch):
     module = load_vime_arguments_module(monkeypatch)
     args = make_vime_validate_args(
         colocate=True,
@@ -288,7 +322,7 @@ def test_vime_validate_args_rederives_mismatched_rollout_gpus_under_colocate(mon
 
     module.vime_validate_args(args)
 
-    assert args.rollout_num_gpus == 8  # re-derived from actor_num_gpus_per_node * actor_num_nodes
+    assert args.rollout_num_gpus == 12
     assert args.offload_train is True
     assert args.offload_rollout is True
 
@@ -308,18 +342,57 @@ def test_vime_validate_args_preserves_zero_rollout_gpus_without_colocate(monkeyp
 
 
 @pytest.mark.unit
-def test_update_weight_delta_disabled(monkeypatch):
+def test_update_weight_delta_disk_is_valid(monkeypatch):
     module = load_vime_arguments_module(monkeypatch)
-    for transport, colocate in (("nccl", False), ("tensor", False), ("nccl", True)):
-        args = types.SimpleNamespace(
-            update_weight_mode="delta",
-            update_weight_transport=transport,
-            update_weight_disk_dir=None,
-            update_weight_delta_dir=None,
-            colocate=colocate,
-        )
-        with pytest.raises(NotImplementedError, match="unverified on vime"):
-            module._validate_update_weight_args(args)
+    args = make_vime_validate_args(
+        update_weight_mode="delta",
+        update_weight_transport="disk",
+        update_weight_disk_dir="/shared/delta",
+        update_weight_local_checkpoint_dir="/local/delta",
+    )
+
+    module.vime_validate_args(args)
+
+
+@pytest.mark.unit
+def test_update_weight_delta_requires_disk_transport(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(
+        update_weight_mode="delta",
+        update_weight_transport="nccl",
+        update_weight_local_checkpoint_dir="/local/delta",
+    )
+
+    with pytest.raises(ValueError, match="requires --update-weight-transport=disk"):
+        module.vime_validate_args(args)
+
+
+@pytest.mark.unit
+def test_update_weight_delta_rejects_colocate(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(
+        update_weight_mode="delta",
+        update_weight_transport="disk",
+        update_weight_disk_dir="/shared/delta",
+        update_weight_local_checkpoint_dir="/local/delta",
+        colocate=True,
+    )
+
+    with pytest.raises(ValueError, match="not supported with --colocate"):
+        module.vime_validate_args(args)
+
+
+@pytest.mark.unit
+def test_update_weight_delta_requires_local_checkpoint_dir(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(
+        update_weight_mode="delta",
+        update_weight_transport="disk",
+        update_weight_disk_dir="/shared/delta",
+    )
+
+    with pytest.raises(ValueError, match="requires --update-weight-local-checkpoint-dir"):
+        module.vime_validate_args(args)
 
 
 if __name__ == "__main__":

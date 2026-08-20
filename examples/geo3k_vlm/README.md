@@ -3,21 +3,14 @@
 Training VLMs with Megatron on single-turn reasoning task using GRPO on the [GEO3K dataset](https://huggingface.co/datasets/hiyouga/geometry3k). We used processed version [here](https://huggingface.co/datasets/chenhegu/geo3k_imgurl).
 
 Supported models:
-* Qwen2.5-VL
-* Qwen3-VL (Dense and MoE)
-* Qwen3.5 (Dense and MoE)
+* Qwen3.5-35B-A3B
 
 Note: Please make sure the cudnn version in the environment is 9.16.0.29 to prevent severe performance regression in conv3d in torch 2.9 mentioned in https://github.com/pytorch/pytorch/issues/168167. Otherwise, you can reinstall cudnn with:
 ```bash
 pip install nvidia-cudnn-cu12==9.16.0.29
 ```
 
-**Important:** We use [Megatron Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) to support multimodal models. However, not all Megatron arguments are passed through to Megatron Bridge — you may need to set some manually [here](https://github.com/vllm-project/vime/blob/main/vime/backends/megatron_utils/model_provider.py) (currently only parallelization-related arguments are passed). For example, for Qwen3-VL-30B-A3B you may need to add:
-```python
-provider.moe_aux_loss_coeff = args.moe_aux_loss_coeff
-provider.freeze_language_model = False
-provider.freeze_vision_model = False
-```
+Qwen3.5 uses vime's native Megatron language model plus the Transformers vision model. Vision parameters retain their HuggingFace names and are loaded and synchronized directly.
 
 <p align="center">
   <img src="vlm-rewardscore.png" alt="GEO3K VLM rollout raw reward" width="800">
@@ -60,43 +53,21 @@ ds.to_parquet("/root/datasets/geo3k_imgurl/train_formatted.parquet")
 ```bash
 export WANDB_API_KEY=your_wandb_api_key
 
-# Megatron backend (default -> Qwen3-VL-8B-Instruct + Megatron)
-./examples/geo3k_vlm/run_geo3k_vlm.sh
-
-# With different model
-VIME_SCRIPT_MODEL_NAME=Qwen3-VL-4B-Instruct ./examples/geo3k_vlm/run_geo3k_vlm.sh
-
-# Qwen3.5
 ./examples/geo3k_vlm/run_geo3k_qwen35.sh
-
-# SFT
-./examples/geo3k_vlm/run_geo3k_vlm_sft.sh
 ```
 
 ### Configuration
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `VIME_SCRIPT_MODEL_NAME` | `Qwen3-VL-8B-Instruct` | Model name |
 | `VIME_SCRIPT_DATASET_NAME` | `chenhegu/geo3k_imgurl` | HuggingFace dataset name |
-| `VIME_SCRIPT_NUM_GPUS` | `8` | Number of GPUs used for colocated training and rollout |
+| `VIME_SCRIPT_NUM_GPUS` | `8` | Number of GPUs |
 | `VIME_SCRIPT_EXTERNAL_RAY` | `0` | Use external Ray cluster (`1` to enable) |
 
-### Supported Models
-
-- `Qwen3-VL-2B-Instruct`
-- `Qwen3-VL-4B-Instruct`
-- `Qwen3-VL-8B-Instruct`
-- `Qwen3-VL-30B-A3B-Instruct`
-- `Qwen3-VL-235B-A22B-Instruct`
-- `Qwen3-VL-2B-Thinking`
-- `Qwen3-VL-4B-Thinking`
-- `Qwen3-VL-8B-Thinking`
-- `Qwen3-VL-30B-A3B-Thinking`
-- `Qwen3-VL-235B-A22B-Thinking`
-
 #### Qwen3.5 Series
-We provide an [example](./run_geo3k_qwen35.sh) for Qwen3.5-35B-A3B. To support other Qwen3.5 models, add a model config file in `scripts/models/` and update the model name and config path in the script accordingly.
+We provide a native [example](./run_geo3k_qwen35.sh) for Qwen3.5-35B-A3B. It loads the Transformers ViT directly and converts only the Megatron language-model parameters. To support another Qwen3.5 model, add its model config under `scripts/models/` and update the example.
+
+The native path supports tensor, pipeline, context, sequence, and expert parallelism. Context parallelism follows Megatron's packed THD zigzag layout.
 
 For GDN training, use `--micro-batch-size 1` and remove `--use-dynamic-batch-size`.
 
@@ -118,7 +89,7 @@ Our initial geo3k-specific verifier produced "format scores" (**0 and 0.9**) ins
 We fixed this by switching to the default math RM with clean **binary 0/1 rewards**. If you encounter similar precision issues with non-binary rewards, you can change the reward tensor dtype from `torch.float` to `torch.float16` in `vime/ray/rollout.py` (`_post_process_rewards` method) to truncate precision artifacts.
 
 ## B200
-On Blackwell (SM100), vllm automatically dispatches the ViT encoder to
+On Blackwell (SM100), vLLM automatically dispatches the ViT encoder to
 FlashAttention 4 (or FA2 fallback) — no manual override is needed
 ([vllm/v1/attention/backends/fa_utils.py:81](https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/fa_utils.py#L81)).
 If you hit a kernel issue on a specific model, you can force SDPA with

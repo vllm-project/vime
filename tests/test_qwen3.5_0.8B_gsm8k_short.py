@@ -36,6 +36,7 @@ def execute():
         "--n-samples-per-prompt 4 "
         "--rollout-max-response-len 1024 "
         "--rollout-temperature 0.8 "
+        "--rollout-top-k 20 "
         "--rollout-top-p 0.95 "
         "--rollout-data-transport nixl "
         "--over-sampling-batch-size 8 "
@@ -82,7 +83,7 @@ def execute():
     )
 
     vllm_args = (
-        "--rollout-num-gpus-per-engine 1 " "--vllm-gpu-memory-utilization 0.7 " "--vllm-max-cudagraph-capture-size 64"
+        "--rollout-num-gpus-per-engine 1 " "--vllm-gpu-memory-utilization 0.7 " "--vllm-max-cudagraph-capture-size 32"
     )
 
     ci_args = "--ci-test "

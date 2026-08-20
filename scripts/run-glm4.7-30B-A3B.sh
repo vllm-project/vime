@@ -116,10 +116,11 @@ VLLM_ARGS=(
    --rollout-num-gpus-per-engine 8
    --vllm-gpu-memory-utilization 0.8
    --vllm-data-parallel-size 8
+   --vllm-enable-expert-parallel
 
    # mtp
-   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
-   --vllm-max-cudagraph-capture-size 64
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":4}'
+   --vllm-max-cudagraph-capture-size 320
    --vllm-max-num-seqs 512
 )
 

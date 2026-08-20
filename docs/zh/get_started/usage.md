@@ -21,7 +21,7 @@
 
 - `--rollout-num-gpus`：rollout （inference）一共需要多少卡。设置为 `0` 时，vime 仍会解析 vLLM 参数并启动 router，但不会启动本地 vLLM server；
 
-- `--rollout-num-gpus-per-engine`：每个 inference engine 有多少卡，这个参数会比较像 vLLM 的 `tp_size`，也就是在进行多机 serving 的时候，这个数值应该是总卡数，例如 2 机 16 卡 serving 一个模型，这里的值应该是 16。
+- `--rollout-num-gpus-per-engine`：单个 inference engine 使用的 worker GPU 总数；只有 data parallel 和 pipeline parallel 都为 1 时，它才等于 vLLM 的 `tensor_parallel_size`。例如用 2 机 16 卡 serving 一个模型时，这里的值应为 16。
 
 在默认的配置下，我们会根据这些参数，通过 ray 给训练部分分配 `actor_num_nodes * actor_num_gpus_per_node` 张 GPU，给推理分配 `rollout_num_gpus` 张 GPU，也就是实现了训推分离。
 
@@ -236,35 +236,17 @@ PPO（Proximal Policy Optimization）是经典的 RL 算法，使用 critic 模�
 --advantage-estimator ppo
 ```
 
-**注意：PPO 的 Critic 和 Actor 是并列申请 GPU 的**，在资源分配时需要考虑这一点。具体来说：
+**注意：当前 PPO 下 Critic 和 Actor 共享同一组训练 GPU**，资源分配时不需要为 critic 额外预留一组独立 GPU。具体来说：
 
-- Critic 模型会独立占用一组 GPU，与 Actor 的 GPU 资源分开；
-- 可以通过 `--critic-num-nodes` 和 `--critic-num-gpus-per-node` 来配置 critic 使用的资源；
-- 如果不配置 critic 的资源参数，默认会使用与 actor 相同的资源配置。
+- PPO 会创建 actor 和 critic 两套训练进程组，但它们会被放到同一组 train placement group 上；
+- critic 的训练规模跟随 actor 配置，当前 actor / critic 的 Megatron 并行拓扑必须保持一致；
+- PPO 会强制开启 train 侧 offload，使 actor 和 critic 在同一批 GPU 上轮流唤醒和释放显存；
+- 当前没有单独配置 critic 训练资源的 CLI 参数，critic 的节点数和每节点 GPU 数会由 actor 配置派生。
 
-集群资源分配示例：
-
-```bash
-# Actor 使用 1 个节点，4 张 GPU
---actor-num-nodes 1
---actor-num-gpus-per-node 4
-
-# Critic 使用 1 个节点，4 张 GPU（与 Actor 并列）
---critic-num-nodes 1
---critic-num-gpus-per-node 4
-
-# Rollout 使用 8 张 GPU
---rollout-num-gpus 8
-```
-
-在上述配置下，总共需要 `4 (actor) + 4 (critic) + 8 (rollout) = 16` 张 GPU。
 
 PPO 相关参数：
 
-- `--critic-load`：critic 模型的 checkpoint 路径；
-- `--critic-save`：critic 模型的保存路径；
-- `--critic-lr`：critic 模型的学习率；
-- `--critic-lr-warmup-iters`：critic 模型的 warmup 步数；
+- `--megatron-config-path`：通过 YAML 对 actor / critic 分别覆盖 Megatron 参数，例如为 critic 单独设置 `load`、`save`、`lr` 或 warmup 参数；
 - `--num-critic-only-steps`：训练开始时只训练 critic 的步数；
 - `--eps-clip`：PPO clip 范围；
 - `--value-clip`：value loss 的 clip 范围；
@@ -341,7 +323,6 @@ vime 支持不同程度的自定义数据生成（rollout）。
       output = await post(
           f"http://{args.vllm_router_ip}:{args.vllm_router_port}/inference/v1/generate",
           {
-              "model": args.hf_checkpoint,
               "token_ids": prompt_token_ids,
               "sampling_params": {"max_tokens": sampling_params["max_new_tokens"]},
           }
@@ -424,7 +405,7 @@ vllm:
 **服务器组功能：**
 - `worker_type`：`regular`、`prefill`、`decode` 或 `placeholder`（预留 GPU 位置但不创建引擎）
 - `overrides`：vLLM `EngineArgs` 字段覆盖字典，会叠加在 `--vllm-*` CLI 参数之上
-- `num_gpus_per_engine`：每组的 TP 大小覆盖
+- `num_gpus_per_engine`：每组中单引擎的 worker GPU 总数覆盖
 
 ## megatron 使用方法
 

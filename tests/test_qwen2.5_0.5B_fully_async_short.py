@@ -10,6 +10,9 @@ existing 0.5B short tests.
 """
 
 import os
+
+import torch
+
 import vime.utils.external_utils.command_utils as U
 
 
@@ -22,7 +25,7 @@ def prepare():
     U.exec_command("mkdir -p /root/models /root/datasets")
     U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
     U.hf_download_dataset("zhuzilin/dapo-math-17k")
-    if U.is_rocm():
+    if torch.version.hip is not None:
         # ROCm image has no modelopt bridge: convert HF->Megatron into a container-local dir.
         U.convert_checkpoint(
             MODEL_NAME,
@@ -34,7 +37,7 @@ def prepare():
 
 
 def execute():
-    if U.is_rocm():
+    if torch.version.hip is not None:
         ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ --ref-load /tmp/{MODEL_NAME}_torch_dist/ "
     else:
         ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load /root/models/{MODEL_NAME}/ "
@@ -112,8 +115,7 @@ def execute():
         "--actor-num-nodes 1 "
         "--actor-num-gpus-per-node 1 "
         "--rollout-num-gpus 3 "
-        f'{"--megatron-to-hf-mode bridge " if not U.is_rocm() else ""}'
-        f'{"--no-gradient-accumulation-fusion --no-offload-train " if U.is_rocm() else ""}'
+        f'{"--no-gradient-accumulation-fusion --no-offload-train " if torch.version.hip is not None else ""}'
     )
 
     train_args = (

@@ -8,10 +8,10 @@ and points vime at both via ``--rollout-external-engine-addrs ...``.
 The first 4 GPUs train. vime queries ``/server_info`` on each engine to
 infer per-engine TP / GPU counts and registers them to its PD-enabled router.
 
-Weight sync uses ``--update-weight-mode full --update-weight-transport disk``
-so the post-train sync writes a complete HF checkpoint to a shared directory
-and the external engines reload it through ``update_weights_from_disk`` without
-forming an NCCL group with the trainer.
+Weight sync defaults to full disk checkpoints. Set ``VIME_TEST_UPDATE_MODE=delta``
+to publish sparse safetensors, apply them to a host-local checkpoint through
+``pull_weights``, and reload that checkpoint without forming an NCCL group with
+the trainer.
 """
 
 import json
@@ -166,7 +166,7 @@ def _launch_vllm_server(
         f"port={port} tp={tp} (pid={process.pid}), log: {log_path}"
     )
 
-    # Wait up to ~10 minutes for /server_info to come up.  /health_generate
+    # Wait up to ~10 minutes for /server_info to come up.  /health
     # is unreliable for prefill/decode-only nodes, so we poll /server_info
     # — that's what vime's discover_external_engines uses anyway.
     deadline = time.time() + 600
@@ -192,6 +192,8 @@ def _launch_vllm_server(
 
 
 def execute():
+    update_mode = os.environ.get("VIME_TEST_UPDATE_MODE", "full")
+    assert update_mode in {"full", "delta"}
     train_gpus, prefill_gpus, decode_gpus = _get_gpu_split()
     external_host = _get_external_host()
     print(f"Using external host for vLLM workers: {external_host}")
@@ -231,8 +233,10 @@ def execute():
                 )
             )
 
-    disk_dir_cm = tempfile.TemporaryDirectory(prefix="vime_external_pd_full_disk_")
+    disk_dir_cm = tempfile.TemporaryDirectory(prefix=f"vime_external_pd_{update_mode}_disk_")
+    local_checkpoint_dir_cm = tempfile.TemporaryDirectory(prefix="vime_external_pd_local_checkpoint_")
     disk_dir = disk_dir_cm.name
+    local_checkpoint_dir = local_checkpoint_dir_cm.name
     try:
         ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load {TORCH_DIST_CKPT} "
 
@@ -293,15 +297,16 @@ def execute():
         all_addrs = [f"{external_host}:{port}" for port in (*PREFILL_PORTS, *DECODE_PORTS)]
         external_args = "--rollout-external-engine-addrs " + " ".join(all_addrs) + " "
 
-        # External engines have no NCCL group with the trainer, so the trainer
-        # publishes a complete HF checkpoint and the engines reload it from the
-        # shared filesystem.
         disk_update_args = (
-            "--update-weight-mode full "
+            f"--update-weight-mode {update_mode} "
             "--update-weight-transport disk "
             f"--update-weight-disk-dir {disk_dir} "
             "--update-weight-disk-keep-files "
         )
+        if update_mode == "delta":
+            disk_update_args += (
+                "--update-weight-delta-encoding xor " f"--update-weight-local-checkpoint-dir {local_checkpoint_dir} "
+            )
 
         ci_args = "--ci-test "
 
@@ -343,6 +348,9 @@ def execute():
         assert checkpoint_dirs, f"No disk checkpoint directories were written under {disk_dir}"
         assert any((path / "model.safetensors.index.json").exists() for path in checkpoint_dirs)
         assert any(list(path.glob("*.safetensors")) for path in checkpoint_dirs)
+        if update_mode == "delta":
+            indexes = [json.loads((path / "model.safetensors.index.json").read_text()) for path in checkpoint_dirs]
+            assert all("delta_encoding" in index["metadata"] for index in indexes)
     finally:
         for p in processes:
             if p.poll() is None:
@@ -350,6 +358,7 @@ def execute():
                 p.wait()
         U.exec_command("pkill -9 vllm; true")
         disk_dir_cm.cleanup()
+        local_checkpoint_dir_cm.cleanup()
 
 
 if __name__ == "__main__":

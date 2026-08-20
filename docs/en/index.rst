@@ -41,7 +41,6 @@ Start by Use Case
    :caption: Dense
 
    examples/qwen3-4B.md
-   examples/gemma4.md
    examples/glm4-9B.md
 
 .. toctree::
@@ -57,6 +56,7 @@ Start by Use Case
    :maxdepth: 1
    :caption: Advanced Features
 
+   advanced/on-policy-distillation.md
    advanced/speculative-decoding.md
    advanced/reproducibility.md
    advanced/fault-tolerance.md
@@ -89,4 +89,3 @@ Start by Use Case
    :caption: Hardware Platforms
 
    platform_support/amd_tutorial.md
-   platform_support/ascend_tutorial.md

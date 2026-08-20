@@ -46,7 +46,7 @@ _ALL_LINEAR_HF_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "
 
 
 def is_lora_enabled(args: Namespace) -> bool:
-    return args.lora_rank > 0
+    return getattr(args, "lora_rank", 0) > 0
 
 
 def parse_target_modules(value: str | Sequence[str] | None) -> list[str]:

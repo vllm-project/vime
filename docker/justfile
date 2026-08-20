@@ -21,17 +21,19 @@ IMAGE := "vllm/vime"
 BUILDER := env("VIME_BUILDER", "vime-builder")
 VIME_COMMIT := env("VIME_COMMIT", "main")
 FA2_MAX_JOBS := env("VIME_FA2_MAX_JOBS", "64")
+DEEPEP_CUDA_ARCH_LIST := env("VIME_DEEPEP_CUDA_ARCH_LIST", "9.0;10.0;10.3")
+TRANSFORMER_ENGINE_CUDA_ARCHS := env("VIME_TRANSFORMER_ENGINE_CUDA_ARCHS", "90;100a;103a")
 
 # ---- per-arch build, pushed BY DIGEST (run once on an amd64 host, once on an arm64 host) ----
 
-# Default — pinned vLLM 0.25.1 / CUDA 13 base.
+# Default — latest vLLM nightly / CUDA 13 base.
 build:
-    ARG_TAG_SUFFIX="" ARG_BUILD_EXTRA_ARGS="--build-arg INSTALL_FLASHQLA=1 --build-arg VIME_COMMIT={{ VIME_COMMIT }} --build-arg FA2_MAX_JOBS={{ FA2_MAX_JOBS }}" just _build-digest
+    ARG_TAG_SUFFIX="" ARG_BUILD_EXTRA_ARGS="--build-arg VIME_COMMIT={{ VIME_COMMIT }} --build-arg FA2_MAX_JOBS={{ FA2_MAX_JOBS }} --build-arg DEEPEP_CUDA_ARCH_LIST={{ DEEPEP_CUDA_ARCH_LIST }} --build-arg TRANSFORMER_ENGINE_CUDA_ARCHS={{ TRANSFORMER_ENGINE_CUDA_ARCHS }}" just _build-digest
 
-# Compatibility target for the explicit cu13 aliases. Keep the base pinned so
-# this target cannot silently drift away from the default image.
+# Compatibility target for the explicit cu13 aliases. Use the same nightly base
+# as the default image so the aliases cannot drift from it.
 build-cu13:
-    ARG_TAG_SUFFIX="-cu13" ARG_BUILD_EXTRA_ARGS='--build-arg BASE_IMAGE=vllm/vllm-openai:v0.25.1-ubuntu2404 --build-arg ENABLE_CUDA_13=1 --build-arg INSTALL_FLASHQLA=1 --build-arg VIME_COMMIT={{ VIME_COMMIT }} --build-arg FA2_MAX_JOBS={{ FA2_MAX_JOBS }}' just _build-digest
+    ARG_TAG_SUFFIX="-cu13" ARG_BUILD_EXTRA_ARGS='--build-arg BASE_IMAGE=vllm/vllm-openai:nightly --build-arg ENABLE_CUDA_13=1 --build-arg VIME_COMMIT={{ VIME_COMMIT }} --build-arg FA2_MAX_JOBS={{ FA2_MAX_JOBS }} --build-arg DEEPEP_CUDA_ARCH_LIST={{ DEEPEP_CUDA_ARCH_LIST }} --build-arg TRANSFORMER_ENGINE_CUDA_ARCHS={{ TRANSFORMER_ENGINE_CUDA_ARCHS }}' just _build-digest
 
 _build-digest:
     #!/bin/bash
@@ -64,16 +66,15 @@ manifest VARIANT AMD_DIGEST ARM_DIGEST:
     [ -n "{{ VARIANT }}" ] && PREFIX="{{ VARIANT }}-"
     docker buildx imagetools create -t "{{ IMAGE }}:${PREFIX}${VERSION}" -t "{{ IMAGE }}:${PREFIX}latest" "{{ IMAGE }}@{{ AMD_DIGEST }}" "{{ IMAGE }}@{{ ARM_DIGEST }}"
 
-# ---- single-arch test/debug image for the run-ci-image validation job ----
-# The e2e-test-image runner is x86, so this is amd64-only and
-# needs no manifest.
+# ---- single-arch test/debug image for Buildkite GPU validation ----
+# This target is amd64-only and needs no manifest.
 build-test:
     #!/bin/bash
     set -euxo pipefail
     cd ..
 
     VERSION="$(cat docker/version.txt | tr -d '\n')"
-    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="${http_proxy:-}" --build-arg HTTPS_PROXY="${https_proxy:-}" --build-arg NO_PROXY="localhost,127.0.0.1" --build-arg INSTALL_FLASHQLA=1 -t "{{ IMAGE }}:test-${VERSION}"
+    docker build -f docker/Dockerfile . --build-arg HTTP_PROXY="${http_proxy:-}" --build-arg HTTPS_PROXY="${https_proxy:-}" --build-arg NO_PROXY="localhost,127.0.0.1" --build-arg DEEPEP_CUDA_ARCH_LIST={{ DEEPEP_CUDA_ARCH_LIST }} --build-arg TRANSFORMER_ENGINE_CUDA_ARCHS={{ TRANSFORMER_ENGINE_CUDA_ARCHS }} -t "{{ IMAGE }}:test-${VERSION}"
     docker push "{{ IMAGE }}:test-${VERSION}"
 
     docker tag "{{ IMAGE }}:test-${VERSION}" "{{ IMAGE }}:test-latest"

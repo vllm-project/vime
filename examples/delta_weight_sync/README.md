@@ -7,9 +7,6 @@ directory; each engine's `/pull_weights` applies them into a host-local checkpoi
 host it spans, and the engines reload through the ordinary `update_weights_from_disk` path —
 vime only ever talks to one endpoint per engine.
 
-Vime currently rejects `--update-weight-mode delta` with a `NotImplementedError`; this example
-is retained as mechanically synchronized upstream reference material.
-
 See [Delta Weight Sync](../../docs/en/advanced/delta-weight-sync.md) for the full mechanism,
 encodings, integrity checks, and shared-filesystem visibility hooks.
 

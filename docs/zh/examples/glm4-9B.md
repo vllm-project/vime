@@ -193,7 +193,7 @@ OPTIMIZER_ARGS=(
 
 #### VLLM_ARGS
 
-vllm 所需的参数，这里 `--rollout-num-gpus-per-engine` 基本对应 vllm 的 `tp_size`，除此之外的 vllm 参数均通过添加 `--vllm-` 的前缀来传给 vime。
+这些是 vLLM 所需的参数。在默认并行配置下，`--rollout-num-gpus-per-engine` 对应 vLLM 的 `tensor_parallel_size`；其他 vLLM 参数通过添加 `--vllm-` 前缀传给 vime。
 
 ```bash
 VLLM_ARGS=(

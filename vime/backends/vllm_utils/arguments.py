@@ -130,6 +130,9 @@ def validate_args(args):
     args.vllm_dp_size = args.vllm_data_parallel_size
     args.vllm_pp_size = args.vllm_pipeline_parallel_size
 
+    if getattr(args, "rollout_top_p", 1.0) != 1.0 and getattr(args, "rollout_top_k", -1) <= 0:
+        raise ValueError("vLLM top-p sampling replay requires --rollout-top-k > 0.")
+
     if getattr(args, "vllm_router_ip", None):
         args.vllm_router_ip = _wrap_ipv6(args.vllm_router_ip)
 
@@ -158,11 +161,13 @@ def vllm_parse_args():
     temp_parser = argparse.ArgumentParser(add_help=False)
     temp_parser.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
     temp_parser.add_argument("--vllm-pipeline-parallel-size", type=int, default=1)
+    temp_parser.add_argument("--vllm-prefill-context-parallel-size", type=int, default=1)
     temp_parser.add_argument("--vllm-data-parallel-size", type=int, default=1)
     temp_args, _ = temp_parser.parse_known_args()
     pp_size = temp_args.vllm_pipeline_parallel_size
+    pcp_size = temp_args.vllm_prefill_context_parallel_size
     dp_size = temp_args.vllm_data_parallel_size
-    vllm_tp_size = temp_args.rollout_num_gpus_per_engine // (pp_size * dp_size)
+    vllm_tp_size = temp_args.rollout_num_gpus_per_engine // (pp_size * pcp_size * dp_size)
     parser.set_defaults(vllm_tensor_parallel_size=vllm_tp_size)
 
     args, _ = parser.parse_known_args()

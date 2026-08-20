@@ -1,5 +1,6 @@
 import copy
 import math
+import os
 from dataclasses import dataclass
 from typing import NoReturn
 
@@ -27,11 +28,226 @@ from megatron.core.transformer.transformer_config import MLATransformerConfig
 from transformers import AutoConfig
 
 from .ops.indexer import generate_varlen_mask_params, lighting_indexer
-from .ops.sparse_mla import SparseMLA
+from .ops.sparse_mla import SparseMLA, VLLMSparseMLA
 
 # Names of the indexer submodules. On a DSA model with *cross-layer index
 # sharing* these only exist on "computing" layers; "skip" layers drop them.
 _INDEXER_SUBMODULE_NAMES = ("wq_b", "wk", "k_norm", "weights_proj")
+_VLLM_ROPE_CACHE = {}
+
+
+class _VLLMAbsorbWeightSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, aligned_weight: torch.Tensor, trainable_weight: torch.Tensor):
+        if aligned_weight.shape != trainable_weight.shape:
+            raise ValueError(
+                "Aligned absorb-weight shape mismatch: " f"{aligned_weight.shape} != {trainable_weight.shape}"
+            )
+        return aligned_weight
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        return None, grad_output
+
+
+class _VLLMIndexerHeadWeights(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, hidden_states: torch.Tensor, weight: torch.Tensor):
+        import deep_gemm
+
+        flat_input = hidden_states.reshape(-1, hidden_states.shape[-1]).contiguous()
+        output = torch.empty(
+            (flat_input.shape[0], weight.shape[0]),
+            dtype=torch.float32,
+            device=flat_input.device,
+        )
+        deep_gemm.bf16_gemm_nt(
+            flat_input,
+            weight.contiguous(),
+            output,
+        )
+        ctx.save_for_backward(hidden_states, weight)
+        return output.view(*hidden_states.shape[:-1], weight.shape[0])
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        from vime.backends.megatron_utils.alignment.deepgemm_forward import router_gating_linear_backward
+
+        hidden_states, weight = ctx.saved_tensors
+        return router_gating_linear_backward(
+            hidden_states,
+            weight,
+            grad_output,
+            torch.float32,
+        )
+
+
+def _get_vllm_indexer_head_weights(
+    hidden_states: torch.Tensor,
+    weight: torch.Tensor,
+    *,
+    num_heads: int,
+    head_dim: int,
+) -> torch.Tensor:
+    if os.getenv("MEGATRON_USE_VLLM_FP8_INDEXER", "0") != "1":
+        output = WeightLinearFunction.apply(hidden_states, weight, None, torch.float32)
+        return output.squeeze(1) * (num_heads**-0.5) * (head_dim**-0.5)
+
+    if hidden_states.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
+        raise TypeError(
+            "VLLM indexer head-gate alignment requires BF16 input and weight, "
+            f"got {hidden_states.dtype}/{weight.dtype}"
+        )
+    output = _VLLMIndexerHeadWeights.apply(hidden_states, weight)
+    return output.squeeze(1) * (num_heads**-0.5)
+
+
+def _get_fp8_aligned_absorb_weight(linear: torch.nn.Module) -> torch.Tensor:
+    weight = linear.weight
+    cache_key = (
+        int(weight._version),
+        weight.data_ptr(),
+        weight.device,
+        weight.dtype,
+        tuple(weight.shape),
+        tuple(weight.stride()),
+    )
+    aligned_weight = getattr(linear, "_vllm_fp8_aligned_absorb_weight_cache", None)
+    if aligned_weight is None or getattr(linear, "_vllm_fp8_aligned_absorb_weight_cache_key", None) != cache_key:
+        from vime.backends.megatron_utils.kernels.fp8_kernel import blockwise_cast_to_fp8_triton
+
+        with torch.no_grad():
+            from vllm.model_executor.layers.quantization.utils.fp8_utils import requant_weight_ue8m0_inplace
+            from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used, per_block_cast_to_fp8
+
+            use_ue8m0 = is_deep_gemm_e8m0_used()
+
+            if use_ue8m0:
+                # Blackwell (sm100/sm103): the VLLM rollout dequantizes the
+                # absorb weight from a UE8M0 (power-of-two scale) FP8 tensor. The
+                # Hopper blockwise_cast_to_fp8_triton (FP32 scales) produces a
+                # bf16 weight that differs by ~1 bf16 ULP from the UE8M0 dequant,
+                # which propagates as a uniform ~1-ULP offset in the absorbed q
+                # and, amplified through the layers and the FP32 LM head, shows
+                # up as a large train/rollout logprob gap. Replicate the UE8M0
+                # quant so the dequantized absorb weight bit-matches the rollout.
+                # requant_weight_ue8m0_inplace updates both tensors to the raw
+                # power-of-two per-block scale used for this dequantization.
+                qweight, scale_inv = per_block_cast_to_fp8(weight.detach().contiguous(), block_size=(128, 128))
+                requant_weight_ue8m0_inplace(qweight, scale_inv, (128, 128))
+            else:
+                # Hopper (sm90): FP32 block scales. Unchanged.
+                qweight, scale_inv = blockwise_cast_to_fp8_triton(
+                    weight.detach().contiguous(),
+                    (128, 128),
+                )
+            expanded_scale = scale_inv.repeat_interleave(128, dim=-2).repeat_interleave(128, dim=-1)
+            aligned_weight = (qweight.float() * expanded_scale[: qweight.shape[-2], : qweight.shape[-1]]).to(
+                torch.bfloat16
+            )
+        linear._vllm_fp8_aligned_absorb_weight_cache = aligned_weight
+        linear._vllm_fp8_aligned_absorb_weight_cache_key = cache_key
+    return _VLLMAbsorbWeightSTE.apply(aligned_weight, weight)
+
+
+@torch.no_grad()
+def _apply_vllm_rope_forward(
+    value: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+) -> torch.Tensor:
+    from vllm import _custom_ops as ops
+
+    output = torch.empty_strided(value.size(), value.stride(), dtype=value.dtype, device=value.device)
+    output.copy_(value)
+    ops.rotary_embedding(
+        positions,
+        output,
+        None,
+        value.shape[-1],
+        cos_sin_cache,
+        False,
+    )
+    return output
+
+
+class _VLLMRoPE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, value, cos_sin_cache, positions):
+        ctx.save_for_backward(cos_sin_cache, positions)
+        return _apply_vllm_rope_forward(value, cos_sin_cache, positions)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        cos_sin_cache, positions = ctx.saved_tensors
+        half = grad_output.shape[-1] // 2
+        broadcast_shape = (positions.numel(),) + (1,) * (grad_output.ndim - 2) + (half,)
+        cos = cos_sin_cache[positions, :half].view(broadcast_shape).to(grad_output.dtype)
+        sin = cos_sin_cache[positions, half:].view(broadcast_shape).to(grad_output.dtype)
+        grad_even = grad_output[..., 0::2]
+        grad_odd = grad_output[..., 1::2]
+        grad_input = torch.stack(
+            (
+                grad_even * cos + grad_odd * sin,
+                grad_odd * cos - grad_even * sin,
+            ),
+            dim=-1,
+        ).flatten(-2)
+        return grad_input, None, None
+
+
+def _get_vllm_rope_cache(
+    device: torch.device,
+    rotary_dim: int,
+    rotary_base: float,
+    needed_positions: int,
+) -> torch.Tensor:
+    key = (device.type, device.index, rotary_dim, float(rotary_base))
+    cache = _VLLM_ROPE_CACHE.get(key)
+    if cache is not None and cache.shape[0] >= needed_positions:
+        return cache
+    inv_freq = 1.0 / (rotary_base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32, device=device) / rotary_dim))
+    positions = torch.arange(needed_positions, dtype=torch.float32, device=device)
+    freqs = torch.einsum("i,j -> ij", positions, inv_freq)
+    cache = torch.cat((freqs.cos(), freqs.sin()), dim=-1)
+    _VLLM_ROPE_CACHE[key] = cache
+    return cache
+
+
+class _DSAKVFP8QAT(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, kv: torch.Tensor):
+        if kv.dtype != torch.bfloat16 or kv.shape[-2:] != (1, 576):
+            raise ValueError(
+                "GLM5 KV FP8 QAT requires BF16 [..., 1, 576], " f"got dtype={kv.dtype}, shape={tuple(kv.shape)}"
+            )
+        flat_kv = kv.contiguous().view(-1, 576)
+        nope = flat_kv[:, :512].view(-1, 4, 128).float()
+        scale = nope.abs().amax(dim=-1, keepdim=True).clamp_min(1e-10) / torch.finfo(torch.float8_e4m3fn).max
+        quantized = (
+            (nope / scale)
+            .clamp(
+                -torch.finfo(torch.float8_e4m3fn).max,
+                torch.finfo(torch.float8_e4m3fn).max,
+            )
+            .to(torch.float8_e4m3fn)
+        )
+        dequantized_nope = (quantized.float() * scale).to(torch.bfloat16).view(-1, 512)
+        return torch.cat((dequantized_nope, flat_kv[:, 512:]), dim=-1).view_as(kv)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        return grad_output
+
+
+def _fake_quant_fp8_kv_cache(kv: torch.Tensor) -> torch.Tensor:
+    enabled = os.environ.get("DSA_KV_FP8_QAT", "0").strip().lower()
+    if enabled not in ("1", "true", "yes", "on"):
+        return kv
+    block_size = int(os.environ.get("DSA_KV_FP8_QAT_BLOCK_SIZE", "128"))
+    if block_size != 128:
+        raise ValueError("VLLM-aligned KV FP8 QAT requires block size 128")
+    return _DSAKVFP8QAT.apply(kv)
 
 
 def is_skip_topk_layer(layer_number: int, skip_topk_offset: int, topk_freq: int) -> bool:
@@ -296,7 +512,16 @@ class DSAMultiLatentAttention(Attention):
             ends = scatter_to_sequence_parallel_region(ends, group=parallel_state.get_context_parallel_group())
             _, topk_indices = fused_select_topk(index_query, index_key, head_weights, starts, ends)
 
-        core_attn_out, _ = SparseMLA.apply(q, kv, topk_indices, self.softmax_scale)
+        if os.getenv("MEGATRON_USE_VLLM_SPARSE_MLA", "0") == "1":
+            core_attn_out, _ = VLLMSparseMLA.apply(
+                q,
+                kv,
+                topk_indices,
+                self.softmax_scale,
+                self.config.kv_lora_rank,
+            )
+        else:
+            core_attn_out, _ = SparseMLA.apply(q, kv, topk_indices, self.softmax_scale)
         core_attn_out = torch.einsum("thm,hdm->thd", core_attn_out, wv)
 
         core_attn_out = core_attn_out.reshape(core_attn_out.size(0), 1, -1)
@@ -330,6 +555,7 @@ class DSAMLASelfAttention(DSAMultiLatentAttention):
         cp_comm_type: str | None = None,
         model_comm_pgs=None,
         pg_collection=None,
+        name: str | None = None,
     ):
         super().__init__(
             config=config,
@@ -496,6 +722,41 @@ class DSAMLASelfAttention(DSAMultiLatentAttention):
                 if hasattr(self, name):
                     delattr(self, name)
 
+    @torch.no_grad()
+    def _get_indexer_q_input(self, q_compressed: torch.Tensor) -> torch.Tensor:
+        """Return the q-RMSNorm value consumed by the DSA indexer.
+
+        GLM-5 fuses q RMSNorm into ``linear_q_up_proj``. That fused projection
+        does not update its input, so the indexer must reconstruct the same
+        normalized q-latent before applying ``wq_b``.
+        """
+        q_compressed = q_compressed.detach()
+        fused_norm_weight = getattr(self.linear_q_up_proj, "layer_norm_weight", None)
+        if fused_norm_weight is None:
+            if isinstance(self.q_layernorm, IdentityOp):
+                return q_compressed
+            return self.q_layernorm(q_compressed)
+
+        if self.config.normalization != "RMSNorm":
+            raise ValueError(f"GLM-5 DSA indexer expects RMSNorm, got {self.config.normalization}")
+        norm_weight = fused_norm_weight.detach().float()
+        if self.config.layernorm_zero_centered_gamma:
+            norm_weight = norm_weight + 1.0
+        if os.getenv("MEGATRON_USE_VLLM_FUSED_RESIDUAL_RMS", "0") == "1":
+            from vllm.model_executor.layers.batch_invariant import rms_norm_batch_invariant
+
+            return rms_norm_batch_invariant(
+                q_compressed,
+                norm_weight,
+                self.config.layernorm_epsilon,
+            )
+        return torch.nn.functional.rms_norm(
+            q_compressed.float(),
+            normalized_shape=(q_compressed.shape[-1],),
+            weight=norm_weight,
+            eps=self.config.layernorm_epsilon,
+        ).to(q_compressed.dtype)
+
     def get_absorb_query_key_value_tensors(
         self,
         hidden_states,
@@ -536,6 +797,7 @@ class DSAMLASelfAttention(DSAMultiLatentAttention):
         # down proj are `TELinear`s, so the output is gathered and not TP-partitioned.`
         q_compressed, _ = self.linear_q_down_proj(hidden_states)
         q_compressed = q_compressed.squeeze(1)
+        index_q_input = None if self.skip_topk else self._get_indexer_q_input(q_compressed)
 
         kv_combined, _ = self.linear_kv_down_proj(hidden_states)
         if self.config.sequence_parallel:
@@ -553,7 +815,12 @@ class DSAMLASelfAttention(DSAMultiLatentAttention):
         q = q.view(*q.size()[:-1], self.num_attention_heads_per_partition, self.q_head_dim)
         q_no_pe, q_pos_emb = torch.split(q, [self.config.qk_head_dim, self.config.qk_pos_emb_head_dim], dim=-1)
 
-        w_kc, w_vc = self.linear_kv_up_proj.weight.unflatten(
+        absorb_weight = (
+            _get_fp8_aligned_absorb_weight(self.linear_kv_up_proj)
+            if os.getenv("MEGATRON_USE_VLLM_SPARSE_MLA", "0") == "1"
+            else self.linear_kv_up_proj.weight
+        )
+        w_kc, w_vc = absorb_weight.unflatten(
             0,
             (-1, self.config.qk_head_dim + self.config.v_head_dim),
         ).split([self.config.qk_head_dim, self.config.v_head_dim], dim=1)
@@ -575,6 +842,24 @@ class DSAMLASelfAttention(DSAMultiLatentAttention):
         )
 
         def fuse_rope(q, cu_seqlens, gathered=False):
+            if os.getenv("MEGATRON_USE_VLLM_ROPE", "0") == "1":
+                if parallel_state.get_tensor_model_parallel_world_size() != 1:
+                    raise RuntimeError("MEGATRON_USE_VLLM_ROPE requires TP=1")
+                if parallel_state.get_context_parallel_world_size() != 1:
+                    raise RuntimeError("The Vime GLM5 vLLM RoPE alignment currently requires CP=1")
+                token_ids = torch.arange(q.shape[0], dtype=torch.int64, device=q.device)
+                seq_ids = torch.searchsorted(cu_seqlens[1:], token_ids, right=True)
+                positions = token_ids - cu_seqlens[seq_ids]
+                cache = _get_vllm_rope_cache(
+                    q.device,
+                    q.shape[-1],
+                    self.config.rotary_base,
+                    int(positions.max().item()) + 1,
+                )
+                if torch.is_grad_enabled() and q.requires_grad:
+                    return _VLLMRoPE.apply(q, cache, positions)
+                return _apply_vllm_rope_forward(q, cache, positions)
+
             # worse precision than apex.
             # from megatron.core.extensions.transformer_engine import fused_apply_rotary_pos_emb_thd
             from apex.transformer.functional import fused_apply_rotary_pos_emb_thd
@@ -600,6 +885,7 @@ class DSAMLASelfAttention(DSAMultiLatentAttention):
 
         query = torch.cat([q_no_pe, q_pos_emb], dim=-1)
         key = torch.cat([kv_compressed, k_pos_emb], dim=-1)
+        key = _fake_quant_fp8_kv_cache(key)
 
         query = query.contiguous()
         key = key.contiguous()
@@ -613,11 +899,10 @@ class DSAMLASelfAttention(DSAMultiLatentAttention):
         # Indexer
         # =========================================
         # Project queries and keys
-        q_compressed = q_compressed.detach()
         hidden_states = hidden_states.detach()
         rotary_pos_emb = rotary_pos_emb.detach()
 
-        index_q, _ = self.wq_b(q_compressed)
+        index_q, _ = self.wq_b(index_q_input)
         index_q = index_q.view(
             *index_q.size()[:-1], self.config.index_num_attention_heads, self.config.index_head_dim
         )  # [total_tokens, index_num_attention_heads_per_partition, index_head_dim]
@@ -632,11 +917,12 @@ class DSAMLASelfAttention(DSAMultiLatentAttention):
         index_k = gather_from_sequence_parallel_region(index_k, group=parallel_state.get_context_parallel_group())
         index_k = index_k.unsqueeze(1)  # [total_tokens, 1, head_dim]
 
-        # head_weights, _ = self.weights_proj(hidden_states.float())
-        head_weights = WeightLinearFunction.apply(hidden_states, self.weights_proj.weight, None, torch.float32)
-        head_weights = head_weights.squeeze(1) * (
-            (self.config.index_num_attention_heads**-0.5) * (self.config.index_head_dim**-0.5)
-        )  # [total_tokens, index_num_attention_heads_per_partition]
+        head_weights = _get_vllm_indexer_head_weights(
+            hidden_states,
+            self.weights_proj.weight,
+            num_heads=self.config.index_num_attention_heads,
+            head_dim=self.config.index_head_dim,
+        )
         if self.config.sequence_parallel:
             head_weights = gather_from_sequence_parallel_region(head_weights)
 

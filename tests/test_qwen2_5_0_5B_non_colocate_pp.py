@@ -90,35 +90,29 @@ def execute():
         "--actor-num-gpus-per-node 2 "
     )
 
-    for megatron_to_hf_mode in ("bridge", "raw"):
-        if megatron_to_hf_mode == "bridge":
-            ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ --ref-load /root/models/{MODEL_NAME}/ "
-        else:
-            torch_dist_checkpoint = f"/root/models/{MODEL_NAME}_torch_dist"
-            ckpt_args = (
-                f"--hf-checkpoint /root/models/{MODEL_NAME}/ "
-                f"--load {torch_dist_checkpoint} "
-                f"--ref-load {torch_dist_checkpoint} "
-            )
+    torch_dist_checkpoint = f"/root/models/{MODEL_NAME}_torch_dist"
+    ckpt_args = (
+        f"--hf-checkpoint /root/models/{MODEL_NAME}/ "
+        f"--load {torch_dist_checkpoint} "
+        f"--ref-load {torch_dist_checkpoint} "
+    )
+    train_args = (
+        f"{ckpt_args} "
+        f"{rollout_args} "
+        f"{optimizer_args} "
+        f"{grpo_args} "
+        f"{U.get_default_wandb_args(__file__)} "
+        f"{perf_args} "
+        f"{vllm_args} "
+        f"{ci_args} "
+        f"{misc_args} "
+    )
 
-        train_args = (
-            f"{ckpt_args} "
-            f"{rollout_args} "
-            f"{optimizer_args} "
-            f"{grpo_args} "
-            f"{U.get_default_wandb_args(__file__)} "
-            f"{perf_args} "
-            f"{vllm_args} "
-            f"{ci_args} "
-            f"{misc_args} "
-            f"--megatron-to-hf-mode {megatron_to_hf_mode} "
-        )
-
-        U.execute_train(
-            train_args=train_args,
-            num_gpus_per_node=NUM_GPUS,
-            megatron_model_type=MODEL_TYPE,
-        )
+    U.execute_train(
+        train_args=train_args,
+        num_gpus_per_node=NUM_GPUS,
+        megatron_model_type=MODEL_TYPE,
+    )
 
 
 if __name__ == "__main__":

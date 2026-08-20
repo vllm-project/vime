@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
 import sys
 from argparse import Namespace
 from contextlib import contextmanager
@@ -128,18 +129,30 @@ def _default_sampling_params(**overrides) -> dict:
     return sp
 
 
-def _generate_response(token_ids: list[int] | None = None) -> dict:
+def _generate_response(
+    token_ids: list[int] | None = None,
+    weight_version: str | None = None,
+    request_spec_decode_stats: dict[str, int] | None = None,
+    sampling_mask: list[list[int]] | None = None,
+) -> dict:
     tids = token_ids or [50, 51]
-    return {
+    response = {
         "choices": [
             {
                 "token_ids": tids,
                 "finish_reason": "stop",
-                "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
+                "logprobs": {"content": [{"logprob": -(index + 1) / 10} for index in range(len(tids))]},
             }
         ],
         "usage": {"prompt_tokens": 3, "completion_tokens": len(tids)},
     }
+    if weight_version is not None:
+        response["weight_version"] = weight_version
+    if request_spec_decode_stats is not None:
+        response["request_spec_decode_stats"] = request_spec_decode_stats
+    if sampling_mask is not None:
+        response["choices"][0]["sampling_mask"] = sampling_mask
+    return response
 
 
 @pytest.fixture
@@ -312,13 +325,24 @@ def test_mm_render_response_empty_engine_prompts_raises():
 
 @pytest.mark.unit
 def test_generate_text_path_updates_sample(patch_generate_state, monkeypatch):
-    post_mock = AsyncMock(return_value=_generate_response([50, 51]))
+    post_mock = AsyncMock(
+        return_value=_generate_response(
+            [50, 51],
+            weight_version="step-7",
+            sampling_mask=[[1, 50], [2, 3, 51]],
+            request_spec_decode_stats={
+                "num_accepted_tokens": 6,
+                "num_draft_tokens": 8,
+                "num_verify_steps": 2,
+            },
+        )
+    )
     monkeypatch.setattr(mod, "post", post_mock)
 
     sample = Sample(index=0, prompt="abc")
     result = asyncio.run(
         mod.generate(
-            _rollout_args(),
+            _rollout_args(vllm_speculative_config={"method": "mtp"}),
             sample,
             _default_sampling_params(max_new_tokens=8),
         )
@@ -327,10 +351,91 @@ def test_generate_text_path_updates_sample(patch_generate_state, monkeypatch):
     assert result.tokens == [97, 98, 99, 50, 51]
     assert result.response_length == 2
     assert result.rollout_log_probs == pytest.approx([-0.1, -0.2])
+    assert result.rollout_top_p_token_ids.tolist() == [1, 50, 2, 3, 51]
+    assert result.rollout_top_p_token_offsets.tolist() == [0, 2, 5]
+    assert result.weight_versions == ["step-7"]
+    assert result.spec_info.spec_accept_token_num == 6
+    assert result.spec_info.spec_draft_token_num == 8
+    assert result.spec_info.spec_verify_ct == 2
     assert result.status == Sample.Status.COMPLETED
     body = post_mock.await_args_list[0].args[1]
     assert body["token_ids"] == [97, 98, 99]
     assert body["sampling_params"]["max_tokens"] == 8
+
+
+@pytest.mark.unit
+def test_generate_streaming_records_weight_version(patch_generate_state, monkeypatch):
+    from vime.rollout import vllm_streaming_rollout as streaming
+
+    class FakeStreamResponse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            chunks = [
+                {
+                    "weight_version": "step-7",
+                    "request_spec_decode_stats": {
+                        "num_accepted_tokens": 6,
+                        "num_draft_tokens": 8,
+                        "num_verify_steps": 2,
+                    },
+                    "choices": [
+                        {
+                            "token_ids": [50],
+                            "sampling_mask": [[1, 50]],
+                            "finish_reason": None,
+                            "logprobs": {"content": [{"logprob": -0.1}]},
+                        }
+                    ],
+                },
+                {
+                    "weight_version": "step-7",
+                    "choices": [
+                        {
+                            "token_ids": [51],
+                            "sampling_mask": [[2, 3, 51]],
+                            "finish_reason": "stop",
+                            "logprobs": {"content": [{"logprob": -0.2}]},
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+                },
+            ]
+            for chunk in chunks:
+                yield f"data: {json.dumps(chunk)}"
+            yield "data: [DONE]"
+
+    class FakeClient:
+        def stream(self, *args, **kwargs):
+            return FakeStreamResponse()
+
+    monkeypatch.setattr(streaming, "GenerateState", _PatchedGenerateState)
+    monkeypatch.setattr(streaming.http_utils, "_http_client", FakeClient())
+
+    result = asyncio.run(
+        streaming.generate_streaming(
+            _rollout_args(vllm_speculative_config={"method": "mtp"}),
+            Sample(index=0, prompt="abc"),
+            _default_sampling_params(max_new_tokens=8),
+        )
+    )
+
+    assert result.tokens == [97, 98, 99, 50, 51]
+    assert result.rollout_log_probs == pytest.approx([-0.1, -0.2])
+    assert result.rollout_top_p_token_ids.tolist() == [1, 50, 2, 3, 51]
+    assert result.rollout_top_p_token_offsets.tolist() == [0, 2, 5]
+    assert result.weight_versions == ["step-7"]
+    assert result.spec_info.spec_accept_token_num == 6
+    assert result.spec_info.spec_draft_token_num == 8
+    assert result.spec_info.spec_verify_ct == 2
+    assert result.status == Sample.Status.COMPLETED
 
 
 @pytest.mark.unit
@@ -658,7 +763,12 @@ def test_eval_rollout_passk_requests_do_not_share_session_ids(patch_generate_sta
 
     args = _rollout_args()
     dataset_cfg = EvalDatasetConfig(name="eval", path="/tmp/eval.jsonl", n_samples_per_eval_prompt=2)
-    cache_key = dataset_cfg.cache_key + (args.hf_checkpoint, args.apply_chat_template)
+    cache_key = dataset_cfg.cache_key + (
+        args.hf_checkpoint,
+        args.apply_chat_template,
+        None,
+        None,
+    )
     mod.EVAL_PROMPT_DATASET[cache_key] = type("DummyDataset", (), {"samples": [Sample(prompt="prompt")]})()
 
     result = asyncio.run(mod.eval_rollout_single_dataset(args, rollout_id=0, dataset_cfg=dataset_cfg))
