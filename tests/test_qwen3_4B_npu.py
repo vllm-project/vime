@@ -1,5 +1,7 @@
 import os
 import shlex
+import tempfile
+from pathlib import Path
 
 import vime.utils.external_utils.command_utils as U
 
@@ -23,6 +25,7 @@ def prepare():
 def execute():
     model_dir = shlex.quote(MODEL_DIR)
     prompt_data = shlex.quote(f"{DATASET_DIR}/dapo-math-17k.jsonl")
+    update_mode = os.environ.get("VIME_TEST_UPDATE_MODE", "full")
 
     checkpoint_args = (
         f"--hf-checkpoint {model_dir} "
@@ -66,7 +69,7 @@ def execute():
         "--kl-loss-coef 0.0 "
         "--kl-loss-type low_var_kl "
         "--kl-coef 0.00 "
-        "--entropy-coef 0.0 "
+        f"--entropy-coef {'0.01' if update_mode == 'delta' else '0.0'} "
         "--eps-clip 0.2 "
         "--eps-clip-high 0.28 "
     )
@@ -109,22 +112,44 @@ def execute():
         "--ci-test "
     )
 
-    train_args = (
-        checkpoint_args
-        + rollout_args
-        + parallel_args
-        + grpo_args
-        + optimizer_args
-        + vllm_args
-        + model_args
-        + runtime_args
-    )
-    U.execute_train(
-        train_args=train_args,
-        num_gpus_per_node=8,
-        megatron_model_type="qwen3-4B",
-        extra_env_vars={},
-    )
+    with tempfile.TemporaryDirectory(prefix="vime_npu_delta_shared_") as shared_dir, tempfile.TemporaryDirectory(
+        prefix="vime_npu_delta_local_"
+    ) as local_dir:
+        disk_args = ""
+        if update_mode == "delta":
+            disk_args = (
+                "--update-weight-mode delta "
+                "--update-weight-transport disk "
+                f"--update-weight-disk-dir {shlex.quote(shared_dir)} "
+                f"--update-weight-local-checkpoint-dir {shlex.quote(local_dir)} "
+                "--update-weight-delta-encoding xor "
+                "--update-weight-delta-checksum xxh3-128 "
+            )
+
+        train_args = (
+            checkpoint_args
+            + rollout_args
+            + parallel_args
+            + grpo_args
+            + optimizer_args
+            + vllm_args
+            + model_args
+            + runtime_args
+            + disk_args
+        )
+        U.execute_train(
+            train_args=train_args,
+            num_gpus_per_node=8,
+            megatron_model_type="qwen3-4B",
+            extra_env_vars={},
+        )
+
+        if update_mode == "delta":
+            versions = sorted(Path(shared_dir).glob("weight_v*"))
+            assert len(versions) >= 2, f"Expected two delta updates under {shared_dir}, got {versions}"
+            assert all((version / "model.safetensors.index.json").exists() for version in versions)
+            assert any("delta_encoding" in (version / "model.safetensors.index.json").read_text() for version in versions)
+            assert (Path(local_dir) / ".weight_sync" / "state.json").exists()
 
 
 def main():

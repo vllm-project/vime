@@ -132,6 +132,68 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 default=1024**3,
                 help="Add margin for train memory allocation. By default we will reserve 1GB as margin.",
             )
+            parser.add_argument(
+                "--update-weight-mode",
+                choices=["full", "delta"],
+                default="full",
+                help=(
+                    "Weight sync strategy. 'full' keeps the existing accelerator-native "
+                    "HCCL/NPU-IPC path. 'delta' publishes only changed weight bytes "
+                    "through a shared filesystem."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-transport",
+                choices=["nccl", "disk"],
+                default="nccl",
+                help=(
+                    "Weight sync transport. 'nccl' is retained for CLI compatibility and "
+                    "selects the existing accelerator-native HCCL/NPU-IPC path on Ascend; "
+                    "'disk' is supported only with --update-weight-mode=delta."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-disk-dir",
+                type=str,
+                default=None,
+                help="Shared filesystem directory where delta weight versions are published.",
+            )
+            parser.add_argument(
+                "--update-weight-local-checkpoint-dir",
+                type=str,
+                default=None,
+                help="Host-local HF checkpoint directory patched in place by rollout workers.",
+            )
+            parser.add_argument(
+                "--update-weight-delta-encoding",
+                choices=["xor", "overwrite"],
+                default="xor",
+                help="Delta encoding: xor (compact) or overwrite (idempotent).",
+            )
+            parser.add_argument(
+                "--update-weight-delta-checksum",
+                choices=["xxh3-128", "blake3", "adler32"],
+                default="xxh3-128",
+                help="Per-tensor checksum algorithm for delta application.",
+            )
+            parser.add_argument(
+                "--custom-update-weight-post-write-path",
+                type=str,
+                default=None,
+                help=(
+                    "Optional trainer-side hook after a delta version is written. Signature: "
+                    "hook(args, version_dir: str, rollout_engines) -> None."
+                ),
+            )
+            parser.add_argument(
+                "--custom-update-weight-pre-read-path",
+                type=str,
+                default=None,
+                help=(
+                    "Optional rollout-host hook before a published version is read. Signature: "
+                    "hook(source_dir: str, target_version: int) -> None."
+                ),
+            )
             try:
                 default_megatron_to_hf_mode = "bridge" if is_npu() else "raw"
             except RuntimeError:
@@ -1687,6 +1749,24 @@ def vime_validate_args(args):
 
     if args.save_interval is not None:
         assert args.save is not None, "'--save' is required when save_interval is set."
+
+    if args.update_weight_mode == "delta":
+        if args.update_weight_transport != "disk":
+            raise ValueError("--update-weight-mode=delta requires --update-weight-transport=disk.")
+        if args.colocate:
+            raise ValueError(
+                "--update-weight-mode=delta is not supported with --colocate; "
+                "colocated NPU IPC already avoids full-model copies."
+            )
+        if not args.update_weight_disk_dir:
+            raise ValueError("--update-weight-mode=delta requires --update-weight-disk-dir.")
+        if not args.update_weight_local_checkpoint_dir:
+            raise ValueError("--update-weight-mode=delta requires --update-weight-local-checkpoint-dir.")
+    elif args.update_weight_transport == "disk":
+        raise ValueError(
+            "--update-weight-transport=disk is currently supported only with "
+            "--update-weight-mode=delta on Ascend."
+        )
 
     assert not (args.kl_coef != 0 and args.kl_loss_coef != 0), "Only one of kl_coef and kl_loss_coef can be set"
 

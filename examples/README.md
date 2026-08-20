@@ -10,3 +10,6 @@ These examples provide concrete examples to leverage vime in your own RL workflo
 - **[geo3k_vlm_multi_turn](./geo3k_vlm_multi_turn)**: VLM multi-turn training on Geo3k dataset.
 - **[multi_agent](./multi_agent)**: Example of running multi-agent RL with `vime`.
 - **[train_infer_mismatch_helper](./train_infer_mismatch_helper)**: Algorithmic methods for rollout correction (e.g., TIS, MIS).
+# Weight synchronization
+
+- [delta_weight_sync](./delta_weight_sync): Ascend non-colocated disk delta weight sync.

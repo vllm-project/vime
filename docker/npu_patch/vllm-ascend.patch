@@ -13,7 +13,7 @@ index 062b3ecd..dd87affb 100644
                  f"Free memory on device "
 @@ -535,15 +535,16 @@ class NPUWorker(WorkerBase):
          self.npugraph_memory_estimate = npugraph_memory_estimate
- 
+
          free_gpu_memory = profile_result.after_profile.free_memory
 -        assert self.init_snapshot.free_memory > free_gpu_memory, (
 -            "Error in memory profiling. "
@@ -50,4 +50,34 @@ index a35d9af8d..66a179cd6 100644
 +        # Source tensors may have been produced asynchronously on the caller's
 +        # stream. Wait before the packing stream reads them in torch.cat.
 +        streams[buffer_idx].wait_stream(source_stream)
-         # Start tasks for the new buffer in a new stream
+        # Start tasks for the new buffer in a new stream
+diff --git a/vllm_ascend/worker/worker.py b/vllm_ascend/worker/worker.py
+index 062b3ecd..f0d1e4a1 100644
+--- a/vllm_ascend/worker/worker.py
++++ b/vllm_ascend/worker/worker.py
+@@ -333,1 +333,25 @@ class NPUWorker(WorkerBase):
++    def pull_weights(
++        self,
++        local_checkpoint_dir: str,
++        source_dir: str,
++        target_version: int,
++        pre_read_hook: str | None = None,
++    ) -> dict:
++        """Materialize a full or delta checkpoint on this rollout host.
++
++        ``collective_rpc`` invokes this on all NPU workers. The checkpoint
++        helper serializes same-host ranks with a filesystem lock, so each host
++        applies a version exactly once before reload_weights is called.
++        """
++        from vllm.utils.local_checkpoint import pull_checkpoint
++
++        pull_checkpoint(
++            local_checkpoint_dir=local_checkpoint_dir,
++            base_dir=self.model_config.model,
++            source_dir=source_dir,
++            target_version=target_version,
++            pre_read_hook=pre_read_hook,
++        )
++        return {"success": True, "weight_version": str(target_version)}
++
+     def shutdown(self) -> None:

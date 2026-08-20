@@ -951,7 +951,33 @@ class VLLMEngine(RayActor):
         }
         return self._post_vllm_update_weights_http(update_info)
 
-    def update_weights_from_disk(self, model_path: str, load_format: str | None = None):
+    def pull_weights(self, target_version: int):
+        """Materialize a published disk version on every host of this engine."""
+        if self.node_rank != 0:
+            return None
+        response = requests.post(
+            f"{self._http_base()}/collective_rpc",
+            json={
+                "method": "pull_weights",
+                "kwargs": {
+                    "local_checkpoint_dir": self.args.update_weight_local_checkpoint_dir,
+                    "source_dir": self.args.update_weight_disk_dir,
+                    "target_version": target_version,
+                    "pre_read_hook": self.args.custom_update_weight_pre_read_path,
+                },
+            },
+            timeout=600,
+        )
+        result = _response_json(response)
+        self._weight_version = str(target_version)
+        return result
+
+    def update_weights_from_disk(
+        self,
+        model_path: str,
+        load_format: str | None = None,
+        weight_version: str | None = None,
+    ):
         """``POST /collective_rpc`` with ``reload_weights`` and ``weights_path``."""
         if self.node_rank != 0:
             return
@@ -964,7 +990,10 @@ class VLLMEngine(RayActor):
             },
             timeout=600,
         )
-        return _response_json(response)
+        result = _response_json(response)
+        if weight_version is not None:
+            self._weight_version = str(weight_version)
+        return result
 
     def pause_generation(self):
         """``POST /pause`` with mode="keep"; returns the ``requests.Response``."""

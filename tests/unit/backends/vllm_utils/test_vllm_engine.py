@@ -354,6 +354,60 @@ def test_update_weights_from_distributed_posts_update_weights_without_checkpoint
 
 
 @pytest.mark.unit
+def test_pull_weights_posts_collective_rpc_and_records_version(vllm_engine, monkeypatch):
+    calls = []
+
+    def fake_post(url, *, json=None, timeout=None):
+        calls.append((url, json, timeout))
+        return _MockResponse(json_data={"success": True})
+
+    monkeypatch.setattr(mod.requests, "post", fake_post)
+
+    assert vllm_engine.pull_weights(8) == {"success": True}
+    assert calls == [
+        (
+            "http://127.0.0.1:8765/collective_rpc",
+            {
+                "method": "pull_weights",
+                "kwargs": {
+                    "local_checkpoint_dir": "/local/weights",
+                    "source_dir": "/shared/weights",
+                    "target_version": 8,
+                    "pre_read_hook": None,
+                },
+            },
+            600,
+        )
+    ]
+    assert vllm_engine._weight_version == "8"
+
+
+@pytest.mark.unit
+def test_pull_weights_failure_does_not_advance_version(vllm_engine, monkeypatch):
+    vllm_engine._weight_version = "old"
+
+    def fake_post(url, *, json=None, timeout=None):
+        del url, json, timeout
+        return _MockResponse(status_code=500, text="failed")
+
+    monkeypatch.setattr(mod.requests, "post", fake_post)
+    with pytest.raises(requests.exceptions.HTTPError):
+        vllm_engine.pull_weights(8)
+    assert vllm_engine._weight_version == "old"
+
+
+@pytest.mark.unit
+def test_disk_reload_records_version_only_after_success(vllm_engine, monkeypatch):
+    def fake_post(url, *, json=None, timeout=None):
+        del url, json, timeout
+        return _MockResponse(json_data={"reloaded": True})
+
+    monkeypatch.setattr(mod.requests, "post", fake_post)
+    assert vllm_engine.update_weights_from_disk("/local/weights", weight_version="9") == {"reloaded": True}
+    assert vllm_engine._weight_version == "9"
+
+
+@pytest.mark.unit
 def test_post_vllm_update_weights_http_wraps_update_info(vllm_engine, monkeypatch):
     seen: list[tuple] = []
 
@@ -680,5 +734,7 @@ def test_control_plane_methods_noop_on_headless_worker(vllm_engine, monkeypatch)
     assert vllm_engine.finish_weight_update() is None
     assert vllm_engine.init_weights_update_group("addr", 1, 0, 4, "g", "nccl") is None
     assert vllm_engine.update_weights_from_distributed(["w"], [torch.float32], [[1]], "g") is None
+    assert vllm_engine.pull_weights(1) is None
+    assert vllm_engine.update_weights_from_disk("/local/weights", weight_version="1") is None
     assert vllm_engine.release_memory_occupation() is None
     assert vllm_engine.resume_memory_occupation() is None

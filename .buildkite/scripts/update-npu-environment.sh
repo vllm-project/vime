@@ -1,7 +1,7 @@
 #!/bin/bash
 # Purpose: Updates an NPU test container to match the requested VIME commit.
 #          - Reads the image's persisted OLD patch series and exact patch bytes
-#          - Updates VIME, then reconciles OLD -> NEW in declared series order
+#          - Updates VIME, then reconciles OLD -> NEW in declared series orde
 #          - Installs the current VIME checkout and normalizes visible devices
 # Usage: Called by Buildkite pipeline during NPU test runs
 set -e -o pipefail
@@ -176,6 +176,10 @@ update_vime_code() {
 
 install_vime_code() {
     pip install -e "$VIME_DIR" --no-deps --break-system-packages || pip install -e "$VIME_DIR" --no-deps
+    # The pre-built smoke image can predate disk-delta dependencies. Keep the
+    # serving and trainer interpreters aligned before loading delta checkpoints.
+    pip install blake3 xxhash zstandard --break-system-packages || \
+        pip install blake3 xxhash zstandard
 }
 
 sort_ascend_visible_devices() {
