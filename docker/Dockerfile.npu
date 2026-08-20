@@ -15,7 +15,8 @@ ARG SOC_VERSION="ascend910_9391"
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG APTMIRROR=""
 
-ENV DEBIAN_FRONTEND=noninteractive \
+ENV SOC_VERSION=$SOC_VERSION \
+    DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     ASCEND_TOOLKIT_HOME=/usr/local/Ascend/ascend-toolkit/latest \
     ASCEND_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp \
@@ -63,10 +64,6 @@ RUN git -C /vllm-workspace/vllm-ascend apply --check --whitespace=nowarn \
 # Protect the serving stack while installing Vime dependencies.
 RUN python3 -c 'import importlib.metadata as m; names = ["numpy", "ray", "torch", "torch-npu", "torchvision", "transformers", "triton-ascend", "vllm", "vllm-ascend"]; open("/tmp/vime-npu-constraints.txt", "w").write("\n".join(f"{name}=={m.version(name)}" for name in names) + "\n")'
 
-# Vime: colocate NPU code lives on the ascend branch (not main/npu).
-RUN git clone --depth 1 --branch ascend \
-      https://github.com/vllm-project/vime.git /root/vime
-
 # Training source dependencies.
 RUN git clone https://github.com/NVIDIA/Megatron-LM.git /root/Megatron-LM && \
     git -C /root/Megatron-LM checkout "${MEGATRON_COMMIT}"
@@ -97,6 +94,15 @@ RUN pip install --no-build-isolation "nvidia-modelopt[torch]>=0.37.0" && \
     pip install --no-deps --no-build-isolation -e /root/mbridge && \
     pip install --no-deps --no-build-isolation -e /root/Megatron-LM && \
     pip install --no-deps --no-build-isolation -e /root/MindSpeed
+
+# Defaults to the ascend branch for local builds. Release workflows should
+# pass an immutable commit SHA for reproducible images.
+ARG VIME_COMMIT=ascend
+RUN test -n "${VIME_COMMIT}" && \
+    git init /root/vime && \
+    git -C /root/vime remote add origin https://github.com/vllm-project/vime.git && \
+    git -C /root/vime fetch --depth 1 origin "${VIME_COMMIT}" && \
+    git -C /root/vime checkout --detach FETCH_HEAD
 
 # ring_flash_attn is a CUDA extension and is not used on Ascend.
 RUN pip install \
