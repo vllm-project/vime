@@ -268,9 +268,9 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
             meta["completion_tokens"] = last_usage.get("completion_tokens", 0)
             meta["cached_tokens"] = (last_usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
         if request_spec_decode_stats:
-            meta["spec_accept_token_num"] = request_spec_decode_stats.get("num_accepted_tokens", 0)
+            meta["spec_accept_token_num"] = request_spec_decode_stats.get("num_accepted_draft_tokens", 0)
             meta["spec_draft_token_num"] = request_spec_decode_stats.get("num_draft_tokens", 0)
-            meta["spec_verify_ct"] = request_spec_decode_stats.get("num_verify_steps", 0)
+            meta["spec_verify_ct"] = request_spec_decode_stats.get("num_spec_steps", 0)
         if new_response_tokens:
             meta["output_token_logprobs"] = [
                 [float(lp), int(tid)] for lp, tid in zip(new_response_log_probs, new_response_tokens, strict=True)

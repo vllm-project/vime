@@ -232,10 +232,12 @@ def test_compute_server_args_prefill_requires_bootstrap_port(vllm_args):
 @pytest.mark.unit
 def test_compute_server_args_applies_rollout_and_dtype_flags(vllm_args):
     vllm_args.use_rollout_routing_replay = True
+    vllm_args.vllm_speculative_config = {"method": "mtp"}
     vllm_args.rollout_top_p = 0.9
     vllm_args.fp16 = True
     sa, _ = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
     assert sa["enable_return_routed_experts"] is True
+    assert sa["per_request_spec_decode_metrics"] == "summary"
     assert sa["return_sampling_mask"] is True
     assert sa["dtype"] == "float16"
 

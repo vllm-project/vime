@@ -330,9 +330,9 @@ def test_generate_text_path_updates_sample(patch_generate_state, monkeypatch):
             weight_version="step-7",
             sampling_mask=[[1, 50], [2, 3, 51]],
             request_spec_decode_stats={
-                "num_accepted_tokens": 6,
+                "num_accepted_draft_tokens": 6,
                 "num_draft_tokens": 8,
-                "num_verify_steps": 2,
+                "num_spec_steps": 2,
             },
         )
     )
@@ -381,9 +381,9 @@ def test_generate_streaming_records_weight_version(patch_generate_state, monkeyp
                 {
                     "weight_version": "step-7",
                     "request_spec_decode_stats": {
-                        "num_accepted_tokens": 6,
+                        "num_accepted_draft_tokens": 6,
                         "num_draft_tokens": 8,
-                        "num_verify_steps": 2,
+                        "num_spec_steps": 2,
                     },
                     "choices": [
                         {

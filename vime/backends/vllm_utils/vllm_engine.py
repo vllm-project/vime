@@ -669,6 +669,8 @@ def _compute_server_args(
 
     if args.use_rollout_routing_replay:
         kwargs["enable_return_routed_experts"] = True
+    if getattr(args, "vllm_speculative_config", None) is not None:
+        kwargs["per_request_spec_decode_metrics"] = "summary"
     if getattr(args, "rollout_top_p", 1.0) != 1.0:
         kwargs["return_sampling_mask"] = True
     if args.fp16:
