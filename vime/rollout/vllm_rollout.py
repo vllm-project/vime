@@ -431,9 +431,11 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         meta["cached_tokens"] = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
     spec_stats = output.get("request_spec_decode_stats")
     if spec_stats:
-        meta["spec_accept_token_num"] = spec_stats.get("num_accepted_draft_tokens", 0)
+        meta["spec_accept_token_num"] = spec_stats.get(
+            "num_accepted_draft_tokens", spec_stats.get("num_accepted_tokens", 0)
+        )
         meta["spec_draft_token_num"] = spec_stats.get("num_draft_tokens", 0)
-        meta["spec_verify_ct"] = spec_stats.get("num_spec_steps", 0)
+        meta["spec_verify_ct"] = spec_stats.get("num_spec_steps", spec_stats.get("num_verify_steps", 0))
 
     # MoE routing replay: vLLM ships routed_experts as a base64 .npy blob on the choice;
     # decode here and route through meta_info. #183: guard on value (null when replay off).
