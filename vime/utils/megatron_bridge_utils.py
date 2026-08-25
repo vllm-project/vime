@@ -38,6 +38,26 @@ def patch_auto_bridge_hf_config(bridge):
     return bridge
 
 
+def patch_auto_bridge_hf_config_for_model(bridge):
+    if bridge is None:
+        return bridge
+
+    hf_pretrained = getattr(bridge, "hf_pretrained", None)
+    config = hf_pretrained.config if hasattr(hf_pretrained, "config") else hf_pretrained
+
+    # Kimi K2 model
+    from megatron.bridge.models.kimi.kimi_bridge import KimiK2Bridge
+
+    if (
+        getattr(config, "model_type", "") == "kimi_k2"
+        and "KimiK2ForCausalLM" not in getattr(config, "architectures", [])
+        and not isinstance(bridge._model_bridge, KimiK2Bridge)
+    ):
+        bridge.__dict__["_causal_lm_architecture"] = "KimiK2ForCausalLM"
+
+    return bridge
+
+
 @contextmanager
 def patch_megatron_model(model):
     unwrapped_model = unwrap_model(model)[0]

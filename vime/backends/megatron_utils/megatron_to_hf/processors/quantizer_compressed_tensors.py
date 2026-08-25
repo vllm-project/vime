@@ -230,14 +230,46 @@ def if_quant(name, patterns):
     return False
 
 
+def _fake_int4_quant_fallback(weight, group_shape, sym=True):
+    """Pure PyTorch fallback for fake_int4_quant_cuda on NPU."""
+    group_size = group_shape[1]
+    orig_shape = weight.shape
+    rows, cols = orig_shape[0], orig_shape[1]
+    n_groups = cols // group_size
+
+    w = weight.reshape(rows, n_groups, group_size).to(torch.float32)
+
+    if sym:
+        w_max = w.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8)
+        scale = w_max / 7.0  # int4 symmetric range: [-8, 7], use 7 as scale
+        q = torch.round(w / scale).clamp(-8, 7)
+        zp = None
+    else:
+        w_min = w.amin(dim=-1, keepdim=True)
+        w_max = w.amax(dim=-1, keepdim=True)
+        scale = ((w_max - w_min) / 15.0).clamp(min=1e-8)  # int4 asymmetric: [0, 15]
+        zp = torch.round(-w_min / scale).clamp(0, 15)
+        q = torch.round(w / scale + zp).clamp(0, 15)
+
+    q = q.reshape(orig_shape).to(torch.float32)
+    scale = scale.reshape(rows, n_groups).contiguous()
+    if zp is not None:
+        zp = zp.reshape(rows, n_groups).contiguous()
+
+    return q, scale, zp
+
+
 def pack_layer(weight, group_size, sym=True):
-    w, scale, zp = fake_int4_quant_cuda.fake_int4_quant_cuda(weight, (1, group_size), sym)
+    if fake_int4_quant_cuda is not None:
+        w, scale, zp = fake_int4_quant_cuda.fake_int4_quant_cuda(weight, (1, group_size), sym)
+    else:
+        w, scale, zp = _fake_int4_quant_fallback(weight, (1, group_size), sym)
     w = w.view(weight.shape[0], 1, weight.shape[1] // group_size, group_size)
     scale = scale.view(weight.shape[0], 1, weight.shape[1] // group_size, 1)
-    zp = zp.view(weight.shape[0], 1, weight.shape[1] // group_size, 1)
     if sym:
         w = w * scale
     else:
+        zp = zp.view(weight.shape[0], 1, weight.shape[1] // group_size, 1)
         w = (w - zp) * scale
     w = w.view(weight.shape)
     scale = scale.view(weight.shape[0], -1).contiguous()
@@ -283,7 +315,7 @@ def quantize_params_compressed_tensors(converted_named_params, quantization_conf
         qw, s, zp = pack_layer(param, group_size, is_symmetric)
         qweight_name = name.replace(".weight", ".weight_packed")
         scale_name = name.replace(".weight", ".weight_scale")
-        weight_shape = torch.tensor(param.shape, dtype=torch.int32, device="cuda")
+        weight_shape = torch.tensor(param.shape, dtype=torch.int32, device=param.device)
         weight_shape_name = name.replace(".weight", ".weight_shape")
         if zp is not None:
             zp_name = name.replace(".weight", ".weight_zero_point")
