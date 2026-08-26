@@ -5,6 +5,7 @@ import logging
 import os
 import queue
 import shutil
+import time
 from argparse import Namespace
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
@@ -91,6 +92,7 @@ class UpdateWeightFromDiskDelta:
             return
 
         self.weight_version += 1
+        self._stage_metrics: dict[str, float] = {}
         self._publish()
         self._reload_engines()
         self._record_metrics()
@@ -119,11 +121,18 @@ class UpdateWeightFromDiskDelta:
             logger.info("[disk delta] captured baseline for %d tensors", len(self._snapshot))
 
     def _publish(self) -> None:
+        started = time.perf_counter()
         self._encode_delta()
+        encoded = time.perf_counter()
         dist.barrier(group=get_gloo_group())
         if dist.get_rank() == 0:
+            write_started = time.perf_counter()
             self._write_delta_files()
+            self._stage_metrics["perf/update_weights_delta_write_time"] = time.perf_counter() - write_started
         dist.barrier(group=get_gloo_group())
+        if dist.get_rank() == 0:
+            self._stage_metrics["perf/update_weights_delta_encode_time"] = encoded - started
+            self._stage_metrics["perf/update_weights_delta_publish_time"] = time.perf_counter() - started
 
     def _iter_hf_tensors(self, *, progress_desc: str):
         """All ranks execute conversion collectives; only rank zero publishes tensors."""
@@ -225,10 +234,14 @@ class UpdateWeightFromDiskDelta:
             self._post_write_hook(self.args, self._version_dir, self.rollout_engines)
         dist.barrier(group=get_gloo_group())
         if dist.get_rank() == 0:
+            started = time.perf_counter()
             ray.get([engine.pull_weights.remote(self.weight_version) for engine in self.rollout_engines])
+            pulled = time.perf_counter()
             ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
+            paused = time.perf_counter()
             try:
                 ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
+                flushed = time.perf_counter()
                 ray.get(
                     [
                         engine.update_weights_from_disk.remote(
@@ -238,8 +251,20 @@ class UpdateWeightFromDiskDelta:
                         for engine in self.rollout_engines
                     ]
                 )
+                reloaded = time.perf_counter()
             finally:
                 ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
+            resumed = time.perf_counter()
+            self._stage_metrics.update(
+                {
+                    "perf/update_weights_delta_materialize_time": pulled - started,
+                    "perf/update_weights_delta_pause_time": paused - pulled,
+                    "perf/update_weights_delta_flush_time": flushed - paused,
+                    "perf/update_weights_delta_reload_time": reloaded - flushed,
+                    "perf/update_weights_delta_resume_time": resumed - reloaded,
+                    "perf/update_weights_delta_rollout_time": resumed - started,
+                }
+            )
         dist.barrier(group=get_gloo_group())
 
     def _record_metrics(self) -> None:
@@ -252,6 +277,8 @@ class UpdateWeightFromDiskDelta:
         self.update_weight_metrics["perf/update_weights_density"] = changed / max(total, 1)
         self.update_weight_metrics["perf/update_weights_wire_bytes"] = wire
         if dist.get_rank() == 0:
+            self.update_weight_metrics.update(self._stage_metrics)
+            logger.info("[disk delta timings v=%s] %s", self.weight_version, self._stage_metrics)
             logger.info("[disk delta v=%s] density=%.2f%% wire=%.2f GB", self.weight_version, 100 * changed / max(total, 1), wire / 1e9)
 
 
