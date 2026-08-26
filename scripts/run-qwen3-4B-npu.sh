@@ -36,6 +36,9 @@ MODEL_PATH="${MODEL_PATH:-/home/vllm/weights/Qwen3-4B}"
 PROMPT_DATA_PATH="${PROMPT_DATA_PATH:-/home/vllm/c00944022/datasets/dapo-math-17k/dapo-math-17k.jsonl}"
 UPDATE_WEIGHT_DISK_DIR="${UPDATE_WEIGHT_DISK_DIR:-/home/vllm/c00944022/0623/vime-delta-weights}"
 UPDATE_WEIGHT_LOCAL_CHECKPOINT_DIR="${UPDATE_WEIGHT_LOCAL_CHECKPOINT_DIR:-/tmp/vime-rollout-checkpoint}"
+RAY_GCS_PORT="${RAY_GCS_PORT:-6399}"
+RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8267}"
+RAY_TEMP_DIR="${RAY_TEMP_DIR:-/tmp/ray-vime-delta}"
 
 CKPT_ARGS=(
    --hf-checkpoint "${MODEL_PATH}"
@@ -120,9 +123,11 @@ MISC_ARGS=(
    --use-flash-attn
 )
 
-ray start --head --node-ip-address 127.0.0.1 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+ray start --head --port="${RAY_GCS_PORT}" --temp-dir="${RAY_TEMP_DIR}" \
+--node-ip-address 127.0.0.1 --disable-usage-stats \
+--dashboard-host=0.0.0.0 --dashboard-port="${RAY_DASHBOARD_PORT}"
 
-ray job submit --address="http://127.0.0.1:8265" \
+ray job submit --address="http://127.0.0.1:${RAY_DASHBOARD_PORT}" \
 -- python3 train.py \
 --actor-num-nodes 1 \
 --actor-num-gpus-per-node 4 \
