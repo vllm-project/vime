@@ -16,6 +16,7 @@ from megatron.core import mpu
 from ray.actor import ActorHandle
 
 from vime.utils.common import is_npu
+from vime.utils.function_compat import call_with_optional_keyword
 from vime.utils.distributed_utils import get_gloo_group
 
 from .hf_weight_iterator_base import HfWeightIteratorBase
@@ -349,7 +350,12 @@ class _VLLMHijack:
             self, is_checkpoint_format: bool = True, _orig=_orig_start_weight_update
         ) -> None:
             _VLLMHijack.patch_moe_weight_loader(self.model_runner.model)
-            _orig(self, is_checkpoint_format=is_checkpoint_format)
+            call_with_optional_keyword(
+                _orig,
+                self,
+                keyword="is_checkpoint_format",
+                value=is_checkpoint_format,
+            )
             _VLLMHijack._invalidate_moe_alltoall_expert_ids()
 
         def _patched_wake_up(self, tags=None, _orig=_orig_wake_up) -> None:
