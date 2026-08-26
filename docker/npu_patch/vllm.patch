@@ -28,7 +28,7 @@ diff --git a/vllm/utils/local_checkpoint.py b/vllm/utils/local_checkpoint.py
 new file mode 100644
 --- /dev/null
 +++ b/vllm/utils/local_checkpoint.py
-@@ -0,0 +1,237 @@
+@@ -0,0 +1,240 @@
 +# SPDX-License-Identifier: Apache-2.0
 +"""Maintain a host-local HF checkpoint from full and delta weight versions."""
 +
@@ -66,11 +66,14 @@ new file mode 100644
 +        # therefore leave bytes changed even though state.json was not advanced;
 +        # discard that partial local state on the next retry.
 +        applied = None if os.path.exists(incomplete) else _read_applied_version(local_checkpoint_dir)
-+        floor = applied if applied is not None else 0
++        # A pull can legitimately restart a run at version zero or target an
++        # older published version. In that case the current checkpoint cannot
++        # be patched backwards, so search from the base checkpoint instead.
++        floor = applied if applied is not None and applied <= target_version else 0
 +        start = target_version
 +        while start > floor and _is_delta(_version_dir(source_dir, start)):
 +            start -= 1
-+        if applied is None or start > applied:
++        if applied is None or applied > target_version or start > applied:
 +            _reset_checkpoint(base_dir if start == 0 else _version_dir(source_dir, start), local_checkpoint_dir, start)
 +        else:
 +            start = applied
