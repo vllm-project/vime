@@ -1,0 +1,9 @@
+FROM python:3.10-bullseye
+
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+RUN git clone https://github.com/sympy/sympy.git /workspace/sympy \
+    && cd /workspace/sympy \
+    && git checkout 88664e6e0b781d0a8b5347896af74b555e92891e \
+    && pip install --no-cache-dir -e . pytest
+
+WORKDIR /workspace/sympy
