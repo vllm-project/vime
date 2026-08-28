@@ -28,6 +28,17 @@ def test_local_bit_exact_diff_uses_storage_bits() -> None:
     assert values.view(torch.uint16).tolist() == [0x8000, 0x7FC2]
 
 
+def test_clone_cpu_snapshot_does_not_alias_mutable_backup() -> None:
+    backup = torch.tensor([1.0, 2.0], dtype=torch.bfloat16)
+
+    snapshot = export.clone_cpu_snapshot(backup)
+    backup.copy_(torch.tensor([3.0, 4.0], dtype=torch.bfloat16))
+
+    indices, values = export.local_bit_exact_diff(backup, snapshot)
+    assert indices.tolist() == [0, 1]
+    assert values.tolist() == [3.0, 4.0]
+
+
 class _SplitProbe:
     def megatron_to_hf(self, tensor, _module):
         # Mimic a fused Megatron parameter split into two final HF tensors.

@@ -289,6 +289,11 @@ _INTEGER_DTYPE = {
 }
 
 
+def clone_cpu_snapshot(tensor: torch.Tensor) -> torch.Tensor:
+    """Create an owning CPU snapshot that cannot alias a mutable weight backup."""
+    return tensor.detach().cpu().contiguous().clone()
+
+
 def local_bit_exact_diff(
     current: torch.Tensor, snapshot: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:

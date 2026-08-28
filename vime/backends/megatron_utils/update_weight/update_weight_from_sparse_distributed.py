@@ -21,7 +21,12 @@ from vime.utils.distributed_utils import get_gloo_group
 
 from ..misc_utils import strip_param_name_prefix
 from .hf_weight_iterator_base import HfWeightIteratorBase
-from .megatron_sparse_export import build_sparse_export_index, local_bit_exact_diff, sparse_hf_entry
+from .megatron_sparse_export import (
+    build_sparse_export_index,
+    clone_cpu_snapshot,
+    local_bit_exact_diff,
+    sparse_hf_entry,
+)
 from .sparse_gather import gather_slot_entries_to_rank0
 from .update_weight_from_distributed import (
     connect_rollout_engines_from_distributed,
@@ -164,7 +169,7 @@ class UpdateWeightFromSparseDistributed:
                 self._iterator._bridge, self.model, local_weights, self._slot_cache
             )
         for record in self._export_index:
-            self._snapshot[record.weight_key] = local_weights[record.weight_key].detach().cpu().contiguous().clone()
+            self._snapshot[record.weight_key] = clone_cpu_snapshot(local_weights[record.weight_key])
 
         if self._verify_full_diff:
             for name, tensor in self._iter_hf_tensors():
@@ -237,7 +242,11 @@ class UpdateWeightFromSparseDistributed:
                     # Commit snapshots only after every collective and rollout
                     # update has succeeded.  A failed update can then be
                     # retried without silently dropping its local changes.
-                    next_snapshot[record.weight_key] = current
+                    # ``current`` may already be the mutable CPU tensor owned by
+                    # TensorBackuper.  Keeping it directly would make the next
+                    # backup mutate both the live weight and our baseline, so
+                    # every update after v1 would compare the tensor with itself.
+                    next_snapshot[record.weight_key] = clone_cpu_snapshot(current)
                     if not record.contributes:
                         local_indices = local_indices[:0]
                         local_values = local_values[:0]
