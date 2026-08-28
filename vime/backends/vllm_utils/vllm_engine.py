@@ -458,6 +458,8 @@ def build_vllm_cmd_and_env(server_args: dict[str, Any]) -> tuple[list[str], dict
             "--weight-transfer-config",
             _serialize_weight_transfer_config(args.vllm_weight_transfer_config),
         ]
+    elif getattr(args, "update_weight_mode", "full") == "sparse":
+        cmd += ["--weight-transfer-config", '{"backend":"sparse_nccl"}']
     elif getattr(args, "colocate", False):
         cmd += ["--weight-transfer-config", '{"backend":"ipc"}']
     else:
@@ -948,6 +950,30 @@ class VLLMEngine(RayActor):
             "dtype_names": dtype_names,
             "shapes": [list(s) for s in shapes],
             "packed": bool(packed),
+        }
+        return self._post_vllm_update_weights_http(update_info)
+
+    def update_sparse_weights_from_distributed(
+        self,
+        names,
+        dtypes,
+        shapes,
+        num_updates_list,
+        group_name,
+        flush_cache=False,
+        weight_version: str | None = None,
+    ):
+        """Sparse HCCL path: send metadata while indices/values use HCCL."""
+        del group_name
+        if weight_version is not None:
+            self._weight_version = str(weight_version)
+        if flush_cache:
+            self.flush_cache()
+        update_info = {
+            "names": names,
+            "dtype_names": [str(dtype).replace("torch.", "") for dtype in dtypes],
+            "shapes": [list(shape) for shape in shapes],
+            "num_updates_list": list(num_updates_list),
         }
         return self._post_vllm_update_weights_http(update_info)
 

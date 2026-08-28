@@ -354,6 +354,31 @@ def test_update_weights_from_distributed_posts_update_weights_without_checkpoint
 
 
 @pytest.mark.unit
+def test_update_sparse_weights_from_distributed_posts_counts(vllm_engine, monkeypatch):
+    calls = []
+    monkeypatch.setattr(vllm_engine, "_post_vllm_update_weights_http", lambda info: calls.append(info) or {"ok": True})
+
+    vllm_engine.update_sparse_weights_from_distributed(
+        ["model.embed_tokens.weight"],
+        [torch.bfloat16],
+        [torch.Size([8, 4])],
+        [3],
+        group_name="vime-sparse-hccl",
+        weight_version="9",
+    )
+
+    assert calls == [
+        {
+            "names": ["model.embed_tokens.weight"],
+            "dtype_names": ["bfloat16"],
+            "shapes": [[8, 4]],
+            "num_updates_list": [3],
+        }
+    ]
+    assert vllm_engine._weight_version == "9"
+
+
+@pytest.mark.unit
 def test_pull_weights_posts_collective_rpc_and_records_version(vllm_engine, monkeypatch):
     calls = []
 

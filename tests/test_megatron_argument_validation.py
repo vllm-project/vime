@@ -211,6 +211,29 @@ def test_update_weight_delta_disk_is_valid(monkeypatch):
 
 
 @pytest.mark.unit
+def test_update_weight_sparse_hccl_is_valid(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    module.vime_validate_args(
+        make_vime_validate_args(update_weight_mode="sparse", update_weight_transport="nccl")
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        ({"update_weight_mode": "sparse", "update_weight_transport": "disk"}, "requires.*nccl"),
+        ({"update_weight_mode": "sparse", "colocate": True}, "non-colocated"),
+        ({"update_weight_mode": "sparse", "megatron_to_hf_mode": "raw"}, "requires.*bridge"),
+    ],
+)
+def test_update_weight_sparse_rejects_invalid_combinations(monkeypatch, overrides, error):
+    module = load_vime_arguments_module(monkeypatch)
+    with pytest.raises(ValueError, match=error):
+        module.vime_validate_args(make_vime_validate_args(**overrides))
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("overrides", "error"),
     [

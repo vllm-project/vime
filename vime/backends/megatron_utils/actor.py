@@ -54,6 +54,7 @@ from .model import forward_only, initialize_model_and_optimizer, save, train
 from .update_weight.common import named_params_and_buffers
 from .update_weight.update_weight_from_disk_delta import UpdateWeightFromDiskDelta
 from .update_weight.update_weight_from_distributed import UpdateWeightFromDistributed
+from .update_weight.update_weight_from_sparse_distributed import UpdateWeightFromSparseDistributed
 from .update_weight.update_weight_from_tensor import UpdateWeightFromTensor
 
 logging.getLogger("megatron").setLevel(logging.WARNING)
@@ -166,6 +167,8 @@ class MegatronTrainRayActor(TrainRayActor):
 
         if getattr(self.args, "update_weight_mode", "full") == "delta":
             update_weight_cls = UpdateWeightFromDiskDelta
+        elif self.args.update_weight_mode == "sparse":
+            update_weight_cls = UpdateWeightFromSparseDistributed
         elif self.args.colocate:
             update_weight_cls = UpdateWeightFromTensor
         else:

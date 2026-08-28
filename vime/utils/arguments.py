@@ -134,12 +134,13 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
             )
             parser.add_argument(
                 "--update-weight-mode",
-                choices=["full", "delta"],
+                choices=["full", "delta", "sparse"],
                 default="full",
                 help=(
                     "Weight sync strategy. 'full' keeps the existing accelerator-native "
                     "HCCL/NPU-IPC path. 'delta' publishes only changed weight bytes "
-                    "through a shared filesystem."
+                    "through a shared filesystem. 'sparse' sends changed BF16 elements "
+                    "directly through the accelerator collective transport."
                 ),
             )
             parser.add_argument(
@@ -1762,6 +1763,13 @@ def vime_validate_args(args):
             raise ValueError("--update-weight-mode=delta requires --update-weight-disk-dir.")
         if not args.update_weight_local_checkpoint_dir:
             raise ValueError("--update-weight-mode=delta requires --update-weight-local-checkpoint-dir.")
+    elif args.update_weight_mode == "sparse":
+        if args.update_weight_transport != "nccl":
+            raise ValueError("--update-weight-mode=sparse requires --update-weight-transport=nccl.")
+        if args.colocate:
+            raise ValueError("--update-weight-mode=sparse is supported only for non-colocated rollout.")
+        if args.megatron_to_hf_mode != "bridge":
+            raise ValueError("--update-weight-mode=sparse requires --megatron-to-hf-mode=bridge.")
     elif args.update_weight_transport == "disk":
         raise ValueError(
             "--update-weight-transport=disk is currently supported only with "
