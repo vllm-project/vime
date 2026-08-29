@@ -142,6 +142,11 @@ class MegatronTrainRayActor(TrainRayActor):
             ),
             single_tag=None,
         )
+        if getattr(self.args, "update_weight_mode", "full") == "sparse":
+            # Sparse diff keeps the previous actor backup as its transactional
+            # baseline. Alternate two pinned CPU buffers so the next backup
+            # cannot mutate that baseline and no full-model clone is needed.
+            self.weights_backuper.enable_double_buffer("actor")
         self._active_model_tag: str | None = "actor"
         self.weights_backuper.backup("actor")
 

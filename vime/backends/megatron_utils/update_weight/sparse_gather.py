@@ -15,7 +15,13 @@ def gather_slot_entries_to_rank0(
     group: dist.ProcessGroup,
     max_round_bytes: int | None = None,
 ) -> list[tuple[torch.Tensor, torch.Tensor]] | None:
-    """Batch K sparse slots into three collectives and assemble on group rank 0."""
+    """Gather variable-length sparse slots only to group rank 0.
+
+    HCCL implements ``dist.gather`` with an all-gather fallback.  That copies every
+    rank's sparse payload to every training rank and also requires padding all
+    payloads to the largest rank.  Exchange the small per-slot counts collectively,
+    then use exact-sized point-to-point transfers for the payload instead.
+    """
     rank = dist.get_rank(group)
     world = dist.get_world_size(group)
     destination = dist.get_global_rank(group, 0)
@@ -76,26 +82,46 @@ def gather_slot_entries_to_rank0(
             for _ in range(slot_count)
         ]
 
-    padded_indices = torch.zeros(
-        max_entries, dtype=indices.dtype, device=device
-    )
-    padded_values = torch.zeros(
-        max_entries, dtype=values.dtype, device=device
-    )
-    padded_indices[: indices.numel()] = indices
-    padded_values[: values.numel()] = values
-    index_list = (
-        [torch.zeros_like(padded_indices) for _ in range(world)]
-        if rank == 0
-        else None
-    )
-    value_list = (
-        [torch.zeros_like(padded_values) for _ in range(world)]
-        if rank == 0
-        else None
-    )
-    dist.gather(padded_indices, index_list, dst=destination, group=group)
-    dist.gather(padded_values, value_list, dst=destination, group=group)
+    if rank == 0:
+        index_list = [indices]
+        value_list = [values]
+        p2p_ops = []
+        for group_rank in range(1, world):
+            entry_count = totals[group_rank]
+            if entry_count == 0:
+                index_list.append(
+                    torch.empty(0, dtype=indices.dtype, device=device)
+                )
+                value_list.append(
+                    torch.empty(0, dtype=values.dtype, device=device)
+                )
+                continue
+            index_buffer = torch.empty(
+                entry_count, dtype=indices.dtype, device=device
+            )
+            value_buffer = torch.empty(
+                entry_count, dtype=values.dtype, device=device
+            )
+            index_list.append(index_buffer)
+            value_list.append(value_buffer)
+            peer = dist.get_global_rank(group, group_rank)
+            p2p_ops.extend(
+                [
+                    dist.P2POp(dist.irecv, index_buffer, peer, group),
+                    dist.P2POp(dist.irecv, value_buffer, peer, group),
+                ]
+            )
+    elif totals[rank] > 0:
+        p2p_ops = [
+            dist.P2POp(dist.isend, indices, destination, group),
+            dist.P2POp(dist.isend, values, destination, group),
+        ]
+    else:
+        p2p_ops = []
+
+    if p2p_ops:
+        for request in dist.batch_isend_irecv(p2p_ops):
+            request.wait()
     if rank != 0:
         return None
 

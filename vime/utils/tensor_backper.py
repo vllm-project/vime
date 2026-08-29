@@ -34,6 +34,9 @@ class TensorBackuper(ABC):
     def copy(self, *, src_tag: str, dst_tag: str):
         raise NotImplementedError
 
+    def enable_double_buffer(self, tag: str) -> None:
+        raise NotImplementedError
+
     @abstractmethod
     def restore(self, tag: str):
         raise NotImplementedError
@@ -43,6 +46,8 @@ class _TensorBackuperNormal(TensorBackuper):
     def __init__(self, source_getter):
         super().__init__(source_getter=source_getter)
         self._backups: dict[str, dict[str, torch.Tensor]] = defaultdict(dict)
+        self._spare_backups: dict[str, dict[str, torch.Tensor]] = defaultdict(dict)
+        self._double_buffer_tags: set[str] = set()
 
     @property
     def backup_tags(self):
@@ -53,12 +58,28 @@ class _TensorBackuperNormal(TensorBackuper):
 
     @torch.no_grad()
     def backup(self, tag: str) -> None:
-        backup_dict = self._backups[tag]
+        backup_dict = (
+            self._spare_backups[tag]
+            if tag in self._double_buffer_tags
+            else self._backups[tag]
+        )
         for name, param in self._source_getter():
             if name not in backup_dict:
                 backup_dict[name] = torch.empty_like(param, device=torch.device("cpu"), pin_memory=True)
             backup_dict[name].copy_(param.detach(), non_blocking=True)
         torch.cuda.synchronize()
+        if tag in self._double_buffer_tags:
+            self._backups[tag], self._spare_backups[tag] = (
+                backup_dict,
+                self._backups[tag],
+            )
+
+    def enable_double_buffer(self, tag: str) -> None:
+        if self._backups[tag]:
+            raise RuntimeError(
+                f"Double buffering must be enabled before the first backup of {tag!r}"
+            )
+        self._double_buffer_tags.add(tag)
 
     @torch.no_grad()
     def copy(self, *, src_tag: str, dst_tag: str):
@@ -95,6 +116,9 @@ class _TensorBackuperNoop(TensorBackuper):
         assert tag == self._single_tag
         self._backup_hash_dict = _compute_hash_dict(dict(self._source_getter()))
         torch.cuda.synchronize()
+
+    def enable_double_buffer(self, tag: str) -> None:
+        del tag
 
     def restore(self, tag: str) -> None:
         assert tag == self._single_tag

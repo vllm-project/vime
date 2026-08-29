@@ -122,7 +122,8 @@ class SparseExportRecord:
     gather_group: dist.ProcessGroup | None
     contributes: bool
     probe: Any
-    module: Any
+    mapping: Any = None
+    module: Any = None
     slots: list[tuple[str, tuple[int, ...]]] | None = None
 
 
@@ -167,6 +168,7 @@ def build_sparse_export_index(
                 gather_group=tp_group if tp_sharded else None,
                 contributes=dp_rank == 0 and (tp_sharded or tp_rank == 0),
                 probe=make_probe(task.mapping, task.megatron_module),
+                mapping=task.mapping,
                 module=task.megatron_module,
             )
         )
@@ -233,6 +235,13 @@ def sparse_hf_entry(
             ),
         )
 
+    if slots is not None:
+        fast_entry = _sparse_hf_entry_fast(
+            record, slots, local_indices, local_values
+        )
+        if fast_entry is not None:
+            return fast_entry
+
     buffer = torch.full(
         tuple(record.param.shape),
         float("nan"),
@@ -279,6 +288,148 @@ def sparse_hf_entry(
             0, dtype=local_values.dtype, device=local_values.device
         ),
     )
+
+
+def _sparse_hf_entry_fast(
+    record: SparseExportRecord,
+    slots: list[tuple[str, tuple[int, ...]]],
+    local_indices: torch.Tensor,
+    local_values: torch.Tensor,
+) -> tuple[
+    list[tuple[str, tuple[int, ...]]],
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+] | None:
+    """Map common dense-Megatron layouts without materializing NaN tensors.
+
+    Qwen3 uses only Auto(Column/Row/Replicated), QKV and GatedMLP mappings.
+    These transforms rearrange coordinates, so changed entries can be routed
+    directly in O(number of changes), instead of building and scanning dense
+    full-HF probe outputs on every TP rank. Unknown Bridge mappings retain the
+    generic probe fallback above.
+    """
+    mapping = getattr(record, "mapping", None)
+    if mapping is None:
+        return None
+    mapping_name = type(mapping).__name__
+    if mapping_name == "AutoMapping" or hasattr(mapping, "_mapping"):
+        concrete = getattr(mapping, "_mapping", None)
+        if concrete is not None:
+            mapping = concrete
+            mapping_name = type(mapping).__name__
+
+    slot_by_name = {str(name): index for index, (name, _shape) in enumerate(slots)}
+    tp_rank = int(getattr(mapping, "tp_rank", 0))
+    contributions: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+
+    if mapping_name in {"DirectMapping", "ReplicatedMapping"}:
+        slot = slot_by_name.get(str(mapping.hf_param))
+        if slot is None:
+            return None
+        contributions[slot] = (local_indices.to(torch.int32), local_values)
+
+    elif mapping_name == "ColumnParallelMapping":
+        slot = slot_by_name.get(str(mapping.hf_param))
+        if slot is None:
+            return None
+        global_indices = local_indices + tp_rank * record.param.numel()
+        contributions[slot] = (global_indices.to(torch.int32), local_values)
+
+    elif mapping_name == "RowParallelMapping":
+        slot = slot_by_name.get(str(mapping.hf_param))
+        if slot is None:
+            return None
+        if record.param.ndim <= 1:
+            global_indices = local_indices
+        else:
+            local_width = record.param.shape[1]
+            full_width = slots[slot][1][1]
+            row = torch.div(local_indices, local_width, rounding_mode="floor")
+            column = local_indices.remainder(local_width)
+            global_indices = (
+                row * full_width + tp_rank * local_width + column
+            )
+        contributions[slot] = (global_indices.to(torch.int32), local_values)
+
+    elif mapping_name == "GatedMLPMapping":
+        if record.param.shape[0] % 2:
+            return None
+        gate_slot = slot_by_name.get(str(mapping.hf_param["gate"]))
+        up_slot = slot_by_name.get(str(mapping.hf_param["up"]))
+        if gate_slot is None or up_slot is None:
+            return None
+        width = record.param.numel() // record.param.shape[0]
+        half_rows = record.param.shape[0] // 2
+        row = torch.div(local_indices, width, rounding_mode="floor")
+        inner = local_indices.remainder(width)
+        gate_mask = row < half_rows
+        for slot, mask, local_row in (
+            (gate_slot, gate_mask, row),
+            (up_slot, ~gate_mask, row - half_rows),
+        ):
+            global_indices = (
+                (tp_rank * half_rows + local_row[mask]) * width + inner[mask]
+            )
+            contributions[slot] = (
+                global_indices.to(torch.int32),
+                local_values[mask],
+            )
+
+    elif mapping_name == "QKVMapping":
+        config = mapping._get_config(record.module)
+        if getattr(config, "attention_output_gate", False):
+            return None
+        q_slot = slot_by_name.get(str(mapping.hf_param["q"]))
+        k_slot = slot_by_name.get(str(mapping.hf_param["k"]))
+        v_slot = slot_by_name.get(str(mapping.hf_param["v"]))
+        if q_slot is None or k_slot is None or v_slot is None:
+            return None
+        head_count = int(config.num_attention_heads)
+        group_count = int(config.num_query_groups)
+        heads_per_group = head_count // group_count
+        head_size = int(config.kv_channels or (config.hidden_size // head_count))
+        width = record.param.numel() // record.param.shape[0]
+        local_row = torch.div(local_indices, width, rounding_mode="floor")
+        inner = local_indices.remainder(width)
+        packed_row = tp_rank * record.param.shape[0] + local_row
+        packed_head = torch.div(packed_row, head_size, rounding_mode="floor")
+        head_inner = packed_row.remainder(head_size)
+        group_width = heads_per_group + 2
+        group = torch.div(packed_head, group_width, rounding_mode="floor")
+        position = packed_head.remainder(group_width)
+        q_mask = position < heads_per_group
+        k_mask = position == heads_per_group
+        v_mask = position == heads_per_group + 1
+        q_row = (group * heads_per_group + position) * head_size + head_inner
+        kv_row = group * head_size + head_inner
+        for slot, mask, output_row in (
+            (q_slot, q_mask, q_row),
+            (k_slot, k_mask, kv_row),
+            (v_slot, v_mask, kv_row),
+        ):
+            contributions[slot] = (
+                (output_row[mask] * width + inner[mask]).to(torch.int32),
+                local_values[mask],
+            )
+    else:
+        return None
+
+    counts = torch.zeros(len(slots), dtype=torch.int64)
+    index_parts: list[torch.Tensor] = []
+    value_parts: list[torch.Tensor] = []
+    for slot in range(len(slots)):
+        indices, values = contributions.get(
+            slot,
+            (
+                torch.empty(0, dtype=torch.int32, device=local_indices.device),
+                torch.empty(0, dtype=local_values.dtype, device=local_values.device),
+            ),
+        )
+        counts[slot] = indices.numel()
+        index_parts.append(indices)
+        value_parts.append(values)
+    return slots, counts, torch.cat(index_parts), torch.cat(value_parts)
 
 
 _INTEGER_DTYPE = {

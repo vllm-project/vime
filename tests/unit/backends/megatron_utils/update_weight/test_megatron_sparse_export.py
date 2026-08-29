@@ -100,6 +100,108 @@ def test_sparse_hf_entry_preserves_final_hf_global_indices() -> None:
     assert values.tolist() == [5.0, 7.0]
 
 
+def _mapping(class_name, **attributes):
+    mapping = type(class_name, (), {})()
+    for name, value in attributes.items():
+        setattr(mapping, name, value)
+    return mapping
+
+
+def _fast_record(mapping, shape):
+    return SimpleNamespace(
+        mapping=mapping,
+        param=torch.empty(shape, dtype=torch.bfloat16),
+        module=SimpleNamespace(),
+        megatron_name="weight",
+        slots=None,
+    )
+
+
+def test_fast_column_and_row_coordinate_mapping() -> None:
+    column = _fast_record(
+        _mapping("ColumnParallelMapping", hf_param="column", tp_rank=2),
+        (2, 3),
+    )
+    column.slots = [("column", (8, 3))]
+    _slots, counts, indices, values = export.sparse_hf_entry(
+        column,
+        torch.tensor([0, 5]),
+        torch.tensor([1.0, 2.0], dtype=torch.bfloat16),
+        {},
+    )
+    assert counts.tolist() == [2]
+    assert indices.tolist() == [12, 17]
+    assert values.tolist() == [1.0, 2.0]
+
+    row = _fast_record(
+        _mapping("RowParallelMapping", hf_param="row", tp_rank=1),
+        (2, 3),
+    )
+    row.slots = [("row", (2, 12))]
+    _slots, counts, indices, _values = export.sparse_hf_entry(
+        row,
+        torch.tensor([0, 5]),
+        torch.tensor([1.0, 2.0], dtype=torch.bfloat16),
+        {},
+    )
+    assert counts.tolist() == [2]
+    assert indices.tolist() == [3, 17]
+
+
+def test_fast_gated_mlp_coordinate_mapping() -> None:
+    mapping = _mapping(
+        "GatedMLPMapping",
+        hf_param={"gate": "gate", "up": "up"},
+        tp_rank=1,
+    )
+    record = _fast_record(mapping, (4, 3))
+    record.slots = [("gate", (4, 3)), ("up", (4, 3))]
+
+    _slots, counts, indices, values = export.sparse_hf_entry(
+        record,
+        torch.tensor([0, 7, 11]),
+        torch.tensor([1.0, 2.0, 3.0], dtype=torch.bfloat16),
+        {},
+    )
+
+    assert counts.tolist() == [1, 2]
+    assert indices.tolist() == [6, 7, 11]
+    assert values.tolist() == [1.0, 2.0, 3.0]
+
+
+def test_fast_qkv_coordinate_mapping() -> None:
+    config = SimpleNamespace(
+        num_attention_heads=4,
+        num_query_groups=2,
+        kv_channels=2,
+        hidden_size=4,
+        attention_output_gate=False,
+    )
+    mapping = _mapping(
+        "QKVMapping",
+        hf_param={"q": "q", "k": "k", "v": "v"},
+        tp_rank=1,
+        _get_config=lambda _module: config,
+    )
+    # Global packed rows are [q0, q1, k0, v0, q2, q3, k1, v1], with
+    # two scalar rows per head. TP rank 1 owns the second four heads.
+    record = _fast_record(mapping, (8, 4))
+    record.slots = [("q", (8, 4)), ("k", (4, 4)), ("v", (4, 4))]
+    local_rows = torch.tensor([0, 2, 4, 6])
+    local_indices = local_rows * 4 + 1
+
+    _slots, counts, indices, values = export.sparse_hf_entry(
+        record,
+        local_indices,
+        torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.bfloat16),
+        {},
+    )
+
+    assert counts.tolist() == [2, 1, 1]
+    assert indices.tolist() == [17, 25, 9, 9]
+    assert values.tolist() == [1.0, 2.0, 3.0, 4.0]
+
+
 def test_exchange_slot_tables_uses_gloo_control_group(monkeypatch) -> None:
     gloo_group = object()
     seen = {}
