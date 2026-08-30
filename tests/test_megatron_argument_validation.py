@@ -211,6 +211,18 @@ def test_update_weight_delta_disk_is_valid(monkeypatch):
 
 
 @pytest.mark.unit
+def test_update_weight_full_disk_is_valid(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    module.vime_validate_args(
+        make_vime_validate_args(
+            update_weight_mode="full",
+            update_weight_transport="disk",
+            update_weight_disk_dir="/shared/full",
+        )
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("overrides", "error"),
     [
@@ -232,7 +244,15 @@ def test_update_weight_delta_disk_is_valid(monkeypatch):
             },
             "requires --update-weight-local-checkpoint-dir",
         ),
-        ({"update_weight_transport": "disk"}, "supported only with --update-weight-mode=delta"),
+        ({"update_weight_transport": "disk"}, "requires --update-weight-disk-dir"),
+        (
+            {
+                "update_weight_transport": "disk",
+                "update_weight_disk_dir": "/shared/full",
+                "colocate": True,
+            },
+            "not supported with --colocate",
+        ),
     ],
 )
 def test_update_weight_disk_rejects_invalid_combinations(monkeypatch, overrides, error):

@@ -149,20 +149,23 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Weight sync transport. 'nccl' is retained for CLI compatibility and "
                     "selects the existing accelerator-native HCCL/NPU-IPC path on Ascend; "
-                    "'disk' is supported only with --update-weight-mode=delta."
+                    "'disk' publishes either full checkpoints or byte deltas through a shared filesystem."
                 ),
             )
             parser.add_argument(
                 "--update-weight-disk-dir",
                 type=str,
                 default=None,
-                help="Shared filesystem directory where delta weight versions are published.",
+                help="Shared filesystem directory where full or delta weight versions are published.",
             )
             parser.add_argument(
                 "--update-weight-local-checkpoint-dir",
                 type=str,
                 default=None,
-                help="Host-local HF checkpoint directory patched in place by rollout workers.",
+                help=(
+                    "Host-local HF checkpoint directory patched in place by rollout workers. "
+                    "Required for delta disk sync and unused by full disk sync."
+                ),
             )
             parser.add_argument(
                 "--update-weight-delta-encoding",
@@ -1763,10 +1766,10 @@ def vime_validate_args(args):
         if not args.update_weight_local_checkpoint_dir:
             raise ValueError("--update-weight-mode=delta requires --update-weight-local-checkpoint-dir.")
     elif args.update_weight_transport == "disk":
-        raise ValueError(
-            "--update-weight-transport=disk is currently supported only with "
-            "--update-weight-mode=delta on Ascend."
-        )
+        if args.colocate:
+            raise ValueError("--update-weight-mode=full --update-weight-transport=disk is not supported with --colocate.")
+        if not args.update_weight_disk_dir:
+            raise ValueError("full disk weight sync requires --update-weight-disk-dir.")
 
     assert not (args.kl_coef != 0 and args.kl_loss_coef != 0), "Only one of kl_coef and kl_loss_coef can be set"
 
