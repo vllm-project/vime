@@ -1,9 +1,9 @@
 # Buildkite CI for vime — AMD ROCm GPU suites. See .buildkite/README.md.
 #
-# One step per test on the self-hosted gfx950 (MI350X) queue (queue=amd_gfx950,
-# docker access + ROCm devices /dev/kfd, /dev/dri). Each test runs in the
-# prebuilt ROCm image and takes the U.is_rocm() path; GPUs are arbitrated with
-# tests/ci/gpu_lock_exec.py on HIP_VISIBLE_DEVICES.
+# One step per test on the self-hosted gfx950 (MI355X) queue
+# (queue=amd_mi355_vime_rl, docker access + ROCm devices /dev/kfd, /dev/dri).
+# Each test runs in the prebuilt ROCm image and takes the U.is_rocm() path;
+# GPUs are arbitrated with tests/ci/gpu_lock_exec.py on HIP_VISIBLE_DEVICES.
 #
 # Grading: fully_async gates the build; the gsm8k suites soft_fail (non-blocking)
 # until the vLLM/ROCm NaN-logprob divergence is fixed.
@@ -26,7 +26,7 @@ steps:
       - label: ":fire: short · fully_async 0.5B (4 GPU)"
         key: rocm-fully-async-short
         agents:
-          queue: amd_gfx950
+          queue: amd_mi355_vime_rl
         timeout_in_minutes: 360
         soft_fail: false
         retry:
@@ -67,7 +67,7 @@ steps:
       - label: ":warning: short · gsm8k 0.8B (4 GPU) [soft-fail]"
         key: rocm-gsm8k-short
         agents:
-          queue: amd_gfx950
+          queue: amd_mi355_vime_rl
         timeout_in_minutes: 360
         soft_fail: true
         retry:
@@ -82,7 +82,7 @@ steps:
       - label: ":warning: short · gsm8k_async 0.8B (4 GPU) [soft-fail]"
         key: rocm-gsm8k-async-short
         agents:
-          queue: amd_gfx950
+          queue: amd_mi355_vime_rl
         timeout_in_minutes: 360
         soft_fail: true
         retry:
