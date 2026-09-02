@@ -24,7 +24,8 @@ export HYDRA_FULL_ERROR=1
 export DISABLE_L2_CACHE=1
 export VLLM_ASCEND_ENABLE_NZ=0
 export VLLM_USE_AOT_COMPILE=0
-export PYTHONPATH="/root/Megatron-Bridge/src:/root/Megatron-LM/:${PYTHONPATH:-}"
+VIME_WORKSPACE_ROOT="${VIME_WORKSPACE_ROOT:-/home/vllm/c00944022/0623}"
+export PYTHONPATH="${VIME_WORKSPACE_ROOT}/Megatron-Bridge/src:${VIME_WORKSPACE_ROOT}/Megatron-LM:${PYTHONPATH:-}"
 
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 
@@ -32,16 +33,23 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 
 DATA_ROOT="${DATA_ROOT:-/root}"
+MODEL_PATH="${MODEL_PATH:-/home/vllm/weights/Qwen3-4B}"
+PROMPT_DATA_PATH="${PROMPT_DATA_PATH:-/home/vllm/c00944022/datasets/dapo-math-17k/dapo-math-17k.jsonl}"
+UPDATE_WEIGHT_DISK_DIR="${UPDATE_WEIGHT_DISK_DIR:-/home/vllm/c00944022/0623/vime-delta-weights}"
+UPDATE_WEIGHT_LOCAL_CHECKPOINT_DIR="${UPDATE_WEIGHT_LOCAL_CHECKPOINT_DIR:-/tmp/vime-rollout-checkpoint}"
+RAY_GCS_PORT="${RAY_GCS_PORT:-6399}"
+RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8267}"
+RAY_TEMP_DIR="${RAY_TEMP_DIR:-/tmp/ray-vime-delta}"
 
 CKPT_ARGS=(
-   --hf-checkpoint ${DATA_ROOT}/models/Qwen3-4B/
-   --load ${DATA_ROOT}/models/Qwen3-4B/
-   --ref-load ${DATA_ROOT}/models/Qwen3-4B/
+   --hf-checkpoint "${MODEL_PATH}"
+   --load "${MODEL_PATH}"
+   --ref-load "${MODEL_PATH}"
    --megatron-to-hf-mode bridge
 )
 
 ROLLOUT_ARGS=(
-   --prompt-data ${DATA_ROOT}/datasets/dapo-math-17k/dapo-math-17k.jsonl
+   --prompt-data "${PROMPT_DATA_PATH}"
    --input-key prompt
    --label-key label
    --apply-chat-template
@@ -97,6 +105,15 @@ VLLM_ARGS=(
    --vllm-gpu-memory-utilization 0.6
 )
 
+UPDATE_WEIGHT_ARGS=(
+   --update-weight-mode delta
+   --update-weight-transport disk
+   --update-weight-disk-dir "${UPDATE_WEIGHT_DISK_DIR}"
+   --update-weight-local-checkpoint-dir "${UPDATE_WEIGHT_LOCAL_CHECKPOINT_DIR}"
+   --update-weight-delta-encoding xor
+   --update-weight-delta-checksum xxh3-128
+)
+
 MISC_ARGS=(
    --attention-dropout 0.0
    --hidden-dropout 0.0
@@ -107,9 +124,11 @@ MISC_ARGS=(
    --use-flash-attn
 )
 
-ray start --head --node-ip-address 127.0.0.1 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+ray start --head --port="${RAY_GCS_PORT}" --temp-dir="${RAY_TEMP_DIR}" \
+--node-ip-address 127.0.0.1 --disable-usage-stats \
+--dashboard-host=0.0.0.0 --dashboard-port="${RAY_DASHBOARD_PORT}"
 
-ray job submit --address="http://127.0.0.1:8265" \
+ray job submit --address="http://127.0.0.1:${RAY_DASHBOARD_PORT}" \
 -- python3 train.py \
 --actor-num-nodes 1 \
 --actor-num-gpus-per-node 4 \
@@ -121,4 +140,5 @@ ${OPTIMIZER_ARGS[@]} \
 ${GRPO_ARGS[@]} \
 ${PERF_ARGS[@]} \
 ${VLLM_ARGS[@]} \
+${UPDATE_WEIGHT_ARGS[@]} \
 ${MISC_ARGS[@]}

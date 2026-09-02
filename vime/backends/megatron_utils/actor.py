@@ -64,6 +64,8 @@ from .initialize import init, is_megatron_main_rank
 from .loss import compute_advantages_and_returns, get_log_probs_and_entropy, get_values
 from .model import forward_only, initialize_model_and_optimizer, save, train
 from .update_weight.common import named_params_and_buffers
+from .update_weight.update_weight_from_disk import UpdateWeightFromDisk
+from .update_weight.update_weight_from_disk_delta import UpdateWeightFromDiskDelta
 from .update_weight.update_weight_from_distributed import UpdateWeightFromDistributed
 from .update_weight.update_weight_from_tensor import UpdateWeightFromTensor
 
@@ -175,7 +177,11 @@ class MegatronTrainRayActor(TrainRayActor):
             hf_vocab = getattr(self.hf_config, "vocab_size", None)
             self.args.vocab_size = hf_vocab if hf_vocab is not None else self.tokenizer.vocab_size
 
-        if self.args.colocate:
+        if getattr(self.args, "update_weight_mode", "full") == "delta":
+            update_weight_cls = UpdateWeightFromDiskDelta
+        elif self.args.update_weight_transport == "disk":
+            update_weight_cls = UpdateWeightFromDisk
+        elif self.args.colocate:
             update_weight_cls = UpdateWeightFromTensor
         else:
             update_weight_cls = UpdateWeightFromDistributed
