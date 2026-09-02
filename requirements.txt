@@ -1,5 +1,6 @@
 accelerate
 anthropic
+blake3
 blobfile
 cloudpickle
 datasets
@@ -22,3 +23,5 @@ tensorboard
 transformers
 vllm-router>=0.1.14
 wandb
+xxhash
+zstandard

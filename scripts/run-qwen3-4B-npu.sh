@@ -24,7 +24,9 @@ export HYDRA_FULL_ERROR=1
 export DISABLE_L2_CACHE=1
 export VLLM_ASCEND_ENABLE_NZ=0
 export VLLM_USE_AOT_COMPILE=0
-export PYTHONPATH="/root/Megatron-Bridge/src:/root/Megatron-LM/:${PYTHONPATH:-}"
+export VLLM_VERSION="${VLLM_VERSION:-0.26.0}"
+VIME_WORKSPACE_ROOT="${VIME_WORKSPACE_ROOT:-/home/vllm/c00944022/0623}"
+export PYTHONPATH="${VIME_WORKSPACE_ROOT}/Megatron-Bridge/src:${VIME_WORKSPACE_ROOT}/Megatron-LM:${PYTHONPATH:-}"
 
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 
@@ -32,27 +34,44 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 
 DATA_ROOT="${DATA_ROOT:-/root}"
+MODEL_PATH="${MODEL_PATH:-/home/vllm/weights/Qwen3-4B}"
+PROMPT_DATA_PATH="${PROMPT_DATA_PATH:-/home/vllm/c00944022/datasets/dapo-math-17k/dapo-math-17k.jsonl}"
+UPDATE_WEIGHT_DISK_DIR="${UPDATE_WEIGHT_DISK_DIR:-/home/vllm/c00944022/0623/vime-delta-weights}"
+UPDATE_WEIGHT_LOCAL_CHECKPOINT_DIR="${UPDATE_WEIGHT_LOCAL_CHECKPOINT_DIR:-/tmp/vime-rollout-checkpoint}"
+UPDATE_WEIGHT_MODE="${UPDATE_WEIGHT_MODE:-delta}"
+UPDATE_WEIGHT_TRANSPORT="${UPDATE_WEIGHT_TRANSPORT:-disk}"
+VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.6}"
+NUM_ROLLOUT="${NUM_ROLLOUT:-200}"
+ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-32}"
+N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
+ROLLOUT_MAX_RESPONSE_LEN="${ROLLOUT_MAX_RESPONSE_LEN:-2048}"
+GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-256}"
+TRAIN_LR="${TRAIN_LR:-1e-6}"
+ENTROPY_COEF="${ENTROPY_COEF:-0.0}"
+RAY_GCS_PORT="${RAY_GCS_PORT:-6399}"
+RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8267}"
+RAY_TEMP_DIR="${RAY_TEMP_DIR:-/tmp/ray-vime-delta}"
 
 CKPT_ARGS=(
-   --hf-checkpoint ${DATA_ROOT}/models/Qwen3-4B/
-   --load ${DATA_ROOT}/models/Qwen3-4B/
-   --ref-load ${DATA_ROOT}/models/Qwen3-4B/
+   --hf-checkpoint "${MODEL_PATH}"
+   --load "${MODEL_PATH}"
+   --ref-load "${MODEL_PATH}"
    --megatron-to-hf-mode bridge
 )
 
 ROLLOUT_ARGS=(
-   --prompt-data ${DATA_ROOT}/datasets/dapo-math-17k/dapo-math-17k.jsonl
+   --prompt-data "${PROMPT_DATA_PATH}"
    --input-key prompt
    --label-key label
    --apply-chat-template
    --rollout-shuffle
    --rm-type math
-   --num-rollout 200
-   --rollout-batch-size 32
-   --n-samples-per-prompt 8
-   --rollout-max-response-len 2048
+   --num-rollout "${NUM_ROLLOUT}"
+   --rollout-batch-size "${ROLLOUT_BATCH_SIZE}"
+   --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT}"
+   --rollout-max-response-len "${ROLLOUT_MAX_RESPONSE_LEN}"
    --rollout-temperature 1
-   --global-batch-size 256
+   --global-batch-size "${GLOBAL_BATCH_SIZE}"
    --balance-data
 )
 
@@ -75,14 +94,14 @@ GRPO_ARGS=(
    --kl-loss-coef 0.0
    --kl-loss-type low_var_kl
    --kl-coef 0.00
-   --entropy-coef 0.0
+   --entropy-coef "${ENTROPY_COEF}"
    --eps-clip 0.2
    --eps-clip-high 0.28
 )
 
 OPTIMIZER_ARGS=(
    --optimizer adam
-   --lr 1e-6
+   --lr "${TRAIN_LR}"
    --lr-decay-style constant
    --weight-decay 0.1
    --adam-beta1 0.9
@@ -94,8 +113,21 @@ OPTIMIZER_ARGS=(
 
 VLLM_ARGS=(
    --rollout-num-gpus-per-engine 4
-   --vllm-gpu-memory-utilization 0.6
+   --vllm-gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION}"
 )
+
+UPDATE_WEIGHT_ARGS=(
+   --update-weight-mode "${UPDATE_WEIGHT_MODE}"
+   --update-weight-transport "${UPDATE_WEIGHT_TRANSPORT}"
+)
+if [[ "${UPDATE_WEIGHT_MODE}" == "delta" ]]; then
+   UPDATE_WEIGHT_ARGS+=(
+      --update-weight-disk-dir "${UPDATE_WEIGHT_DISK_DIR}"
+      --update-weight-local-checkpoint-dir "${UPDATE_WEIGHT_LOCAL_CHECKPOINT_DIR}"
+      --update-weight-delta-encoding xor
+      --update-weight-delta-checksum xxh3-128
+   )
+fi
 
 MISC_ARGS=(
    --attention-dropout 0.0
@@ -107,9 +139,11 @@ MISC_ARGS=(
    --use-flash-attn
 )
 
-ray start --head --node-ip-address 127.0.0.1 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+ray start --head --port="${RAY_GCS_PORT}" --temp-dir="${RAY_TEMP_DIR}" \
+--node-ip-address 127.0.0.1 --disable-usage-stats \
+--dashboard-host=0.0.0.0 --dashboard-port="${RAY_DASHBOARD_PORT}"
 
-ray job submit --address="http://127.0.0.1:8265" \
+ray job submit --address="http://127.0.0.1:${RAY_DASHBOARD_PORT}" \
 -- python3 train.py \
 --actor-num-nodes 1 \
 --actor-num-gpus-per-node 4 \
@@ -121,4 +155,5 @@ ${OPTIMIZER_ARGS[@]} \
 ${GRPO_ARGS[@]} \
 ${PERF_ARGS[@]} \
 ${VLLM_ARGS[@]} \
+${UPDATE_WEIGHT_ARGS[@]} \
 ${MISC_ARGS[@]}

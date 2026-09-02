@@ -23,6 +23,9 @@ def vllm_args() -> SimpleNamespace:
         use_critic=False,
         critic_num_gpus_per_node=0,
         critic_num_nodes=0,
+        update_weight_disk_dir="/shared/weights",
+        update_weight_local_checkpoint_dir="/local/weights",
+        custom_update_weight_pre_read_path=None,
     )
 
 
