@@ -1,11 +1,13 @@
 import os
 import shlex
+from pathlib import Path
 
 import vime.utils.external_utils.command_utils as U
 
 
 TEST_ROOT = os.environ.get("HF_HOME") or "/root"
 MODEL_DIR = f"{TEST_ROOT}/models/Qwen3-30B-A3B"
+CHECKPOINT_DIR = f"{TEST_ROOT}/models/Qwen3-30B-A3B_torch_dist"
 DATASET_DIR = f"{TEST_ROOT}/datasets/dapo-math-17k"
 
 
@@ -13,24 +15,38 @@ def prepare():
     models_dir = shlex.quote(f"{TEST_ROOT}/models")
     datasets_dir = shlex.quote(f"{TEST_ROOT}/datasets")
     model_dir = shlex.quote(MODEL_DIR)
+    checkpoint_dir = shlex.quote(CHECKPOINT_DIR)
     dataset_dir = shlex.quote(DATASET_DIR)
 
     U.exec_command(f"mkdir -p {models_dir} {datasets_dir}")
     U.exec_command(f"hf download Qwen/Qwen3-30B-A3B --local-dir {model_dir}")
     U.exec_command("hf download --repo-type dataset zhuzilin/dapo-math-17k " f"--local-dir {dataset_dir}")
+    U.exec_command(f"rm -rf {checkpoint_dir}")
+    U.exec_command(
+        "source scripts/models/qwen3-30B-A3B.sh && "
+        "PYTHONPATH=/root/Megatron-LM "
+        f"torchrun --nproc-per-node 8 tools/convert_hf_to_torch_dist.py "
+        "${MODEL_ARGS[@]} "
+        f"--hf-checkpoint {model_dir} --save {checkpoint_dir}"
+    )
+
+    checkpoint_path = Path(CHECKPOINT_DIR)
+    tracker = checkpoint_path / "latest_checkpointed_iteration.txt"
+    assert tracker.read_text().strip() == "release"
+    weight_files = [
+        path
+        for path in checkpoint_path.rglob("*")
+        if path.is_file() and path.name != "latest_checkpointed_iteration.txt"
+    ]
+    assert weight_files, f"No checkpoint weights found under {checkpoint_path}"
 
 
 def execute():
     model_dir = shlex.quote(MODEL_DIR)
+    checkpoint_dir = shlex.quote(CHECKPOINT_DIR)
     prompt_data = shlex.quote(f"{DATASET_DIR}/dapo-math-17k.jsonl")
 
-    checkpoint_args = (
-        f"--hf-checkpoint {model_dir} "
-        f"--load {model_dir} "
-        f"--ref-load {model_dir} "
-        "--megatron-to-hf-mode bridge "
-        "--no-load-optim "
-    )
+    checkpoint_args = f"--hf-checkpoint {model_dir} " f"--ref-load {checkpoint_dir} " "--no-load-optim "
 
     rollout_args = (
         f"--prompt-data {prompt_data} "

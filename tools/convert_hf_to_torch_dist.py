@@ -4,6 +4,10 @@ import shutil
 
 import torch
 import torch.distributed as dist
+from vime.utils.common import is_npu
+
+if is_npu():
+    import megatron_adaptor  # noqa: F401
 from megatron.core.enums import ModelType
 from megatron.training.arguments import parse_args, validate_args
 from megatron.training.checkpointing import get_checkpoint_name, get_checkpoint_tracker_filename, save_checkpoint
@@ -14,7 +18,6 @@ from mbridge import AutoBridge
 from vime.backends.megatron_utils.arguments import set_default_megatron_args
 from vime.backends.megatron_utils.initialize import init
 from vime.backends.megatron_utils.model_provider import get_model_provider_func
-from vime.utils.common import is_npu
 from vime.utils.logging_utils import configure_logger
 from vime.utils.memory_utils import print_memory
 
@@ -92,15 +95,19 @@ def main():
     os.environ.setdefault("LOCAL_RANK", str(local_rank))
     os.environ.setdefault("MASTER_ADDR", "localhost")
     os.environ.setdefault("MASTER_PORT", "12355")
-    backend = "nccl"
     if is_npu():
-        backend = "hccl"
-    dist.init_process_group(
-        backend=backend,
-        world_size=world_size,
-        rank=global_rank,
-        device_id=torch.device(f"cuda:{local_rank}"),
-    )
+        dist.init_process_group(
+            backend="hccl",
+            world_size=world_size,
+            rank=global_rank,
+        )
+    else:
+        dist.init_process_group(
+            backend="nccl",
+            world_size=world_size,
+            rank=global_rank,
+            device_id=torch.device(f"cuda:{local_rank}"),
+        )
     args = get_args()
     init(args)
 
