@@ -20,7 +20,10 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from vime.agent.sandbox import E2BSandbox, Sandbox
+if os.environ.get("DOCKER_SANDBOX", True):
+    from .docker_sandbox import DockerSandbox as E2BSandbox, Sandbox
+else:
+    from vime.agent.sandbox import E2BSandbox, Sandbox
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +43,12 @@ SWE_HOST_CC_TARBALL = Path(
     os.environ.get(
         "SWE_HOST_CC_TARBALL",
         "/path/to/anthropic-ai-claude-code.tgz",
+    )
+)
+SWE_HOST_CC_TARBALL_DEP = Path(
+    os.environ.get(
+        "SWE_HOST_CC_TARBALL_DEP",
+        "/path/to/claude-code-linux-x64.tgz",
     )
 )
 SWE_BOOT_CONCURRENCY = int(os.environ.get("SWE_BOOT_CONCURRENCY", "16"))
@@ -109,6 +118,8 @@ async def install_node22(sb: Sandbox, host_tarball: Path) -> None:
     """Node 22 over the base image (Debian 12 ships 16; cli.js needs >= 20).
     Decompresses .xz on the host (cached) so sandboxes without xz-utils can
     still run plain `tar xf`. npm prefix=/usr/local required for sweap-images."""
+    tarball_in_container = _tarball_path_in_container(host_tarball)
+    '''
     host_tarball = Path(host_tarball)
     if host_tarball.suffix == ".xz":
         plain = Path(tempfile.gettempdir()) / f"coding_agent_rl.{host_tarball.stem}.tar"
@@ -119,13 +130,14 @@ async def install_node22(sb: Sandbox, host_tarball: Path) -> None:
             os.replace(tmp, plain)
         host_tarball = plain
     await sb.write_file("/tmp/node22.tar", host_tarball)
+    '''
     await sb.exec(
-        "set -e && mkdir -p /opt/node22 && "
-        "tar xf /tmp/node22.tar -C /opt/node22 --strip-components=1 && "
-        "ln -sf /opt/node22/bin/node /usr/local/bin/node && "
-        "ln -sf /opt/node22/bin/npm  /usr/local/bin/npm && "
-        "ln -sf /opt/node22/bin/npx  /usr/local/bin/npx && "
-        "hash -r 2>/dev/null || true && node --version && npm --version",
+        f"set -e && mkdir -p /opt/node22 && "
+        f"tar xf {tarball_in_container} -C /opt/node22 --strip-components=1 && "
+        f"ln -sf /opt/node22/bin/node /usr/local/bin/node && "
+        f"ln -sf /opt/node22/bin/npm  /usr/local/bin/npm && "
+        f"ln -sf /opt/node22/bin/npx  /usr/local/bin/npx && "
+        f"node --version && npm --version",
         user="root",
         timeout=180,
         check=True,
@@ -133,19 +145,36 @@ async def install_node22(sb: Sandbox, host_tarball: Path) -> None:
 
 
 async def install_claude_code(sb: Sandbox, host_tarball: Path) -> None:
-    await sb.write_file("/tmp/claude-code.tgz", host_tarball)
+    # await sb.write_file("/tmp/claude-code.tgz", host_tarball)
+    tarball_in_container = _tarball_path_in_container(host_tarball)
+    tarball_in_container_dep = _tarball_path_in_container(SWE_HOST_CC_TARBALL_DEP)
     await sb.exec(
-        "npm install -g --prefix=/usr/local --no-audit --no-fund /tmp/claude-code.tgz "
-        "&& ls -la /usr/local/bin/claude && /usr/local/bin/claude --version",
+        f"npm config set strict-ssl false && "
+        f"npm install -g --prefix=/usr/local --no-audit --no-fund --no-optional {tarball_in_container_dep} {tarball_in_container} "
+        f"&& claude --version",
         user="root",
         timeout=300,
         check=True,
     )
 
 
+def _tarball_path_in_container(host_tarball: Path) -> str:
+    """Return the path at which a Docker-mounted tarball is visible.
+
+    The Docker backend mounts ``DOCKER_TARBALL_DIR`` at the same path in the
+    container.  Keeping this lookup in one place also makes the bootstrap
+    functions usable with a different mount directory in tests or on another
+    host.  The E2B backend still uses ``write_file`` (the block above), so its
+    path is unaffected by this helper.
+    """
+    mount_dir = os.environ.get("DOCKER_TARBALL_DIR", "/home/vllm/c00944022/vime-agent/env")
+    return f"{mount_dir.rstrip('/')}/{Path(host_tarball).name}"
+
+
 async def ensure_agent_user(sb: Sandbox, workdir: str) -> None:
     """Create the unprivileged 'agent' user that owns workdir + can git diff.
     Settings file pre-acks bypass-permissions so claude-code starts headless."""
+    await sb.exec(f"mkdir -p {workdir}", user="root", check=True)
     await sb.exec(
         f"id agent >/dev/null 2>&1 || useradd -m -s /bin/bash agent && "
         f"chown -R agent:agent /home/agent {workdir} && "
@@ -198,6 +227,18 @@ async def run_claude_code(
         f"{workdir}/PROBLEM_STATEMENT.md",
         problem_statement or "",
         user="agent",
+    )
+    # Commit the baseline (base_commit + test_patch + PROBLEM_STATEMENT.md)
+    # so that the model's subsequent git diff excludes test_patch changes.
+    # Without this, the eval sandbox applies pre_commands again and then
+    # tries to re-apply the diff which already contains the test_patch,
+    # causing git apply to fail.
+    await sb.exec(
+        f"cd {workdir} && git -c user.name='cagent' -c user.email='cagent@local' "
+        f"add -A && "
+        f"git -c user.name='cagent' -c user.email='cagent@local' "
+        f"commit -m 'baseline with test patch' --allow-empty",
+        user="agent", timeout=120, check=False,
     )
     return await _spawn_claude_code(
         sb,
@@ -283,9 +324,14 @@ async def _spawn_claude_code(
 async def git_diff(sb: Sandbox, workdir: str) -> str:
     cmd = (
         f"cd {workdir} && git add -N . && "
-        f"git diff -- . ':(exclude)PROBLEM_STATEMENT.md' "
+        f"git diff -- . "
+        f"':(exclude)PROBLEM_STATEMENT.md' "
         f"':(exclude)claude_code_trajectory.jsonl' "
-        f"':(exclude).cagent_done' ':(exclude).cagent_run.sh'"
+        f"':(exclude).cagent_done' ':(exclude).cagent_run.sh' "
+        f"':(exclude)*/tests/*' "
+        f"':(exclude)*/test_*.py' "
+        f"':(exclude)*_test.py' "
+        f"':(exclude)*/testing/*' "
     )
     _, out, _ = await sb.exec(cmd, user="agent", timeout=120)
     return out
