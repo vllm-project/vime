@@ -1,4 +1,5 @@
 from .deepseekv3 import convert_deepseekv3_to_hf
+from .gemma4 import convert_gemma4_to_hf
 from .glm4 import convert_glm4_to_hf
 from .glm4moe import convert_glm4moe_to_hf
 from .llama import convert_llama_to_hf
@@ -30,7 +31,9 @@ def convert_to_hf(args, model_name, name, param, quantization_config=None, trans
 # TODO optimize code details
 def _convert_to_hf_core(args, model_name, name, param):
     model_name = model_name.lower().replace("_", "").replace("-", "")
-    if "minimaxm2" in model_name:
+    if "gemma4" in model_name:
+        converted_named_tensors = convert_gemma4_to_hf(args, name, param)
+    elif "minimaxm2" in model_name:
         converted_named_tensors = convert_minimax_m2_to_hf(args, name, param)
     elif any(family in model_name for family in ("glm4moelite", "deepseekv3", "deepseekv32", "glmmoedsa", "kimi")):
         converted_named_tensors = convert_deepseekv3_to_hf(args, name, param)

@@ -382,6 +382,7 @@ def test_loader_scope_stays_explicit():
     assert set(_LOADERS) == {
         "deepseek_v3",
         "deepseek_v32",
+        "gemma4_text",
         "glm4",
         "glm4_moe",
         "glm4_moe_lite",
