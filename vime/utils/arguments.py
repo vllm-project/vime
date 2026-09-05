@@ -920,6 +920,12 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument("--eps-clip", type=float, default=0.2, help="PPO clip range")
             parser.add_argument("--eps-clip-high", type=float, default=None, help="PPO clip upper range")
             parser.add_argument(
+                "--soft-overlong-cache",
+                type=int,
+                default=None,
+                help="DAPO Soft Overlong penalty window; 0 disables it.",
+            )
+            parser.add_argument(
                 "--eps-clip-c",
                 type=float,
                 default=None,
@@ -965,6 +971,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                     "grpo",
                     "gspo",
                     "cispo",
+                    "dapo",
                     "reinforce_plus_plus",
                     "reinforce_plus_plus_baseline",
                     "ppo",
@@ -2006,8 +2013,28 @@ def vime_validate_args(args):
         assert args.use_dynamic_batch_size, "--balance-by-flops requires --use-dynamic-batch-size"
         args.balance_data = True
 
+    if args.advantage_estimator == "dapo":
+        args.advantage_estimator = "grpo"
+        if args.eps_clip_high is None:
+            args.eps_clip_high = 0.28
+        args.calculate_per_token_loss = True
+        if args.dynamic_sampling_filter_path is None:
+            args.dynamic_sampling_filter_path = (
+                "vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std"
+            )
+        if args.soft_overlong_cache is None:
+            if args.rollout_max_response_len is None:
+                raise ValueError("DAPO requires --rollout-max-response-len or --soft-overlong-cache 0.")
+            args.soft_overlong_cache = max(1, int(args.rollout_max_response_len) // 4)
+
     if args.eps_clip_high is None:
         args.eps_clip_high = args.eps_clip
+
+    soft_overlong_cache = getattr(args, "soft_overlong_cache", None)
+    if soft_overlong_cache and (
+        args.rollout_max_response_len is None or not 0 < soft_overlong_cache <= args.rollout_max_response_len
+    ):
+        raise ValueError("--soft-overlong-cache must be between 0 and --rollout-max-response-len.")
 
     if args.advantage_estimator == "cispo" and args.eps_clip < 1.0:
         logger.warning(

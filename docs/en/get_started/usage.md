@@ -197,6 +197,7 @@ The recommended contract is to put the source identifier in `metadata["source_na
     - `grpo` ([https://arxiv.org/abs/2402.03300](https://arxiv.org/abs/2402.03300))
     - `gspo` ([https://arxiv.org/abs/2507.18071](https://arxiv.org/abs/2507.18071))
     - `cispo` ([https://arxiv.org/abs/2506.13585](https://arxiv.org/abs/2506.13585))
+    - `dapo` ([https://arxiv.org/abs/2503.14476](https://arxiv.org/abs/2503.14476))
     - `reinforce_plus_plus` and `reinforce_plus_plus_baseline` ([https://arxiv.org/abs/2501.03262](https://arxiv.org/abs/2501.03262))
     - `ppo` ([https://arxiv.org/abs/1707.06347](https://arxiv.org/abs/1707.06347))
 - `--calculate-per-token-loss`: By default, vime calculates loss on a per-sample basis, i.e., `mean(sum(sample_i) / len(sample_i))`. Enable this flag to calculate loss on a per-token basis, i.e., `sum(sum(sample_i)) / sum(len(sample_i))`.
@@ -223,6 +224,16 @@ Related parameters:
 - `--n-samples-per-prompt`: Number of responses sampled per prompt for intra-group comparison.
 - `--normalize-advantages`: Whether to normalize advantages.
 - `--eps-clip`: PPO-style clip range.
+
+#### DAPO Algorithm
+
+DAPO (Decoupled Clip and Dynamic sAmpling Policy Optimization, https://arxiv.org/abs/2503.14476) is exposed as a preset over the existing GRPO implementation. Set:
+
+```bash
+--advantage-estimator dapo
+```
+
+This selects GRPO with Clip-Higher (`--eps-clip-high 0.28`), token-level loss, the default dynamic-sampling filter, and a Soft Overlong window of one quarter of `--rollout-max-response-len`. Set `--soft-overlong-cache 0` to disable the length penalty. A custom reward post-process replaces the built-in reward shaping.
 
 #### PPO Algorithm
 

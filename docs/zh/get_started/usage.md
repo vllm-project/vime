@@ -200,6 +200,7 @@ vime 支持加载 `.jsonl` 和 `.parquet` 格式文件；读取 Parquet 需要�
   - `grpo`（https://arxiv.org/abs/2402.03300）；
   - `gspo`（https://arxiv.org/abs/2507.18071）；
   - `cispo`（https://arxiv.org/abs/2506.13585）；
+  - `dapo`（https://arxiv.org/abs/2503.14476）；
   - `reinforce_plus_plus` 与 `reinforce_plus_plus_baseline`（https://arxiv.org/abs/2501.03262）；
   - `ppo`（https://arxiv.org/abs/1707.06347）。
 - `--calculate-per-token-loss`：vime 中默认的方案是 per sample loss，即 `mean(sum(sample_i) / len(sample_i))`，如果需要计算 per token loss，即 `sum(sum(sample_i)) / sum(len(sample_i))`，可以开启 `--calculate-per-token-loss`；
@@ -226,6 +227,16 @@ GRPO 的主要特点：
 - `--n-samples-per-prompt`：每个 prompt 采样的 response 数量，用于组内比较；
 - `--normalize-advantages`：是否对 advantage 进行归一化；
 - `--eps-clip`：PPO 风格的 clip 范围。
+
+#### DAPO 算法
+
+DAPO（Decoupled Clip and Dynamic sAmpling Policy Optimization，https://arxiv.org/abs/2503.14476）作为现有 GRPO 实现的预设提供。使用：
+
+```bash
+--advantage-estimator dapo
+```
+
+该预设使用 GRPO，并启用 Clip-Higher（`--eps-clip-high 0.28`）、token-level loss、默认 dynamic-sampling filter，以及长度为 `--rollout-max-response-len` 四分之一的 Soft Overlong 区间。设置 `--soft-overlong-cache 0` 可关闭长度惩罚；自定义 reward post-process 会替代内置 reward shaping。
 
 #### PPO 算法
 
