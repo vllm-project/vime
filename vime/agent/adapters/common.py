@@ -545,9 +545,8 @@ async def call_vllm_generate(
         fr = choice.get("finish_reason")
         finish = fr if isinstance(fr, str) and fr else "stop"
     except (asyncio.CancelledError, aiohttp.ClientError, asyncio.TimeoutError) as e:
-        # vLLM ``/inference/v1/generate`` has no per-request HTTP abort endpoint.
-        # Cancelling the in-flight task tears down the aiohttp request, which drops
-        # the streaming connection so vLLM stops generating.
+        # vLLM has no per-request abort endpoint. Closing this router request also
+        # closes its selected worker request, so vLLM cancels the engine request.
         logger.debug("[%s] sid=%s turn aborted: %s", adapter.log_prefix, session_id, type(e).__name__)
         if task is not None:
             task.cancel()

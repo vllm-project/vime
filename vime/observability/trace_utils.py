@@ -140,6 +140,22 @@ def _new_span_id() -> str:
 def build_vllm_meta_trace_attrs(meta: dict[str, Any]) -> dict[str, Any]:
     attrs: dict[str, Any] = {}
     try:
+        request_metrics = meta.get("request_metrics")
+        if isinstance(request_metrics, dict):
+            meta = dict(meta)
+            for target, source, scale in (
+                ("queue_time", "queue_time_ms", 0.001),
+                ("decode_throughput", "tokens_per_second", 1.0),
+                ("pd_decode_transfer_duration", "remote_kv_wait_time_ms", 0.001),
+            ):
+                if request_metrics.get(source) is not None:
+                    meta[target] = request_metrics[source] * scale
+            latency_parts = [
+                request_metrics.get(key) for key in ("queue_time_ms", "time_to_first_token_ms", "generation_time_ms")
+            ]
+            if all(value is not None for value in latency_parts):
+                meta["e2e_latency"] = sum(latency_parts) / 1000
+
         attrs.update({key: meta[key] for key in VLLM_TRACE_META_KEYS if key in meta and meta[key] is not None})
         finish_reason = meta.get("finish_reason")
         if isinstance(finish_reason, dict) and finish_reason.get("type") is not None:

@@ -17,6 +17,12 @@ The outer rollout loop (semaphore, dp_rank balancing, abort orchestration,
 partial-rollout buffer hand-off) is still owned by ``vllm_rollout``; this file
 only replaces the inner HTTP call.
 
+This generator selects request-level abort, so Vime cancels each active HTTP
+stream instead of aborting every request on its vLLM server.
+
+Request cancellation preserves only metadata received before disconnect;
+terminal-only data such as routed-expert replay is unavailable after abort.
+
 vLLM's ``/inference/v1/generate`` SSE chunks carry **delta** ``token_ids`` +
 ``logprobs`` per ``GenerateResponseStreamChoice`` — so we *accumulate* the
 per-chunk deltas (``+=``) rather than overwriting from each chunk. Each delta
@@ -300,5 +306,10 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
         if weight_version is not None:
             sample.weight_versions.append(weight_version)
         sample.status = Sample.Status.ABORTED
+    else:
+        raise RuntimeError("vLLM streaming response ended without a terminal finish_reason.")
 
     return sample
+
+
+generate_streaming.abort_mode = "request"

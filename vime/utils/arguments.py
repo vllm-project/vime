@@ -499,7 +499,9 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=(
                     "Only substitue the `def generate(args, sample, sampling_params)` function within the example rollout function. "
-                    "This should be useful if you need to implement some special rollout logic, e.g. multi-turn, function calling."
+                    "This should be useful if you need to implement some special rollout logic, e.g. multi-turn, function calling. "
+                    "Set `abort_mode = 'request'` on the function when cancelling its task aborts only that request; "
+                    "otherwise Vime aborts all in-flight requests on the server."
                 ),
             )
             parser.add_argument(

@@ -113,6 +113,7 @@ def test_launch_config_single_node(vllm_args):
     assert sa["_pp_size"] == 1
     assert sa["_pcp_size"] == 1
     assert sa["_dp_size"] == 1
+    assert sa["enable_per_request_metrics"] is True
 
 
 @pytest.mark.unit

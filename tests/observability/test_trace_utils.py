@@ -56,6 +56,46 @@ def test_build_vllm_meta_trace_attrs_keeps_standard_and_pd_fields():
 
 
 @pytest.mark.unit
+def test_build_vllm_meta_trace_attrs_normalizes_request_metrics():
+    attrs = build_vllm_meta_trace_attrs(
+        {
+            "request_metrics": {
+                "queue_time_ms": 100,
+                "time_to_first_token_ms": 200,
+                "generation_time_ms": 300,
+                "tokens_per_second": 20,
+                "remote_kv_wait_time_ms": 50,
+            }
+        }
+    )
+    trace_children = attrs.pop(TRACE_CHILDREN_KEY)
+
+    assert attrs == {
+        "queue_time": pytest.approx(0.1),
+        "e2e_latency": pytest.approx(0.6),
+        "decode_throughput": pytest.approx(20),
+    }
+    assert trace_children == [
+        {
+            "type": "span",
+            "name": "vllm_pd_decode",
+            "start_offset": 0.0,
+            "end_offset": pytest.approx(0.05),
+            "attrs": {"phase": "decode", "duration_s": pytest.approx(0.05)},
+            "children": [
+                {
+                    "type": "span",
+                    "name": "vllm_pd_decode_transfer",
+                    "start_offset": 0.0,
+                    "end_offset": pytest.approx(0.05),
+                    "attrs": {"pd_decode_transfer_duration": pytest.approx(0.05)},
+                }
+            ],
+        }
+    ]
+
+
+@pytest.mark.unit
 def test_trace_timeline_viewer_omits_virtual_pd_lanes_without_pd_attrs(tmp_path: Path):
     viewer = _load_trace_timeline_viewer_module()
     sample = Sample(index=0, prompt="hello")

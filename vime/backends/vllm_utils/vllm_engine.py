@@ -632,6 +632,7 @@ def _compute_server_args(
         "tensor_parallel_size": tp,
         "logprobs_mode": "processed_logprobs",
         "enable_prompt_tokens_details": True,
+        "enable_per_request_metrics": True,
         "enable_server_load_tracking": True,
     }
 
@@ -764,5 +765,6 @@ _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS = [
     "tensor_parallel_size",
     "logprobs_mode",
     "enable_prompt_tokens_details",
+    "enable_per_request_metrics",
     "enable_server_load_tracking",
 ]
