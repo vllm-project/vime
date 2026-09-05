@@ -406,3 +406,119 @@ def test_connect_keeps_colocated_engines_and_initializes_once(upw_vllm):
 
     assert len(engines2[0].init_weight_transfer_engine.calls) == 0
     assert len(engines2[1].init_weight_transfer_engine.calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# GLM-4.7 MTP drafter cudagraph-friendly patch (_patch_glm_mtp_graph_friendly)
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_glm_mtp_module(monkeypatch, *, with_layer: bool = True):
+    """Install a fake ``vllm.model_executor.models.glm4_moe_lite_mtp`` module.
+
+    Returns the fake ``Glm4MoeLiteMultiTokenPredictorLayer`` class when
+    ``with_layer`` is True (otherwise the leaf module exposes no such
+    attribute, simulating an absent/non-GLM target).
+    """
+    for name in ("vllm", "vllm.model_executor", "vllm.model_executor.models"):
+        if name not in sys.modules:
+            stub = types.ModuleType(name)
+            stub.__path__ = []
+            monkeypatch.setitem(sys.modules, name, stub)
+    leaf = types.ModuleType("vllm.model_executor.models.glm4_moe_lite_mtp")
+    fake_layer = None
+    if with_layer:
+
+        class FakeMTPPredictorLayer:
+            pass
+
+        fake_layer = FakeMTPPredictorLayer
+        leaf.Glm4MoeLiteMultiTokenPredictorLayer = fake_layer
+    monkeypatch.setitem(sys.modules, "vllm.model_executor.models.glm4_moe_lite_mtp", leaf)
+    return fake_layer
+
+
+@pytest.mark.unit
+def test_glm_mtp_graph_patch_is_noop_without_env_var(upw_vllm, monkeypatch):
+    monkeypatch.delenv("VIME_PATCH_GLM_MTP_GRAPH", raising=False)
+    fake_layer = _install_fake_glm_mtp_module(monkeypatch, with_layer=True)
+
+    upw_vllm._VLLMHijack._patch_glm_mtp_graph_friendly()
+
+    assert not getattr(fake_layer, "_glm_mtp_graph_patched", False)
+    assert not hasattr(fake_layer, "forward")
+
+
+@pytest.mark.unit
+def test_glm_mtp_graph_patch_replaces_forward_and_is_idempotent(upw_vllm, monkeypatch):
+    monkeypatch.setenv("VIME_PATCH_GLM_MTP_GRAPH", "1")
+    fake_layer = _install_fake_glm_mtp_module(monkeypatch, with_layer=True)
+
+    upw_vllm._VLLMHijack._patch_glm_mtp_graph_friendly()
+    patched_forward = fake_layer.forward
+
+    assert fake_layer._glm_mtp_graph_patched is True
+    assert callable(patched_forward)
+
+    # Second call must be a no-op (idempotent): forward must not be replaced.
+    upw_vllm._VLLMHijack._patch_glm_mtp_graph_friendly()
+    assert fake_layer.forward is patched_forward
+
+
+@pytest.mark.unit
+def test_glm_mtp_graph_patch_silent_noop_when_target_absent(upw_vllm, monkeypatch):
+    monkeypatch.setenv("VIME_PATCH_GLM_MTP_GRAPH", "1")
+    # Leaf module has no Glm4MoeLiteMultiTokenPredictorLayer -> ImportError -> silent return.
+    _install_fake_glm_mtp_module(monkeypatch, with_layer=False)
+
+    # Must not raise.
+    upw_vllm._VLLMHijack._patch_glm_mtp_graph_friendly()
+
+
+@pytest.mark.unit
+def test_glm_mtp_patched_forward_zeroes_position_zero_and_adds_residual(upw_vllm, monkeypatch):
+    monkeypatch.setenv("VIME_PATCH_GLM_MTP_GRAPH", "1")
+    fake_layer = _install_fake_glm_mtp_module(monkeypatch, with_layer=True)
+    upw_vllm._VLLMHijack._patch_glm_mtp_graph_friendly()
+
+    layer = fake_layer()
+    captured = {}
+    layer.enorm = lambda x: captured.setdefault("enorm_in", x)
+    layer.hnorm = lambda x: x
+    layer.eh_proj = lambda x: x
+    block_hidden = torch.full((3, 4), 5.0)
+    block_residual = torch.full((3, 4), 1.0)
+    layer.mtp_block = MagicMock(return_value=(block_hidden, block_residual))
+
+    inputs_embeds = torch.ones((3, 4))
+    previous_hidden_states = torch.full((3, 4), 2.0)
+    positions = torch.tensor([0, 1, 2])
+
+    out = layer.forward(None, positions, previous_hidden_states, inputs_embeds)
+
+    # Position 0 masked to zeros via torch.where; positions 1, 2 untouched.
+    enorm_in = captured["enorm_in"]
+    assert torch.equal(enorm_in[0], torch.zeros(4))
+    assert torch.equal(enorm_in[1], torch.ones(4))
+    assert torch.equal(enorm_in[2], torch.ones(4))
+
+    # mtp_block called with element-wise (graph-friendly) inputs.
+    layer.mtp_block.assert_called_once()
+    kwargs = layer.mtp_block.call_args.kwargs
+    assert kwargs["positions"] is positions
+    assert kwargs["residual"] is None
+    assert kwargs["hidden_states"].shape == (3, 8)  # cat([embeds, prev], dim=-1)
+
+    # out = residual + block hidden (the added residual path).
+    assert torch.equal(out, block_residual + block_hidden)
+
+
+@pytest.mark.unit
+def test_glm_mtp_patched_forward_requires_inputs_embeds(upw_vllm, monkeypatch):
+    monkeypatch.setenv("VIME_PATCH_GLM_MTP_GRAPH", "1")
+    fake_layer = _install_fake_glm_mtp_module(monkeypatch, with_layer=True)
+    upw_vllm._VLLMHijack._patch_glm_mtp_graph_friendly()
+
+    layer = fake_layer()
+    with pytest.raises(AssertionError):
+        layer.forward(None, torch.tensor([0, 1]), torch.zeros((2, 4)), inputs_embeds=None)

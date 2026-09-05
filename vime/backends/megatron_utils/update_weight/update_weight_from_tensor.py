@@ -416,6 +416,55 @@ class _VLLMHijack:
         ApplyRotaryEmb.__init__ = _npu_rotary_emb_init  # type: ignore[attr-defined]
         ApplyRotaryEmb._npu_rotary_patched = True
 
+    @staticmethod
+    def _patch_glm_mtp_graph_friendly() -> None:
+        """Patch GLM-4.7 MTP draft forward to be NPU cudagraph-friendly.
+
+        Upstream ``Glm4MoeLiteMultiTokenPredictorLayer.forward`` does
+        ``inputs_embeds[positions == 0] = 0`` (bool-mask index assignment),
+        which routes to aclnnNonzeroV2 — a data-dependent-shape op that fails
+        under NPU cudagraph capture (``stream is captured``). Replace with the
+        element-wise, graph-friendly ``torch.where`` equivalent so the MTP
+        drafter can run under cudagraph on Ascend.
+
+        Env-gated (``VIME_PATCH_GLM_MTP_GRAPH=1``), idempotent, and a silent
+        no-op when the target class is absent (non-GLM models).
+        """
+        if not os.environ.get("VIME_PATCH_GLM_MTP_GRAPH"):
+            return
+
+        try:
+            from vllm.model_executor.models.glm4_moe_lite_mtp import Glm4MoeLiteMultiTokenPredictorLayer
+        except ImportError:
+            return
+
+        if getattr(Glm4MoeLiteMultiTokenPredictorLayer, "_glm_mtp_graph_patched", False):
+            return
+        Glm4MoeLiteMultiTokenPredictorLayer._glm_mtp_graph_patched = True
+
+        def _patched_forward(
+            self,
+            input_ids: torch.Tensor,
+            positions: torch.Tensor,
+            previous_hidden_states: torch.Tensor,
+            inputs_embeds: torch.Tensor | None = None,
+            spec_step_index: int = 0,
+        ) -> torch.Tensor:
+            assert inputs_embeds is not None
+            # masking inputs at position 0, as not needed by MTP.
+            # torch.where (element-wise) replaces bool-mask index to stay
+            # cudagraph-capturable on NPU.
+            mask = (positions == 0).unsqueeze(-1)
+            inputs_embeds = torch.where(mask, torch.zeros_like(inputs_embeds), inputs_embeds)
+            inputs_embeds = self.enorm(inputs_embeds)
+            previous_hidden_states = self.hnorm(previous_hidden_states)
+            hidden_states = self.eh_proj(torch.cat([inputs_embeds, previous_hidden_states], dim=-1))
+            hidden_states, residual = self.mtp_block(positions=positions, hidden_states=hidden_states, residual=None)
+            hidden_states = residual + hidden_states
+            return hidden_states
+
+        Glm4MoeLiteMultiTokenPredictorLayer.forward = _patched_forward  # type: ignore[attr-defined]
+
 
 class vLLMColocateWorkerExtension:
     """vLLM ``--worker-extension-cls`` entry for colocated rollout workers."""
@@ -425,6 +474,7 @@ class vLLMColocateWorkerExtension:
             _VLLMHijack._patch_a3_moe_alltoall_expert_ids()
             _VLLMHijack._patch_npu_worker()
             _VLLMHijack._patch_npu_rotary_emb()
+            _VLLMHijack._patch_glm_mtp_graph_friendly()
         return super().__new__(cls)
 
 
@@ -435,4 +485,5 @@ class vLLMWorkerExtension:
         if is_npu():
             _VLLMHijack._patch_npu_worker()
             _VLLMHijack._patch_npu_rotary_emb()
+            _VLLMHijack._patch_glm_mtp_graph_friendly()
         return super().__new__(cls)
