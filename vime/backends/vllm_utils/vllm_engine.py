@@ -355,8 +355,7 @@ class VLLMEngine(RayActor):
         return response.json()
 
     def check_weights(self, action: str):
-        del action
-        return {"ok": True, "supported": False}
+        return self._make_request("weights_checker", {"action": action})
 
     def init_weight_transfer_engine(self, payload: dict) -> dict:
         return self._make_request("init_weight_transfer_engine", payload)
