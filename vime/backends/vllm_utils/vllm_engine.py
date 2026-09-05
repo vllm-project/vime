@@ -148,6 +148,11 @@ class VLLMEngine(RayActor):
     ):
         del nccl_port
 
+        # Apply DSpark meta-device patch (vLLM#55076) before engine init.
+        from vime.backends.vllm_utils.dspark_patch import patch_vllm_dspark_meta_device
+
+        patch_vllm_dspark_meta_device()
+
         self.router_ip = _wrap_ipv6(router_ip) if router_ip is not None else None
         self.router_port = router_port
 

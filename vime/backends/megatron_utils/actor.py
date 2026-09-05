@@ -196,6 +196,12 @@ class MegatronTrainRayActor(TrainRayActor):
 
         torch_memory_saver.resume()
 
+        # Restore DSpark draft param views after TMS resume
+        if getattr(self.args, "dspark_enabled", False):
+            from vime.backends.megatron_utils.dspark.modeling import restore_dspark_param_views
+
+            restore_dspark_param_views(self.model)
+
         clear_memory()
         reload_process_groups()
 
