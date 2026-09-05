@@ -149,20 +149,38 @@ def _build_messages(data: dict, prompt_key: str, as_conversation: bool, multimod
         else:
             prompt = [{"role": "user", "content": prompt}]
 
+    multimodals = {}
     if multimodal_keys:
         # Build mapping: placeholder -> (MultimodalType, content_list)
-        multimodals = {}
         for type_name, data_key in multimodal_keys.items():
             mt = MultimodalTypes.get(type_name)
-            if mt:
-                multimodal_data = data.get(data_key)
-                if multimodal_data is not None:
-                    multimodals[mt.placeholder] = (mt, list(multimodal_data))
+            if mt is None:
+                raise ValueError(
+                    f"Unknown multimodal type '{type_name}' in --multimodal-keys; "
+                    f"supported types are {[m.name for m in MultimodalTypes.all()]}."
+                )
+            multimodal_data = data.get(data_key)
+            if multimodal_data is not None:
+                if isinstance(multimodal_data, (str, dict)):
+                    multimodal_data = [multimodal_data]
+                multimodals[mt.placeholder] = (mt, list(multimodal_data))
 
+    # Only rows that actually carry media need placeholder substitution. Running
+    # the split with an empty `multimodals` would build the pattern "()", which
+    # matches the empty string everywhere and shatters the prompt into one text
+    # segment per character.
+    if multimodals:
         pattern = "(" + "|".join(re.escape(p) for p in multimodals.keys()) + ")"
+
+        # Media is only consumed from messages whose content is a plain string.
+        # A row already in list-of-dicts form embeds its media inline, so the
+        # leftover check below would fire on media this function never had a
+        # placeholder to spend.
+        expanded_any = False
 
         for message in prompt:
             if isinstance(message["content"], str):
+                expanded_any = True
                 content_list = []
                 for segment in re.split(pattern, message["content"]):
                     if not segment:
@@ -202,11 +220,13 @@ def _build_messages(data: dict, prompt_key: str, as_conversation: bool, multimod
                     f"Unsupported content type: {type(message['content'])}, expected str or list of dicts"
                 )
 
-        for placeholder, (mt, remaining) in multimodals.items():
-            assert len(remaining) == 0, (
-                f"Multimodal data count mismatch: {len(remaining)} more {mt.name}(s)"
-                f"than '{placeholder}' placeholders in prompt"
-            )
+        if expanded_any:
+            for placeholder, (mt, remaining) in multimodals.items():
+                if len(remaining) != 0:
+                    raise AssertionError(
+                        f"Multimodal data count mismatch: {len(remaining)} more {mt.name}(s) "
+                        f"than '{placeholder}' placeholders in prompt"
+                    )
 
     return prompt
 
