@@ -72,6 +72,24 @@ print(json.dumps({"env_vars": env}))
 PY
 )
 
+# Defaults below are the ones that actually trained; evidence:
+# n-samples-per-prompt and rollout-temperature are both load-bearing for GRPO:
+# the advantage is computed within a prompt's sample group, so one sample -- or
+# n identical greedy samples -- gives an advantage of exactly zero and no
+# gradient. Changing only one of the two does not help. Measured: at n=4 this
+# task set showed 2/10 prompts with usable variance, at n=8 it showed 4/10.
+# temperature > 0 and n-samples-per-prompt > 1 are both load-bearing for GRPO:
+# the advantage is computed within a prompt's sample group, so a single sample
+# (or n identical greedy samples) gives an advantage of exactly zero and no
+# gradient. Changing only one of the two does not help.
+# Not a free parameter: vime asserts
+# global_batch_size == rollout_batch_size * n_samples_per_prompt // num_steps_per_rollout
+# Override GB whenever RB or N_SAMPLES changes, or startup fails validation.
+# Without an entropy bonus the policy collapses at any usable learning rate.
+# 1e-6 left the policy effectively static (11 steps, trend t=-0.21); 1e-5
+# collapsed entropy 0.345 -> 0.096 within 2 steps and reward regressed after
+# an initial rise. 3e-6 with the entropy bonus held entropy flat-to-rising
+# across 30 steps while reward rose from 0.254 to 0.596 (t=+4.19).
 ray job submit --address=http://127.0.0.1:8265 \
   --runtime-env-json="${RUNTIME_ENV_JSON}" \
   -- python -u train.py \
@@ -86,24 +104,12 @@ ray job submit --address=http://127.0.0.1:8265 \
   --apply-chat-template \
   --num-rollout ${NUM_ROLLOUT:-2} \
   --rollout-batch-size ${RB:-4} \
-  # n-samples-per-prompt and rollout-temperature are both load-bearing for GRPO:
-  # the advantage is computed within a prompt's sample group, so one sample -- or
-  # n identical greedy samples -- gives an advantage of exactly zero and no
-  # gradient. Changing only one of the two does not help. Measured: at n=4 this
-  # task set showed 2/10 prompts with usable variance, at n=8 it showed 4/10.
   --n-samples-per-prompt ${N_SAMPLES:-8} \
   --rollout-max-context-len ${CTX:-32768} \
   --rollout-max-response-len ${RESP:-4096} \
   --rollout-stop-token-ids 151645 151643 \
-  # temperature > 0 and n-samples-per-prompt > 1 are both load-bearing for GRPO:
-  # the advantage is computed within a prompt's sample group, so a single sample
-  # (or n identical greedy samples) gives an advantage of exactly zero and no
-  # gradient. Changing only one of the two does not help.
   --rollout-temperature 1.0 \
   --num-steps-per-rollout 1 \
-  # Not a free parameter: vime asserts
-  #   global_batch_size == rollout_batch_size * n_samples_per_prompt // num_steps_per_rollout
-  # Override GB whenever RB or N_SAMPLES changes, or startup fails validation.
   --global-batch-size ${GB:-32} \
   --micro-batch-size 1 \
   --save-debug-rollout-data "${RUN_ROOT}/rollout_dumps/rollout_{rollout_id}.pt" \
@@ -125,15 +131,10 @@ ray job submit --address=http://127.0.0.1:8265 \
   --kl-loss-coef 0.0 \
   --kl-loss-type low_var_kl \
   --kl-coef 0.0 \
-  # Without an entropy bonus the policy collapses at any usable learning rate.
   --entropy-coef ${ENT:-0.01} \
   --eps-clip 0.2 \
   --eps-clip-high 0.28 \
   --optimizer adam \
-  # 1e-6 left the policy effectively static (11 steps, trend t=-0.21); 1e-5
-  # collapsed entropy 0.345 -> 0.096 within 2 steps and reward regressed after
-  # an initial rise. 3e-6 with the entropy bonus held entropy flat-to-rising
-  # across 30 steps while reward rose from 0.254 to 0.596 (t=+4.19).
   --lr ${LR:-3e-6} \
   --lr-decay-style constant \
   --weight-decay 0.1 \
