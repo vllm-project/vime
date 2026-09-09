@@ -514,12 +514,12 @@ async def call_vllm_generate(
     if logger.isEnabledFor(logging.DEBUG):
         _n = adapter._sid_turn_count.get(session_id, 0)
         logger.debug("[agent.adapters] prompt_growth sid_turn=%d prompt_tokens=%d", _n, len(prompt_ids))
-        if _n <= 1 and not getattr(adapter, "_logged_schema", False):
-            adapter._logged_schema = True
+        if _n <= 1 and not getattr(session, "_logged_schema", False):
+            session._logged_schema = True
             try:
                 _tools = (body or {}).get("tools") or []
                 _sys = (body or {}).get("system")
-                _st = len(adapter.tokenizer.encode(json.dumps(_sys))) if _sys else 0
+                _st = len(adapter.tokenizer.encode(_sys if isinstance(_sys, str) else json.dumps(_sys))) if _sys else 0
                 logger.debug("[agent.adapters] system_prompt_tokens=%d n_tools=%d", _st, len(_tools))
                 for _t in _tools:
                     _nm = _t.get("name") or (_t.get("function") or {}).get("name") or "?"
@@ -535,7 +535,11 @@ async def call_vllm_generate(
         # can prevent this. Truncate the middle of the prompt instead, keeping
         # the head (system prompt and tools) and the most recent tail, and
         # always leave room to generate.
-        _reserve = min(1024, max(256, session.max_context_tokens // 8))
+        # Cap the reserve at half the window so a small max_context_tokens
+        # cannot drive _budget to zero or negative, which would make the
+        # slices below silently wrong.
+        _reserve = min(1024, max(256, session.max_context_tokens // 8),
+                       max(1, session.max_context_tokens // 2))
         _budget = session.max_context_tokens - _reserve
         if len(prompt_ids) > _budget:
             _head = _budget // 4

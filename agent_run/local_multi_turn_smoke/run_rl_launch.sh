@@ -2,7 +2,9 @@
 # ROCm/MI355X (gfx950) port of run_h200.sh.
 set -euo pipefail
 
-ROOT=${ROOT:-/mnt/m2m_nobackup/lizli102/vime-agent-smoke}
+# Model weights, images and run outputs. Point this at node-local scratch --
+# tens of GB per model, and a network filesystem will bottleneck rollouts.
+ROOT=${ROOT:-${VIME_SMOKE_ROOT:-${HOME}/vime-agent-smoke}}
 mkdir -p "${ROOT}/runs"
 
 # ROCm device passthrough replaces `--gpus all`; --group-add video + seccomp
@@ -20,12 +22,12 @@ docker run -d --name vime-rl \
   --ipc=host --network host --shm-size 32G \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v /usr/bin/docker:/usr/bin/docker:ro \
-  -v /home/lizli102/vime:/root/vime \
+  -v "${VIME_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}":/root/vime \
   -v "${ROOT}/models:/work/models" \
   -v "${ROOT}/assets:/work/assets" \
   -v "${ROOT}/tasks:/work/tasks:ro" \
   -v "${ROOT}/runs:/work/runs" \
-  -v /home/lizli102:/host \
+  -v "${HOME}":/host \
   -e MODEL_DIR="${MODEL_DIR-}" \
   -e VLLM_MEM_UTIL="${VLLM_MEM_UTIL-}" \
   -e MAX_TURNS="${MAX_TURNS-}" \
