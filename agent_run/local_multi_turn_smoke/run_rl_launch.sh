@@ -30,6 +30,7 @@ docker run -d --name vime-rl \
   -e VLLM_MEM_UTIL="${VLLM_MEM_UTIL-}" \
   -e MAX_TURNS="${MAX_TURNS-}" \
   -e ENT="${ENT-}" \
+  -e WEIGHT_TRANSPORT="${WEIGHT_TRANSPORT-}" \
   -e LR="${LR-}" \
   -e TASKS="${TASKS-}" \
   -e MODEL_CONF="${MODEL_CONF-}" \
@@ -38,5 +39,5 @@ docker run -d --name vime-rl \
   -e NUM_ROLLOUT="${NUM_ROLLOUT-}" -e RB="${RB-}" -e N_SAMPLES="${N_SAMPLES-}" \
   -e RESP="${RESP-}" -e GB="${GB-}" -e CTX="${CTX-}" -e MTPG="${MTPG-}" \
   -w /root/vime \
-  --entrypoint bash vllm/vime-rocm:latest \
+  --entrypoint bash "${IMAGE:-rocm/pytorch-private:vime-09-08}" \
   agent_run/local_multi_turn_smoke/run_rl.sh

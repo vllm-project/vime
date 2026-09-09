@@ -143,7 +143,7 @@ ray job submit --address=http://127.0.0.1:8265 \
   --rollout-num-gpus ${NGPU:-8} \
   --rollout-num-gpus-per-engine ${TP:-1} \
   --vllm-gpu-memory-utilization "${VLLM_MEM_UTIL:-0.60}" \
-  --update-weight-transport disk \
+  --update-weight-transport ${WEIGHT_TRANSPORT:-nccl} \
   --update-weight-disk-dir /work/runs/wsync \
   --vllm-max-num-seqs "${MAX_SEQS:-8}" \
   --vllm-max-num-batched-tokens "${MAX_BT:-4096}" \
