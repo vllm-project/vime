@@ -17,7 +17,7 @@ class LocalDockerSandbox:
         self.sandbox_id = f"vime-agent-{secrets.token_hex(6)}"
 
     async def __aenter__(self):
-        await self._run(
+        rc, _out, err = await self._run(
             "docker",
             "run",
             "--detach",
@@ -29,9 +29,10 @@ class LocalDockerSandbox:
             self.image,
             "sleep",
             "infinity",
-            check=True,
         )
-        self._trace("sandbox_start", image=self.image)
+        self._trace("sandbox_start", image=self.image, returncode=rc, stderr=err)
+        if rc != 0:
+            raise RuntimeError(f"sandbox start failed ({rc}): {err}")
         return self
 
     async def __aexit__(self, _exc_type, _exc, _tb) -> None:
@@ -53,7 +54,7 @@ class LocalDockerSandbox:
         for key, value in (env or {}).items():
             argv.extend(("--env", f"{key}={value}"))
         argv.extend((self.sandbox_id, "bash", "-lc", cmd))
-        result = await asyncio.wait_for(self._run(*argv, check=check), timeout=timeout)
+        result = await asyncio.wait_for(self._run(*argv), timeout=timeout)
         self._trace(
             "exec",
             user=user,
@@ -62,6 +63,10 @@ class LocalDockerSandbox:
             stdout=result[1],
             stderr=result[2],
         )
+        # Checked after tracing, not inside _run: a failing command is exactly
+        # the one whose trace is worth having, and raising earlier dropped it.
+        if check and result[0] != 0:
+            raise RuntimeError(f"command failed ({result[0]}): {cmd}\n{result[2]}")
         return result
 
     async def write_file(self, sandbox_path: str, content: FileContent, *, user: str = "root") -> None:
@@ -102,14 +107,20 @@ class LocalDockerSandbox:
             output.write(json.dumps(record, default=str) + "\n")
 
     @staticmethod
-    async def _run(*argv: str, check: bool = False) -> ExecResult:
+    async def _run(*argv: str) -> ExecResult:
         process = await asyncio.create_subprocess_exec(
             *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await process.communicate()
-        result = process.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
-        if check and process.returncode != 0:
-            raise RuntimeError(f"command failed ({process.returncode}): {' '.join(argv)}\n{result[2]}")
-        return result
+        try:
+            stdout, stderr = await process.communicate()
+        except asyncio.CancelledError:
+            # communicate() is cancelled when exec() hits its timeout. Without
+            # this the docker CLI child survives the cancellation and
+            # accumulates across a run.
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise
+        return process.returncode, stdout.decode(errors="replace"), stderr.decode(errors="replace")
