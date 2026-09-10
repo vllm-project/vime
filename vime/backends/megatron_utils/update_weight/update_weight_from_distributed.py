@@ -31,7 +31,9 @@ logger = logging.getLogger(__name__)
 def _begin_vllm_weight_update_session(rollout_engines: Sequence[ActorHandle]) -> None:
     if dist.get_rank() == 0:
         logger.info("vLLM weight update: start_weight_update")
-        ray.get([engine.start_weight_update.remote(is_checkpoint_format=True) for engine in rollout_engines])
+        # NPU layerwise_reload corrupts weights; use direct mode (same as colocate).
+        _ckpt_fmt = not is_npu()
+        ray.get([engine.start_weight_update.remote(is_checkpoint_format=_ckpt_fmt) for engine in rollout_engines])
     dist.barrier(group=get_gloo_group())
 
 
@@ -274,24 +276,29 @@ class UpdateWeightFromDistributed:
         EP all-gather a buffered batch + HF convert on PP source. Returns HF tensors on
         PP source, [] elsewhere. Clears ``named_tensors``.
         """
+        ep_world_size = mpu.get_expert_model_parallel_world_size()
         names = [name for name, _ in named_tensors]
-        all_names = [None] * mpu.get_expert_model_parallel_world_size()
+        all_names = [None] * ep_world_size
         dist.all_gather_object(all_names, names, group=mpu.get_expert_model_parallel_group())
 
-        for names in all_names:
-            assert len(named_tensors) == len(names), f"mismatch names length: {len(named_tensors)} != {len(names)}"
+        for names_list in all_names:
+            assert len(named_tensors) == len(
+                names_list
+            ), f"mismatch names length: {len(named_tensors)} != {len(names_list)}"
 
-        all_gathered_params = [[] for _ in range(mpu.get_expert_model_parallel_world_size())]
+        # NPU MindSpeed GroupedGemm: same param name across all EP ranks
+        # (e.g., mlp.experts.weight1/weight2 or MindSpeed linear_fc1/fc2).
+        is_npu_grouped_gemm = is_npu() and ep_world_size > 1 and all(names_list == names for names_list in all_names)
+
+        device = torch.npu.current_device() if is_npu() else torch.cuda.current_device()
+        all_gathered_params = [[] for _ in range(ep_world_size)]
         handles = []
         for i, (_name, param) in enumerate(named_tensors):
-            params = [
-                torch.empty_like(param.data, device=torch.cuda.current_device())
-                for _ in range(mpu.get_expert_model_parallel_world_size())
-            ]
+            params = [torch.empty_like(param.data, device=device) for _ in range(ep_world_size)]
             handle = dist.all_gather(params, param.data, group=mpu.get_expert_model_parallel_group(), async_op=True)
             handles.append(handle)
-            for ep_rank, names in enumerate(all_names):
-                all_gathered_params[ep_rank].append((names[i], params[ep_rank]))
+            for ep_rank, names_list in enumerate(all_names):
+                all_gathered_params[ep_rank].append((names_list[i], params[ep_rank]))
         for handle in handles:
             handle.wait()
 
@@ -299,6 +306,32 @@ class UpdateWeightFromDistributed:
         if not self._is_pp_src_rank:
             return []
 
+        if is_npu_grouped_gemm:
+            # GroupedGemm: concatenate params from all EP ranks along expert dimension,
+            # then convert the full param (with all experts) to HF format.
+            # 3D MindSpeed: [num_local_experts, ...] -> concat dim=0
+            # 2D weight1/linear_fc1: [hidden, fc * num_local] -> concat dim=1
+            # 2D weight2/linear_fc2: [fc * num_local, hidden] -> concat dim=0
+            saved_names = list(names)
+            converted_hf_tensors = []
+            for i, name in enumerate(saved_names):
+                sample = all_gathered_params[0][i][1]
+                if sample.dim() == 3:
+                    concat_dim = 0
+                elif "weight1" in name or "linear_fc1" in name:
+                    concat_dim = 1
+                else:
+                    concat_dim = 0
+                full_param = torch.cat(
+                    [all_gathered_params[ep_rank][i][1] for ep_rank in range(ep_world_size)],
+                    dim=concat_dim,
+                )
+                converted_hf_tensors += convert_to_hf(
+                    self.args, self.model_name, name, full_param, self.quantization_config
+                )
+            return converted_hf_tensors
+
+        # Original ungrouped format: each EP rank has different expert indices
         all_gathered_params = sum(all_gathered_params, [])
         converted_hf_tensors = []
         for name, param in all_gathered_params:
