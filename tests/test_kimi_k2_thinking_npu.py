@@ -1,3 +1,4 @@
+import json
 import os
 import shlex
 
@@ -20,9 +21,26 @@ def prepare():
     U.exec_command("hf download --repo-type dataset zhuzilin/dapo-math-17k " f"--local-dir {dataset_dir}")
 
 
+def generate_dummy_config(model_dir):
+    model_config = os.path.join(model_dir, "config.json")
+    with open(model_config, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    data["num_hidden_layers"] = 2
+    data["quantization_config"]["ignore"].extend([
+        "model.embed_tokens",
+        "re:.*mlp\\.gate\\.weights$"
+    ])
+
+    with open(model_config, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
 def execute():
     model_dir = shlex.quote(MODEL_DIR)
     prompt_data = shlex.quote(f"{DATASET_DIR}/dapo-math-17k.jsonl")
+
+    generate_dummy_config(model_dir)
 
     # NPU skips torch_dist conversion; HF weights load directly via bridge mode.
     checkpoint_args = (
@@ -50,10 +68,9 @@ def execute():
         "--balance-data "
     )
 
-    # TP=2/EP=8 mirrors scripts/run-qwen3.5-35B-A3B-npu.sh; --qkv-format bshd is
-    # qwen3.5-specific (not part of MODEL_ARGS, so passed explicitly here).
+    # TP=8/EP=8 mirrors scripts/run-kimi-k2-thinking-npu.sh.
     parallel_args = (
-        "--tensor-model-parallel-size 2 "
+        "--tensor-model-parallel-size 8 "
         "--sequence-parallel "
         "--pipeline-model-parallel-size 1 "
         "--context-parallel-size 1 "
@@ -63,7 +80,7 @@ def execute():
         "--recompute-method uniform "
         "--recompute-num-layers 1 "
         "--micro-batch-size 1 "
-        "--max-tokens-per-gpu 16384 "
+        "--max-tokens-per-gpu 2048 "
     )
 
     grpo_args = (
@@ -90,15 +107,14 @@ def execute():
     )
 
     vllm_args = (
-        "--rollout-backend vllm"
+        "--rollout-backend vllm "
         "--rollout-num-gpus-per-engine 16 "
-        "--vllm-gpu-memory-utilization 0.7 "
-        "--vllm-data-parallel-size 8 "
-        "--vllm-enable-experet-parallel "
+        "--vllm-gpu-memory-utilization 0.45 "
+        "--vllm-enable-expert-parallel "
         "--vllm-enable-sleep-mode "
         "--vllm-weight-sync-mode native "
         "--vllm-enforce-eager "
-        "--vllm-load-format dummy"
+        "--vllm-load-format dummy "
     )
 
     model_args = (
@@ -115,7 +131,6 @@ def execute():
         "--actor-num-nodes 1 "
         "--actor-num-gpus-per-node 8 "
         "--rollout-num-gpus 8 "
-        "--ci-test "
     )
 
     train_args = (
@@ -129,12 +144,12 @@ def execute():
         + runtime_args
     )
     # Model architecture (--spec, --attention-output-gate, --moe-shared-expert-gate,
-    # num-experts, moe-* ...) is injected by sourcing scripts/models/qwen3.5-35B-A3B.sh
+    # num-experts, moe-* ...) is injected by sourcing scripts/models/kimi-k2-thinking.sh
     # via ${MODEL_ARGS[@]}, so only runtime/training args are passed here.
     U.execute_train(
         train_args=train_args,
         num_gpus_per_node=16,
-        megatron_model_type="Kimi-K2-Thinking",
+        megatron_model_type="kimi-k2-thinking-2layer",
         extra_env_vars={
             "DISABLE_L2_CACHE": "1",
             "VLLM_USE_AOT_COMPILE": "0",

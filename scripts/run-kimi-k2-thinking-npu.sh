@@ -56,7 +56,7 @@ export VLLM_DISABLE_COMPILE_CACHE=1
 export TRANSFORMERS_VERBOSITY=error
 export RUST_LOG=vllm_router_rs=warn
 
-NUM_NPUS=16
+NUM_NPUS=256
 source "${VIME_DIR}/scripts/models/kimi-k2-thinking.sh"
 
 CKPT_ARGS=(
@@ -153,7 +153,6 @@ MISC_ARGS=(
    --use-flash-attn
 )
 
-#MASTER_ADDR
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 CURRENT_NODE_IP="${CURRENT_NODE_IP:-$(hostname -I | awk '{print $1}')}"
 if [[ "${CURRENT_NODE_IP}" != "${MASTER_ADDR}" ]];then
@@ -162,6 +161,7 @@ if [[ "${CURRENT_NODE_IP}" != "${MASTER_ADDR}" ]];then
   ray start \
       --address="${MASTER_ADDR}:${RAY_PORT}"
       --node-ip-address "${CURRENT_NODE_IP}" \
+
       --num-gpus 0 \
       --resources "{\"NPU\": $NUM_NPUS}" \
       --disable-usage-stats \
