@@ -215,20 +215,16 @@ class UpdateWeightFromDiskDelta:
 
         # Pinned host-buffer pool: a pinned non_blocking GPU->CPU copy is far faster than .cpu().
         max_bytes = max((int(v.nbytes) for v in snapshot.values()), default=0)
-        free_q: queue.Queue = queue.Queue()
-        use_pinned = True
-        try:
-            for _ in range(max(4, min(2 * NUM_WORKERS, (32 << 30) // max(max_bytes, 1)))):
-                free_q.put(torch.empty(max_bytes, dtype=torch.uint8, pin_memory=True))
-        except RuntimeError as e:  # low memlock limit
-            logger.warning("pinned host buffers unavailable (%s); using pageable .cpu()", e)
-            use_pinned = False
+        free_q = _make_pinned_pool(max_bytes)
+        use_pinned = not free_q.empty()
 
         def diff_and_compress(name, buf, nbytes, pinned):
             if pinned:  # copy out and free the pinned buffer before the heavy diff/compress
-                new = np.empty(nbytes, dtype=np.uint8)
-                np.copyto(new, buf.numpy()[:nbytes])
-                free_q.put(buf)
+                try:
+                    new = np.empty(nbytes, dtype=np.uint8)
+                    np.copyto(new, buf.numpy()[:nbytes])
+                finally:
+                    free_q.put(buf)
             else:
                 new = buf
             old = snapshot[name]
@@ -260,18 +256,26 @@ class UpdateWeightFromDiskDelta:
             for name, tensor in self._iter_hf_tensors():
                 flat = tensor.detach().contiguous().view(torch.uint8).reshape(-1)
                 nbytes = int(flat.numel())
-                if use_pinned and nbytes <= max_bytes:
-                    buf = free_q.get()  # blocks when all buffers are in flight -> backpressures the gather
-                    buf[:nbytes].copy_(flat, non_blocking=True)
-                    if flat.device.type == "npu":
-                        torch.npu.current_stream().synchronize()
-                    elif flat.device.type == "cuda":
-                        torch.cuda.current_stream().synchronize()
-                    payload, pinned = buf, True
-                else:
-                    payload, pinned = flat.cpu().numpy().copy(), False
-                self.total_bytes += nbytes
-                inflight.append(pool.submit(diff_and_compress, name, payload, nbytes, pinned))
+                buf = None
+                submitted = False
+                try:
+                    if use_pinned and nbytes <= max_bytes:
+                        buf = free_q.get()  # backpressure until a worker returns a buffer
+                        buf[:nbytes].copy_(flat, non_blocking=True)
+                        if flat.device.type == "npu":
+                            torch.npu.current_stream().synchronize()
+                        elif flat.device.type == "cuda":
+                            torch.cuda.current_stream().synchronize()
+                        payload, pinned = buf, True
+                    else:
+                        payload, pinned = flat.cpu().numpy().copy(), False
+                    self.total_bytes += nbytes
+                    future = pool.submit(diff_and_compress, name, payload, nbytes, pinned)
+                    submitted = True  # the worker now owns returning the buffer
+                    inflight.append(future)
+                finally:
+                    if buf is not None and not submitted:
+                        free_q.put(buf)
                 if len(inflight) >= 2 * NUM_WORKERS:
                     collect(inflight.popleft())
             while inflight:
@@ -299,6 +303,21 @@ class UpdateWeightFromDiskDelta:
                 100.0 * changed / max(total, 1),
                 wire / 1e9,
             )
+
+
+def _make_pinned_pool(max_bytes: int) -> queue.Queue:
+    """Limit this pool's requested pinned storage to 8 GiB, excluding other CPU state."""
+    free_q: queue.Queue = queue.Queue()
+    num_buffers = min(2 * NUM_WORKERS, (8 << 30) // max_bytes) if max_bytes > 0 else 0
+    try:
+        for _ in range(num_buffers):
+            free_q.put(torch.empty(max_bytes, dtype=torch.uint8, pin_memory=True))
+    except (RuntimeError, MemoryError) as e:
+        # Release partial allocations before falling back to pageable copies.
+        while not free_q.empty():
+            free_q.get_nowait()
+        logger.warning("pinned host buffers unavailable (%s); using pageable .cpu()", e)
+    return free_q
 
 
 def _atomic_write(path: str, data: bytes) -> None:
