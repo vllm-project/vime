@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import io
 import json
 import sys
 from argparse import Namespace
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 _tests_root = Path(__file__).resolve().parent
 if str(_tests_root) not in sys.path:
@@ -134,7 +135,7 @@ def _generate_response(
     request_spec_decode_stats: dict[str, int] | None = None,
     sampling_mask: list[list[int]] | None = None,
 ) -> dict:
-    tids = token_ids or [50, 51]
+    tids = [50, 51] if token_ids is None else token_ids
     response = {
         "choices": [
             {
@@ -247,20 +248,75 @@ def test_build_inference_sampling_params_forwards_disabled_top_k():
 
 
 @pytest.mark.unit
-def test_inference_generate_tokens_and_logprobs_aligns_partial_content():
-    token_ids, log_probs = mod._inference_generate_tokens_and_logprobs(
-        {
-            "token_ids": [11, 12, 13],
-            "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
-        }
-    )
-    assert token_ids == [11, 12, 13]
-    assert log_probs == [-0.1, -0.2, 0.0]
+def test_inference_generate_tokens_and_logprobs_preserves_zero_and_finite_sentinel():
+    choice = {
+        "token_ids": [11, 12, 13, 14],
+        "logprobs": {"content": [{"logprob": value} for value in [-0.1, 0.0, 0, -9999]]},
+    }
+    original = copy.deepcopy(choice)
+    token_ids, log_probs = mod._inference_generate_tokens_and_logprobs(choice)
+    assert token_ids == [11, 12, 13, 14]
+    assert log_probs == [-0.1, 0.0, 0.0, -9999.0]
+    assert all(type(value) is float for value in log_probs)
+    assert choice == original
 
 
 @pytest.mark.unit
-def test_inference_generate_tokens_and_logprobs_rejects_invalid_token_ids():
-    assert mod._inference_generate_tokens_and_logprobs({"token_ids": [1, "2"]}) == ([], [])
+@pytest.mark.parametrize("logprobs", [None, {}, {"content": None}, {"content": []}])
+def test_inference_generate_tokens_and_logprobs_accepts_empty_response(logprobs):
+    assert mod._inference_generate_tokens_and_logprobs({"token_ids": [], "logprobs": logprobs}) == ([], [])
+    assert mod._inference_generate_tokens_and_logprobs({"token_ids": []}) == ([], [])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("choice", [None, [], "private response"])
+def test_inference_generate_tokens_and_logprobs_rejects_invalid_choice(choice):
+    with pytest.raises(ValueError, match="choice must be an object"):
+        mod._inference_generate_tokens_and_logprobs(choice)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("token_ids", [None, 1, "12", [1, "2"], [True], [False], [-1], [1.5]])
+def test_inference_generate_tokens_and_logprobs_rejects_invalid_token_ids(token_ids):
+    with pytest.raises(ValueError, match="token_ids must be a list of non-negative integers"):
+        mod._inference_generate_tokens_and_logprobs({"token_ids": token_ids})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("logprobs", [None, [], "private metadata", {}, {"content": None}, {"content": {}}])
+def test_inference_generate_tokens_and_logprobs_rejects_missing_or_invalid_content(logprobs):
+    with pytest.raises(ValueError, match="logprobs"):
+        mod._inference_generate_tokens_and_logprobs({"token_ids": [11], "logprobs": logprobs})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("token_ids,content_length", [([11], 0), ([11, 12], 1), ([11], 2), ([], 1)])
+def test_inference_generate_tokens_and_logprobs_rejects_length_mismatch(token_ids, content_length):
+    with pytest.raises(ValueError, match="token/logprob length mismatch"):
+        mod._inference_generate_tokens_and_logprobs(
+            {"token_ids": token_ids, "logprobs": {"content": [{"logprob": -0.1}] * content_length}}
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("entry", [{}, None, [], "private entry"])
+def test_inference_generate_tokens_and_logprobs_rejects_missing_entry_value(entry):
+    with pytest.raises(ValueError, match="missing logprob at token index 0"):
+        mod._inference_generate_tokens_and_logprobs({"token_ids": [11], "logprobs": {"content": [entry]}})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", [None, True, False, "-0.1", "private value", [], {}])
+def test_inference_generate_tokens_and_logprobs_rejects_non_numeric_value(value):
+    with pytest.raises(ValueError, match="non-numeric logprob at token index 0"):
+        mod._inference_generate_tokens_and_logprobs({"token_ids": [11], "logprobs": {"content": [{"logprob": value}]}})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), 10**400])
+def test_inference_generate_tokens_and_logprobs_rejects_non_finite_value(value):
+    with pytest.raises(ValueError, match="non-finite logprob at token index 0"):
+        mod._inference_generate_tokens_and_logprobs({"token_ids": [11], "logprobs": {"content": [{"logprob": value}]}})
 
 
 @pytest.mark.unit
@@ -380,6 +436,118 @@ def test_generate_text_path_updates_sample(patch_generate_state, monkeypatch):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("sample_kind", ["text", "multimodal", "continuation"])
+@pytest.mark.parametrize("malformed", ["missing", "short", "entry", "tokens", "choices"])
+def test_generate_and_rm_rejects_metadata_before_training_data_or_reward_mutation(
+    patch_generate_state, monkeypatch, sample_kind, malformed
+):
+    response = _generate_response([50001, 50002])
+    response["id"] = "private server response id"
+    response["choices"][0]["text"] = "private generated text"
+    choice = response["choices"][0]
+    if malformed == "missing":
+        choice.pop("logprobs")
+    elif malformed == "short":
+        choice["logprobs"]["content"].pop()
+    elif malformed == "entry":
+        choice["logprobs"]["content"][1] = {"logprob": "private invalid value"}
+    elif malformed == "tokens":
+        choice["token_ids"][1] = "private invalid token"
+    else:
+        response["choices"] = []
+
+    post_mock = AsyncMock(return_value=response)
+    monkeypatch.setattr(mod, "post", post_mock)
+    hooks_mock = AsyncMock()
+    reward_mock = AsyncMock()
+    monkeypatch.setattr(mod, "apply_rollout_sample_hooks", hooks_mock)
+    monkeypatch.setattr(mod, "async_rm", reward_mock)
+
+    sample = Sample(index=7, prompt="private prompt text")
+    if sample_kind == "multimodal":
+        state = _PatchedGenerateState(_rollout_args())
+        state.processor = _FakeProcessor()
+        monkeypatch.setattr(mod, "GenerateState", lambda args: state)
+        sample.multimodal_inputs = {"images": ["private image"]}
+        monkeypatch.setattr(mod, "build_multimodal_messages", lambda *_args: [{"role": "user", "content": []}])
+        post_mock.side_effect = [{"token_ids": [10, 20, 30]}, response]
+    elif sample_kind == "continuation":
+        sample.tokens = [97, 98, 99]
+        sample.append_response_tokens(tokens=[50], log_probs=[-0.1], text="2")
+        sample.append_response_tokens(tokens=[60], trainable=False, text="tool result")
+
+    original = copy.deepcopy(sample.to_dict())
+    append_mock = Mock(side_effect=AssertionError("invalid metadata reached Sample.append_response_tokens"))
+    monkeypatch.setattr(Sample, "append_response_tokens", append_mock)
+
+    with pytest.raises(ValueError, match="Invalid vLLM generation metadata") as caught:
+        asyncio.run(mod.generate_and_rm(_rollout_args(), sample, _default_sampling_params()))
+
+    # The existing tracing decorator records the failed attempt on a dynamic
+    # attribute. Prompt, response, and all training fields remain unchanged.
+    actual = sample.to_dict()
+    actual.pop("trace", None)
+    assert actual == original
+    append_mock.assert_not_called()
+    hooks_mock.assert_not_awaited()
+    reward_mock.assert_not_awaited()
+    message = str(caught.value)
+    request_id = post_mock.await_args_list[-1].kwargs["headers"]["x-request-id"]
+    assert f"request_id={request_id}" in message
+    assert "private" not in message
+    assert "50001" not in message
+    if sample_kind == "multimodal":
+        assert post_mock.await_count == 2
+        assert post_mock.await_args_list[-1].args[1]["token_ids"] == [10, 20, 30]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("finish_reason", ["stop", "length", "abort", "cancelled"])
+def test_generate_accepts_empty_terminal_without_logprobs(patch_generate_state, monkeypatch, finish_reason):
+    response = _generate_response([])
+    response["choices"][0].pop("logprobs")
+    response["choices"][0]["finish_reason"] = finish_reason
+    monkeypatch.setattr(mod, "post", AsyncMock(return_value=response))
+
+    sample = Sample(prompt="abc")
+    result = asyncio.run(mod.generate(_rollout_args(), sample, _default_sampling_params()))
+
+    assert result.tokens == [97, 98, 99]
+    assert result.response_length == 0
+    assert result.response == ""
+    assert result.rollout_log_probs == []
+    expected_status = {
+        "stop": Sample.Status.COMPLETED,
+        "length": Sample.Status.TRUNCATED,
+        "abort": Sample.Status.ABORTED,
+        "cancelled": Sample.Status.ABORTED,
+    }[finish_reason]
+    assert result.status == expected_status
+
+
+@pytest.mark.unit
+def test_generate_and_rm_keeps_tool_zeros_and_real_generated_zero(patch_generate_state, monkeypatch):
+    response = _generate_response([51, 52])
+    response["choices"][0]["logprobs"]["content"] = [{"logprob": 0.0}, {"logprob": -9999}]
+    monkeypatch.setattr(mod, "post", AsyncMock(return_value=response))
+    reward_mock = AsyncMock(return_value=0.5)
+    monkeypatch.setattr(mod, "async_rm", reward_mock)
+
+    sample = Sample(prompt="abc", tokens=[97, 98, 99])
+    sample.append_response_tokens(tokens=[50], log_probs=[-0.1], text="2")
+    sample.append_response_tokens(tokens=[60], trainable=False, text="tool result")
+    result = asyncio.run(mod.generate_and_rm(_rollout_args(), sample, _default_sampling_params()))
+
+    assert result.tokens == [97, 98, 99, 50, 60, 51, 52]
+    assert result.loss_mask == [1, 0, 1, 1]
+    assert result.rollout_log_probs == [-0.1, 0.0, 0.0, -9999.0]
+    assert result.response_length == 4
+    assert result.status == Sample.Status.COMPLETED
+    assert result.reward == 0.5
+    reward_mock.assert_awaited_once()
+
+
+@pytest.mark.unit
 def test_generate_streaming_records_weight_version(patch_generate_state, monkeypatch):
     from vime.rollout import vllm_streaming_rollout as streaming
 
@@ -469,7 +637,8 @@ def test_generate_consistent_hash_header(patch_generate_state, monkeypatch):
     )
 
     headers = post_mock.await_args_list[0].kwargs.get("headers")
-    assert headers == {"x-session-id": "sess-42"}
+    assert headers["x-session-id"] == "sess-42"
+    assert headers["x-request-id"]
 
 
 @pytest.mark.unit
@@ -519,7 +688,7 @@ def test_generate_applies_routed_experts(patch_generate_state, monkeypatch):
                     "token_ids": [50, 51],
                     "finish_reason": "stop",
                     "routed_experts": _encode_routed(routed_rows),
-                    "logprobs": {"content": [{}, {}]},
+                    "logprobs": {"content": [{"logprob": 0.0}, {"logprob": 0.0}]},
                 }
             ],
             "usage": {},
@@ -884,6 +1053,49 @@ def test_abort_collects_partial_samples_when_partial_rollout(patch_generate_stat
 
     assert aborted_samples == [[sample]]
     assert sample.metadata["start_rollout_id"] == 7
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("has_continuation", [False, True])
+def test_generate_preserves_existing_multimodal_canonical_tokens_without_cached_train_inputs(
+    patch_generate_state, monkeypatch, has_continuation
+):
+    state = _PatchedGenerateState(_rollout_args())
+    state.processor = _FakeProcessor()
+    monkeypatch.setattr(mod, "GenerateState", lambda args: state)
+    monkeypatch.setattr(mod, "build_multimodal_messages", lambda *_args: [{"role": "user", "content": []}])
+    # The local processor yields [10,20,30], while the restored sample is canonical.
+    post_mock = AsyncMock(side_effect=[{"token_ids": [10, 20, 30]}, _generate_response([51])])
+    monkeypatch.setattr(mod, "post", post_mock)
+    sample = Sample(prompt="image", tokens=[10, 20, 30, 40], multimodal_inputs={"images": ["image"]})
+    if has_continuation:
+        sample.append_response_tokens(tokens=[50], log_probs=[-0.1], text="2")
+    original_tokens = list(sample.tokens)
+    assert sample.multimodal_train_inputs is None
+
+    result = asyncio.run(mod.generate(_rollout_args(), sample, _default_sampling_params()))
+
+    assert post_mock.await_args_list[-1].args[1]["token_ids"] == original_tokens
+    assert result.tokens == original_tokens + [51]
+    assert result.multimodal_train_inputs == {"pixel_values": [[1.0]]}
+
+
+@pytest.mark.unit
+def test_generate_exhausted_budget_preserves_prepared_multimodal_inputs(patch_generate_state, monkeypatch):
+    state = _PatchedGenerateState(_rollout_args())
+    state.processor = _FakeProcessor()
+    monkeypatch.setattr(mod, "GenerateState", lambda args: state)
+    post_mock = AsyncMock()
+    monkeypatch.setattr(mod, "post", post_mock)
+    sample = Sample(prompt="image", tokens=[10, 20, 30], multimodal_inputs={"images": ["image"]})
+    sample.append_response_tokens(tokens=[50], log_probs=[-0.1], text="2")
+
+    result = asyncio.run(mod.generate(_rollout_args(), sample, _default_sampling_params(max_new_tokens=1)))
+
+    assert result.status == Sample.Status.TRUNCATED
+    assert result.tokens == [10, 20, 30, 50]
+    assert result.multimodal_train_inputs == {"pixel_values": [[1.0]]}
+    post_mock.assert_not_awaited()
 
 
 if __name__ == "__main__":

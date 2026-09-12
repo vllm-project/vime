@@ -5,6 +5,7 @@ import inspect
 import io
 import json
 import logging
+import math
 import uuid
 from argparse import Namespace
 from collections.abc import Callable
@@ -233,18 +234,46 @@ def _build_inference_sampling_params(sampling_params: dict[str, Any]) -> dict[st
 
 
 def _inference_generate_tokens_and_logprobs(choice: dict[str, Any]) -> tuple[list[int], list[float]]:
-    """Extract aligned token ids and log probabilities from a vLLM choice."""
+    """Validate a non-streaming trainable choice without inventing log probabilities.
+
+    Empty terminal responses need no probabilities. Nonempty responses must
+    provide one numeric, finite log probability per token, including real zeros
+    and vLLM's finite sentinel values. Tool/environment tokens use
+    ``Sample.append_response_tokens(trainable=False)`` instead of this parser.
+    """
+    if not isinstance(choice, dict):
+        raise ValueError("choice must be an object")
     token_ids = choice.get("token_ids")
-    if not isinstance(token_ids, list) or not all(isinstance(token_id, int) for token_id in token_ids):
-        return [], []
+    if not isinstance(token_ids, list) or any(type(token_id) is not int or token_id < 0 for token_id in token_ids):
+        raise ValueError("token_ids must be a list of non-negative integers")
 
     logprobs = choice.get("logprobs")
-    content = logprobs.get("content") if isinstance(logprobs, dict) else []
-    content = content or []
-    log_probs = [
-        float(content[index].get("logprob", 0.0)) if index < len(content) and isinstance(content[index], dict) else 0.0
-        for index in range(len(token_ids))
-    ]
+    if not token_ids and logprobs is None:
+        return [], []
+    if not isinstance(logprobs, dict):
+        raise ValueError("logprobs must be an object for nonempty trainable token_ids")
+    content = logprobs.get("content")
+    if not token_ids and content is None:
+        return [], []
+    if not isinstance(content, list):
+        raise ValueError("logprobs.content must be a list")
+    if len(content) != len(token_ids):
+        raise ValueError(f"token/logprob length mismatch: {len(token_ids)} tokens, {len(content)} entries")
+
+    log_probs = []
+    for index, entry in enumerate(content):
+        if not isinstance(entry, dict) or "logprob" not in entry:
+            raise ValueError(f"missing logprob at token index {index}")
+        value = entry["logprob"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"non-numeric logprob at token index {index}")
+        try:
+            value = float(value)
+        except OverflowError as exc:
+            raise ValueError(f"non-finite logprob at token index {index}") from exc
+        if not math.isfinite(value):
+            raise ValueError(f"non-finite logprob at token index {index}")
+        log_probs.append(value)
     return token_ids, log_probs
 
 
@@ -348,7 +377,10 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         sample.status == Sample.Status.PENDING or sample.status == Sample.Status.ABORTED
     ), f"Sample status is {sample.status}"
 
-    prompt_ids = _prepare_prompt_ids(sample, state.tokenizer, state.processor)
+    # Prompt preparation may populate multimodal_train_inputs. Keep these
+    # changes local until the response's trainable metadata has been validated.
+    prepared_sample = copy.copy(sample)
+    prompt_ids = _prepare_prompt_ids(prepared_sample, state.tokenizer, state.processor)
 
     sampling_params["max_new_tokens"] -= sample.response_length
 
@@ -356,6 +388,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         sampling_params["max_new_tokens"] >= 0
     ), f"max_new_tokens: {sampling_params['max_new_tokens']} should not be less than 0"
     if sampling_params["max_new_tokens"] == 0:
+        sample.multimodal_train_inputs = prepared_sample.multimodal_train_inputs
         sample.status = Sample.Status.TRUNCATED
         return sample
 
@@ -363,14 +396,12 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
 
     messages = build_multimodal_messages(sample.prompt, sample.multimodal_inputs)
 
-    if not sample.tokens:
-        sample.tokens = prompt_ids
-
+    request_id = str(uuid.uuid4())
     # Use session_id for consistent hashing routing (vLLM router)
-    headers = None
+    headers = {"x-request-id": request_id}
     if sample.session_id:
         if getattr(args, "router_policy", None) == "consistent_hash":
-            headers = {"x-session-id": sample.session_id}
+            headers["x-session-id"] = sample.session_id
 
     if messages:
         render_payload = {
@@ -382,7 +413,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         with trace_span(sample, "vllm_mm_render", attrs={"model": args.hf_checkpoint}):
             render_data = await post(render_url, render_payload, headers=headers)
         generate_body = _mm_render_response_to_generate_body(render_data, args.hf_checkpoint)
-        canonical_token_ids = _coerce_flat_int_token_ids(sample.tokens)
+        canonical_token_ids = _coerce_flat_int_token_ids(sample.tokens) if sample.tokens else prompt_ids
         if canonical_token_ids:
             _align_mm_feature_placeholders_to_tokens(generate_body, canonical_token_ids)
             generate_body["token_ids"] = canonical_token_ids
@@ -403,10 +434,15 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
             if hasattr(span, "update"):
                 span.update(build_vllm_meta_trace_attrs(output))
 
-    choice = output["choices"][0]
-
-    # Parse token_ids and logprobs from vLLM response
-    new_response_tokens, new_response_log_probs = _inference_generate_tokens_and_logprobs(choice)
+    # Never include prompts, token values, or raw response metadata in errors.
+    try:
+        choices = output.get("choices") if isinstance(output, dict) else None
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("response must contain a nonempty choices list")
+        choice = choices[0]
+        new_response_tokens, new_response_log_probs = _inference_generate_tokens_and_logprobs(choice)
+    except ValueError as exc:
+        raise ValueError(f"Invalid vLLM generation metadata (request_id={request_id}): {exc}") from exc
 
     # Decode text from token_ids
     skip_sp = sampling_params.get("skip_special_tokens")
@@ -454,6 +490,9 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
             offsets.append(offsets[-1] + len(token_ids))
         meta["top_p_token_offsets"] = offsets
 
+    if not sample.tokens:
+        sample.tokens = prompt_ids
+    sample.multimodal_train_inputs = prepared_sample.multimodal_train_inputs
     sample.append_response_tokens(
         args,
         tokens=new_response_tokens,
