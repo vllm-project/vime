@@ -35,15 +35,21 @@ index 63b4cc37..00394727 100644
              # Check the actual parameter name to determine the correct parallelism type
              if self.megatron_param and (
                  self.megatron_param.endswith("layer_norm_weight") or self.megatron_param.endswith("layer_norm_bias")
-@@ -1313,7 +1318,7 @@ class AutoMapping(MegatronParamMapping[torch.Tensor]):
+@@ -1313,9 +1318,10 @@ class AutoMapping(MegatronParamMapping[torch.Tensor]):
              return "replicated"
 
          # Check parallel_mode for TELinear
 -        if module_type == "TELinear":
 +        if module_type == "TELinear" or module_type == "MindSpeedTELinear":
-             if module.parallel_mode == "column":
++            parallel_mode = getattr(module, "parallel_mode", None)
+-            if module.parallel_mode == "column":
++            if parallel_mode == "column":
                  return "column"
-             elif module.parallel_mode == "row":
+-            elif module.parallel_mode == "row":
++            elif parallel_mode == "row":
+                 return "row"
+             else:
+                 return "replicated"
 diff --git a/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py b/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py
 index 7360857d..a6c00358 100644
 --- a/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py
