@@ -1,0 +1,250 @@
+# vime on AMD ROCm 7.14.
+#
+# Build:
+#   DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm7.14 \
+#     --build-arg BUILD_ROCM_ARCH=gfx942 -t vime-rocm714 .
+
+ARG BASE_IMAGE=rocm/primus:v26.4
+FROM ${BASE_IMAGE}
+
+# ======================================== Arguments =============================================
+
+ARG VIME_REPO=https://github.com/vllm-project/vime
+ARG VIME_REF=main
+ARG VLLM_REPO=https://github.com/vllm-project/vllm
+ARG VLLM_TAG=v0.29.0
+ARG VLLM_COMMIT=98dff2a81d747d1dba01a47f939f48c3526d4206
+ARG MEGATRON_REPO=https://github.com/NVIDIA/Megatron-LM
+ARG MEGATRON_COMMIT=1dcf0dafa884ad52ffb243625717a3471643e087
+ARG TMS_REPO=https://github.com/fzyzcjy/torch_memory_saver.git
+ARG TMS_COMMIT=d64a639
+ARG PATCH_VERSION=latest
+
+ARG BUILD_ROCM_ARCH=gfx942
+ARG MAX_JOBS=
+
+# ======================================== Setup =============================================
+
+ENV VIME_ROOT=/opt/vime \
+    MEGATRON_ROOT=/opt/Megatron-LM \
+    VLLM_ROOT=/opt/vllm \
+    ROCM_CONSTRAINTS=/opt/rocm_constraints.txt \
+    PIP_ROOT_USER_ACTION=ignore \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /opt/
+
+RUN set -eux; \
+    SP="$(python3 -c 'import site; print(site.getsitepackages()[0])')"; \
+    ln -sfn "${SP}/_rocm_sdk_core/share/amd_smi/amdsmi" "${SP}/amdsmi"; \
+    ln -sf "${SP}/_rocm_sdk_devel/lib/libamdhip64.so" /usr/lib/libamdhip64.so; \
+    python3 -c "import amdsmi; print('amdsmi', amdsmi.__file__)"
+
+# setuptools is capped below 80 because vLLM's setup.py at this tag still uses APIs removed there.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install --upgrade pip && \
+    python3 -m pip install --upgrade "setuptools>=77.0.3,<80.0.0" setuptools_scm setuptools-rust \
+        wheel ninja packaging pybind11
+
+# ======================================== vLLM ================================================
+RUN set -eux; \
+    mkdir -p "${VLLM_ROOT}"; \
+    cd "${VLLM_ROOT}"; \
+    git init -q .; \
+    git remote add origin "${VLLM_REPO}"; \
+    git fetch --depth 1 origin "refs/tags/${VLLM_TAG}:refs/tags/${VLLM_TAG}"; \
+    git checkout -q --detach "refs/tags/${VLLM_TAG}"; \
+    test "$(git rev-parse HEAD)" = "${VLLM_COMMIT}"; \
+    git describe --tags
+
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/pip \
+    set -eux; \
+    cd "${VLLM_ROOT}"; \
+    export SETUPTOOLS_SCM_PRETEND_VERSION="${VLLM_TAG#v}"; \
+    export PYTORCH_ROCM_ARCH="${BUILD_ROCM_ARCH}"; \
+    export ROCM_AMDGPU_TARGETS="${BUILD_ROCM_ARCH}"; \
+    export HIP_ARCHITECTURES="${BUILD_ROCM_ARCH}"; \
+    export MAX_JOBS="${MAX_JOBS:-$(nproc)}"; \
+    export CCACHE_DIR=/root/.cache/ccache; \
+    export CCACHE_MAXSIZE=50G; \
+    export CMAKE_C_COMPILER_LAUNCHER=ccache; \
+    export CMAKE_CXX_COMPILER_LAUNCHER=ccache; \
+    export CMAKE_HIP_COMPILER_LAUNCHER=ccache; \
+    python3 -m pip install -r requirements/rocm.txt; \
+    python3 setup.py develop --no-deps; \
+    python3 -c "import vllm; print('vllm', vllm.__version__, vllm.__file__)"; \
+    ccache -s
+
+RUN python3 - "${ROCM_CONSTRAINTS}" <<'PY'
+import importlib.metadata as metadata
+import sys
+
+# Packages whose build flavour (ROCm vs CUDA) matters. Anything absent is skipped.
+GUARDED = ["torch", "torchvision", "torchaudio", "triton", "vllm",
+           "flash_attn", "transformer_engine", "apex", "aiter"]
+
+lines = []
+for package in GUARDED:
+    try:
+        lines.append(f"{package}=={metadata.version(package)}")
+    except metadata.PackageNotFoundError:
+        continue
+if not any(line.startswith("torch==") for line in lines):
+    sys.exit("refusing to write constraints: torch is not installed")
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write("\n".join(lines) + "\n")
+print("constraints written to " + sys.argv[1])
+print("\n".join(lines))
+PY
+
+# ======================================== Megatron-LM =========================================
+RUN set -eux; \
+    mkdir -p "${VIME_ROOT}"; \
+    cd "${VIME_ROOT}"; \
+    git init -q .; \
+    git remote add origin "${VIME_REPO}"; \
+    git fetch --depth 1 origin "${VIME_REF}"; \
+    git checkout -q --detach FETCH_HEAD; \
+    RESOLVED="$(git rev-parse HEAD)"; \
+    echo "vime ${VIME_REF} resolved to ${RESOLVED}"; \
+    git log -1 --format='vime %h %ci %s'; \
+    if printf '%s' "${VIME_REF}" | grep -Eq '^[0-9a-f]{40}$'; then \
+        test "${RESOLVED}" = "${VIME_REF}"; \
+    fi
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    set -eux; \
+    mkdir -p "${MEGATRON_ROOT}"; \
+    cd "${MEGATRON_ROOT}"; \
+    git init -q .; \
+    git remote add origin "${MEGATRON_REPO}"; \
+    (git fetch --depth 1 origin "${MEGATRON_COMMIT}" || git fetch origin); \
+    git checkout -q --detach "${MEGATRON_COMMIT}"; \
+    test "$(git rev-parse HEAD)" = "${MEGATRON_COMMIT}"; \
+    patch --batch --forward -p1 -i "${VIME_ROOT}/docker/amd_patch/${PATCH_VERSION}/megatron.patch"; \
+    patch --batch --forward -p1 -i "${VIME_ROOT}/docker/amd_patch/${PATCH_VERSION}/amd_megatron_fused_kernels_init.patch"; \
+    ! find . -name '*.rej' | grep -q . ; \
+    ! grep -Rqn '^<<<<<<< ' megatron --include='*.py' ; \
+    python3 -m pip install -c "${ROCM_CONSTRAINTS}" -e . --no-deps
+
+# ====================================== Python dependencies ====================================
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install -c "${ROCM_CONSTRAINTS}" --ignore-installed PyJWT && \
+    python3 -m pip install -c "${ROCM_CONSTRAINTS}" "flash-linear-attention==0.4.2" && \
+    python3 -m pip install -c "${ROCM_CONSTRAINTS}" megatron-energon --no-deps && \
+    python3 -m pip install -c "${ROCM_CONSTRAINTS}" multi-storage-client --no-deps
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    set -eux; \
+    export ROCM_PATH="$(python3 -c 'import site; print(site.getsitepackages()[0])')/_rocm_sdk_devel"; \
+    export PYTORCH_ROCM_ARCH="${BUILD_ROCM_ARCH}"; \
+    export HIPCC_COMPILE_FLAGS_APPEND="--offload-arch=${BUILD_ROCM_ARCH} -D__HIP_PLATFORM_AMD__"; \
+    export CFLAGS="-D__HIP_PLATFORM_AMD__"; \
+    export CXXFLAGS="-D__HIP_PLATFORM_AMD__"; \
+    python3 -m pip install -c "${ROCM_CONSTRAINTS}" "git+${TMS_REPO}@${TMS_COMMIT}" \
+        --no-cache-dir --force-reinstall --no-deps; \
+    python3 -c "import torch_memory_saver; print('torch_memory_saver ok')"
+
+# The dry run is a guard, not decoration: it aborts the build if the resolver has decided to install
+# a PyPI torch or vllm wheel, which is the single most common way a working ROCm image becomes a broken one.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    set -eux; \
+    cd "${VIME_ROOT}"; \
+    python3 -m pip install --dry-run -c "${ROCM_CONSTRAINTS}" -r requirements.txt \
+        2>&1 | tee /opt/vime_requirements_dryrun.log | tail -5; \
+    if grep -qiE "Would install .*(^| )(torch|vllm)-[0-9]" /opt/vime_requirements_dryrun.log; then \
+        echo "ABORT: vime requirements would replace the ROCm torch/vllm" >&2; exit 1; \
+    fi; \
+    python3 -m pip install -c "${ROCM_CONSTRAINTS}" -r requirements.txt
+
+# Megatron requires NumPy 1.x: this base ships 2.3.5 and Megatron-LM asserts numpy < 2 at import,
+# killing the trainer actor after the vLLM engine is already up. 
+RUN --mount=type=cache,target=/root/.cache/pip \
+    set -eux; \
+    python3 -m pip uninstall -y tilelang || true; \
+    python3 -m pip install "numpy==1.26.4"; \
+    python3 -c "import numpy; assert numpy.__version__.startswith('1.26.'), numpy.__version__; print('numpy', numpy.__version__)"
+
+# ====================================== Install main package ===================================
+RUN --mount=type=cache,target=/root/.cache/pip \
+    cd "${VIME_ROOT}" && python3 -m pip install -c "${ROCM_CONSTRAINTS}" -e . --no-deps
+
+RUN set -eux; \
+    SP="$(python3 -c 'import site; print(site.getsitepackages()[0])')"; \
+    printf '%s\n%s\n' "${VIME_ROOT}" "${MEGATRON_ROOT}" > "${SP}/zz-vime-port-roots.pth"; \
+    python3 -c "import megatron.training, megatron.core, vime; print('megatron.training', megatron.training.__file__)"
+
+# ====================================== Runtime environment ====================================
+ENV HSA_ENABLE_IPC_MODE_LEGACY=1
+ENV CUDA_DEVICE_MAX_CONNECTIONS=1
+ENV RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1
+ENV RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1
+ENV VLLM_USE_MEGA_AOT_ARTIFACT=0
+
+# ====================================== Verification ===========================================
+# Fail the build, not the first training run. This asserts that the base image's ROCm torch was not
+# replaced by a PyPI CUDA wheel, that VLLM_TAG is what actually got installed, and that the vLLM API
+# window vime needs is present at BOTH ends — the cli_args module this vime revision imports, and
+# the NCCLTrainerInitInfo class that v0.27.1 predates. GPU assertions are not possible here because
+# `docker build` has no devices; the last line prints the device count for a run-time check.
+RUN python3 - "${VLLM_TAG#v}" <<'PY'
+import importlib
+import pathlib
+import sys
+import torch
+
+expected_vllm = sys.argv[1]
+failed = []
+
+def check(label, ok, detail=""):
+    print(f"[{'ok  ' if ok else 'FAIL'}] {label}{'  — ' + detail if detail else ''}")
+    if not ok:
+        failed.append(label)
+
+check("torch is a ROCm build", torch.version.hip is not None,
+      f"torch {torch.__version__}, hip {torch.version.hip}")
+check("torch is not a CUDA wheel", "+rocm" in torch.__version__, torch.__version__)
+
+for module_name, prefix in [("vllm", expected_vllm), ("numpy", "1.26.")]:
+    module = importlib.import_module(module_name)
+    check(f"{module_name} version", module.__version__.startswith(prefix),
+          f"{module.__version__} (expected prefix {prefix})")
+
+for module_name in ["vime", "megatron.core", "megatron.training", "ray", "torch_memory_saver"]:
+    try:
+        importlib.import_module(module_name)
+        check(f"import {module_name}", True)
+    except Exception as exc:  # noqa: BLE001
+        check(f"import {module_name}", False, f"{type(exc).__name__}: {exc}")
+
+# The cli_args end of the API window MOVES with vime's mainline, so assert the location this
+# revision actually imports rather than a hardcoded one; the check then stays meaningful as main
+# advances. NCCLTrainerInitInfo is the other end: v0.27.1 predates it.
+source = pathlib.Path("/opt/vime/vime/backends/vllm_utils/arguments.py").read_text()
+if "entrypoints.launchers.cli_args" in source:
+    cli_args_module = "vllm.entrypoints.launchers.cli_args"
+else:
+    cli_args_module = "vllm.entrypoints.openai.cli_args"
+print(f"[info] this vime revision imports {cli_args_module}")
+
+for module_name, symbol in [
+    (cli_args_module, "FrontendArgs"),
+    ("vllm.distributed.weight_transfer.nccl_engine", "NCCLTrainerInitInfo"),
+    ("vllm.distributed.weight_transfer.ipc_engine", "IPCTrainerInitInfo"),
+    ("vllm.distributed.weight_transfer.factory", "WeightTransferTrainerFactory"),
+]:
+    try:
+        check(f"{module_name}.{symbol}", hasattr(importlib.import_module(module_name), symbol))
+    except Exception as exc:  # noqa: BLE001
+        check(f"{module_name}.{symbol}", False, f"{type(exc).__name__}: {exc}")
+
+print(f"[info] visible devices at build time: {torch.cuda.device_count()} "
+      "(expected 0; check at run time)")
+sys.exit(f"{len(failed)} check(s) failed: {failed}" if failed else 0)
+PY
+
+WORKDIR /opt/vime
+ENTRYPOINT ["sleep"]
+CMD ["infinity"]
