@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
+import os
 import time
 from collections.abc import Callable
 from typing import Any
@@ -500,17 +502,54 @@ async def call_vllm_generate(
     logger = adapter.logger
     sp = _sampling_params(session, body, max_token_keys=adapter.max_token_keys, stop_keys=adapter.stop_keys)
 
+    # Instrument prompt growth: turn index vs prompt size. The intercept is the
+    # fixed overhead (system prompt + tool schemas), the slope is what actually
+    # accumulates. Needed because observation size and turn count have both been
+    # ruled out as the cause of context overflow.
+    # Context budgeting is the least obvious failure mode in this loop: the
+    # fixed cost of the system prompt plus tool schemas can dominate the window
+    # before any conversation accumulates (measured: 24118 of 40960 tokens on
+    # turn 1, of which 18730 was tool schemas). Log the per-turn size at DEBUG
+    # so that budget is inspectable without noise in a normal run.
+    if logger.isEnabledFor(logging.DEBUG):
+        _n = adapter._sid_turn_count.get(session_id, 0)
+        logger.debug("[agent.adapters] prompt_growth sid_turn=%d prompt_tokens=%d", _n, len(prompt_ids))
+        if _n <= 1 and not getattr(session, "_logged_schema", False):
+            session._logged_schema = True
+            try:
+                _tools = (body or {}).get("tools") or []
+                _sys = (body or {}).get("system")
+                _st = len(adapter.tokenizer.encode(_sys if isinstance(_sys, str) else json.dumps(_sys))) if _sys else 0
+                logger.debug("[agent.adapters] system_prompt_tokens=%d n_tools=%d", _st, len(_tools))
+                for _t in _tools:
+                    _nm = _t.get("name") or (_t.get("function") or {}).get("name") or "?"
+                    logger.debug("[agent.adapters] tool_cost name=%s tokens=%d",
+                                 _nm, len(adapter.tokenizer.encode(json.dumps(_t))))
+            except Exception as _e:
+                logger.debug("[agent.adapters] schema breakdown failed: %s", _e)
+
     if session.max_context_tokens > 0:
-        remaining_context = session.max_context_tokens - len(prompt_ids)
-        if remaining_context <= 0:
+        # Returning an empty TurnRecord here used to kill the run: the CLI got a
+        # zero-token reply and exited 1. Growth is not uniform -- measured means
+        # rise ~1.5k/turn while individual turns jump to 100k+ -- so no turn cap
+        # can prevent this. Truncate the middle of the prompt instead, keeping
+        # the head (system prompt and tools) and the most recent tail, and
+        # always leave room to generate.
+        # Cap the reserve at half the window so a small max_context_tokens
+        # cannot drive _budget to zero or negative, which would make the
+        # slices below silently wrong.
+        _reserve = min(1024, max(256, session.max_context_tokens // 8),
+                       max(1, session.max_context_tokens // 2))
+        _budget = session.max_context_tokens - _reserve
+        if len(prompt_ids) > _budget:
+            _head = _budget // 4
+            _tail = _budget - _head
             logger.warning(
-                "[%s] sid=%s prompt exceeds max_context_tokens (%d >= %d)",
-                adapter.log_prefix,
-                session_id,
-                len(prompt_ids),
-                session.max_context_tokens,
+                "[%s] sid=%s prompt %d > budget %d; truncating middle (head=%d tail=%d)",
+                adapter.log_prefix, session_id, len(prompt_ids), _budget, _head, _tail,
             )
-            return TurnRecord(prompt_ids=list(prompt_ids), output_ids=[], finish_reason="length")
+            prompt_ids = list(prompt_ids[:_head]) + list(prompt_ids[-_tail:])
+        remaining_context = session.max_context_tokens - len(prompt_ids)
         sp["max_new_tokens"] = min(int(sp.get("max_new_tokens", remaining_context)), remaining_context)
 
     vllm_url = adapter.vllm_url
