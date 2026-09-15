@@ -3,28 +3,19 @@
 Used only by the test and example launch utilities (`command_utils.execute_train`), not by
 vime core: a `Platform` describes one accelerator for the purpose of *launching a job* — how
 Ray advertises its devices, the device runtime env, whether torch_dist checkpoint conversion
-works, unsupported features, and how to detect it. Adding one `register(Platform(...))` in the
-REGISTERED PLATFORMS block reuses the resolver, launcher, and the `execute_train` seam
-unchanged; but full end-to-end support for a new accelerator may still need changes in vime
-core (resource selection, backends, rollout workers), which still branches on `is_npu()`. cuda
-is the default, so the GPU path is unchanged.
+works, and how to construct the launch command. It adapts the core ``vime.platforms``
+selection to shell commands.
 
 Imports stay stdlib-only (torch imports are lazy) so the module is unit-testable in isolation;
 the actual `exec_command` calls live in `command_utils`.
 """
 
 import json
-import os
 import shlex
-from collections.abc import Callable
 from dataclasses import dataclass, field
 
 
 # ── Platform contract ──────────────────────────────────────────────────────
-
-
-def _never() -> bool:
-    return False
 
 
 @dataclass(frozen=True)
@@ -32,9 +23,7 @@ class Platform:
     name: str
     ray_args: str  # ray-start resource flags, "{n}"-templated with the device count
     env: dict = field(default_factory=dict)  # device runtime env (into runtime_env + raylet)
-    unsupported_features: frozenset = frozenset()  # declarative (e.g. {"deepep"}); not enforced by the launcher yet
-    torch_dist_convert: bool = True  # False -> load HF weights via bridge, no conversion
-    detect: Callable[[], bool] = _never  # True on this platform's hardware (detection fallback)
+    torch_dist_convert: bool = True  # False -> use native HF loading without automatic conversion
 
     def ray_start_args(self, num_devices: int) -> str:
         return self.ray_args.format(n=num_devices)
@@ -49,20 +38,7 @@ def register(platform: Platform) -> None:
     PLATFORMS[platform.name] = platform
 
 
-def registered_platforms() -> list[Platform]:
-    return list(PLATFORMS.values())
-
-
 # ── Registered platforms (add a new accelerator here) ─────────────────────────
-
-
-def _detect_npu() -> bool:
-    try:
-        from vime.utils.common import is_npu
-
-        return is_npu()
-    except (ImportError, RuntimeError):
-        return False
 
 
 register(Platform(name="cuda", ray_args="--num-gpus {n}"))  # default; other fields unused for cuda
@@ -73,9 +49,7 @@ register(
         # vime requests NPU bundles, not GPU (see ray/placement_group.py), so advertise
         # the custom NPU resource rather than Ray GPU capacity.
         ray_args="--num-gpus 0 --resources '{{\"NPU\": {n}}}'",
-        detect=_detect_npu,
-        torch_dist_convert=False,  # torch_dist conversion fails on Ascend -> bridge load
-        unsupported_features=frozenset({"deepep", "fp8_rollout"}),
+        torch_dist_convert=False,  # Keep HF tests unchanged; torch_dist has a separate opt-in test.
         env={
             "PYTHONPATH": (
                 "/root/Megatron-LM:/root/vime:"
@@ -112,15 +86,14 @@ register(
 
 
 def current_platform() -> Platform:
-    """The active platform: `VIME_TEST_DEVICE` override, else the first registered platform
-    whose `detect()` matches. cuda is the default when none match (GPU path unchanged)."""
-    override = os.environ.get("VIME_TEST_DEVICE")
-    if override:
-        return PLATFORMS[override.lower()]
-    for platform in registered_platforms():
-        if platform.detect():
-            return platform
-    return PLATFORMS["cuda"]
+    """Adapt the selected core runtime platform to the launch contract."""
+    from vime.platforms import current_platform as current_runtime_platform
+
+    selected = current_runtime_platform().name
+    try:
+        return PLATFORMS[selected]
+    except KeyError as exc:
+        raise ValueError(f"No launcher adapter is registered for platform {selected!r}") from exc
 
 
 def launch_commands(
@@ -142,6 +115,7 @@ def launch_commands(
     """
     extra_env = extra_env or {}
     all_env = {**platform.env, **extra_env}
+    all_env["VIME_PLATFORM"] = platform.name
     cmds: list = []
     cmds.append(
         "pkill -9 -f '[v]llm serve|VLL[M]::'; sleep 3; "

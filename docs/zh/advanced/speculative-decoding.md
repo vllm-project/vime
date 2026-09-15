@@ -8,14 +8,14 @@ vLLM 把投机采样的所有配置收敛到一个 JSON（`SpeculativeConfig`）
 `--vllm-speculative-config` 透传。对于有 MTP 层的模型（例如 GLM-4.7、DeepSeek-V3/R1），传入：
 
 ```bash
---vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
+--vllm-speculative-config '{"method":"mtp","num_speculative_tokens":4}'
 ```
 
 如果要使用单独训练的 draft model，在同一个 JSON 里加上 `model`（可选还可加
 `draft_tensor_parallel_size` 等）：
 
 ```bash
---vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3,"model":"/your/draft/model/path"}'
+--vllm-speculative-config '{"method":"eagle","num_speculative_tokens":4,"model":"/your/draft/model/path"}'
 ```
 
 要从头训练一个 draft model，可以参考 [TorchSpec](https://github.com/lightseekorg/TorchSpec)

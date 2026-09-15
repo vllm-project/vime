@@ -1,14 +1,14 @@
 # syntax=docker/dockerfile:1.7
 
-ARG BASE_IMAGE=quay.io/ascend/vllm-ascend
-ARG BASE_IMAGE_TAG=v0.22.1rc1-a3
+ARG BASE_IMAGE=quay.io/atlas-ci/vllm-ascend
+ARG BASE_IMAGE_TAG=v0.28.0-fd81546-a3
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 WORKDIR /root
 
 ARG MEGATRON_COMMIT=1dcf0dafa884ad52ffb243625717a3471643e087
-ARG MEGATRON_BRIDGE_COMMIT=7f0fb3456f8ffe47599b5fd167b454605d85f932
+ARG MEGATRON_BRIDGE_COMMIT=3fd3768045422d0aa5c97e90a4e6c659aea9acb9
 ARG MINDSPEED_COMMIT=fc63de5c48426dd019c3b3f39e65f5bdf56e4086
 ARG MEGATRON_ADAPTOR_COMMIT=15582addff3f3d4680e350826fa70d012b475509
 ARG TRANSFORMER_ENGINE_NPU_COMMIT=d743c83d060d5edc48867ecb9e93ec80d81860e4
@@ -35,7 +35,7 @@ ENV SOC_VERSION=$SOC_VERSION \
 # PATCH MAINTENANCE: keep patch COPY/apply operations and
 # docker/npu_patch/series.conf synchronized.
 COPY docker/npu_patch /opt/npu_patch
-COPY docker/patch/latest/megatron.patch /opt/vime_patch/megatron.patch
+COPY docker/patch/latest/megatron.patch /opt/npu_patch/megatron-common.patch
 
 RUN git config --global http.sslVerify false
 
@@ -90,9 +90,9 @@ RUN git clone https://github.com/ISEEKYAN/mbridge.git /root/mbridge && \
 # The NPU Megatron patch is based on the common Vime Megatron patch, so the
 # common patch must be applied first.
 RUN git -C /root/Megatron-LM apply --check --whitespace=nowarn \
-      /opt/vime_patch/megatron.patch && \
+      /opt/npu_patch/megatron-common.patch && \
     git -C /root/Megatron-LM apply --whitespace=nowarn \
-      /opt/vime_patch/megatron.patch && \
+      /opt/npu_patch/megatron-common.patch && \
     git -C /root/Megatron-LM apply --check --whitespace=nowarn \
       /opt/npu_patch/megatron.patch && \
     git -C /root/Megatron-LM apply --whitespace=nowarn \
@@ -132,38 +132,16 @@ RUN pip install \
 # Vime currently imports torch_memory_saver from its training actor.
 RUN git clone --depth 1 --branch 2026.6.0 \
       https://github.com/sgl-project/sgl-kernel-npu.git /root/sgl-kernel-npu && \
-    cd /root/sgl-kernel-npu && \
-    bash build.sh -a kernels && \
-    bash build.sh -a memory-saver && \
-    pip install --no-deps \
-      output/torch_memory_saver-*.whl && \
+    cd /root/sgl-kernel-npu/contrib/torch_memory_saver/python && \
+    python3 setup.py bdist_wheel && \
+    python3 -m pip install --no-deps \
+      dist/torch_memory_saver-*.whl && \
     cd /root && \
     rm -rf /root/sgl-kernel-npu
 
-# ---- fla-npu: NPU GDN (gated delta net) kernels for Qwen3.5-35B-A3B ------------
-RUN git clone -b v26.6.0 https://github.com/flashserve/flash-linear-attention-npu \
-      /root/flash-linear-attention-npu && \
-    git -C /root/flash-linear-attention-npu checkout 14c2c92
-
-RUN pip uninstall -y torch_npu && \
-    pip install torch_npu==2.10.0.post2 && \
-    cd /root/flash-linear-attention-npu && \
-    source /usr/local/Ascend/cann/set_env.sh && \
-    printf 'y' | bash install_deps.sh && \
-    pip install -r requirements.txt && \
-    python3 scripts/check_npu_env.py --build-only
-
-RUN cd /root/flash-linear-attention-npu && \
-    source /usr/local/Ascend/cann/set_env.sh && \
-    bash build.sh --soc=ascend910_93 --pkg --vendor_name=fla_npu && \
-    bash build_out/fla-npu-fla_npu_linux-aarch64.run && \
-    export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.0.0/opp/vendors/fla_npu_transformer/op_api/lib:${LD_LIBRARY_PATH} && \
-    cd torch_custom/fla_npu && \
-    bash build.sh
-
 # Minimal import check.
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    python3 -c 'import megatron, mindspeed, megatron_adaptor, transformer_engine, torch_memory_saver, vime, vllm, vllm_ascend, fla_npu;'
+    python3 -c 'import megatron, mindspeed, megatron_adaptor, transformer_engine, torch_memory_saver, vime, vllm, vllm_ascend;'
 
 WORKDIR /root/vime
 ENTRYPOINT []

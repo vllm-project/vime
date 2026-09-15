@@ -61,6 +61,11 @@ def convert_qwen2_to_hf(args, name, param):
             return [(f"model.layers.{layer_idx}.input_layernorm.weight", param)]
         elif rest == "mlp.linear_fc1.layer_norm_weight":
             return [(f"model.layers.{layer_idx}.post_attention_layernorm.weight", param)]
+        # Local spec (--transformer-impl local) uses different layernorm names
+        elif rest == "input_layernorm.weight":
+            return [(f"model.layers.{layer_idx}.input_layernorm.weight", param)]
+        elif rest == "pre_mlp_layernorm.weight":
+            return [(f"model.layers.{layer_idx}.post_attention_layernorm.weight", param)]
 
         # qk norm
         elif rest == "self_attention.q_layernorm.weight":

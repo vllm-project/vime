@@ -24,14 +24,8 @@ def execute():
     model_dir = shlex.quote(MODEL_DIR)
     prompt_data = shlex.quote(f"{DATASET_DIR}/dapo-math-17k.jsonl")
 
-    # NPU skips torch_dist conversion; HF weights load directly via bridge mode.
-    checkpoint_args = (
-        f"--hf-checkpoint {model_dir} "
-        f"--load {model_dir} "
-        f"--ref-load {model_dir} "
-        "--megatron-to-hf-mode bridge "
-        "--no-load-optim "
-    )
+    # Load HF weights through the native loader, without torch_dist conversion.
+    checkpoint_args = f"--hf-checkpoint {model_dir} --load {model_dir} --ref-load {model_dir} --no-load-optim "
 
     # Smoke-scaled rollout (num-rollout/batch/n-samples trimmed like test_qwen3_30B_A3B_npu).
     rollout_args = (
@@ -44,7 +38,7 @@ def execute():
         "--num-rollout 2 "
         "--rollout-batch-size 4 "
         "--n-samples-per-prompt 4 "
-        "--rollout-max-response-len 1024 "
+        "--rollout-max-response-len 128 "
         "--rollout-temperature 1 "
         "--global-batch-size 16 "
         "--balance-data "
@@ -89,19 +83,19 @@ def execute():
         "--use-precision-aware-optimizer "
     )
 
-    # MTP speculative decoding under cudagraph - exercises the GLM-4.7 MTP
-    # drafter's graph-friendly forward (patched via docker/npu_patch/vllm.patch).
-    mtp_args = "--mtp-num-layers 1 " "--enable-mtp-training " "--mtp-loss-scaling-factor 0.2 "
-
     vllm_args = (
+        "--vllm-additional-config '{\"weight_nz_mode\":0}' "
         "--rollout-num-gpus-per-engine 4 "
         "--vllm-gpu-memory-utilization 0.7 "
         "--vllm-enable-expert-parallel "
         "--vllm-cudagraph-capture-sizes 1 2 4 8 "
         '--vllm-speculative-config \'{"method":"mtp","num_speculative_tokens":1}\' '
     )
+    mtp_args = "--mtp-num-layers 1 --enable-mtp-training --mtp-loss-scaling-factor 0.2 "
 
     model_args = (
+        # GLM-4.7-Flash has no HF rope_scaling; MLA otherwise defaults to YaRN.
+        "--rope-type rope "
         "--attention-dropout 0.0 "
         "--hidden-dropout 0.0 "
         "--accumulate-allreduce-grads-in-fp32 "

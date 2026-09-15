@@ -23,31 +23,16 @@ import os
 import subprocess
 
 GPU_QUEUE = "mithril-h100-pool"
-CI_IMAGE = "inferactinc/public:vime-latest"
+CI_IMAGE = os.environ.get("VIME_CI_IMAGE", "vllm/vime:latest")
 HF_CACHE_HOST_PATH = "/mnt/hf-cache"
 HF_HOME = "/root/.cache/huggingface"
 NODE_INSTANCE_TYPE = "gpu-h100-sxm"
-
-# Known hardware-fit failures on the pool's 80 GB H100s — test-level issues,
-# not pipeline ones (PR #239, builds #6/#7):
-#   * gsm8k_async_short: FIXED — max-tokens-per-gpu reduced 9216→2048 (peak
-#     39.6 GB on H200, well within H100 80 GB). Root cause was Qwen3.5 248k
-#     vocab × 5 logits copies in calculate_log_probs_and_entropy.
-#   * parallel_check: cross-layout grad-norm invariance (TP4+per-token-loss)
-#     diverges ~12% on ~11% of rollout data (bimodal: most <1.5%, outliers
-#     10-20%). Confirmed same behavior in slime — Megatron FP reduction-order
-#     non-invariance, not a vime bug.
-# soft_fail keeps them running and visible (orange) without failing the build.
-SOFT_FAIL_ON_H100 = {
-    "test_qwen3_0.6B_parallel_check.py",
-}
 
 # (test_file, num_gpus, extra_args, env overrides)
 SUITES = {
     "short": [
         ("test_qwen3.5_0.8B_gsm8k_async_short.py", 4, "", {}),
         ("test_qwen3.5_0.8B_gsm8k_short.py", 4, "", {}),
-        ("test_qwen2.5_0.5B_ppo_critic_only_short.py", 4, "", {}),
         ("test_qwen2.5_0.5B_fully_async_short.py", 4, "", {}),
     ],
     "vllm-config": [
@@ -57,26 +42,48 @@ SUITES = {
         ("test_vllm_config_mixed_offload_ft.py", 8, "", {}),
     ],
     "megatron": [
+        ("test_full_disk_weight_update.py", 4, "", {}),
         ("test_quick_start_glm4_9B.py", 8, "", {}),
         ("test_glm4.7_30B_A3B_pd_mooncake.py", 8, "", {}),
-        ("test_qwen3_30B_A3B.py", 8, "", {"USE_DEEPEP": "1", "USE_FP8_ROLLOUT": "1"}),
+        (
+            "test_qwen3_30B_A3B.py",
+            8,
+            "",
+            {"USE_DEEPEP": "1", "USE_FP8_ROLLOUT": "1"},
+        ),
         ("test_qwen3.6_35B_A3B_pd_mooncake.py", 8, "", {"USE_DEEPEP": "1"}),
         ("test_qwen3_30B_A3B_r3.py", 8, "", {"USE_DEEPEP": "1", "USE_FP8_ROLLOUT": "1", "ENABLE_EVAL": "0"}),
         ("test_qwen3_30B_A3B_r3.py", 8, "", {"ENABLE_EVAL": "0"}),
         ("test_qwen3_4B_ppo.py", 8, "", {}),
         ("test_qwen3_4B_ppo_disaggregate.py", 8, "", {}),
         ("test_qwen3_4B_ppo_train_critic_only.py", 8, "", {}),
+        ("test_ppo_logprob_entropy_gpu.py", 2, "", {}),
+        ("test_release_train.py", 4, "", {}),
         ("test_qwen3_4B_streaming_partial_rollout.py", 8, "", {}),
         ("test_moonlight_16B_A3B.py", 8, "", {}),
         ("test_moonlight_16B_A3B_r3.py", 8, "", {"ENABLE_EVAL": "0"}),
+        ("test_mimo_7B_mtp_only_grad.py", 8, "", {}),
         ("test_qwen2.5_0.5B_debug_rollout_then_train.py", 8, "", {}),
         ("test_qwen2.5_0.5B_opd_vllm.py", 8, "", {}),
+        ("test_qwen2.5_0.5B_fanout_short.py", 4, "", {}),
+        ("test_qwen2.5_0.5B_debug_train_dump_e2e.py", 8, "", {}),
+        ("test_qwen3_4B_external_pd.py", 6, "", {"VIME_TEST_UPDATE_MODE": "delta"}),
+    ],
+    "vime-customized": [
+        ("test_qwen2_5_0_5B_non_colocate_pp.py", 4, "", {}),
+        ("test_geo3k_vlm_multi_turn_e2e.py", 1, "", {}),
+        ("test_qwen2.5_vl_3B_ep_disaggregation.py", 3, "", {}),
+        ("test_moonlight_16B_A3B_non_colocate_nccl.py", 8, "", {}),
+        ("test_qwen3_5_0_8B_top_p_cp2.py", 4, "", {}),
     ],
     "precision": [
         ("test_qwen3_0.6B_parallel_check.py", 8, "", {}),
     ],
     "ckpt": [
-        ("test_qwen3_4B_ckpt.py", 8, "", {}),
+        ("test_qwen3_4B_ckpt.py", 8, "--save-optimizer gpu --load-optimizer gpu", {}),
+        ("test_qwen3_4B_ckpt.py", 8, "--save-optimizer gpu --load-optimizer cpu", {}),
+        ("test_qwen3_4B_ckpt.py", 8, "--save-optimizer cpu --load-optimizer cpu", {}),
+        ("test_qwen3_4B_ckpt.py", 8, "--save-optimizer cpu --load-optimizer gpu", {}),
         ("test_qwen3_4B_ckpt.py", 8, "--async-save", {}),
     ],
 }
@@ -107,9 +114,10 @@ def gpu_step(suite: str, test_file: str, num_gpus: int, extra_args: str, env: di
         {"name": "VIME_TEST_USE_DEEPEP", "value": vime_flags.get("USE_DEEPEP", "0")},
         {"name": "VIME_TEST_USE_FP8_ROLLOUT", "value": vime_flags.get("USE_FP8_ROLLOUT", "0")},
         {"name": "VIME_TEST_ENABLE_EVAL", "value": vime_flags.get("ENABLE_EVAL", "1")},
+        {"name": "NCCL_NVLS_ENABLE", "value": env.get("NCCL_NVLS_ENABLE", "0")},
     ]
     # anything else in env is passed to the pod verbatim (e.g. allocator knobs)
-    pod_env += [{"name": k, "value": v} for k, v in env.items() if k not in vime_flags]
+    pod_env += [{"name": k, "value": v} for k, v in env.items() if k not in vime_flags and k != "NCCL_NVLS_ENABLE"]
     # Set a stable commit identifier for downstream tooling.
     command = "\n".join(
         [
@@ -130,7 +138,12 @@ def gpu_step(suite: str, test_file: str, num_gpus: int, extra_args: str, env: di
         "command": command,
         "agents": {"queue": GPU_QUEUE},
         "timeout_in_minutes": 360,
-        "retry": {"automatic": [{"exit_status": -1, "limit": 2}]},
+        "retry": {
+            "automatic": [
+                {"exit_status": -1, "limit": 2},
+                {"exit_status": 1, "limit": 2},
+            ]
+        },
         "plugins": [
             {
                 "kubernetes": {
@@ -159,9 +172,6 @@ def gpu_step(suite: str, test_file: str, num_gpus: int, extra_args: str, env: di
             }
         ],
     }
-    if test_file in SOFT_FAIL_ON_H100:
-        step["soft_fail"] = True
-        step["label"] = ":warning: " + step["label"]
     return step
 
 

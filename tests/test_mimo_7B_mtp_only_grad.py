@@ -91,8 +91,9 @@ def execute():
         "--rollout-num-gpus-per-engine 2 "
         "--rollout-num-gpus 8 "
         "--vllm-gpu-memory-utilization 0.8 "
-        "--vllm-max-cudagraph-capture-size 8 "
-        '--vllm-speculative-config \'{"method":"mtp","num_speculative_tokens":2}\' '
+        "--vllm-enforce-eager "
+        "--vllm-max-cudagraph-capture-size 32 "
+        '--vllm-speculative-config \'{"method":"mtp","num_speculative_tokens":3}\' '
     )
 
     # Enable MTP training with loss scaling

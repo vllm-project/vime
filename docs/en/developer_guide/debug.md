@@ -50,6 +50,54 @@ Specifically, vime currently provides the following parameters for separate debu
 
     When enabled, data will be loaded from `args.load_debug_rollout_data.format(rollout_id=rollout_id)`, and vLLM will not be initialized (automatically setting `debug_train_only=True`). This method allows you to fix the input for the training part to tune it, for example, by switching between different parallelization strategies.
 
+5.  `--save-debug-train-data /your/saved/debug/train_{rollout_id}.pt`
+
+    Saves one train-side file per rollout. Only the last Pipeline Parallel stage and Tensor Parallel rank 0 participate. They restore response-token fields such as `log_probs`, `ref_log_probs`, `values`, `advantages`, `returns`, `kl`, and `entropy` across Context Parallel ranks. Context Parallel rank 0 moves each restored tensor to CPU immediately, so complete tensors do not accumulate on the GPU, and then gathers the distinct Data Parallel shards to one writer.
+
+    The version-2 payload mirrors the rollout debug dump: a top-level `samples` list holds one dict per training sample (`sample_index`, `data_parallel_rank`, and its per-sample fields such as `tokens`, `log_probs`, `advantages`), sorted by `sample_index` so it lines up one-to-one with the rollout dump's `samples` (join on `sample_index` ↔ the rollout side's `index`). A parallel `dp_shards` key preserves the DP/micro-batch layout — each entry records `rank`, `data_parallel_rank`, that shard's `sample_indices`, and the DP-local schedule (`micro_batch_indices`, `num_microbatches`, `global_batch_sizes`) — without duplicating any per-sample tensor. Whole-batch fields such as `raw_reward` are stored once at the top level. If any sample lacks a `sample_index` (custom rollouts that build fresh `Sample` objects leave it `None`), the samples stay in DP-gather order and a warning is logged. With or without CP, response-token fields use the same full-response format. In configs that skip the separate actor log-prob recompute (`can_reuse_log_probs_in_loss` or `--use-rollout-logprobs`), the actor `log_probs` are snapshotted from the training forward itself (keyed by rollout position, at no extra forward), so the dump still carries them.
+
+## INT4 / Compressed-Tensors Quantization Checkpoint Issues
+
+When using INT4-quantized models (e.g., `compressed-tensors` with `W4A16`), the checkpoint's `config.json` contains a `quantization_config.ignore` list that specifies which parameters should **not** be quantized. During online weight updates (Megatron → vLLM), vime also reads this ignore list to decide which parameters to INT4-quantize. An incorrect ignore list can cause silent errors:
+
+1. **MoE router weights (`mlp.gate.weight`) become all zeros**
+
+   The MoE router weight (`mlp.gate.weight`, shape `[num_experts, hidden_size]`) is a plain 2D weight tensor, but it is **not** a Linear layer weight. If it is not in the ignore list, the online quantizer will INT4-quantize it into `weight_packed`, `weight_scale`, `weight_zero_point`, etc. However, vLLM does not expect quantized names for the router, so these parameters are silently skipped during `load_weights`, resulting in all-zero gate weights.
+
+   **Fix**: Ensure `config.json` contains `"re:.*mlp\\.gate\\..*"` in the ignore list.
+
+2. **Other non-Linear 2D weights**
+
+   Similar issues can occur with any 2D `.weight` tensor that is not a true Linear layer, such as `model.embed_tokens.weight`. Always verify the ignore list covers all non-Linear weights.
+
+   **Recommended ignore patterns** (for GLM-style MoE models):
+   ```json
+   "ignore": [
+     "lm_head",
+     "model.embed_tokens.weight",
+     "re:.*self_attn.*",
+     "re:.*mlp\\.shared_experts.*",
+     "re:.*mlp\\.gate_up_proj.*",
+     "re:.*mlp\\.gate_proj.*",
+     "re:.*mlp\\.up_proj.*",
+     "re:.*mlp\\.down_proj.*",
+     "re:.*eh_proj.*",
+     "re:.*mlp\\.gate\\..*"
+   ]
+   ```
+
+3. **Missing safetensors shards**
+
+   Conversion tools may occasionally produce an incomplete checkpoint (e.g., a missing `model-00010-of-00093.safetensors`). After conversion, always verify:
+   - The number of `.safetensors` files matches the expected count.
+   - The `model.safetensors.index.json` contains entries for every layer.
+   - Spot-check that critical layers (e.g., the first MoE layer) have the expected number of keys.
+
+4. **How to diagnose**
+
+   - Use `--check-weight-update-equal` to verify that weights after a Megatron → vLLM sync match the expected values. If a parameter shows all zeros on the vLLM side, it was likely incorrectly quantized or missing from the checkpoint.
+   - Use `--debug-rollout-only` with a small number of GPUs to quickly test whether vLLM can generate coherent text from the quantized checkpoint alone.
+
 ## Debug vllm illegal memory access (IMA)
 
 When running large scale RL, we will occationally meet the IMA in vLLM, there are some debug suggestions based on our experience:

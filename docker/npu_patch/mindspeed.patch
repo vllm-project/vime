@@ -15,10 +15,23 @@ index bb007b44..98708a5b 100644
          self.permute_idx_device = None
          input_chunk_idxs = torch.arange(
 diff --git a/mindspeed/core/megatron_basic/arguments_basic.py b/mindspeed/core/megatron_basic/arguments_basic.py
-index 8ea25b9f..7853bce4 100644
+index 8ea25b9f..054313cb 100644
 --- a/mindspeed/core/megatron_basic/arguments_basic.py
 +++ b/mindspeed/core/megatron_basic/arguments_basic.py
-@@ -113,3 +113,35 @@ def transformer_config_init_wrapper(fn):
+@@ -91,5 +91,11 @@ def transformer_config_init_wrapper(fn):
+         known_config = {}
+         unknown_config = {}
+         ignore_config = ['rope_type']
+-        full_args = vars(get_full_args()).copy()
++        # vLLM serving arguments share the process-level Namespace in Vime,
++        # but they are not Megatron TransformerConfig fields.
++        full_args = {
++            key: value
++            for key, value in vars(get_full_args()).items()
++            if not key.startswith("vllm_")
++        }
+         full_args.update(dict(kwargs))
+@@ -113,3 +119,41 @@ def transformer_config_init_wrapper(fn):
          fn(self, *args, **known_config)
  
      return wrapper
@@ -35,7 +48,13 @@ index 8ea25b9f..7853bce4 100644
 +def transformer_config_init_subclass(cls, **kwargs):
 +    mutable_types = (list, dict, set, bytearray)
 +    unknown_config = {}
-+    full_args = vars(get_full_args()).copy()
++    # Keep serving-only vLLM values out of dynamically created Megatron
++    # dataclass fields. They remain available on the original Vime args.
++    full_args = {
++        key: value
++        for key, value in vars(get_full_args()).items()
++        if not key.startswith("vllm_")
++    }
 +    full_args.update(kwargs)
 +
 +    config_key = inspect.signature(cls).parameters

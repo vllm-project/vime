@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # for rerun the task
-pkill -9 -f "vllm serve"
+pkill -9 -f '[v]llm serve|VLL[M]::'
 sleep 3
 ray stop --force
 pkill -9 ray
@@ -116,10 +116,11 @@ VLLM_ARGS=(
    --rollout-num-gpus-per-engine 8
    --vllm-gpu-memory-utilization 0.8
    --vllm-data-parallel-size 8
+   --vllm-enable-expert-parallel
 
    # mtp
-   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
-   --vllm-max-cudagraph-capture-size 64
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":4}'
+   --vllm-max-cudagraph-capture-size 320
    --vllm-max-num-seqs 512
 )
 
@@ -146,6 +147,7 @@ RUNTIME_ENV_JSON="{
   \"env_vars\": {
     \"PYTHONPATH\": \"/root/Megatron-LM/\",
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
+    \"NVSHMEM_DISABLE_NCCL\": \"1\",
     \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\"
   }
 }"

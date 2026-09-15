@@ -1,7 +1,6 @@
 """CI smoke test for the fully-async rollout path.
 
-Mirrors ``test_qwen2.5_0.5B_async_short`` (Qwen2.5-0.5B + dapo-math-17k +
-3 rollouts of GRPO) but flips the rollout function over to
+Uses Qwen2.5-0.5B with dapo-math-17k and GRPO, selecting
 ``vime.rollout.fully_async_rollout.generate_rollout_fully_async`` so the
 fully-async worker path gets exercised end-to-end.
 
@@ -10,6 +9,9 @@ existing 0.5B short tests.
 """
 
 import os
+
+import torch
+
 import vime.utils.external_utils.command_utils as U
 
 
@@ -22,14 +24,25 @@ def prepare():
     U.exec_command("mkdir -p /root/models /root/datasets")
     U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
     U.hf_download_dataset("zhuzilin/dapo-math-17k")
+    if torch.version.hip is not None:
+        # ROCm image has no modelopt bridge: convert HF->Megatron into a container-local dir.
+        U.convert_checkpoint(
+            MODEL_NAME,
+            MODEL_TYPE,
+            num_gpus_per_node=1,
+            extra_args="--no-gradient-accumulation-fusion --attention-backend flash",
+            dir_dst="/tmp",
+        )
 
 
 def execute():
-    ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load /root/models/{MODEL_NAME}/ "
+    if torch.version.hip is not None:
+        ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ --ref-load /tmp/{MODEL_NAME}_torch_dist/ "
+    else:
+        ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load /root/models/{MODEL_NAME}/ "
 
     rollout_args = (
-        # The only line that differs from test_qwen2.5_0.5B_async_short.py:
-        # use the public fully-async rollout function.
+        # Select the public fully-async rollout function.
         "--rollout-function-path vime.rollout.fully_async_rollout.generate_rollout_fully_async "
         "--prompt-data /root/datasets/dapo-math-17k/dapo-math-17k.jsonl "
         "--input-key prompt "
@@ -100,7 +113,7 @@ def execute():
         "--actor-num-nodes 1 "
         "--actor-num-gpus-per-node 1 "
         "--rollout-num-gpus 3 "
-        "--megatron-to-hf-mode bridge "
+        f'{"--no-gradient-accumulation-fusion --no-offload-train " if torch.version.hip is not None else ""}'
     )
 
     train_args = (

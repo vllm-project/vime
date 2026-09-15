@@ -49,7 +49,7 @@ body:
         - vime version:
         - Python version:
         - PyTorch version:
-        - CUDA version:
+        - CUDA/ROCm version:
         - GPU type and count:
         - OS:
 

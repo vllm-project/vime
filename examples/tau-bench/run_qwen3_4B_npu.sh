@@ -41,7 +41,6 @@ CKPT_ARGS=(
    --hf-checkpoint ${DATA_ROOT}/weights/Qwen3-4B-Instruct-2507/
    --load ${DATA_ROOT}/weights/Qwen3-4B-Instruct-2507/
    --ref-load ${DATA_ROOT}/weights/Qwen3-4B-Instruct-2507/
-   --megatron-to-hf-mode bridge
 )
 
 ROLLOUT_ARGS=(
@@ -101,6 +100,7 @@ OPTIMIZER_ARGS=(
 )
 
 VLLM_ARGS=(
+   --vllm-additional-config '{"weight_nz_mode":0}'
    --rollout-num-gpus-per-engine 1
    --vllm-gpu-memory-utilization 0.7
    --vllm-max-model-len 16384
@@ -123,7 +123,7 @@ CUSTOM_ARGS=(
 
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 
-ray start --head \
+ray start --head --num-gpus 0 --resources '{"NPU": 8}' \
   --node-ip-address "${MASTER_ADDR}" \
   --disable-usage-stats \
   --dashboard-host=0.0.0.0 \
@@ -145,4 +145,3 @@ ray job submit --address="http://127.0.0.1:8265" \
    "${VLLM_ARGS[@]}" \
    "${CUSTOM_ARGS[@]}" \
    "${MISC_ARGS[@]}"
-

@@ -1,135 +1,147 @@
 # Vime NPU Patch Installation Guide
 
-This guide provides instructions for installing Vime with NPU support, including all required dependencies and patches.
+This guide provides instructions for installing Vime with NPU support, including the required dependencies and patches.
 
 ## Component Version Mapping
 
-| Component       | Version/Commit                           | Source                                                                                                              |
-| --------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| vime            | main                                     | [GitHub](https://github.com/vllm-project/vime/tree/main)                                                            |
-| Megatron-Bridge | 7f0fb3456f8ffe47599b5fd167b454605d85f932 | [GitHub](https://github.com/radixark/Megatron-Bridge)                                                               |
-| Megatron-LM     | 1dcf0dafa884ad52ffb243625717a3471643e087 | [GitHub](https://github.com/NVIDIA/Megatron-LM)                                                                     |
-| MegatronAdaptor | 15582addff3f3d4680e350826fa70d012b475509 | [GitCode](https://gitcode.com/Ascend/MegatronAdaptor)                                                               |
-| TransformerEngineNPU | d743c83d060d5edc48867ecb9e93ec80d81860e4 | [GitCode](https://gitcode.com/Ascend/TransformerEngineNPU)                                                          |
-| MindSpeed       | fc63de5c48426dd019c3b3f39e65f5bdf56e4086 | [GitCode](https://gitcode.com/Ascend/MindSpeed)                                                                     |
-| HDK             | 25.3.RC1                                 | [Ascend](https://www.hiascend.com/hardware/firmware-drivers/commercial?product=7\&model=33)                         |
-| CANN            | 9.0.0                                    | [Ascend](https://www.hiascend.com/developer/download/community/result?module=cann\&cann=9.0.0\&product=7\&model=33) |
+| Component | Version/Commit | Source |
+| --- | --- | --- |
+| Base image | `v0.28.0-fd81546-a3` | `quay.io/atlas-ci/vllm-ascend` |
+| vLLM | `e6bfe03ad73a3330cb427885aa90d97a12e1c704` | [GitHub](https://github.com/vllm-project/vllm) |
+| vLLM-Ascend | `fd815467c221ee600137f6bdd53fe354d5e7c999` | [GitHub](https://github.com/vllm-project/vllm-ascend) |
+| Megatron-LM | `1dcf0dafa884ad52ffb243625717a3471643e087` | [GitHub](https://github.com/NVIDIA/Megatron-LM) |
+| Megatron-Bridge | `3fd3768045422d0aa5c97e90a4e6c659aea9acb9` | [GitHub](https://github.com/radixark/Megatron-Bridge) |
+| mbridge | `89eb10887887bc74853f89a4de258c0702932a1c` | [GitHub](https://github.com/ISEEKYAN/mbridge) |
+| MegatronAdaptor | `15582addff3f3d4680e350826fa70d012b475509` | [GitCode](https://gitcode.com/Ascend/MegatronAdaptor) |
+| TransformerEngineNPU | `d743c83d060d5edc48867ecb9e93ec80d81860e4` | [GitCode](https://gitcode.com/Ascend/TransformerEngineNPU) |
+| MindSpeed | `fc63de5c48426dd019c3b3f39e65f5bdf56e4086` | [GitCode](https://gitcode.com/Ascend/MindSpeed) |
+| torch_memory_saver (NPU) | `sgl-kernel-npu` tag `2026.6.0` | [GitHub](https://github.com/sgl-project/sgl-kernel-npu) |
 
 ## Preparing the Running Environment
 
-Run the steps below in a Python 3.12 environment with CANN 9.0.0. A
-`quay.io/ascend/vllm-ascend:nightly-main-a3` container can be used as the base.
+Run the following steps inside the base image listed above, with the Ascend devices and host driver mounted. The base image provides Python, CANN, PyTorch, torch-npu, vLLM and vLLM-Ascend.
+
+Use a checkout of this Vime revision at `/root/vime`. Start with unpatched dependency source trees; do not repeat these steps in an already-patched Vime image.
 
 ```bash
-export WORKSPACE=/root
-cd "${WORKSPACE}"
+export VIME_INSTALL_ROOT=/root
+export PATCH_DIR="${VIME_INSTALL_ROOT}/vime/docker/npu_patch"
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
 ```
 
-Vime's Ascend NPU adaptation lives on the **`ascend`** branch, so clone that
-branch (not `main`):
+Preserve the base image's serving package versions when installing training dependencies:
 
 ```bash
-git clone --branch ascend https://github.com/vllm-project/vime.git "${WORKSPACE}/vime"
-export PATCH_DIR="${WORKSPACE}/vime/docker/npu_patch"
+export PIP_CONSTRAINT="$(mktemp /tmp/vime-npu-constraints.XXXXXX)"
+python3 - <<'PY'
+import importlib.metadata as metadata
+import os
+
+names = [
+    "numpy", "ray", "torch", "torch-npu", "torchvision",
+    "transformers", "triton-ascend", "vllm", "vllm-ascend",
+]
+with open(os.environ["PIP_CONSTRAINT"], "w") as constraints:
+    constraints.write("\n".join(f"{name}=={metadata.version(name)}" for name in names) + "\n")
+PY
 ```
 
-#### 1. Megatron-Bridge
+### 1. vLLM and vLLM-Ascend
 
-Used via `PYTHONPATH` (no editable install); it requires `nvidia-modelopt`.
+Both packages are installed in editable mode in the base image. Apply the patches to their existing source trees:
 
 ```bash
-export MEGATRON_BRIDGE_COMMIT=7f0fb3456f8ffe47599b5fd167b454605d85f932
-export MBRIDGE_COMMIT=89eb10887887bc74853f89a4de258c0702932a1c
-pip install "git+https://github.com/ISEEKYAN/mbridge.git@${MBRIDGE_COMMIT}" --no-deps
-git clone --branch bridge https://github.com/radixark/Megatron-Bridge.git "${WORKSPACE}/Megatron-Bridge"
-git -C "${WORKSPACE}/Megatron-Bridge" checkout "${MEGATRON_BRIDGE_COMMIT}"
+git -C /vllm-workspace/vllm apply --check "${PATCH_DIR}/vllm.patch"
+git -C /vllm-workspace/vllm apply "${PATCH_DIR}/vllm.patch"
 
-git -C "${WORKSPACE}/Megatron-Bridge" apply --whitespace=nowarn "${PATCH_DIR}/megatron-bridge.patch"
-
-pip install --no-build-isolation "nvidia-modelopt[torch]>=0.37.0"
+git -C /vllm-workspace/vllm-ascend apply --check "${PATCH_DIR}/vllm-ascend.patch"
+git -C /vllm-workspace/vllm-ascend apply "${PATCH_DIR}/vllm-ascend.patch"
 ```
 
-#### 2. Megatron-LM
+### 2. Megatron-LM
+
+Apply the common Megatron patch before the NPU patch.
 
 ```bash
-export MEGATRON_COMMIT=1dcf0dafa884ad52ffb243625717a3471643e087
-git clone https://github.com/NVIDIA/Megatron-LM.git "${WORKSPACE}/Megatron-LM"
-git -C "${WORKSPACE}/Megatron-LM" checkout "${MEGATRON_COMMIT}"
+git clone https://github.com/NVIDIA/Megatron-LM.git "${VIME_INSTALL_ROOT}/Megatron-LM"
+git -C "${VIME_INSTALL_ROOT}/Megatron-LM" checkout 1dcf0dafa884ad52ffb243625717a3471643e087
 
-git -C "${WORKSPACE}/Megatron-LM" apply --whitespace=nowarn "${WORKSPACE}/vime/docker/patch/latest/megatron.patch"
-git -C "${WORKSPACE}/Megatron-LM" apply --whitespace=nowarn "${PATCH_DIR}/megatron.patch"
+git -C "${VIME_INSTALL_ROOT}/Megatron-LM" apply --check "${VIME_INSTALL_ROOT}/vime/docker/patch/latest/megatron.patch"
+git -C "${VIME_INSTALL_ROOT}/Megatron-LM" apply "${VIME_INSTALL_ROOT}/vime/docker/patch/latest/megatron.patch"
+git -C "${VIME_INSTALL_ROOT}/Megatron-LM" apply --check "${PATCH_DIR}/megatron.patch"
+git -C "${VIME_INSTALL_ROOT}/Megatron-LM" apply "${PATCH_DIR}/megatron.patch"
 
-pip install --no-deps --no-build-isolation -e "${WORKSPACE}/Megatron-LM"
+pip install --no-deps --no-build-isolation -e "${VIME_INSTALL_ROOT}/Megatron-LM"
 ```
 
-#### 3. MegatronAdaptor and TransformerEngineNPU
+### 3. Megatron-Bridge and mbridge
 
-The NPU training stack now uses the two source repositories directly. The mainline Megatron patch is applied first; `docker/npu_patch/megatron.patch` contains only the NPU-specific changes rebased onto that mainline patch:
-
-pip install --no-deps --no-build-isolation -e ${WORKSPACE}/MegatronAdaptor
-pip install --no-deps --no-build-isolation -e ${WORKSPACE}/TransformerEngineNPU
-
-Do not install the CUDA TransformerEngine package in the same environment.
-
-#### 4. MegatronAdaptor and TransformerEngineNPU
+Use the Megatron-Bridge source through `PYTHONPATH`, without installing its CUDA package dependencies.
 
 ```bash
-export MINDSPEED_COMMIT=fc63de5c48426dd019c3b3f39e65f5bdf56e4086
-git clone https://gitcode.com/Ascend/MindSpeed.git "${WORKSPACE}/MindSpeed"
-git -C "${WORKSPACE}/MindSpeed" checkout "${MINDSPEED_COMMIT}"
+git clone --branch bridge https://github.com/radixark/Megatron-Bridge.git "${VIME_INSTALL_ROOT}/Megatron-Bridge"
+git -C "${VIME_INSTALL_ROOT}/Megatron-Bridge" checkout 3fd3768045422d0aa5c97e90a4e6c659aea9acb9
+git -C "${VIME_INSTALL_ROOT}/Megatron-Bridge" apply --check "${PATCH_DIR}/megatron-bridge.patch"
+git -C "${VIME_INSTALL_ROOT}/Megatron-Bridge" apply "${PATCH_DIR}/megatron-bridge.patch"
 
-git -C "${WORKSPACE}/MindSpeed" apply --whitespace=nowarn "${PATCH_DIR}/mindspeed.patch"
+git clone https://github.com/ISEEKYAN/mbridge.git "${VIME_INSTALL_ROOT}/mbridge"
+git -C "${VIME_INSTALL_ROOT}/mbridge" checkout 89eb10887887bc74853f89a4de258c0702932a1c
+pip install --no-deps --no-build-isolation -e "${VIME_INSTALL_ROOT}/mbridge"
 
-pip install --no-deps --no-build-isolation -e "${WORKSPACE}/MindSpeed"
+pip install --no-build-isolation "nvidia-modelopt==0.46.0" "nvdlfw-inspect==0.2.2"
 ```
 
-#### 5. Vime
+### 4. TransformerEngineNPU and MegatronAdaptor
+
+Use TransformerEngineNPU, not the CUDA TransformerEngine package.
 
 ```bash
-pip install -r "${WORKSPACE}/vime/requirements.txt"
-pip install "vllm-router>=0.1.14"
-pip install --no-deps --no-build-isolation -e "${WORKSPACE}/vime"
+git clone https://gitcode.com/Ascend/TransformerEngineNPU.git "${VIME_INSTALL_ROOT}/TransformerEngineNPU"
+git -C "${VIME_INSTALL_ROOT}/TransformerEngineNPU" checkout d743c83d060d5edc48867ecb9e93ec80d81860e4
+pip install --no-deps --no-build-isolation -e "${VIME_INSTALL_ROOT}/TransformerEngineNPU"
+
+git clone https://gitcode.com/Ascend/MegatronAdaptor.git "${VIME_INSTALL_ROOT}/MegatronAdaptor"
+git -C "${VIME_INSTALL_ROOT}/MegatronAdaptor" checkout 15582addff3f3d4680e350826fa70d012b475509
+pip install --no-deps --no-build-isolation -e "${VIME_INSTALL_ROOT}/MegatronAdaptor"
 ```
 
-Build the matching Ascend `torch_memory_saver` wheel. NPU does not actually use
-`torch_memory_saver`, but the code still imports and calls it and will break
-without it, and there is currently no published Python 3.12 build — so compile
-it from source:
+### 5. MindSpeed
 
 ```bash
-git clone --branch 2026.6.0 https://github.com/sgl-project/sgl-kernel-npu.git "${WORKSPACE}/sgl-kernel-npu"
-cd "${WORKSPACE}/sgl-kernel-npu"
-bash build.sh -a kernels
-bash build.sh -a memory-saver
-pip install --no-deps output/torch_memory_saver-0.0.8-cp312-cp312-linux_aarch64.whl
+git clone https://gitcode.com/Ascend/MindSpeed.git "${VIME_INSTALL_ROOT}/MindSpeed"
+git -C "${VIME_INSTALL_ROOT}/MindSpeed" checkout fc63de5c48426dd019c3b3f39e65f5bdf56e4086
+git -C "${VIME_INSTALL_ROOT}/MindSpeed" apply --check "${PATCH_DIR}/mindspeed.patch"
+git -C "${VIME_INSTALL_ROOT}/MindSpeed" apply "${PATCH_DIR}/mindspeed.patch"
+pip install --no-deps --no-build-isolation -e "${VIME_INSTALL_ROOT}/MindSpeed"
 ```
 
-#### 5. Install vLLM and vLLM Ascend
+### 6. Vime
 
 ```bash
-export VLLM_COMMIT=9090368b650896bf5fc990c921df7eb4c20355a5
-
-git clone https://github.com/vllm-project/vllm.git "${WORKSPACE}/vllm"
-git -C "${WORKSPACE}/vllm" checkout "${VLLM_COMMIT}"
-VLLM_TARGET_DEVICE=empty pip install -v -e "${WORKSPACE}/vllm"
-
-git clone https://github.com/vllm-project/vllm-ascend.git "${WORKSPACE}/vllm-ascend"
-git -C "${WORKSPACE}/vllm-ascend" submodule update --init --recursive
-pip install -v -e "${WORKSPACE}/vllm-ascend"
+pip install -r "${VIME_INSTALL_ROOT}/vime/requirements.txt"
+pip install --no-deps --no-build-isolation -e "${VIME_INSTALL_ROOT}/vime"
 ```
 
-> [!NOTE]
-> vLLM Ascend has not yet cut a release tag against vLLM 0.22.0. As a temporary
-> measure we pin vLLM to the commit below and build vLLM Ascend from source.
-> Once vLLM Ascend officially supports 0.22.0, this whole step can be omitted and
-> the released packages used instead.
+### 7. torch_memory_saver
 
-## Additional Dependencies
+Build the NPU wheel from `sgl-kernel-npu`:
 
-Ensure the following packages are pinned to these matching versions：
-
-```shell
-pip install torch-npu==2.10.0.post2
-pip install torchvision==0.25.0
-pip install numpy==1.26.4
+```bash
+git clone --depth 1 --branch 2026.6.0 https://github.com/sgl-project/sgl-kernel-npu.git "${VIME_INSTALL_ROOT}/sgl-kernel-npu"
+cd "${VIME_INSTALL_ROOT}/sgl-kernel-npu/contrib/torch_memory_saver/python"
+python3 setup.py bdist_wheel
+python3 -m pip install --no-deps dist/torch_memory_saver-*.whl
+cd "${VIME_INSTALL_ROOT}/vime"
 ```
+
+## Environment Setup and Installation Check
+
+Set the source paths before running Vime:
+
+```bash
+export PYTHONPATH="${VIME_INSTALL_ROOT}/Megatron-Bridge/src:${VIME_INSTALL_ROOT}/Megatron-LM:${VIME_INSTALL_ROOT}/MegatronAdaptor:${VIME_INSTALL_ROOT}/TransformerEngineNPU:${VIME_INSTALL_ROOT}/vime${PYTHONPATH:+:${PYTHONPATH}}"
+
+python3 -c 'import megatron, mindspeed, megatron_adaptor, transformer_engine, torch_memory_saver, vime, vllm, vllm_ascend'
+```
+
+For a complete container build recipe, see [Dockerfile.npu](../Dockerfile.npu).

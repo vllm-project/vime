@@ -5,6 +5,7 @@ import math
 import os
 from argparse import Namespace
 from collections.abc import Callable, Sequence
+from contextlib import contextmanager, nullcontext
 from functools import partial
 from pathlib import Path
 
@@ -27,14 +28,14 @@ try:
     from megatron.core.pipeline_parallel.utils import unwrap_model
 except ImportError:
     from megatron.core.utils import unwrap_model
-from vime.utils import logging_utils
+from vime.observability import logging_utils, train_metric_utils
 from vime.utils.memory_utils import clear_memory
 
 from .checkpoint import load_checkpoint, save_checkpoint
-from .cp_utils import reduce_train_step_metrics
 from .data import DataIterator, get_batch
-from .loss import loss_function
+from .loss import ROLLOUT_TOP_P_TOKEN_KEYS, get_rollout_top_p_logprob_kwargs, loss_function
 from .model_provider import get_model_provider_func
+from .stateless_adam import StatelessAdam
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,12 @@ def _wrap_forward_step_with_microbatch_pbar(forward_step_func, pbar):
     return wrapped_forward_step
 
 
+def _with_rollout_top_p_token_keys(args: Namespace, keys: Sequence[str]) -> list[str]:
+    if args.rollout_top_p == 1.0:
+        return list(keys)
+    return [*keys, *ROLLOUT_TOP_P_TOKEN_KEYS]
+
+
 def _iter_critic_output_layers(model: Sequence[DDP]):
     for chunk_id, module in enumerate(unwrap_model(model)):
         output_layer = getattr(module, "output_layer", None)
@@ -80,12 +87,45 @@ def _iter_critic_output_layers(model: Sequence[DDP]):
             yield chunk_id, output_layer
 
 
+try:
+    from megatron.training.checkpointing import get_load_checkpoint_path_by_args
+except ImportError:
+
+    def get_load_checkpoint_path_by_args(args, load_arg="load"):
+        from megatron.training.checkpointing import (
+            get_checkpoint_name,
+            get_checkpoint_tracker_filename,
+            isfile,
+            read_metadata,
+        )
+
+        """Get the checkpoint path based on the arguments."""
+        load_dir = getattr(args, load_arg)
+        iteration, release = -1, False
+        tracker_filename = "because load directory is not defined"
+        if load_dir is not None:
+            tracker_filename = get_checkpoint_tracker_filename(load_dir)
+            if isfile(tracker_filename):
+                iteration, release = read_metadata(tracker_filename)
+            else:
+                load_dir, checkpoint_step = os.path.split(load_dir)
+                if checkpoint_step == "release" or checkpoint_step.startswith("iter_"):
+                    release = checkpoint_step == "release"
+                    if not release:
+                        iteration = int(checkpoint_step.split("_")[1])
+
+        # Allow user to specify the loaded iteration.
+        if getattr(args, "ckpt_step", None):
+            iteration = args.ckpt_step
+
+        return get_checkpoint_name(load_dir, iteration, release, return_base_dir=True)
+
+
 def _critic_output_layer_needs_reinit(args: Namespace, model: Sequence[DDP], role: str) -> bool:
     if role != "critic" or args.load is None:
         return False
 
     from megatron.core.dist_checkpointing.serialization import load_tensors_metadata
-    from megatron.training.checkpointing import get_load_checkpoint_path_by_args
 
     checkpoint_path = Path(get_load_checkpoint_path_by_args(args))
     if not (checkpoint_path / ".metadata").is_file():
@@ -128,9 +168,12 @@ def _critic_output_layer_needs_reinit(args: Namespace, model: Sequence[DDP], rol
 
 
 @torch.no_grad()
-def _reinitialize_critic_output_layer(model: Sequence[DDP]) -> None:
+def _reinitialize_critic_output_layer(args: Namespace, model: Sequence[DDP]) -> None:
+    init_method_std = getattr(args, "init_method_std", None)
+    if init_method_std is None:
+        init_method_std = 0.02
     for _chunk_id, output_layer in _iter_critic_output_layers(model):
-        output_layer.weight.data.normal_(mean=0.0, std=0.02)
+        output_layer.weight.data.normal_(mean=0.0, std=init_method_std)
         if output_layer.bias is not None:
             output_layer.bias.data.zero_()
 
@@ -191,10 +234,42 @@ def get_optimizer_param_scheduler(args: Namespace, optimizer: MegatronOptimizer)
     return opt_param_scheduler
 
 
+def _noop_init_state_fn(*args, **kwargs) -> None:
+    return None
+
+
+def _disable_distributed_optimizer_state_initialization(optimizer: MegatronOptimizer) -> None:
+    for megatron_optimizer in getattr(optimizer, "chained_optimizers", [optimizer]):
+        if megatron_optimizer.__class__.__name__ == "DistributedOptimizer":
+            megatron_optimizer.init_state_fn = _noop_init_state_fn
+
+
+@contextmanager
+def _patch_megatron_adam(adam_cls):
+    import megatron.core.optimizer as megatron_optimizer
+    import megatron.core.optimizer.distrib_optimizer as megatron_distrib_optimizer
+
+    missing = object()
+    old_adam = megatron_optimizer.Adam
+    old_cpu_adam = getattr(megatron_optimizer, "CPUAdam", missing)
+    old_distrib_adam = megatron_distrib_optimizer.Adam
+    try:
+        megatron_optimizer.Adam = adam_cls
+        if old_cpu_adam is not missing:
+            megatron_optimizer.CPUAdam = adam_cls
+        megatron_distrib_optimizer.Adam = adam_cls
+        yield
+    finally:
+        megatron_optimizer.Adam = old_adam
+        if old_cpu_adam is not missing:
+            megatron_optimizer.CPUAdam = old_cpu_adam
+        megatron_distrib_optimizer.Adam = old_distrib_adam
+
+
 def setup_model_and_optimizer(
     args: Namespace,
     role: str = "actor",
-) -> tuple[list[DDP], MegatronOptimizer, OptimizerParamScheduler]:
+) -> tuple[list[DDP], MegatronOptimizer | None, OptimizerParamScheduler | None]:
     """Build model(s), wrap with DDP, and construct optimizer and scheduler.
 
     Args:
@@ -207,7 +282,7 @@ def setup_model_and_optimizer(
         lr_mult (float): Global learning-rate multiplier for the optimizer.
 
     Returns:
-        tuple[list[DDP], MegatronOptimizer, OptimizerParamScheduler]:
+        tuple[list[DDP], MegatronOptimizer | None, OptimizerParamScheduler | None]:
             - List of model chunks wrapped by ``DDP``.
             - The constructed ``MegatronOptimizer`` instance.
             - The learning-rate/weight-decay scheduler tied to the optimizer.
@@ -217,6 +292,10 @@ def setup_model_and_optimizer(
 
     model = get_model(get_model_provider_func(args, role), ModelType.encoder_or_decoder)
 
+    if args.num_rollout == 0:
+        args.no_load_optim = True
+        return model, None, None
+
     # Optimizer
     kwargs = {}
     for f in dataclasses.fields(OptimizerConfig):
@@ -225,11 +304,19 @@ def setup_model_and_optimizer(
     config = OptimizerConfig(**kwargs)
     config.timers = None
 
-    optimizer = get_megatron_optimizer(
-        config=config,
-        model_chunks=model,
-        use_gloo_process_groups=args.enable_gloo_process_groups,
-    )
+    if args.use_stateless_adam:
+        assert config.optimizer == "adam", "Stateless Adam only supports --optimizer adam."
+        assert args.no_save_optim, "Stateless Adam does not save Adam moment states. Please set --no-save-optim."
+
+    optimizer_context = _patch_megatron_adam(StatelessAdam) if args.use_stateless_adam else nullcontext()
+    with optimizer_context:
+        optimizer = get_megatron_optimizer(
+            config=config,
+            model_chunks=model,
+            use_gloo_process_groups=args.enable_gloo_process_groups,
+        )
+    if args.use_stateless_adam:
+        _disable_distributed_optimizer_state_initialization(optimizer)
     opt_param_scheduler = get_optimizer_param_scheduler(args, optimizer)
     return model, optimizer, opt_param_scheduler
 
@@ -265,6 +352,7 @@ def forward_only(
     data_iterator: Sequence[DataIterator],
     num_microbatches: Sequence[int],
     store_prefix: str = "",
+    use_rollout_top_p_replay: bool = False,
 ) -> dict[str, list[torch.Tensor]]:
     """Run forward passes only and collect non-loss outputs (e.g., logprobs).
 
@@ -284,6 +372,8 @@ def forward_only(
         data_iterator (Sequence[DataIterator]): Iterable(s) yielding batches for inference.
         num_microbatches (Sequence[int]): Number of microbatches per rollout step.
         store_prefix (str): Prefix to prepend to stored output keys.
+        use_rollout_top_p_replay (bool): Whether to pass rollout top-p token sets
+            to the post-forward log-prob callback when top-p rollout is enabled.
 
     Returns:
         dict[str, list[torch.Tensor]]: Aggregated outputs keyed by ``store_prefix + key``.
@@ -294,6 +384,15 @@ def forward_only(
         iterator.reset()
 
     config = get_model_config(model[0])
+    batch_keys = [
+        "tokens",
+        "loss_masks",
+        "multimodal_train_inputs",
+        "total_lengths",
+        "response_lengths",
+    ]
+    if use_rollout_top_p_replay:
+        batch_keys = _with_rollout_top_p_token_keys(args, batch_keys)
 
     def forward_step(
         data_iterator: DataIterator, model: GPTModel, return_schedule_plan: bool = False
@@ -315,16 +414,8 @@ def forward_only(
         # Get the batch.
         batch = get_batch(
             data_iterator,
-            [
-                "tokens",
-                "loss_masks",
-                "multimodal_train_inputs",
-                "total_lengths",
-                "response_lengths",
-                "max_seq_lens",
-            ],
+            batch_keys,
             args.data_pad_size_multiplier,
-            args.qkv_format,
             args.allgather_cp,
         )
         unconcat_tokens = batch["unconcat_tokens"]
@@ -344,15 +435,17 @@ def forward_only(
             forward_kwargs.update(batch["multimodal_train_inputs"])
         output_tensor = model(**forward_kwargs)
 
-        return output_tensor, partial(
-            f,
-            args=args,
-            unconcat_tokens=unconcat_tokens,
-            total_lengths=total_lengths,
-            response_lengths=response_lengths,
-            with_entropy=args.use_rollout_entropy,
-            max_seq_lens=batch.get("max_seq_lens", None),
-        )
+        output_kwargs = {
+            "args": args,
+            "unconcat_tokens": unconcat_tokens,
+            "total_lengths": total_lengths,
+            "response_lengths": response_lengths,
+            "with_entropy": args.use_rollout_entropy,
+        }
+        if use_rollout_top_p_replay:
+            output_kwargs.update(get_rollout_top_p_logprob_kwargs(args, batch))
+
+        return output_tensor, partial(f, **output_kwargs)
 
     # Turn on evaluation mode which disables dropout.
     for model_module in model:
@@ -486,25 +579,29 @@ def train_one_step(
         # Get the batch.
         batch = get_batch(
             data_iterator,
-            [
-                "tokens",
-                "multimodal_train_inputs",
-                "packed_seq_params",
-                "total_lengths",
-                "response_lengths",
-                "loss_masks",
-                "log_probs",
-                "ref_log_probs",
-                "values",
-                "advantages",
-                "returns",
-                "rollout_log_probs",
-                "max_seq_lens",
-                "teacher_log_probs",
-                "rollout_mask_sums",
-            ],
+            _with_rollout_top_p_token_keys(
+                args,
+                [
+                    "tokens",
+                    "multimodal_train_inputs",
+                    "packed_seq_params",
+                    "total_lengths",
+                    "response_lengths",
+                    "loss_masks",
+                    "log_probs",
+                    "ref_log_probs",
+                    "values",
+                    "advantages",
+                    "returns",
+                    "rollout_log_probs",
+                    "teacher_log_probs",
+                    "rollout_mask_sums",
+                    # Only present when dumping train debug data; lets the loss
+                    # snapshot each sample's log_probs keyed by rollout position.
+                    *(["partition"] if args.save_debug_train_data is not None else []),
+                ],
+            ),
             args.data_pad_size_multiplier,
-            args.qkv_format,
             args.allgather_cp,
         )
 
@@ -533,17 +630,56 @@ def train_one_step(
                 "loss_mask": batch["full_loss_masks"],
             }
 
+            # MCore MambaModel.forward does not accept loss_mask; masking is
+            # applied by the loss function instead.
+            _m = model
+            while hasattr(_m, "module"):
+                _m = _m.module
+            # Signature does not change during training, so compute once and cache.
+            accepts_loss_mask = getattr(_m, "_vime_forward_accepts_loss_mask", None)
+            if accepts_loss_mask is None:
+                import inspect
+
+                accepts_loss_mask = "loss_mask" in inspect.signature(_m.forward).parameters
+                _m._vime_forward_accepts_loss_mask = accepts_loss_mask
+            if not accepts_loss_mask:
+                forward_kwargs.pop("loss_mask", None)
+
             if batch["multimodal_train_inputs"] is not None:
                 forward_kwargs.update(batch["multimodal_train_inputs"])
 
             if args.enable_mtp_training:
                 forward_kwargs["mtp_kwargs"] = {"mtp_labels": batch["tokens"]}
 
-            output_tensor = model(**forward_kwargs)
+            dspark_outputs = None
+            dspark_config = None
+            if args.dspark_enabled:
+                from vime.backends.megatron_utils.dspark.hidden_capture import forward_with_dspark
+
+                output_tensor, dspark_outputs, dspark_config = forward_with_dspark(
+                    model,
+                    forward_kwargs,
+                    batch,
+                    args.dspark_target_layer_ids,
+                )
+            else:
+                output_tensor = model(**forward_kwargs)
 
         if os.environ.get("ENABLE_ROUTING_REPLAY", "0") == "1":
             os.environ["ROUTING_REPLAY_STAGE"] = old_stage
 
+        if dspark_outputs is not None:
+            from vime.backends.megatron_utils.dspark.loss import build_combined_loss_fn
+
+            return output_tensor, build_combined_loss_fn(
+                loss_function,
+                args,
+                batch,
+                num_microbatches,
+                step_global_batch_size,
+                dspark_outputs,
+                dspark_config,
+            )
         return output_tensor, partial(loss_function, args, batch, num_microbatches, step_global_batch_size)
 
     # Forward pass.
@@ -594,7 +730,7 @@ def train_one_step(
     optimizer.zero_grad()
 
     if mpu.is_pipeline_last_stage(ignore_virtual=True):
-        loss_reduced = reduce_train_step_metrics(
+        loss_reduced = train_metric_utils.reduce_train_step_metrics(
             losses_reduced,
             calculate_per_token_loss=args.calculate_per_token_loss,
             step_global_batch_size=step_global_batch_size,
@@ -682,7 +818,7 @@ def train(
             and mpu.get_tensor_model_parallel_rank() == 0
             and mpu.get_pipeline_model_parallel_rank() == mpu.get_pipeline_model_parallel_world_size() - 1
         ):
-            print("Reset optimizer states")
+            logger.info("Reset optimizer states")
         for chained_optimizer in optimizer.chained_optimizers:
             for group in chained_optimizer.optimizer.param_groups:
                 if "step" in group:
@@ -763,15 +899,15 @@ def train(
                     torch.distributed.all_reduce(values, group=tracker.get("reduce_group"))
                 if tracker.get("avg_group") is not None:
                     torch.distributed.all_reduce(values, group=tracker["avg_group"], op=torch.distributed.ReduceOp.AVG)
-                # here we assume only one mtp layer
-                mtp_losses = (tracker["values"] * mtp_loss_scale).item()
+                # Multi-head MTP: tracker["values"] is [num_mtp_layers]; aggregate below.
+                mtp_losses = tracker["values"] * mtp_loss_scale
                 MTPLossLoggingHelper.clean_loss_in_tracker()
 
                 # CI check: verify MTP loss is within expected bounds
                 if args.ci_test:
                     from vime.backends.megatron_utils.ci_utils import check_mtp_loss
 
-                    check_mtp_loss(mtp_losses)
+                    check_mtp_loss(mtp_losses.sum().item())
 
         # per train step log.
         if (
@@ -788,7 +924,9 @@ def train(
             }
             log_dict[f"train/{role_tag}grad_norm"] = grad_norm
             if args.enable_mtp_training:
-                log_dict[f"train/{role_tag}mtp_loss"] = mtp_losses
+                for _i in range(mtp_losses.shape[0]):
+                    log_dict[f"train/{role_tag}mtp_{_i + 1}_loss"] = mtp_losses[_i].item()
+                log_dict[f"train/{role_tag}mtp_loss"] = mtp_losses.sum().item()
 
             for param_group_id, param_group in enumerate(optimizer.param_groups):
                 log_dict[f"train/{role_tag}lr-pg_{param_group_id}"] = opt_param_scheduler.get_lr(param_group)
@@ -799,7 +937,8 @@ def train(
             logging_utils.log(args, log_dict, step_key="train/step")
 
             if args.ci_test and "train/train_rollout_logprob_abs_diff" in log_dict:
-                assert log_dict["train/train_rollout_logprob_abs_diff"] <= 0.1, f"{log_dict=}"
+                threshold = args.ci_train_rollout_logprob_abs_diff_threshold
+                assert log_dict["train/train_rollout_logprob_abs_diff"] <= threshold, f"{threshold=} {log_dict=}"
 
             if args.ci_test and not args.ci_disable_kl_checker:
                 if step_id == 0 and "train/ppo_kl" in log_dict and "train/pg_clipfrac" in log_dict:
@@ -874,60 +1013,9 @@ def save(
         enable_forward_pre_hook(model)
 
 
-def save_hf_model(args, rollout_id: int, model: Sequence[DDP]) -> None:
-    """Save Megatron model in HuggingFace format.
-
-    Args:
-        model (Sequence[DDP]): Sequence of DDP-wrapped model chunks.
-        rollout_id (int): Rollout ID for path formatting.
-    """
-    if args.megatron_to_hf_mode != "bridge":
-        try:
-            from vime.backends.megatron_utils.hf_checkpoint_saver import save_hf_model_direct
-
-            save_hf_model_direct(args, rollout_id, model)
-        except Exception as e:
-            if (
-                mpu.get_data_parallel_rank(with_context_parallel=True) == 0
-                and mpu.get_tensor_model_parallel_rank() == 0
-            ):
-                logger.error(f"Failed to save HuggingFace format: {e}")
-        return
-
-    should_log = (
-        mpu.get_data_parallel_rank(with_context_parallel=True) == 0 and mpu.get_tensor_model_parallel_rank() == 0
-    )
-
-    try:
-        from megatron.bridge import AutoBridge
-
-        from vime.utils.megatron_bridge_utils import patch_auto_bridge_hf_config, patch_megatron_model
-
-        path = Path(args.save_hf.format(rollout_id=rollout_id))
-
-        if should_log:
-            logger.info(f"Saving model in HuggingFace format to {path}")
-
-        bridge = patch_auto_bridge_hf_config(AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True))
-
-        path.mkdir(parents=True, exist_ok=True)
-
-        with patch_megatron_model(model):
-            bridge.save_hf_pretrained(
-                model,
-                path=path,
-            )
-
-        if should_log:
-            logger.info(f"Successfully saved HuggingFace model to {path}")
-    except Exception as e:
-        if should_log:
-            logger.error(f"Failed to save HuggingFace format: {e}")
-
-
 def initialize_model_and_optimizer(
     args: Namespace, role: str = "actor"
-) -> tuple[list[DDP], MegatronOptimizer, OptimizerParamScheduler, int]:
+) -> tuple[list[DDP], MegatronOptimizer | None, OptimizerParamScheduler | None, int]:
     """Initialize model(s), optimizer, scheduler, and load from checkpoint.
 
     Args:
@@ -935,9 +1023,17 @@ def initialize_model_and_optimizer(
         role (str): Logical role of the model (e.g., "actor", "critic").
 
     Returns:
-        tuple[list[DDP], MegatronOptimizer, OptimizerParamScheduler, int]:
+        tuple[list[DDP], MegatronOptimizer | None, OptimizerParamScheduler | None, int]:
             DDP-wrapped model chunks, optimizer, scheduler, and iteration index.
     """
+
+    if torch.version.hip:
+        import megatron.core.dist_checkpointing.strategies.filesystem_async as filesystem_async_module
+
+        from vime.utils.rocm_checkpoint_writer import ROCmFileSystemWriterAsync
+
+        filesystem_async_module.FileSystemWriterAsync = ROCmFileSystemWriterAsync
+        print("[ROCm] Applied FileSystemWriterAsync patch for HIP compatibility")
 
     model, optimizer, opt_param_scheduler = setup_model_and_optimizer(args, role)
     model[0].role = role
@@ -948,10 +1044,9 @@ def initialize_model_and_optimizer(
         optimizer,
         opt_param_scheduler,
         checkpointing_context={},
-        skip_load_to_model_and_opt=False,
     )
     if reinit_critic_output_layer:
-        _reinitialize_critic_output_layer(model)
+        _reinitialize_critic_output_layer(args, model)
         if (args.fp16 or args.bf16) and optimizer is not None:
             optimizer.reload_model_params()
     clear_memory()

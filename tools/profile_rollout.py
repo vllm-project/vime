@@ -14,18 +14,10 @@ def get_workers(router_url):
         return []
 
 
-def start_profile(worker_url, args):
-    payload = {
-        "output_dir": args.output_dir,
-        "num_steps": args.num_steps,
-        "activities": args.activities,
-        "profile_by_stage": args.profile_by_stage,
-        "with_stack": args.with_stack,
-        "record_shapes": args.record_shapes,
-    }
+def start_profile(worker_url):
     try:
-        print(f"Starting profile on {worker_url} for {args.num_steps} steps...")
-        response = requests.post(f"{worker_url}/start_profile", json=payload)
+        print(f"Starting profile on {worker_url}...")
+        response = requests.post(f"{worker_url}/start_profile", json={})
         response.raise_for_status()
         print(f"Successfully started profile on {worker_url}")
     except Exception as e:
@@ -46,12 +38,6 @@ def main():
     parser = argparse.ArgumentParser(description="Automate vLLM profiling across all workers via router.")
     parser.add_argument("--router-url", type=str, required=True, help="Router URL (e.g., http://127.0.0.1:3000)")
     parser.add_argument("--action", type=str, choices=["start", "stop"], default="start", help="Action to perform")
-    parser.add_argument("--output-dir", type=str, default="/tmp/vllm_profile", help="Output directory for traces")
-    parser.add_argument("--num-steps", type=int, default=3, help="Number of steps to profile (default: 3)")
-    parser.add_argument("--activities", type=str, nargs="+", default=["GPU"], help="Activities to profile (CPU, GPU)")
-    parser.add_argument("--profile-by-stage", action="store_true", help="Profile by stage (prefill/decode)")
-    parser.add_argument("--with-stack", action="store_true", help="Record call stack")
-    parser.add_argument("--record-shapes", action="store_true", help="Record tensor shapes")
 
     args = parser.parse_args()
 
@@ -68,7 +54,7 @@ def main():
             continue
 
         if args.action == "start":
-            start_profile(worker_url, args)
+            start_profile(worker_url)
         else:
             stop_profile(worker_url)
 

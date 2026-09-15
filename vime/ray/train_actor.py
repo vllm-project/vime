@@ -9,27 +9,22 @@ import torch
 import torch.distributed as dist
 
 import vime.utils.eval_config
+from vime.observability.logging_utils import configure_logger
+from vime.platforms import current_platform
 from vime.ray.ray_actor import RayActor
-from vime.utils.common import is_npu
+from vime.utils import accelerator
 from vime.utils.distributed_utils import init_gloo_group
-from vime.utils.logging_utils import configure_logger
 from vime.utils.memory_utils import clear_memory, print_memory
 
 logger = logging.getLogger(__name__)
 
 
 def get_local_gpu_id():
-    if is_npu():
-        env_var = "ASCEND_RT_VISIBLE_DEVICES"
-        device_ids = ray.get_runtime_context().get_accelerator_ids()["NPU"]
-    else:
-        env_var = "CUDA_VISIBLE_DEVICES"
-        device_ids = ray.get_gpu_ids()
-    cvd = os.environ.get(env_var, None)
-    if cvd is None:
-        return device_ids[0]
-    else:
-        return cvd.split(",").index(str(device_ids[0]))
+    platform = current_platform()
+    if platform.is_npu:
+        return platform.ray.local_device_id()
+
+    return accelerator.resolve_visible_device_id(ray.get_gpu_ids()[0])
 
 
 class TrainRayActor(RayActor):
@@ -63,12 +58,14 @@ class TrainRayActor(RayActor):
         torch.serialization.add_safe_globals([vime.utils.eval_config.EvalDatasetConfig])
 
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        if is_npu():
-            torch.npu.set_device(f"npu:{local_rank}")
-        else:
-            torch.cuda.set_device(f"cuda:{local_rank}")
+        accelerator.set_device(local_rank)
+        if accelerator.set_allocator_expandable_segments():
+            logger.info(
+                f"[Rank {self._rank}] Enabled {accelerator.device_type().upper()} memory allocator "
+                "expandable_segments for train actor"
+            )
 
-        backend = args.distributed_backend
+        backend = accelerator.process_group_backend(args.distributed_backend)
 
         dist.init_process_group(
             backend=backend,
@@ -80,17 +77,20 @@ class TrainRayActor(RayActor):
         args.world_size = dist.get_world_size()
 
         try:
-            import pynvml
+            if torch.version.hip is not None:
+                logger.info("Detected ROCm/HIP environment, skipping NUMA affinity setup")
+            else:
+                import pynvml
 
-            pynvml.nvmlInit()
+                pynvml.nvmlInit()
 
-            local_rank = int(os.environ["RANK"]) % args.num_gpus_per_node
+                local_rank = int(os.environ["RANK"]) % args.num_gpus_per_node
 
-            handle = pynvml.nvmlDeviceGetHandleByIndex(local_rank)
-            pynvml.nvmlDeviceSetCpuAffinity(handle)
+                handle = pynvml.nvmlDeviceGetHandleByIndex(local_rank)
+                pynvml.nvmlDeviceSetCpuAffinity(handle)
 
-            logger.info(f"Set NUMA affinity for GPU {local_rank}")
-            pynvml.nvmlShutdown()
+                logger.info(f"Set NUMA affinity for GPU {local_rank}")
+                pynvml.nvmlShutdown()
 
         except ImportError:
             logger.info("Warning: pynvml not available, skipping NUMA affinity setup")
@@ -122,10 +122,6 @@ class TrainRayActor(RayActor):
 
     @abc.abstractmethod
     def update_weights(self):
-        raise NotImplementedError
-
-    @abc.abstractmethod
-    def _get_parallel_config(self):
         raise NotImplementedError
 
     def set_rollout_manager(self, rollout_manager):

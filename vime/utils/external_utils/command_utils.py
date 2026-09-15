@@ -28,10 +28,9 @@ def convert_checkpoint(
     dir_dst: str = "/root",
     hf_checkpoint: str | None = None,
 ):
-    # Platforms without torch_dist conversion (e.g. NPU, verified to fail on Ascend)
-    # load HF weights directly via `--megatron-to-hf-mode bridge`; nothing to convert.
+    # Platforms without automatic conversion use native HF loading by default.
     if not current_platform().torch_dist_convert:
-        print(f"convert_checkpoint skip on {current_platform().name} (bridge load)")
+        print(f"convert_checkpoint skip on {current_platform().name} (native HF load)")
         return
 
     hf_checkpoint = hf_checkpoint or f"/root/models/{model_name}"
@@ -59,7 +58,7 @@ def convert_checkpoint(
 
     exec_command(
         f"source {repo_base_dir}/scripts/models/{megatron_model_type}.sh && "
-        f"PYTHONPATH=/root/Megatron-LM "
+        f"PYTHONPATH={repo_base_dir}:/root/Megatron-LM:${{PYTHONPATH:-}} "
         f"torchrun "
         f"--nproc-per-node {num_gpus_per_node} "
         f"{multinode_args}"
@@ -138,15 +137,17 @@ def execute_train(
     master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
 
     exec_command(
-        # vLLM renames its subprocesses (VLLM::EngineCore / Worker_TP*), so match
-        # the renamed children too; the [v]/[M] brackets avoid matching pkill itself.
         "pkill -9 -f '[v]llm serve|VLL[M]::'; "
         "sleep 3; "
         f"{'' if external_ray else 'ray stop --force; '}"
         f"{'' if external_ray else 'pkill -9 ray; '}"
+        # cannot be run in CI, o/w kill the parent script
+        # TODO: do we really need this kill? (or can we instead kill vime)
+        # "pkill -9 python; "
         "pkill -9 vime; "
         "sleep 3; "
         f"{'' if external_ray else 'pkill -9 ray; '}"
+        # "pkill -9 python; "
         "pkill -9 vime; "
         "pkill -9 redis; "
         "true; "
@@ -166,8 +167,9 @@ def execute_train(
         {
             "env_vars": {
                 "PYTHONPATH": "/root/Megatron-LM/",
+                "RAY_USE_UVLOOP": "0",
                 "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-                "NCCL_NVLS_ENABLE": str(int(check_has_nvlink())),
+                "NCCL_NVLS_ENABLE": os.environ.get("NCCL_NVLS_ENABLE", str(int(check_has_nvlink()))),
                 "no_proxy": f"127.0.0.1,{master_addr}",
                 # This is needed by megatron / torch distributed in multi-node setup
                 "MASTER_ADDR": master_addr,
@@ -193,15 +195,41 @@ def execute_train(
             if megatron_model_type is not None
             else ""
         )
-        exec_command(
-            f"export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && "
-            f"{cmd_megatron_model_source}"
-            f'ray job submit --address="http://127.0.0.1:8265" '
-            f"--runtime-env-json='{runtime_env_json}' "
-            f"-- python3 {train_script} "
-            f"{'${MODEL_ARGS[@]}' if megatron_model_type is not None else ''} "
-            f"{train_args}"
-        )
+        model_args = "${MODEL_ARGS[@]}" if megatron_model_type is not None else ""
+        import torch
+
+        if torch.version.hip is not None:
+            # ROCm: `ray job submit` intermittently hits a "No available agent"
+            # race in the ROCm container. Run the train script directly against
+            # the ray head started above; pass the ray runtime-env as exports.
+            amd_env = {
+                "no_proxy": f"127.0.0.1,{master_addr}",
+                "PYTHONUNBUFFERED": "1",
+                "PYTHONPATH": f"{repo_base_dir}:/root/Megatron-LM/",
+                "RAY_USE_UVLOOP": "0",
+                "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+                "MASTER_ADDR": master_addr,
+                **extra_env_vars,
+                **_parse_extra_env_vars(config.extra_env_vars),
+            }
+            import shlex
+
+            amd_exports = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in amd_env.items())
+            exec_command(
+                f"export {amd_exports} && "
+                f"{cmd_megatron_model_source}"
+                f"python3 {train_script} {model_args} {train_args}"
+            )
+        else:
+            exec_command(
+                f"export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && "
+                f"{cmd_megatron_model_source}"
+                f'ray job submit --address="http://127.0.0.1:8265" '
+                f"--runtime-env-json='{runtime_env_json}' "
+                f"-- python3 {train_script} "
+                f"{model_args} "
+                f"{train_args}"
+            )
 
 
 def _parse_extra_env_vars(text: str):
@@ -250,7 +278,7 @@ def create_run_id() -> str:
 _warned_bool_env_var_keys = set()
 
 
-# copied from SGLang
+# copied from VLLM
 def get_bool_env_var(name: str, default: str = "false") -> bool:
     value = os.getenv(name, default)
     value = value.lower()

@@ -1,0 +1,320 @@
+"""Helpers for pre-launched external vLLM engines."""
+
+from __future__ import annotations
+
+import dataclasses
+import logging
+from urllib.parse import urlparse
+
+import requests
+
+logger = logging.getLogger(__name__)
+
+
+@dataclasses.dataclass(frozen=True)
+class ExternalEngineInfo:
+    url: str
+    host: str
+    port: int
+    worker_type: str
+    num_gpus: int
+    disaggregation_bootstrap_port: int | None = None
+    server_info: dict = dataclasses.field(default_factory=dict)
+
+    @property
+    def is_pd_worker(self) -> bool:
+        return self.worker_type in ("prefill", "decode")
+
+    @property
+    def parallel_config(self) -> dict[str, int | bool]:
+        pp_size = int(self.server_info.get("pp_size") or self.server_info.get("pipeline_parallel_size") or 1)
+        pcp_size = int(self.server_info.get("pcp_size") or self.server_info.get("prefill_context_parallel_size") or 1)
+        dp_size = int(self.server_info.get("dp_size") or self.server_info.get("data_parallel_size") or 1)
+        tp_size = int(
+            self.server_info.get("tp_size")
+            or self.server_info.get("tensor_parallel_size")
+            or self.num_gpus // (pp_size * pcp_size * dp_size)
+        )
+        enable_expert_parallel = bool(self.server_info.get("enable_expert_parallel", False))
+        return {
+            "tp_size": tp_size,
+            "pp_size": pp_size,
+            "pcp_size": pcp_size,
+            "dp_size": dp_size,
+            "enable_expert_parallel": enable_expert_parallel,
+            "ep_size": tp_size * pcp_size * dp_size if enable_expert_parallel else 1,
+        }
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
+
+
+def normalize_external_engine_addr(addr: str) -> str:
+    """Normalize ``host:port`` or ``http://host:port`` to an HTTP base URL."""
+    if "://" not in addr:
+        addr = f"http://{addr}"
+    addr = addr.rstrip("/")
+    parsed = urlparse(addr)
+    if parsed.scheme != "http" or parsed.hostname is None or parsed.port is None:
+        raise ValueError(
+            f"Invalid external vLLM engine address {addr!r}. "
+            "Use host:port or http://host:port (IPv6 must be bracketed)."
+        )
+    return addr
+
+
+def external_engine_init_kwargs(info: ExternalEngineInfo) -> dict:
+    init_kwargs = {
+        "dist_init_addr": f"{info.host}:{info.port}",
+        "nccl_port": None,
+        "host": info.host,
+        "port": info.port,
+    }
+    if info.worker_type == "prefill":
+        init_kwargs["disaggregation_bootstrap_port"] = info.disaggregation_bootstrap_port
+    return init_kwargs
+
+
+def get_server_info(url: str, timeout: float = 30.0) -> dict:
+    errors = []
+    for endpoint in ("/server_info?config_format=json", "/server_info", "/get_server_info"):
+        try:
+            response = requests.get(f"{url}{endpoint}", timeout=timeout)
+            response.raise_for_status()
+            return _normalize_server_info(response.json())
+        except Exception as exc:
+            errors.append(f"{endpoint}: {exc}")
+    raise RuntimeError(f"Failed to fetch vLLM server info from {url}: {'; '.join(errors)}")
+
+
+def _normalize_server_info(server_info: dict) -> dict:
+    vllm_config = server_info.get("vllm_config")
+    if not isinstance(vllm_config, dict):
+        return server_info
+
+    normalized = dict(server_info)
+    for section in vllm_config.values():
+        if not isinstance(section, dict):
+            continue
+        for key, value in section.items():
+            normalized.setdefault(key, value)
+
+    def find_config_value(config, name):
+        if not isinstance(config, dict):
+            return None
+        if name in config:
+            return config[name]
+        for value in config.values():
+            found = find_config_value(value, name)
+            if found is not None:
+                return found
+        return None
+
+    kv_transfer_config = find_config_value(vllm_config, "kv_transfer_config")
+    if kv_transfer_config is not None:
+        normalized["kv_transfer_config"] = kv_transfer_config
+    weight_transfer_config = find_config_value(vllm_config, "weight_transfer_config")
+    if weight_transfer_config is not None:
+        normalized["weight_transfer_config"] = weight_transfer_config
+    if isinstance(kv_transfer_config, dict):
+        role = kv_transfer_config.get("kv_role")
+        if role == "kv_producer":
+            normalized["disaggregation_mode"] = "prefill"
+        elif role == "kv_consumer":
+            normalized["disaggregation_mode"] = "decode"
+
+    vllm_env = server_info.get("vllm_env")
+    if isinstance(vllm_env, dict):
+        bootstrap_port = vllm_env.get("VLLM_NIXL_SIDE_CHANNEL_PORT")
+        if bootstrap_port is not None:
+            normalized["disaggregation_bootstrap_port"] = bootstrap_port
+
+    return normalized
+
+
+def _infer_worker_type(server_info: dict) -> str:
+    if server_info.get("encoder_only"):
+        return "encoder"
+    kv_transfer_config = server_info.get("kv_transfer_config")
+    if isinstance(kv_transfer_config, dict):
+        role = kv_transfer_config.get("kv_role")
+        if role == "kv_producer":
+            return "prefill"
+        if role == "kv_consumer":
+            return "decode"
+    mode = server_info.get("disaggregation_mode")
+    if mode in ("prefill", "decode"):
+        return mode
+    return "regular"
+
+
+def discover_external_engines(addrs: list[str], timeout: float = 30.0) -> list[ExternalEngineInfo]:
+    infos = []
+    for addr in addrs:
+        url = normalize_external_engine_addr(addr)
+        parsed = urlparse(url)
+        assert parsed.hostname is not None and parsed.port is not None
+        server_info = get_server_info(url, timeout=timeout)
+
+        pp_size = int(server_info.get("pp_size") or server_info.get("pipeline_parallel_size") or 1)
+        pcp_size = int(server_info.get("pcp_size") or server_info.get("prefill_context_parallel_size") or 1)
+        dp_size = int(server_info.get("dp_size") or server_info.get("data_parallel_size") or 1)
+        tp_size = int(server_info.get("tp_size") or server_info.get("tensor_parallel_size") or 1)
+        num_gpus = int(
+            server_info.get("num_gpus")
+            or server_info.get("num_gpus_per_engine")
+            or tp_size * pp_size * pcp_size * dp_size
+        )
+        bootstrap_port = server_info.get("disaggregation_bootstrap_port")
+        bootstrap_port = int(bootstrap_port) if bootstrap_port is not None else None
+
+        infos.append(
+            ExternalEngineInfo(
+                url=url,
+                host=parsed.hostname,
+                port=parsed.port,
+                worker_type=_infer_worker_type(server_info),
+                num_gpus=num_gpus,
+                disaggregation_bootstrap_port=bootstrap_port,
+                server_info=server_info,
+            )
+        )
+    return infos
+
+
+def apply_external_engine_info_to_args(args, logger=None) -> None:
+    """Detect external engines and store the derived topology on ``args``."""
+    addrs = args.rollout_external_engine_addrs
+    if not addrs:
+        raise ValueError("apply_external_engine_info_to_args requires --rollout-external-engine-addrs.")
+
+    infos = discover_external_engines(addrs)
+    if not infos:
+        raise ValueError("--rollout-external-engine-addrs did not contain any engines.")
+
+    args.rollout_external_engine_infos = [info.to_dict() for info in infos]
+    args.rollout_num_engines = len(infos)
+    args.rollout_num_gpus = sum(info.num_gpus for info in infos)
+
+    if logger is not None:
+        summary = [
+            {
+                "url": info.url,
+                "worker_type": info.worker_type,
+                "num_gpus": info.num_gpus,
+                "disaggregation_bootstrap_port": info.disaggregation_bootstrap_port,
+            }
+            for info in infos
+        ]
+        logger.info(f"Detected external vLLM engines: {summary}")
+
+
+@dataclasses.dataclass
+class ExternalRolloutServer:
+    """Rollout server backed by pre-launched external vLLM engines."""
+
+    engines: list
+    engine_gpu_counts: list[int]
+    engine_gpu_offsets: list[int]
+    engine_parallel_configs: list[dict[str, int]]
+    router_ip: str | None = None
+    router_port: int | None = None
+    model_name: str = "default"
+    update_weights: bool = True
+    num_new_engines: int = 0
+    server_groups: list = dataclasses.field(default_factory=list)
+
+    @property
+    def all_engines(self):
+        return self.engines
+
+    def recover(self):
+        logger.warning("Fault tolerance is not supported for external rollout engines; skip recover.")
+
+    def offload(self):
+        return []
+
+    def onload(self, tags: list[str] | None = None):
+        return []
+
+    def onload_weights(self):
+        return []
+
+    def onload_kv(self):
+        return []
+
+
+def external_engine_infos_from_args(args) -> list[ExternalEngineInfo]:
+    raw_infos = getattr(args, "rollout_external_engine_infos", None)
+    if raw_infos is None:
+        raise RuntimeError(
+            "External rollout engine info is missing. "
+            "apply_external_engine_info_to_args must run before starting external rollout servers."
+        )
+    return [ExternalEngineInfo(**info) if isinstance(info, dict) else info for info in raw_infos]
+
+
+def start_external_rollout_servers(args, *, start_router) -> tuple[dict[str, ExternalRolloutServer], list]:
+    import ray
+
+    from vime.backends.vllm_utils.vllm_engine import VLLMEngine
+    from vime.ray.utils import add_default_ray_env_vars
+
+    infos = external_engine_infos_from_args(args)
+    has_pd_disaggregation = any(info.is_pd_worker for info in infos)
+    prefill_urls = [(info.url, info.disaggregation_bootstrap_port) for info in infos if info.worker_type == "prefill"]
+    decode_urls = [info.url for info in infos if info.worker_type == "decode"]
+    router_ip, router_port, _ = start_router(
+        args,
+        has_pd_disaggregation=has_pd_disaggregation,
+        prefill_urls=prefill_urls if has_pd_disaggregation else None,
+        decode_urls=decode_urls if has_pd_disaggregation else None,
+    )
+    args.vllm_router_ip = router_ip
+    args.vllm_router_port = router_port
+
+    engines = []
+    engine_gpu_counts = []
+    engine_gpu_offsets = []
+    init_handles = []
+    RolloutRayActor = ray.remote(VLLMEngine)
+    gpu_offset = 0
+    for rank, info in enumerate(infos):
+        rollout_engine = RolloutRayActor.options(
+            num_cpus=0.2,
+            num_gpus=0,
+            runtime_env={"env_vars": add_default_ray_env_vars()},
+        ).remote(
+            args=args,
+            rank=rank,
+            worker_type=info.worker_type,
+            base_gpu_id=0,
+            num_gpus_per_engine=info.num_gpus,
+        )
+        engines.append(rollout_engine)
+        engine_gpu_counts.append(info.num_gpus)
+        engine_gpu_offsets.append(gpu_offset)
+        gpu_offset += info.num_gpus
+        init_handles.append(
+            rollout_engine.init.remote(
+                **external_engine_init_kwargs(info),
+                router_ip=None if has_pd_disaggregation else router_ip,
+                router_port=None if has_pd_disaggregation else router_port,
+            )
+        )
+
+    args.vllm_model_routers = {"default": (router_ip, router_port)}
+    servers = {
+        "default": ExternalRolloutServer(
+            engines=engines,
+            engine_gpu_counts=engine_gpu_counts,
+            engine_gpu_offsets=engine_gpu_offsets,
+            engine_parallel_configs=[info.parallel_config for info in infos],
+            router_ip=router_ip,
+            router_port=router_port,
+            model_name="default",
+            update_weights=True,
+            num_new_engines=len(engines),
+        )
+    }
+    return servers, init_handles

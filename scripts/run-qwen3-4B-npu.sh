@@ -37,7 +37,6 @@ CKPT_ARGS=(
    --hf-checkpoint ${DATA_ROOT}/models/Qwen3-4B/
    --load ${DATA_ROOT}/models/Qwen3-4B/
    --ref-load ${DATA_ROOT}/models/Qwen3-4B/
-   --megatron-to-hf-mode bridge
 )
 
 ROLLOUT_ARGS=(
@@ -67,7 +66,6 @@ PERF_ARGS=(
    --recompute-num-layers 1
    --use-dynamic-batch-size
    --max-tokens-per-gpu 8192
-   --megatron-to-hf-mode bridge
 )
 
 GRPO_ARGS=(
@@ -93,6 +91,7 @@ OPTIMIZER_ARGS=(
 )
 
 VLLM_ARGS=(
+   --vllm-additional-config '{"weight_nz_mode":0}'
    --rollout-num-gpus-per-engine 4
    --vllm-gpu-memory-utilization 0.6
 )
@@ -107,7 +106,7 @@ MISC_ARGS=(
    --use-flash-attn
 )
 
-ray start --head --node-ip-address 127.0.0.1 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+ray start --head --num-gpus 0 --resources '{"NPU": 8}' --node-ip-address 127.0.0.1 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 
 ray job submit --address="http://127.0.0.1:8265" \
 -- python3 train.py \

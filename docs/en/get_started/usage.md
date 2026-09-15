@@ -18,22 +18,21 @@ There are four main parameters for cluster resource allocation:
 
   - `--actor-num-nodes`: The number of nodes required for RL actor training.
   - `--actor-num-gpus-per-node`: The number of GPUs per node for RL actor training.
-  - `--rollout-num-gpus`: The total number of GPUs required for rollout (inference).
-  - `--rollout-num-gpus-per-engine`: The number of GPUs per inference engine. This parameter is similar to vLLM's `tp_size`. When performing multi-node serving, this value should be the total number of GPUs. For example, if serving one model with 2 nodes and 16 GPUs, this value should be 16.
+  - `--rollout-num-gpus`: The total number of GPUs required for rollout (inference). Set it to `0` to still parse vLLM arguments and launch the router without launching local vLLM servers.
+  - `--rollout-num-gpus-per-engine`: The total worker GPU count for one inference engine. It equals vLLM's `tensor_parallel_size` only when data and pipeline parallelism are both 1. For example, if one model is served across 2 nodes and 16 GPUs, this value should be 16.
 
 With the default configuration, we use these parameters to allocate `actor_num_nodes * actor_num_gpus_per_node` GPUs for training and `rollout_num_gpus` GPUs for inference via Ray, thus achieving a separation of training and inference resources.
 
 For co-located training and inference, you also need to configure:
 
-  - `--colocate`: Enables co-located training and inference. When enabled, it ignores `--rollout-num-gpus` and makes the number of GPUs for training and inference equal.
+  - `--colocate`: Enables co-located training and inference. By default, this makes the number of GPUs for training and inference equal. You can explicitly set a different positive `--rollout-num-gpus`, for example to use more rollout GPUs than actor GPUs; the extra GPUs are used as rollout-only resources. If `--rollout-num-gpus 0` is set explicitly, vime launches only the router and no local vLLM servers.
 
 Additionally, vime supports Prefill and Decode disaggregation (PD Disaggregation). You can set the number of servers used for Prefill by setting the `--prefill-num-servers` argument.
 
 ### Choosing Training Backend
 
-vime supports multiple training backends, which can be selected via the `--train-backend` parameter:
-
-- `megatron` (default): Uses Megatron-LM as the training backend, supporting efficient training of large-scale models.
+vime currently uses Megatron-LM as its training backend. The compatibility option
+`--train-backend megatron` may still be supplied explicitly.
 
 ### Loading Megatron
 
@@ -145,13 +144,14 @@ Note:
   - Before the first training step, vime will synchronize the parameters from Megatron to vLLM. Therefore, the `--hf-checkpoint` does not need to contain the latest training parameters, and you do not need to change the HF checkpoint when resuming training.
   - By default, vLLM reads the maximum context length from the `config.json` in the Hugging Face checkpoint. You can use the `--vllm-max-model-len` parameter to override this value to support longer inference.
   - During co-located training and inference, although Megatron and vLLM will offload sequentially, they still need to leave some memory for each other. You need to adjust vLLM's total VRAM usage by reducing `--vllm-gpu-memory-utilization`.
-  - vime supports passing through vllm-router parameters by adding a `router` prefix to the original parameter name. For example, vllm-router's `--balance-abs-threshold` parameter should be set as `--router-balance-abs-threshold`. Since vllm-router uses cache-aware routing by default, it may cause uneven request distribution. You can set `--router-balance-abs-threshold 0` to force balanced distribution, but this may affect prefix cache hit rate in multi-turn conversation scenarios.
+  - vime supports passing through vllm-router parameters by adding a `router` prefix to the original parameter name. For example, vllm-router's `--balance-abs-threshold` parameter should be set as `--router-balance-abs-threshold`. Since vllm-router uses cache-aware routing by default, it may cause uneven request distribution. You can set `--router-balance-abs-threshold 0` to force balanced distribution, but this may affect prefix cache hit rate in multi-turn conversation scenarios. For multi-turn sessions that require session affinity, set `--router-policy consistent_hash` and send a stable `x-session-id` for each session.
+  - If vLLM engines are pre-launched by an external system, connect to them with `--rollout-external-engine-addrs host1:port host2:port`. When the trainer and engines cannot form an NCCL weight-update group, use `--update-weight-mode full --update-weight-transport disk --update-weight-disk-dir /shared/fs/updates`; vime writes a complete HF checkpoint and asks vLLM to hot-load it through `update_weights_from_disk`. For large models or cross-cluster deployments, use `--update-weight-mode delta --update-weight-transport disk` instead. See [External Rollout Engines Roadmap](../advanced/external-rollout-engines.md) and [Delta Weight Sync](../advanced/delta-weight-sync.md).
 
 For details on some of vLLM's customizations and the principles behind how vime incorporates vLLM, please see the "How to Use vLLM" section.
 
 ### Data Format
 
-Currently, vime only supports loading files in `.jsonl` format, where each line of the file is a JSON object. An example of a single data entry (expanded) is as follows:
+vime supports `.jsonl` and `.parquet` files; reading Parquet requires `pyarrow`. Each record in either format should contain the fields selected by `--input-key` and `--label-key`. An expanded JSONL record looks like this:
 
 ```json
 {
@@ -177,11 +177,26 @@ This corresponds to the following configuration:
 Please note that the `step_loss_mask` (default=1) here is for SFT phase. If it is set to 0, the turn will not contibute to the final loss; if it is set to 1, vime will use the normal `loss_mask`.
 Additionally, we provide a `metadata_key`, which defaults to `"metadata"`. When read, vime will load the metadata from the data, which can be helpful for custom data generation or creating custom reward models.
 
+If one run mixes multiple data sources, put `source_name` in the sample metadata:
+
+```json
+{
+  "prompt": "...",
+  "label": "...",
+  "metadata": {
+    "source_name": "math"
+  }
+}
+```
+
+The recommended contract is to put the source identifier in `metadata["source_name"]`; vime also recognizes a dynamically set `sample.source` from custom data sources. When rollout samples are converted to training data, vime carries one `source_names` entry per sample to the training side. The source lookup order is dynamic `sample.source`, then `metadata["source_name"]`; if neither is set, the source is `"unknown"`. This is useful for custom rewards, filters, logging, and future per-source routing such as OPD teacher selection.
+
 ### Hyperparameters for RL Training
 
 - `--advantage-estimator`: Specifies the RL algorithm for the training process. Currently supported algorithms include:
     - `grpo` ([https://arxiv.org/abs/2402.03300](https://arxiv.org/abs/2402.03300))
     - `gspo` ([https://arxiv.org/abs/2507.18071](https://arxiv.org/abs/2507.18071))
+    - `cispo` ([https://arxiv.org/abs/2506.13585](https://arxiv.org/abs/2506.13585))
     - `reinforce_plus_plus` and `reinforce_plus_plus_baseline` ([https://arxiv.org/abs/2501.03262](https://arxiv.org/abs/2501.03262))
     - `ppo` ([https://arxiv.org/abs/1707.06347](https://arxiv.org/abs/1707.06347))
 - `--calculate-per-token-loss`: By default, vime calculates loss on a per-sample basis, i.e., `mean(sum(sample_i) / len(sample_i))`. Enable this flag to calculate loss on a per-token basis, i.e., `sum(sum(sample_i)) / sum(len(sample_i))`.
@@ -219,35 +234,17 @@ To use PPO, set:
 --advantage-estimator ppo
 ```
 
-**Note: In PPO, the Critic and Actor request GPUs in parallel**, which should be considered when allocating resources. Specifically:
+**Note: In PPO, the critic and actor share the same training GPU group.** You do not need to reserve a separate set of GPUs for the critic. Specifically:
 
-- The critic model occupies a separate set of GPUs, independent from the actor's GPU resources.
-- You can configure critic resources using `--critic-num-nodes` and `--critic-num-gpus-per-node`.
-- If critic resource parameters are not configured, the same resource configuration as the actor will be used by default.
+- PPO creates separate actor and critic training process groups, but places them on the same train placement group.
+- The critic training scale follows the actor configuration, and the actor / critic Megatron parallel topology must currently stay identical.
+- PPO forces train-side offload so that actor and critic can wake up and release memory on the same GPUs in turn.
+- There are currently no separate CLI arguments for configuring critic training resources; the critic node count and GPUs per node are derived from the actor configuration.
 
-Cluster resource allocation example:
-
-```bash
-# Actor uses 1 node, 4 GPUs
---actor-num-nodes 1
---actor-num-gpus-per-node 4
-
-# Critic uses 1 node, 4 GPUs (parallel to Actor)
---critic-num-nodes 1
---critic-num-gpus-per-node 4
-
-# Rollout uses 8 GPUs
---rollout-num-gpus 8
-```
-
-With the above configuration, a total of `4 (actor) + 4 (critic) + 8 (rollout) = 16` GPUs are required.
 
 PPO-related parameters:
 
-- `--critic-load`: Checkpoint path for the critic model.
-- `--critic-save`: Save path for the critic model.
-- `--critic-lr`: Learning rate for the critic model.
-- `--critic-lr-warmup-iters`: Number of warmup steps for the critic model.
+- `--megatron-config-path`: YAML config for role-specific Megatron overrides, such as setting critic-specific `load`, `save`, `lr`, or warmup parameters.
 - `--num-critic-only-steps`: Number of steps to train only the critic at the beginning of training.
 - `--eps-clip`: PPO clip range.
 - `--value-clip`: Clip range for value loss.
@@ -326,7 +323,6 @@ vime supports customizing data generation (rollout) to various degrees.
         output = await post(
             f"http://{args.vllm_router_ip}:{args.vllm_router_port}/inference/v1/generate",
             {
-                "model": args.hf_checkpoint,
                 "token_ids": prompt_token_ids,
                 "sampling_params": {"max_tokens": sampling_params["max_new_tokens"]},
             }
@@ -409,7 +405,7 @@ Each model gets its own router. The per-model router info is accessible via `arg
 **Server group features:**
 - `worker_type`: `regular`, `prefill`, `decode`, or `placeholder` (reserves GPU slots without creating engines)
 - `overrides`: Dict of vLLM `EngineArgs` field overrides applied on top of `--vllm-*` CLI args
-- `num_gpus_per_engine`: Per-group TP size override
+- `num_gpus_per_engine`: Per-group total worker GPU count override
 
 ## How to Use Megatron
 

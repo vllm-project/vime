@@ -45,7 +45,6 @@ CKPT_ARGS=(
    --hf-checkpoint "${MODEL_DIR}"
    --load "${MODEL_DIR}"
    --ref-load "${MODEL_DIR}"
-   --megatron-to-hf-mode bridge
    --save /tmp/vime_fully_async_demo/
    --save-interval 9999
 )
@@ -106,6 +105,7 @@ OPTIMIZER_ARGS=(
 )
 
 VLLM_ARGS=(
+   --vllm-additional-config '{"weight_nz_mode":0}'
    --rollout-num-gpus-per-engine 2
    --vllm-gpu-memory-utilization 0.6
 )
@@ -119,7 +119,7 @@ MISC_ARGS=(
    --use-flash-attn
 )
 
-ray start --head --node-ip-address 127.0.0.1 --disable-usage-stats
+ray start --head --num-gpus 0 --resources '{"NPU": 4}' --node-ip-address 127.0.0.1 --disable-usage-stats
 
 # fully-async splits actor / rollout onto disjoint GPUs (no colocation).
 ACTOR_GPUS=2

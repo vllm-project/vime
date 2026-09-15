@@ -28,6 +28,8 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
+from vime.utils import accelerator
+
 FP8_INFO = torch.finfo(torch.float8_e4m3fn)
 FP8_MAX, FP8_MIN = FP8_INFO.max, FP8_INFO.min
 
@@ -57,7 +59,10 @@ def block_fp8(weight, block_size):
     block_max = torch.max(torch.abs(qweight), dim=1, keepdim=True)[0]
     block_max = torch.max(block_max, dim=3, keepdim=True)[0]
 
-    scale = block_max.to(torch.float32) / FP8_MAX
+    # Clamp the block max away from zero, matching channel_fp8 / tensor_fp8: an
+    # all-zero block (e.g. padding rows or an unused MoE expert) would otherwise
+    # produce scale == 0 and qweight == 0/0 == NaN in the converted checkpoint.
+    scale = block_max.clamp(min=1e-12).to(torch.float32) / FP8_MAX
     qweight = (
         (qweight / scale)
         .clamp(min=FP8_MIN, max=FP8_MAX)
@@ -114,11 +119,13 @@ def process_file(input_path, output_path, filename, strategy, block_size, result
     if not filename.endswith(".safetensors"):
         return
 
-    print(f"Processing {filename}, memory usage: {torch.cuda.memory_allocated()}")
+    print(f"Processing {filename}, memory usage: {accelerator.memory_allocated()}")
     weights = {}
     q_weights = {}
 
-    with safetensors.safe_open(os.path.join(input_path, filename), framework="pt", device="cuda") as f:
+    with safetensors.safe_open(
+        os.path.join(input_path, filename), framework="pt", device=accelerator.device_name()
+    ) as f:
         for k in f.keys():
             weights[k] = f.get_tensor(k)
 
@@ -240,7 +247,7 @@ def convert_fp8(input_path, output_path, strategy, block_size=None, max_workers=
     json.dump(index_dict, open(os.path.join(output_path, "model.safetensors.index.json"), "w"), indent=2)
 
     gc.collect()
-    torch.cuda.empty_cache()
+    accelerator.empty_cache()
 
 
 if __name__ == "__main__":

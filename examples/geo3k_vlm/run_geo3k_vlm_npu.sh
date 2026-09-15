@@ -110,6 +110,7 @@ OPTIMIZER_ARGS=(
 )
 
 VLLM_ARGS=(
+   --vllm-additional-config '{"weight_nz_mode":0}'
    --rollout-num-gpus-per-engine 1
    --vllm-gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION:-0.8}"
    --vllm-max-model-len 16384
@@ -130,6 +131,7 @@ else
 fi
 
 BACKEND_ARGS=(
+   --spec vime_plugins.models.qwen3_vl get_qwen3_vl_model_provider
    --train-backend megatron
    --load "$MODEL_ROOT"
    --tensor-model-parallel-size 4
@@ -148,7 +150,6 @@ BACKEND_ARGS=(
    --accumulate-allreduce-grads-in-fp32
    --attention-softmax-in-fp32
    --attention-backend flash
-   --megatron-to-hf-mode bridge
 )
 
 VIME_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." &>/dev/null && pwd)"
@@ -166,7 +167,7 @@ pkill -9 redis || true
 export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 export no_proxy="127.0.0.1,${MASTER_ADDR}"
 if [ "$USE_EXTERNAL_RAY" = "0" ]; then
-   ray start --head --node-ip-address "$MASTER_ADDR" --disable-usage-stats \
+   ray start --head --num-gpus 0 --resources "{\"NPU\": ${REQUIRED_NPUS}}" --node-ip-address "$MASTER_ADDR" --disable-usage-stats \
       --dashboard-host=0.0.0.0 --dashboard-port=8265
 fi
 

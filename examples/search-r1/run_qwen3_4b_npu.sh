@@ -66,7 +66,6 @@ CKPT_ARGS=(
    --save /path/to/Qwen3-4B-Instruct-2507_vime_npu/
    --save-interval 100
    --no-load-optim
-   --megatron-to-hf-mode bridge
 )
 
 ROLLOUT_ARGS=(
@@ -135,10 +134,10 @@ OPTIMIZER_ARGS=(
 )
 
 VLLM_ARGS=(
+   --vllm-additional-config '{"weight_nz_mode":0}'
    --rollout-num-gpus-per-engine 4
    --vllm-gpu-memory-utilization 0.7
    --vllm-enable-sleep-mode
-   --vllm-weight-sync-mode native
 )
 
 MISC_ARGS=(
@@ -173,7 +172,7 @@ ray start --head \
     --dashboard-host=0.0.0.0
 
 # Build the runtime environment JSON with proper variable substitution
-RUNTIME_ENV_JSON=$(cat << 'EOF'
+RUNTIME_ENV_JSON=$(cat << EOF
 {
   "env_vars": {
     "PYTHONPATH": "${VIME_DIR}/examples/search-r1:/root/Megatron-LM:/root/vllm:/root/vllm-ascend:${VIME_DIR}:/root/Megatron-Bridge:/root/mbridge:/root/MegatronAdaptor:/root/TransformerEngineNPU:/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:/usr/local/Ascend/ascend-toolkit/latest/tools/ms_fmk_transplt/torch_npu_bridge",

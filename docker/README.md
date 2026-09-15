@@ -1,7 +1,7 @@
 # Docker release rule
 
 vime ships one image based on the official vllm image, published as
-`inferactinc/public:vime-latest`. Supports GB200/300 and H100/200.
+`vllm/vime:latest`. Supports GB200/300 and H100/200.
 
 Build locally:
 

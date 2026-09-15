@@ -1,15 +1,13 @@
 diff --git a/src/megatron/bridge/models/conversion/param_mapping.py b/src/megatron/bridge/models/conversion/param_mapping.py
-index 63b4cc37..00394727 100644
+index a0421273..7f9203ab 100644
 --- a/src/megatron/bridge/models/conversion/param_mapping.py
 +++ b/src/megatron/bridge/models/conversion/param_mapping.py
-@@ -1199,18 +1199,23 @@ class AutoMapping(MegatronParamMapping[torch.Tensor]):
-             "ColumnParallelLinear",
+@@ -1097,15 +1097,20 @@ class AutoMapping(MegatronParamMapping[torch.Tensor]):
              "LinearCrossEntropyModule",
              "TEColumnParallelLinear",
 +            "MindSpeedTEColumnParallelLinear",
              "TELayerNormColumnParallelLinear",
 +            "MindSpeedTELayerNormColumnParallelLinear",
-             "InferenceLayerNormColumnParallelLinear",
              "TEColumnParallelGroupedLinear",
 +            "MindSpeedTEColumnParallelGroupedLinear",
              "VocabParallelEmbedding",
@@ -20,98 +18,246 @@ index 63b4cc37..00394727 100644
          "row": {
              "RowParallelLinear",
              "TERowParallelLinear",
-             "InferenceRowParallelLinear",
              "TERowParallelGroupedLinear",
 +            "MindSpeedTERowParallelGroupedLinear",
          },
          "replicated": {
              # Normalization layers
-@@ -1282,7 +1287,7 @@ class AutoMapping(MegatronParamMapping[torch.Tensor]):
+@@ -1176,7 +1180,7 @@ class AutoMapping(MegatronParamMapping[torch.Tensor]):
          # Handle fused modules like TELayerNormColumnParallelLinear
          # These modules have both column-parallel weights (weight, bias)
          # and replicated layer norm weights (layer_norm_weight, layer_norm_bias)
--        if module_type in ("TELayerNormColumnParallelLinear", "InferenceLayerNormColumnParallelLinear"):
-+        if module_type in ("TELayerNormColumnParallelLinear", "InferenceLayerNormColumnParallelLinear", "MindSpeedTELayerNormColumnParallelLinear"):
+-        if module_type == "TELayerNormColumnParallelLinear":
++        if module_type == "TELayerNormColumnParallelLinear" or module_type == "MindSpeedTELayerNormColumnParallelLinear":
              # Check the actual parameter name to determine the correct parallelism type
              if self.megatron_param and (
                  self.megatron_param.endswith("layer_norm_weight") or self.megatron_param.endswith("layer_norm_bias")
-@@ -1313,7 +1318,7 @@ class AutoMapping(MegatronParamMapping[torch.Tensor]):
+@@ -1207,7 +1211,7 @@ class AutoMapping(MegatronParamMapping[torch.Tensor]):
              return "replicated"
-
+ 
          # Check parallel_mode for TELinear
 -        if module_type == "TELinear":
 +        if module_type == "TELinear" or module_type == "MindSpeedTELinear":
              if module.parallel_mode == "column":
                  return "column"
              elif module.parallel_mode == "row":
-diff --git a/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py b/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py
-index 7360857d..a6c00358 100644
---- a/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py
-+++ b/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py
-@@ -27,6 +27,7 @@ from megatron.core.pipeline_parallel.utils import is_pp_last_stage
- from megatron.core.process_groups_config import ProcessGroupCollection
- from megatron.core.transformer import MegatronModule
+diff --git a/src/megatron/bridge/models/qwen/__init__.py b/src/megatron/bridge/models/qwen/__init__.py
+index b3656b6d..382845cc 100644
+--- a/src/megatron/bridge/models/qwen/__init__.py
++++ b/src/megatron/bridge/models/qwen/__init__.py
+@@ -15,7 +15,7 @@
+ from megatron.bridge.models.qwen.qwen2_bridge import Qwen2Bridge  # noqa: F401
+ from megatron.bridge.models.qwen.qwen3_bridge import Qwen3Bridge  # noqa: F401
+ from megatron.bridge.models.qwen.qwen3_moe_bridge import Qwen3MoEBridge  # noqa: F401
+-from megatron.bridge.models.qwen.qwen3_next_bridge import Qwen3NextBridge
++# from megatron.bridge.models.qwen.qwen3_next_bridge import Qwen3NextBridge
+ from megatron.bridge.models.qwen.qwen_provider import (
+     Qwen2ModelProvider,
+     Qwen2ModelProvider1P5B,
+@@ -32,8 +32,8 @@ from megatron.bridge.models.qwen.qwen_provider import (
+     Qwen3MoEModelProvider,
+     Qwen3MoEModelProvider30B_A3B,
+     Qwen3MoEModelProvider235B_A22B,
+-    Qwen3NextModelProvider,
+-    Qwen3NextModelProvider80B_A3B,
++    # Qwen3NextModelProvider,
++    # Qwen3NextModelProvider80B_A3B,
+     Qwen25ModelProvider1P5B,
+     Qwen25ModelProvider3B,
+     Qwen25ModelProvider7B,
+@@ -67,6 +67,6 @@ __all__ = [
+     "Qwen3MoEModelProvider",
+     "Qwen3MoEModelProvider30B_A3B",
+     "Qwen3MoEModelProvider235B_A22B",
+-    "Qwen3NextModelProvider",
+-    "Qwen3NextModelProvider80B_A3B",
++    # "Qwen3NextModelProvider",
++    # "Qwen3NextModelProvider80B_A3B",
+ ]
+diff --git a/src/megatron/bridge/models/qwen/qwen_provider.py b/src/megatron/bridge/models/qwen/qwen_provider.py
+index 775b9765..6200103c 100644
+--- a/src/megatron/bridge/models/qwen/qwen_provider.py
++++ b/src/megatron/bridge/models/qwen/qwen_provider.py
+@@ -18,9 +18,9 @@ from typing import TYPE_CHECKING, Callable, Optional
+ 
+ import torch
+ import torch.nn.functional as F
+-from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
+-    get_transformer_block_with_experimental_attention_variant_spec,
+-)
++# from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
++#     get_transformer_block_with_experimental_attention_variant_spec,
++# )
  from megatron.core.transformer.spec_utils import ModuleSpec
-+from megatron.core.utils import nvtx_range_pop, nvtx_range_push
- from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig as Qwen3VLConfigHF
-
- from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.attention import Qwen3VLSelfAttention
-@@ -497,7 +498,7 @@ class Qwen3VLModel(MegatronModule):
-         if not _is_mrope_position_ids(position_ids):
-             position_ids = None
-
--        torch.cuda.nvtx.range_push("Qwen3VLModel.forward.pre_process")
-+        nvtx_range_push(msg="Qwen3VLModel.forward.pre_process")
-
-         cp_rank = self.pg_collection.cp.rank()
-         cp_size = self.pg_collection.cp.size()
-@@ -598,7 +599,7 @@ class Qwen3VLModel(MegatronModule):
-                                 vision_embeds,
-                                 deepstack_feature_lists,
-                             )
--                            torch.cuda.nvtx.range_pop()
-+                            nvtx_range_pop(msg="Qwen3VLModel.forward.pre_process")
-                             return output_vision_module
-                         else:
-                             vision_embeds = self.vision_embeds
-@@ -821,8 +822,8 @@ class Qwen3VLModel(MegatronModule):
-             if position_ids_were_split and self.language_model is not None:
-                 self.language_model.rotary_pos_emb.is_thd_format = True
-
--        torch.cuda.nvtx.range_pop()
--        torch.cuda.nvtx.range_push("Qwen3VLModel.forward.language_model")
-+        nvtx_range_pop(msg="Qwen3VLModel.forward.pre_process")
-+        nvtx_range_push(msg="Qwen3VLModel.forward.language_model")
-
-         return_sliced_loss_mask = False
-         if packed_seq_params is not None:
-@@ -863,7 +864,7 @@ class Qwen3VLModel(MegatronModule):
-             **(extra_block_kwargs or {}),
-             **kwargs,
-         )
--        torch.cuda.nvtx.range_pop()
-+        nvtx_range_pop(msg="Qwen3VLModel.forward.language_model")
-         if self.use_dist_train:
-             if not is_pp_last_stage(self.pg_collection.pp):
-                 return {"language_module": output}
+ 
+ from megatron.bridge.models.gpt_provider import GPTModelProvider
+@@ -430,53 +430,53 @@ class Qwen3MoEModelProvider235B_A22B(Qwen3MoEModelProvider):
+ # =============================================================================
+ 
+ 
+-@dataclass
+-class Qwen3NextModelProvider(Qwen3MoEModelProvider):
+-    """Base provider for Qwen 3 Next Models."""
+-
+-    transformer_layer_spec: ModuleSpec | Callable[["GPTModelProvider"], ModuleSpec] = (
+-        get_transformer_block_with_experimental_attention_variant_spec
+-    )
+-
+-    layernorm_zero_centered_gamma: bool = True  # Zero-centered RMSNorm
+-    kv_channels: int | None = 256
+-    num_query_groups: int = 2
+-    seq_length: int = 262144  # 256k tokens
+-    rotary_base: float = 10000000.0
+-    rotary_percent: float = 0.25  # 25% of the hidden size is used for RoPE
+-    attention_output_gate: bool = True  # Gated Attention
+-
+-    # MoE specific parameters
+-    num_moe_experts: int = 512
+-    moe_router_topk: int = 10  # 10 routed experts per token
+-    moe_shared_expert_gate: bool = True  # Qwen3-Next uses a gate for the shared expert
+-    moe_router_dtype: str = "fp32"
+-    moe_router_load_balancing_type: str = "global_aux_loss"  # Qwen3-Next uses global aux loss for load balancing
+-
+-    # Linear Attention specific parameters
+-    experimental_attention_variant: str = "gated_delta_net"  # Gated Delta Net used in 75% of the model layers
+-    linear_attention_freq: int | list[int] = 4  # 1 gated standard attention layer per 4 layers
+-    linear_conv_kernel_dim: int = 4
+-    linear_key_head_dim: int = 128
+-    linear_value_head_dim: int = 128
+-    linear_num_key_heads: int = 16
+-    linear_num_value_heads: int = 32
+-
+-    # Checkpointing
+-    hetereogenous_dist_checkpoint: bool = True
+-
+-
+-@dataclass
+-class Qwen3NextModelProvider80B_A3B(Qwen3NextModelProvider):
+-    """
+-    Provider for Qwen 3 Next 80B-A3B: https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct and https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Thinking
+-    """
+-
+-    num_layers: int = 48
+-    hidden_size: int = 2048
+-    num_attention_heads: int = 16
+-    num_query_groups: int = 2
+-    ffn_hidden_size: int = 5120
+-    moe_ffn_hidden_size: int = 512
+-    moe_shared_expert_intermediate_size: int = 512
+-    mtp_num_layers: Optional[int] = None
++# @dataclass
++# class Qwen3NextModelProvider(Qwen3MoEModelProvider):
++#     """Base provider for Qwen 3 Next Models."""
++
++#     transformer_layer_spec: ModuleSpec | Callable[["GPTModelProvider"], ModuleSpec] = (
++#         get_transformer_block_with_experimental_attention_variant_spec
++#     )
++
++#     layernorm_zero_centered_gamma: bool = True  # Zero-centered RMSNorm
++#     kv_channels: int | None = 256
++#     num_query_groups: int = 2
++#     seq_length: int = 262144  # 256k tokens
++#     rotary_base: float = 10000000.0
++#     rotary_percent: float = 0.25  # 25% of the hidden size is used for RoPE
++#     attention_output_gate: bool = True  # Gated Attention
++
++#     # MoE specific parameters
++#     num_moe_experts: int = 512
++#     moe_router_topk: int = 10  # 10 routed experts per token
++#     moe_shared_expert_gate: bool = True  # Qwen3-Next uses a gate for the shared expert
++#     moe_router_dtype: str = "fp32"
++#     moe_router_load_balancing_type: str = "global_aux_loss"  # Qwen3-Next uses global aux loss for load balancing
++
++#     # Linear Attention specific parameters
++#     experimental_attention_variant: str = "gated_delta_net"  # Gated Delta Net used in 75% of the model layers
++#     linear_attention_freq: int | list[int] = 4  # 1 gated standard attention layer per 4 layers
++#     linear_conv_kernel_dim: int = 4
++#     linear_key_head_dim: int = 128
++#     linear_value_head_dim: int = 128
++#     linear_num_key_heads: int = 16
++#     linear_num_value_heads: int = 32
++
++#     # Checkpointing
++#     hetereogenous_dist_checkpoint: bool = True
++
++
++# @dataclass
++# class Qwen3NextModelProvider80B_A3B(Qwen3NextModelProvider):
++#     """
++#     Provider for Qwen 3 Next 80B-A3B: https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct and https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Thinking
++#     """
++
++#     num_layers: int = 48
++#     hidden_size: int = 2048
++#     num_attention_heads: int = 16
++#     num_query_groups: int = 2
++#     ffn_hidden_size: int = 5120
++#     moe_ffn_hidden_size: int = 512
++#     moe_shared_expert_intermediate_size: int = 512
++#     mtp_num_layers: Optional[int] = None
+diff --git a/src/megatron/bridge/models/qwen_vl/qwen35_vl_provider.py b/src/megatron/bridge/models/qwen_vl/qwen35_vl_provider.py
+index 6c74827c..75973903 100644
+--- a/src/megatron/bridge/models/qwen_vl/qwen35_vl_provider.py
++++ b/src/megatron/bridge/models/qwen_vl/qwen35_vl_provider.py
+@@ -36,9 +36,9 @@ from typing import Any, Callable, List, Optional
+ 
+ import transformers
+ from megatron.core.models.gpt import GPTModel as MCoreGPTModel
+-from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
+-    get_transformer_block_with_experimental_attention_variant_spec,
+-)
++# from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
++#     get_transformer_block_with_experimental_attention_variant_spec,
++# )
+ from megatron.core.transformer.spec_utils import ModuleSpec
+ from megatron.core.transformer.transformer_block import TransformerBlockSubmodules
+ from packaging.version import Version as PkgVersion
+@@ -105,9 +105,10 @@ class Qwen35VLModelProvider(GPTModelProvider):
+     # =========================================================================
+     # Hybrid Architecture (Qwen3-Next style)
+     # =========================================================================
+-    transformer_layer_spec: ModuleSpec | Callable[["GPTModelProvider"], ModuleSpec] = (
+-        get_transformer_block_with_experimental_attention_variant_spec
+-    )
++    # transformer_layer_spec: ModuleSpec | Callable[["GPTModelProvider"], ModuleSpec] = (
++    #     get_transformer_block_with_experimental_attention_variant_spec
++    # )
++    transformer_layer_spec: ModuleSpec = None
+     layernorm_zero_centered_gamma: bool = True
+     attention_output_gate: bool = True
+     experimental_attention_variant: str = "gated_delta_net"
+@@ -261,9 +262,10 @@ class Qwen35VLMoEModelProvider(GPTModelProvider):
+     # =========================================================================
+     # Hybrid Architecture (Qwen3-Next style)
+     # =========================================================================
+-    transformer_layer_spec: ModuleSpec | Callable[["GPTModelProvider"], ModuleSpec] = (
+-        get_transformer_block_with_experimental_attention_variant_spec
+-    )
++    # transformer_layer_spec: ModuleSpec | Callable[["GPTModelProvider"], ModuleSpec] = (
++    #     get_transformer_block_with_experimental_attention_variant_spec
++    # )
++    transformer_layer_spec: ModuleSpec = None
+     layernorm_zero_centered_gamma: bool = True
+     attention_output_gate: bool = True
+     experimental_attention_variant: str = "gated_delta_net"
 diff --git a/src/megatron/bridge/models/transformer_config.py b/src/megatron/bridge/models/transformer_config.py
-index 6bc5b8d3..dd71b959 100644
+index 618700ed..3133f4ea 100644
 --- a/src/megatron/bridge/models/transformer_config.py
 +++ b/src/megatron/bridge/models/transformer_config.py
-@@ -71,6 +71,10 @@ def _resolve_string_fields(config: MCoreTransformerConfig) -> None:
-         config.pipeline_dtype = str_to_dtype(config.pipeline_dtype)
-
-
+@@ -47,6 +47,10 @@ def _safe_asdict(obj, skip_keys: set[str]) -> dict:
+         return obj.__class__((_safe_asdict(k, skip_keys), _safe_asdict(v, skip_keys)) for k, v in obj.items())
+     return obj
+ 
++from dataclasses import dataclass, field
++
 +class MyConfig:
 +    pass
-+
-+
+ 
  @dataclass
  class TransformerConfig(MCoreTransformerConfig):
-     """Megatron Core TransformerConfig with deferred post-init.
-@@ -93,6 +97,13 @@ class TransformerConfig(MCoreTransformerConfig):
+@@ -70,6 +74,13 @@ class TransformerConfig(MCoreTransformerConfig):
      """
-
+ 
      _NO_COPY_KEYS = {"_pg_collection"}
 +    # vllm_eplb_config: MyConfig = field(default_factory=MyConfig)
 +    # vllm_ir_op_priority: MyConfig = field(default_factory=MyConfig)
@@ -120,19 +266,110 @@ index 6bc5b8d3..dd71b959 100644
 +    # vllm_structured_outputs_config: MyConfig = field(default_factory=MyConfig)
 +    # vllm_compilation_config: MyConfig = field(default_factory=MyConfig)
 +    # vllm_attention_config: MyConfig = field(default_factory=MyConfig)
-
+ 
      def __post_init__(self) -> None:
          """Skip MCore post_init during initial construction.
 diff --git a/src/megatron/bridge/peft/utils.py b/src/megatron/bridge/peft/utils.py
-index d354c34f..d59fd7da 100644
+index 1ca5b18b..3d8ec12a 100644
 --- a/src/megatron/bridge/peft/utils.py
 +++ b/src/megatron/bridge/peft/utils.py
-@@ -74,7 +74,7 @@ HAVE_TE = all(
+@@ -62,7 +62,7 @@ HAVE_TE = all(
      )
  )
-
+ 
 -MixedFusedLayerNorm, HAVE_APEX = safe_import_from("apex.normalization.fused_layer_norm", "MixedFusedLayerNorm")
 +# MixedFusedLayerNorm, HAVE_APEX = safe_import_from("apex.normalization.fused_layer_norm", "MixedFusedLayerNorm")
- ModelOptLinear, HAVE_MODELOPT_LINEAR = safe_import_from("megatron.core.post_training.modelopt.layers", "Linear")
-
+ 
  TECL = (TEColumnParallelLinear, TELayerNormColumnParallelLinear, TEColumnParallelGroupedLinear)
+ TERL = (TERowParallelLinear, TERowParallelGroupedLinear)
+diff --git a/src/megatron/bridge/training/mlm_compat/model.py b/src/megatron/bridge/training/mlm_compat/model.py
+index 60cc091c..1dd5c808 100644
+--- a/src/megatron/bridge/training/mlm_compat/model.py
++++ b/src/megatron/bridge/training/mlm_compat/model.py
+@@ -21,9 +21,9 @@ from megatron.core import tensor_parallel
+ from megatron.core.enums import ModelType
+ from megatron.core.fp8_utils import correct_amax_history_if_needed
+ from megatron.core.models.gpt import GPTModel
+-from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
+-    get_transformer_block_with_experimental_attention_variant_spec,
+-)
++# from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
++#     get_transformer_block_with_experimental_attention_variant_spec,
++# )
+ from megatron.core.models.gpt.gpt_layer_specs import (
+     get_gpt_decoder_block_spec,
+     get_gpt_layer_local_spec,
+diff --git a/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py b/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py
+index 7775c11c..c7b094cf 100644
+--- a/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py
++++ b/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/model.py
+@@ -26,6 +26,7 @@ from megatron.core.packed_seq_params import PackedSeqParams
+ from megatron.core.process_groups_config import ProcessGroupCollection
+ from megatron.core.transformer import MegatronModule
+ from megatron.core.transformer.spec_utils import ModuleSpec
++from megatron.core.utils import nvtx_range_pop, nvtx_range_push
+ from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig as Qwen3VLConfigHF
+ 
+ from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.attention import Qwen3VLSelfAttention
+@@ -294,7 +295,7 @@ class Qwen3VLModel(MegatronModule):
+         # position ids is computed within the model
+         position_ids = None
+ 
+-        torch.cuda.nvtx.range_push("Qwen3VLModel.forward.pre_process")
++        nvtx_range_push(msg="Qwen3VLModel.forward.pre_process")
+ 
+         cp_rank = self.pg_collection.cp.rank()
+         cp_size = self.pg_collection.cp.size()
+@@ -387,7 +388,7 @@ class Qwen3VLModel(MegatronModule):
+                 combined_embeddings = split_data_cp_rank(combined_embeddings, cp_size, 0, cp_rank)
+             if packed_seq_params is not None:
+                 if attention_mask is None:
+-                    attention_mask = torch.ones_like(input_ids, dtype=torch.int32, device=input_ids.device)
++                    attention_mask = torch.ones_like(input_ids, dtype=torch.bool, device=input_ids.device)
+                 input_ids_thd, _ = preprocess_packed_seqs(
+                     input_ids, attention_mask, pre_process=True, pg_collection=self.pg_collection
+                 )
+@@ -443,7 +444,7 @@ class Qwen3VLModel(MegatronModule):
+             # convert lm_input_ids to THD format so it matches position_ids.
+             if packed_seq_params is not None:
+                 if attention_mask is None:
+-                    attention_mask = torch.ones_like(input_ids, dtype=torch.int32, device=input_ids.device)
++                    attention_mask = torch.ones_like(input_ids, dtype=torch.bool, device=input_ids.device)
+                 lm_input_ids, _ = preprocess_packed_seqs(
+                     input_ids, attention_mask, pre_process=True, pg_collection=self.pg_collection
+                 )
+@@ -499,8 +500,8 @@ class Qwen3VLModel(MegatronModule):
+                 attention_mask = None
+                 self.language_model.rotary_pos_emb.is_thd_format = True
+ 
+-        torch.cuda.nvtx.range_pop()
+-        torch.cuda.nvtx.range_push("Qwen3VLModel.forward.language_model")
++        nvtx_range_pop(msg="Qwen3VLModel.forward.pre_process")
++        nvtx_range_push(msg="Qwen3VLModel.forward.language_model")
+ 
+         output = self.language_model(
+             input_ids=lm_input_ids,
+@@ -516,6 +517,6 @@ class Qwen3VLModel(MegatronModule):
+             **(extra_block_kwargs or {}),
+             **kwargs,
+         )
+-        torch.cuda.nvtx.range_pop()
++        nvtx_range_pop(msg="Qwen3VLModel.forward.language_model")
+ 
+         return output
+diff --git a/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/utils.py b/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/utils.py
+index b714d0f7..42fcab74 100644
+--- a/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/utils.py
++++ b/src/megatron/bridge/models/qwen_vl/modelling_qwen3_vl/utils.py
+@@ -668,6 +668,11 @@ def preprocess_packed_seqs(
+     """
+     batch_size = input_ids.shape[0]
+ 
++    # Ensure boolean dtype for correct advanced indexing (bool → mask select,
++    # int → fancy index which silently corrupts data when values are 0/1).
++    if attention_mask.dtype != torch.bool:
++        attention_mask = attention_mask.bool()
++
+     seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
+     if pg_collection is not None:
+         tp_size = pg_collection.tp.size()

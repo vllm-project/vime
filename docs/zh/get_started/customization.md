@@ -8,26 +8,26 @@ vime 通过函数路径参数提供了广泛的自定义能力。这些参数允
 
 | 接口参数 | 用途 |
 | :--- | :--- |
-| [`--rollout-function-path`](#1-rollout-函数---rollout-function-path) | 覆盖整个 rollout 生成逻辑。 |
-| [`--custom-generate-function-path`](#2-自定义生成函数---custom-generate-function-path) | 仅覆盖生成步骤（例如用于 RAG 或工具调用）。 |
-| [`--custom-rm-path`](#3-奖励模型---custom-rm-path) | 实现自定义奖励计算逻辑。 |
-| [`--dynamic-sampling-filter-path`](#4-动态采样过滤器---dynamic-sampling-filter-path) | 在动态采样过程中过滤样本（例如 DAPO）。 |
-| [`--buffer-filter-path`](#5-buffer-过滤器---buffer-filter-path) | 在训练前过滤 rollout buffer 中的样本。 |
-| [`--rollout-sample-filter-path`](#6-rollout-样本过滤器---rollout-sample-filter-path) | 决定单个样本是否参与损失计算。 |
-| [`--rollout-all-samples-process-path`](#7-rollout-全样本处理---rollout-all-samples-process-path) | 在 rollout 后处理所有样本（包括被过滤的样本）。 |
-| [`--rollout-data-postprocess-path`](#8-rollout-数据后处理---rollout-data-postprocess-path) | 在计算 log probabilities 后对 rollout 数据进行后处理。 |
-| [`--custom-loss-function-path`](#9-自定义损失函数---custom-loss-function-path) | 实现自定义训练损失计算。 |
-| [`--custom-tis-function-path`](#10-自定义-tisrs-函数---custom-tis-function-path) | 实现用于离策略（off-policy）校正的自定义重要性采样。 |
-| [`--custom-pg-loss-reducer-function-path`](#11-自定义-pg-loss-reducer---custom-pg-loss-reducer-function-path) | 自定义 pg_loss 的归约方式（如 Dr.GRPO）。 |
-| [`--custom-reward-post-process-path`](#12-奖励后处理---custom-reward-post-process-path) | 在优势计算前对奖励进行自定义后处理。 |
-| [`--custom-convert-samples-to-train-data-path`](#13-样本转训练数据---custom-convert-samples-to-train-data-path) | 覆盖样本到训练数据格式的转换逻辑。 |
-| [`--custom-rollout-log-function-path`](#14-日志函数) | 训练 rollout 的自定义日志记录。 |
-| [`--custom-eval-rollout-log-function-path`](#14-日志函数) | 评估 rollout 的自定义日志记录。 |
-| [`--data-source-path`](#15-数据源---data-source-path) | 覆盖 rollout 提示词的数据源。 |
-| [`--eval-function-path`](#16-评估函数---eval-function-path) | 专门为评估覆盖 rollout 函数。 |
-| [`--custom-megatron-init-path`](#17-megatron-hook) | Megatron 设置后的自定义初始化。 |
-| [`--custom-megatron-before-log-prob-hook-path`](#17-megatron-hook) | log probability 计算前的自定义逻辑。 |
-| [`--custom-megatron-before-train-step-hook-path`](#17-megatron-hook) | 每个训练步骤前的自定义逻辑。 |
+| [`--rollout-function-path`](#rollout-function-path) | 覆盖整个 rollout 生成逻辑。 |
+| [`--custom-generate-function-path`](#custom-generate-function-path) | 仅覆盖生成步骤（例如用于 RAG 或工具调用）。 |
+| [`--custom-rm-path`](#custom-rm-path) | 实现自定义奖励计算逻辑。 |
+| [`--dynamic-sampling-filter-path`](#dynamic-sampling-filter-path) | 在动态采样过程中过滤样本（例如 DAPO）。 |
+| [`--buffer-filter-path`](#buffer-filter-path) | 在训练前过滤 rollout buffer 中的样本。 |
+| [`--rollout-sample-filter-path`](#rollout-sample-filter-path) | 决定单个样本是否参与损失计算。 |
+| [`--rollout-all-samples-process-path`](#rollout-all-samples-process-path) | 在 rollout 后处理所有样本（包括被过滤的样本）。 |
+| [`--rollout-data-postprocess-path`](#rollout-data-postprocess-path) | 在计算 log probabilities 后对 rollout 数据进行后处理。 |
+| [`--custom-loss-function-path`](#custom-loss-function-path) | 实现自定义训练损失计算。 |
+| [`--custom-tis-function-path`](#custom-tis-function-path) | 实现用于离策略（off-policy）校正的自定义重要性采样。 |
+| [`--custom-pg-loss-reducer-function-path`](#custom-pg-loss-reducer-function-path) | 自定义 pg_loss 的归约方式（如 Dr.GRPO）。 |
+| [`--custom-reward-post-process-path`](#custom-reward-post-process-path) | 在优势计算前对奖励进行自定义后处理。 |
+| [`--custom-convert-samples-to-train-data-path`](#custom-convert-samples-to-train-data-path) | 覆盖样本到训练数据格式的转换逻辑。 |
+| [`--custom-rollout-log-function-path`](#logging-functions) | 训练 rollout 的自定义日志记录。 |
+| [`--custom-eval-rollout-log-function-path`](#logging-functions) | 评估 rollout 的自定义日志记录。 |
+| [`--data-source-path`](#data-source-path) | 覆盖 rollout 提示词的数据源。 |
+| [`--eval-function-path`](#eval-function-path) | 专门为评估覆盖 rollout 函数。 |
+| [`--custom-megatron-init-path`](#megatron-hooks) | Megatron 设置后的自定义初始化。 |
+| [`--custom-megatron-before-log-prob-hook-path`](#megatron-hooks) | log probability 计算前的自定义逻辑。 |
+| [`--custom-megatron-before-train-step-hook-path`](#megatron-hooks) | 每个训练步骤前的自定义逻辑。 |
 
 ## 通过 customization 接口实现 agentic workflow
 
@@ -37,18 +37,18 @@ agentic workflow——multi-turn tool use、sandbox interaction、environment fe
 
 | 想做的事 | 应使用的接口 |
 | :--- | :--- |
-| 让每条 sample 跑自定义的 agent loop、tool call、RAG、sandbox 执行、browser/terminal 交互或多轮生成，同时复用 vime 默认 rollout loop | [`--custom-generate-function-path`](#2-自定义生成函数---custom-generate-function-path) |
-| 实现 verifier reward、test-based reward、environment 成功判定、rule-based reward 或调用外部 reward 服务 | [`--custom-rm-path`](#3-奖励模型---custom-rm-path) |
-| 替换整个 rollout 编排（只在 per-sample 自定义不够用时使用） | [`--rollout-function-path`](#1-rollout-函数---rollout-function-path) |
-| 控制任务采样、缓冲、回填，或自定义 prompt / task 数据源 | [`--data-source-path`](#15-数据源---data-source-path) |
-| 给 agentic 输出附加自定义 loss mask、metadata，或转换成训练数据 | [`--rollout-data-postprocess-path`](#8-rollout-数据后处理---rollout-data-postprocess-path)、[`--custom-convert-samples-to-train-data-path`](#13-样本转训练数据---custom-convert-samples-to-train-data-path) |
-| 调试长耗时的 custom generation、verifier、tool call 或 sandbox 调用 | [`vime.utils.trace_utils`](../developer_guide/trace.md) 中的 trace 工具 |
+| 让每条 sample 跑自定义的 agent loop、tool call、RAG、sandbox 执行、browser/terminal 交互或多轮生成，同时复用 vime 默认 rollout loop | [`--custom-generate-function-path`](#custom-generate-function-path) |
+| 实现 verifier reward、test-based reward、environment 成功判定、rule-based reward 或调用外部 reward 服务 | [`--custom-rm-path`](#custom-rm-path) |
+| 替换整个 rollout 编排（只在 per-sample 自定义不够用时使用） | [`--rollout-function-path`](#rollout-function-path) |
+| 控制任务采样、缓冲、回填，或自定义 prompt / task 数据源 | [`--data-source-path`](#data-source-path) |
+| 给 agentic 输出附加自定义 loss mask、metadata，或转换成训练数据 | [`--rollout-data-postprocess-path`](#rollout-data-postprocess-path)、[`--custom-convert-samples-to-train-data-path`](#custom-convert-samples-to-train-data-path) |
+| 调试长耗时的 custom generation、verifier、tool call 或 sandbox 调用 | [`vime.observability.trace_utils`](../developer_guide/trace.md) 中的 trace 工具 |
 
 这一模式的原生示例：[`examples/multi_agent`](../../../examples/multi_agent/README.md) 中基于 `--rollout-function-path` 的多 agent 模式，以及 [`examples/fully_async`](../../../examples/fully_async/README.md) 中适合 long-tail agentic 场景的 fully-async rollout，两者外层都走 vime 默认的 `vllm_rollout`。
 
 ## 详细接口参考
 
-### 1. Rollout 函数 (`--rollout-function-path`)
+### `--rollout-function-path`
 
 **默认值**: `vime.rollout.vllm_rollout.generate_rollout`
 
@@ -64,11 +64,11 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False) -> Rollout
 - 添加自定义采样策略
 - 在生成过程中集成外部工具或 API
 
-**示例**: 参见 [examples/multi_agent/rollout_with_multi_agents.py](../../../examples/multi_agent/rollout_with_multi_agents.py)
+**示例**: 参见 [examples/fully_async](../_examples_synced/fully_async/README.md)
 
 ---
 
-### 2. 自定义生成函数 (`--custom-generate-function-path`)
+### `--custom-generate-function-path`
 
 **默认值**: `None`（使用内置生成函数）
 
@@ -76,7 +76,7 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False) -> Rollout
 
 **函数签名**:
 ```python
-async def custom_generate(args, sample: Sample, sampling_params: dict) -> Sample
+async def custom_generate(args, sample: Sample, sampling_params: dict) -> Sample | list[Sample]
 ```
 
 **使用场景**:
@@ -84,9 +84,41 @@ async def custom_generate(args, sample: Sample, sampling_params: dict) -> Sample
 - 添加检索增强生成（RAG）
 - 多轮对话处理
 
+#### 一个 prompt 产生多个训练样本
+
+在 subagent、multi-agent、context compact 等 agentic 场景中，一次 prompt rollout 可能会自然拆成多个可训练片段。例如：主 agent 调用 subagent 后，subagent 的轨迹和主 agent 的后续轨迹都需要参与训练；或者发生 compact 后，compact 前后的上下文被切成多个 segment。
+
+这种情况下不需要重写整个 rollout 函数，`custom_generate` 可以直接返回 `list[Sample]`。关键是：这些由同一次 rollout 拆出来的 sibling samples 必须设置相同的 `rollout_id`，这样 vime 会在训练切分和 loss 聚合时把它们视作同一次 rollout，而不是重复计数为多次独立 rollout。
+
+```python
+import copy
+
+from vime.utils.types import Sample
+
+
+async def custom_generate(args, sample: Sample, sampling_params: dict) -> list[Sample]:
+    segments = await run_agent_and_split_segments(args, sample, sampling_params)
+    rollout_id = sample.rollout_id if sample.rollout_id is not None else sample.index
+
+    samples: list[Sample] = []
+    for segment in segments:
+        s = copy.copy(sample)
+        s.tokens = segment.tokens
+        s.response = segment.response
+        s.response_length = segment.response_length
+        s.loss_mask = segment.loss_mask
+        s.reward = segment.reward
+        s.status = Sample.Status.COMPLETED
+        s.rollout_id = rollout_id
+        samples.append(s)
+    return samples
+```
+
+如果一个完整 trajectory 只有一个总奖励、但被拆成了 `K` 个训练片段，常见做法是在这些片段之间分配这个奖励（例如每个片段写入 `reward / K`），避免把同一次 rollout 的奖励重复放大。
+
 ---
 
-### 3. 奖励模型 (`--custom-rm-path`)
+### `--custom-rm-path`
 
 **默认值**: `None`（基于 `--rm-type` 使用内置奖励模型）
 
@@ -118,7 +150,7 @@ async def batched_custom_rm(args, samples: list[Sample]) -> list[float]
 
 ---
 
-### 4. 动态采样过滤器 (`--dynamic-sampling-filter-path`)
+### `--dynamic-sampling-filter-path`
 
 **默认值**: `None`
 
@@ -146,7 +178,7 @@ class DynamicFilterOutput:
 
 ---
 
-### 5. Buffer 过滤器 (`--buffer-filter-path`)
+### `--buffer-filter-path`
 
 **默认值**: `None`
 
@@ -164,7 +196,7 @@ def buffer_filter(args, rollout_id, buffer: list[list[Sample]], num_samples: int
 
 ---
 
-### 6. Rollout 样本过滤器 (`--rollout-sample-filter-path`)
+### `--rollout-sample-filter-path`
 
 **默认值**: `None`
 
@@ -183,7 +215,7 @@ def filter_function(args, samples: list[Sample]) -> None
 
 ---
 
-### 7. Rollout 全样本处理 (`--rollout-all-samples-process-path`)
+### `--rollout-all-samples-process-path`
 
 **默认值**: `None`
 
@@ -200,7 +232,7 @@ def process_function(args, samples: list[list[Sample]], data_source) -> None
 
 ---
 
-### 8. Rollout 数据后处理 (`--rollout-data-postprocess-path`)
+### `--rollout-data-postprocess-path`
 
 **默认值**: `None`
 
@@ -217,7 +249,7 @@ def postprocess_function(args, samples: list[list[Sample]]) -> None
 
 ---
 
-### 9. 自定义损失函数 (`--custom-loss-function-path`)
+### `--custom-loss-function-path`
 
 **默认值**: `None`（需要 `--loss-type custom_loss`）
 
@@ -230,7 +262,7 @@ def postprocess_function(args, samples: list[list[Sample]]) -> None
 
 ---
 
-### 10. 自定义 TIS/RS 函数 (`--custom-tis-function-path`)
+### `--custom-tis-function-path`
 
 **默认值**: `None`
 
@@ -244,7 +276,7 @@ def postprocess_function(args, samples: list[list[Sample]]) -> None
 
 ---
 
-### 11. 自定义 pg_loss Reducer (`--custom-pg-loss-reducer-function-path`)
+### `--custom-pg-loss-reducer-function-path`
 
 **默认值**: `None`
 
@@ -266,7 +298,7 @@ def get_pg_loss_reducer(
 
 ---
 
-### 12. 奖励后处理 (`--custom-reward-post-process-path`)
+### `--custom-reward-post-process-path`
 
 **默认值**: `None`（使用默认的 GRPO 归一化）
 
@@ -278,7 +310,7 @@ def get_pg_loss_reducer(
 
 ---
 
-### 13. 样本转训练数据 (`--custom-convert-samples-to-train-data-path`)
+### `--custom-convert-samples-to-train-data-path`
 
 **默认值**: `None`（使用内置转换逻辑）
 
@@ -318,7 +350,7 @@ dict: {
   
 ---
 
-### 14. 日志函数
+### Logging functions
 
 #### 训练 Rollout 日志 (`--custom-rollout-log-function-path`)
 
@@ -340,7 +372,7 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics) -> bool
 
 ---
 
-### 15. 数据源 (`--data-source-path`)
+### `--data-source-path`
 
 **默认值**: `vime.rollout.data_source.RolloutDataSourceWithBuffer`
 
@@ -371,7 +403,7 @@ class CustomDataSource(DataSource):
 
 ---
 
-### 16. 评估函数 (`--eval-function-path`)
+### `--eval-function-path`
 
 **默认值**: 与 `--rollout-function-path` 相同
 
@@ -383,7 +415,7 @@ class CustomDataSource(DataSource):
 
 ---
 
-### 17. Megatron Hook
+### Megatron hooks
 
 #### Megatron 初始化 (`--custom-megatron-init-path`)
 
@@ -423,6 +455,24 @@ def custom_hook(args, rollout_id, step_id, model, optimizer, opt_param_scheduler
 | `--use-routing-replay` | 训练中前向-反向路由一致性。([arXiv:2507.18071](https://arxiv.org/abs/2507.18071)) |
 | `--use-rollout-routing-replay` | R3：在训练时重放 rollout 阶段的路由。vime 默认的 `vllm_rollout` 路径支持该功能。([arXiv:2510.11370](https://arxiv.org/abs/2510.11370)) |
 
+---
+
+### 19. Disk 权重同步 Post-Write Hook（`--custom-update-weight-post-write-path`）
+
+**签名**：
+```python
+def hook(args, version_dir: str, rollout_engines) -> None
+```
+
+**用途**：在 disk 权重同步（`--update-weight-transport disk`，full 或 delta 模式）的文件写完之后、
+engine 读取之前，在每个训练 rank 上调用。用于在非 POSIX 共享文件系统上发布写入——例如 commit
+一个对象存储挂载——否则其他 host 无法看到这些文件。hook 会在每个 rank 上被调用，需要自行去重
+（例如每个容器只执行一次）。
+
+post-write hook 返回前必须保证完整版本目录对读取端可见。host-local 的完整 checkpoint
+复制随后直接使用该目录作为来源。delta 机制见
+[Delta 权重同步](../advanced/delta-weight-sync.md)。
+
 ## 自定义函数路径的测试
 
 vime 现在也提供了一组 CPU 契约测试，用于校验这些 customization 接口。测试会通过字符串形式的导入路径来动态加载组件，因此既能回归仓库内置 hook，也能验证用户通过和训练时完全相同的 CLI 参数传入的自定义实现。
@@ -448,9 +498,8 @@ python -m pytest \
   tests/plugin_contracts/test_plugin_runtime_hook_contracts.py
 ```
 
-每个测试文件也支持直接通过 `python tests/plugin_contracts/<file>.py` 执行，这样可以和 `run-ci-changed` 保持兼容。
-
-CI 中也提供了独立的 `run-ci-plugin-contracts` label，给 PR 打上该标签后会并行运行上述全部四个契约测试（无需 GPU）。
+每个测试文件也支持直接通过 `python tests/plugin_contracts/<file>.py` 执行。
+Buildkite 会在始终运行的 `plugin-contracts` CPU step 中执行全部四个契约测试。
 
 如果你要验证自己的自定义实现，可以直接设置环境变量，例如 `VIME_CONTRACT_ROLLOUT_FUNCTION_PATH`、`VIME_CONTRACT_CUSTOM_RM_PATH`，也可以在直接运行测试文件时传参，例如：
 

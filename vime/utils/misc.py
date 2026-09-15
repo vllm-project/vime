@@ -1,9 +1,41 @@
 import importlib
 import subprocess
+from collections import defaultdict
+from collections.abc import Iterable
+from functools import cache
+from typing import Any
+
+import torch
 
 from vime.utils.http_utils import is_port_available
 
 
+def decode_int32_meta_array(meta_info: dict[str, Any], keys: str | Iterable[str]) -> torch.Tensor | None:
+    if isinstance(keys, str):
+        keys = (keys,)
+    for key in keys:
+        if key in meta_info:
+            value = meta_info[key]
+            break
+    else:
+        return None
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        import pybase64
+
+        value = pybase64.b64decode(value.encode("ascii"))
+    if isinstance(value, bytes | bytearray | memoryview):
+        return torch.frombuffer(bytearray(value), dtype=torch.int32)
+    if torch.is_tensor(value):
+        return value.detach().to(device="cpu", dtype=torch.int32).reshape(-1)
+    if hasattr(value, "flags") and not value.flags.writeable:
+        value = value.copy()
+    return torch.as_tensor(value, dtype=torch.int32).reshape(-1)
+
+
+@cache
 def load_function(path):
     """
     Load a function from a module.
@@ -105,13 +137,6 @@ class Box:
         return self._inner
 
 
-from collections import defaultdict
-from collections.abc import Callable, Iterable
-from typing import Any
-
-import torch
-
-
 # details: https://stackoverflow.com/questions/773/how-do-i-use-itertools-groupby
 def group_by(iterable, key=None):
     """Similar to itertools.groupby, but do not require iterable to be sorted"""
@@ -119,30 +144,3 @@ def group_by(iterable, key=None):
     for item in iterable:
         ret[key(item) if key is not None else item].append(item)
     return dict(ret)
-
-
-def chunk_named_params_by_size(named_params: Iterable[tuple[str, torch.Tensor]], chunk_size: int):
-    return _chunk_by_size(
-        named_params,
-        compute_size=lambda named_weight: named_weight[1].nbytes,
-        chunk_size=chunk_size,
-    )
-
-
-def _chunk_by_size(objects: Iterable[Any], compute_size: Callable[[Any], int], chunk_size: int):
-    bucket: list[Any] = []
-    bucket_size = 0
-
-    for obj in objects:
-        obj_size = compute_size(obj)
-
-        if bucket and (bucket_size + obj_size) >= chunk_size:
-            yield bucket
-            bucket = []
-            bucket_size = 0
-
-        bucket.append(obj)
-        bucket_size += obj_size
-
-    if bucket:
-        yield bucket

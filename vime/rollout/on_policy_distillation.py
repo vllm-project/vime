@@ -19,7 +19,7 @@ async def reward_func(args, sample, **kwargs):
     teacher_model = getattr(args, "opd_teacher_model", None)
     sampling_params = {
         "max_tokens": 1,
-        "temperature": 0,
+        "temperature": args.rollout_temperature,
         "prompt_logprobs": 1,
         "skip_special_tokens": False,
     }

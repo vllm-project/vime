@@ -90,7 +90,7 @@ hf download --repo-type dataset zhuzilin/dapo-math-17k \
 We provide an example to run GRPO training with
 [Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B) on 8 NPUs (4 for the actor,
 4 for rollout), please refer to:
-[scripts/models/qwen3-4B_npu.sh](https://github.com/vllm-project/vime/blob/npu/scripts/models/qwen3-4B_npu.sh).
+[scripts/run-qwen3-4B-npu.sh](../../../scripts/run-qwen3-4B-npu.sh).
 Just run:
 
 ```bash
@@ -100,7 +100,8 @@ cd /root/vime
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
 
-MODEL_ROOT=/root bash scripts/models/qwen3-4B_npu.sh
+DATA_ROOT="${MODEL_ROOT:-/root}" bash scripts/run-qwen3-4B-npu.sh \
+  2>&1 | tee /root/vime/train_qwen3_4b_vllm.log
 ```
 
 The full log is written to `/root/vime/train_qwen3_4b_vllm.log`.
