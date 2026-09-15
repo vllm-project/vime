@@ -142,13 +142,26 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
             )
             parser.add_argument(
                 "--update-weight-transport",
-                choices=["nccl", "disk"],
+                choices=["nccl", "disk", "modelexpress"],
                 default="nccl",
                 help=(
-                    "Carrier for weight sync. In full mode, 'nccl' broadcasts chunks and "
-                    "'disk' writes a complete HF checkpoint under --update-weight-disk-dir "
-                    "before engines reload it. Delta mode is 'disk' only: each host applies the "
-                    "published deltas into its local checkpoint and reloads via update_weights_from_disk."
+                    "Carrier for weight sync. In full mode, 'nccl' broadcasts chunks, "
+                    "'disk' writes a complete HF checkpoint under --update-weight-disk-dir, and "
+                    "'modelexpress' publishes canonical S3 checkpoints through the "
+                    "version lifecycle "
+                    "configured by --modelexpress-config. "
+                    "Delta mode is 'disk' only."
+                ),
+            )
+            parser.add_argument(
+                "--modelexpress-config",
+                type=json.loads,
+                default={},
+                help=(
+                    "ModelExpress configuration as a JSON object, including "
+                    "seed_checkpoint_path and refit_checkpoint_dir. Set "
+                    "full_hf_checkpoint_interval to a positive integer to publish "
+                    "periodic full HF checkpoints."
                 ),
             )
             parser.add_argument(
@@ -2182,6 +2195,11 @@ def vime_validate_args(args):
 
     if args.only_train_params_name_list and args.freeze_params_name_list:
         raise ValueError("You can only specify ONE of: --only-train-params-name-list, or --freeze-params-name-list.")
+
+    if not isinstance(args.modelexpress_config, dict):
+        raise ValueError("--modelexpress-config must be a JSON object")
+    if args.modelexpress_config and args.update_weight_transport != "modelexpress":
+        raise ValueError("--modelexpress-config requires --update-weight-transport=modelexpress")
 
     # disk-backed sync (full or delta) writes on the trainer and reads on the engines: needs a shared dir
     if args.update_weight_transport == "disk" and not args.update_weight_disk_dir:
