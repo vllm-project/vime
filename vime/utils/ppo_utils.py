@@ -235,7 +235,10 @@ class _VocabParallelLogProbEntropy(torch.autograd.Function):
         def sum_softmax_logits(softmax: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
             if softmax.is_cuda:
                 # Avoid materializing the full [seq_len, vocab] product buffer.
-                return torch.einsum("ij,ij->i", softmax, logits).unsqueeze(-1)
+                # Autocast can downcast einsum even though both inputs are fp32,
+                # corrupting the entropy value and its saved backward statistic.
+                with torch.autocast(device_type="cuda", enabled=False):
+                    return torch.einsum("ij,ij->i", softmax, logits).unsqueeze(-1)
             return (softmax * logits).sum(dim=-1, keepdim=True)
 
         if log_prob_keep_mask is None:

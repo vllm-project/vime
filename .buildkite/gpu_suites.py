@@ -58,6 +58,7 @@ SUITES = {
         ("test_qwen3_4B_ppo_disaggregate.py", 8, "", {"ENABLE_EVAL": "0"}),
         ("test_qwen3_4B_ppo_train_critic_only.py", 8, "", {"ENABLE_EVAL": "0"}),
         ("test_ppo_logprob_entropy_gpu.py", 2, "", {}),
+        ("test_ppo_entropy_autocast_gpu.py", 1, "", {}),
         ("test_release_train.py", 4, "", {}),
         ("test_qwen3_4B_streaming_partial_rollout.py", 8, "", {}),
         ("test_moonlight_16B_A3B.py", 8, "", {"ENABLE_EVAL": "0"}),
