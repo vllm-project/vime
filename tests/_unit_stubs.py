@@ -35,9 +35,8 @@ from unittest.mock import MagicMock
 
 def real_module_available(name: str) -> bool:
     """True when the real package is importable and should not be shadowed."""
-    if name in sys.modules:
-        return True
     try:
+        # Earlier test modules may have installed a stub with no import spec.
         return importlib.util.find_spec(name) is not None
     except (ImportError, ValueError):
         return False

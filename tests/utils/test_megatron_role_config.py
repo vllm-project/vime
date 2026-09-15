@@ -15,6 +15,7 @@ if str(_tests_root) not in sys.path:
 import _unit_stubs
 
 _unit_stubs.install_rollout_optional_stubs()
+_unit_stubs.install_vllm_cli_stubs()
 
 NUM_GPUS = 0
 

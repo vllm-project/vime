@@ -9,6 +9,8 @@ import torch
 import torch.nn.functional as F
 from safetensors import safe_open
 
+from vime.platforms import current_platform
+
 
 class SafetensorReader:
     def __init__(self, path: str | Path):
@@ -129,7 +131,7 @@ def shard_mcore_tensor(name: str, tensor: torch.Tensor, parameter: torch.Tensor)
         tensor,
         parallel_size=parallel_size,
         parallel_rank=parallel_rank,
-        partition_dim=parameter.partition_dim,
+        partition_dim=current_platform().megatron.adjust_tp_partition_dim(name, parameter.partition_dim),
         partition_stride=parameter.partition_stride,
     )
 

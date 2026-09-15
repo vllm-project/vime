@@ -44,6 +44,9 @@ def _install_fake_deps(monkeypatch):
     accelerator_mod.current_device = lambda: "cuda:0"
     accelerator_mod.ipc_collect = lambda: None
 
+    platform_mod = types.ModuleType("vime.platforms")
+    platform_mod.current_platform = lambda: types.SimpleNamespace(is_npu=False)
+
     dist_mod = types.ModuleType("torch.distributed")
 
     def gather_object(obj, object_gather_list, dst, group):
@@ -110,6 +113,7 @@ def _install_fake_deps(monkeypatch):
     update_from_distributed_mod.update_weights_from_distributed = lambda *args, **kwargs: []
 
     monkeypatch.setitem(sys.modules, "vime", vime_pkg)
+    monkeypatch.setitem(sys.modules, "vime.platforms", platform_mod)
     monkeypatch.setitem(sys.modules, "vime.backends", vime_backends_pkg)
     monkeypatch.setitem(sys.modules, "vime.backends.megatron_utils", megatron_utils_pkg)
     monkeypatch.setitem(sys.modules, "vime.backends.megatron_utils.update_weight", update_weight_pkg)

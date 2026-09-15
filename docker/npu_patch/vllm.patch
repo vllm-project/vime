@@ -1,0 +1,158 @@
+diff --git a/vllm/entrypoints/scale_out/token_in_token_out/protocol.py b/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
+index f304bf677b..71a17e9363 100644
+--- a/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
++++ b/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
+@@ -240,6 +240,8 @@ class GenerateStreamResponse(BaseModel):
+     )
+     choices: list[GenerateResponseStreamChoice]
+     usage: UsageInfo | None = Field(default=None)
++    weight_version: str | None = None
++    request_spec_decode_stats: dict[str, Any] | None = Field(default=None)
+
+
+ class GenerateResponse(BaseModel):
+@@ -255,6 +257,8 @@ class GenerateResponse(BaseModel):
+     created: int | None = None
+     choices: list[GenerateResponseChoice]
+     usage: UsageInfo | None = Field(default=None)
++    weight_version: str | None = None
++    request_spec_decode_stats: dict[str, Any] | None = Field(default=None)
+     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
+
+     kv_transfer_params: dict[str, Any] | None = Field(
+diff --git a/vllm/entrypoints/scale_out/token_in_token_out/serving.py b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
+index bbbd85137c..809f1a66ea 100644
+--- a/vllm/entrypoints/scale_out/token_in_token_out/serving.py
++++ b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
+@@ -14,6 +14,7 @@ from vllm.engine.protocol import EngineClient
+ from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
+ from vllm.entrypoints.generate.base.serving import (
+     GenerateBaseServing,
++    build_spec_decoding_metrics,
+     clamp_prompt_logprobs,
+ )
+ from vllm.entrypoints.openai.chat_completion.protocol import (
+@@ -261,6 +262,7 @@ class ServingTokens(GenerateBaseServing):
+         )
+
+         assert result_generator is not None
++        weight_version = await self.engine_client.get_weight_version()
+
+         if request.stream:
+             return self.serve_tokens_stream_generator(
+@@ -269,10 +271,16 @@ class ServingTokens(GenerateBaseServing):
+                 request_id,
+                 model_name,
+                 request_metadata,
++                weight_version,
+             )
+
+         return await self.serve_tokens_full_generator(
+-            request, result_generator, request_id, model_name, request_metadata
++            request,
++            result_generator,
++            request_id,
++            model_name,
++            request_metadata,
++            weight_version,
+         )
+
+     async def serve_tokens_full_generator(
+@@ -282,6 +290,7 @@ class ServingTokens(GenerateBaseServing):
+         request_id: str,
+         model_name: str,
+         request_metadata: RequestResponseMetadata,
++        weight_version: str | None,
+     ) -> ErrorResponse | GenerateResponse:
+         created_time = int(time.time())
+         final_res: RequestOutput | None = None
+@@ -355,6 +364,11 @@ class ServingTokens(GenerateBaseServing):
+                 cached_tokens=final_res.num_cached_tokens
+             )
+
++        spec_decode_metrics = build_spec_decoding_metrics(final_res)
++        request_spec_decode_stats = (
++            spec_decode_metrics.model_dump() if spec_decode_metrics else None
++        )
++
+         request_metadata.final_usage_info = usage
+
+         response = GenerateResponse(
+@@ -363,6 +377,8 @@ class ServingTokens(GenerateBaseServing):
+             model=model_name,
+             choices=choices,
+             usage=usage,
++            weight_version=weight_version,
++            request_spec_decode_stats=request_spec_decode_stats,
+             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
+             kv_transfer_params=final_res.kv_transfer_params,
+             ec_transfer_params=final_res.ec_transfer_params,
+@@ -396,11 +412,13 @@ class ServingTokens(GenerateBaseServing):
+         request_id: str,
+         model_name: str,
+         request_metadata: RequestResponseMetadata,
++        weight_version: str | None,
+     ) -> AsyncGenerator[str, None]:
+         num_prompt_tokens = 0
+         num_generated_tokens: list[int] = []
+         first_iteration = True
+         num_cached_tokens = None
++        request_spec_decode_stats: dict[str, object] | None = None
+         sampling_params: SamplingParams = request.sampling_params
+
+         include_usage, include_continuous_usage = should_include_usage(
+@@ -409,6 +427,9 @@ class ServingTokens(GenerateBaseServing):
+
+         try:
+             async for res in result_generator:
++                spec_decode_metrics = build_spec_decoding_metrics(res)
++                if spec_decode_metrics is not None:
++                    request_spec_decode_stats = spec_decode_metrics.model_dump()
+                 if first_iteration:
+                     if res.prompt_token_ids is not None:
+                         num_prompt_tokens = len(res.prompt_token_ids)
+@@ -448,6 +469,8 @@ class ServingTokens(GenerateBaseServing):
+
+                     chunk = GenerateStreamResponse(
+                         request_id=request_id,
++                        weight_version=weight_version,
++                        request_spec_decode_stats=request_spec_decode_stats,
+                         choices=[
+                             GenerateResponseStreamChoice(
+                                 index=i,
+@@ -482,6 +505,8 @@ class ServingTokens(GenerateBaseServing):
+             if include_usage:
+                 final_chunk = GenerateStreamResponse(
+                     request_id=request_id,
++                    weight_version=weight_version,
++                    request_spec_decode_stats=request_spec_decode_stats,
+                     choices=[],
+                     usage=final_usage_info,
+                 )
+diff --git a/vllm/model_executor/model_loader/reload/meta.py b/vllm/model_executor/model_loader/reload/meta.py
+index a8f8023cf2..d62f39a2b8 100644
+--- a/vllm/model_executor/model_loader/reload/meta.py
++++ b/vllm/model_executor/model_loader/reload/meta.py
+@@ -30,5 +30,6 @@ SKIP_LOAD_TENSORS: set[str] = {
+     "expert_global_to_physical",
+     "expert_physical_to_global",
+     "expert_local_to_global",
++    "expert_ids_per_ep_rank",
+     "e_score_correction_bias",
+ }
+diff --git a/vllm/model_executor/models/glm4_moe_lite_mtp.py b/vllm/model_executor/models/glm4_moe_lite_mtp.py
+index 1d30a0eaf6..37239f7f62 100644
+--- a/vllm/model_executor/models/glm4_moe_lite_mtp.py
++++ b/vllm/model_executor/models/glm4_moe_lite_mtp.py
+@@ -129,6 +129,10 @@ class Glm4MoeLiteMultiTokenPredictorLayer(nn.Module):
+     ) -> torch.Tensor:
+         assert inputs_embeds is not None
+         # masking inputs at position 0, as not needed by MTP
+-        inputs_embeds[positions == 0] = 0
++        # Avoid dynamic bool indexing during NPU graph capture.
++        mask = (positions == 0).unsqueeze(-1)
++        inputs_embeds = torch.where(
++            mask, torch.zeros_like(inputs_embeds), inputs_embeds
++        )
+         inputs_embeds = self.enorm(inputs_embeds)
+         previous_hidden_states = self.hnorm(previous_hidden_states)

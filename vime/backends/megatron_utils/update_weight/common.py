@@ -10,6 +10,7 @@ import torch.distributed as dist
 from megatron.core import mpu
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
+from vime.platforms import current_platform
 from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.types import ParamInfo
 
@@ -51,6 +52,7 @@ def all_gather_param(name: str, param: torch.nn.Parameter) -> torch.Tensor:
     if "linear_fc1.weight" in name or "linear_fc1.bias" in name:
         param_partitions = [p.chunk(2, dim=0) for p in param_partitions]
         param_partitions = [p[0] for p in param_partitions] + [p[1] for p in param_partitions]
+        partition_dim = current_platform().megatron.adjust_tp_partition_dim(name, partition_dim)
     # this is bug in megatron's grouped moe.
     if "linear_fc2.weight" in name:
         if partition_dim == 0:
@@ -118,6 +120,7 @@ def all_gather_params_async(
             if "linear_fc1.weight" in info.name or "linear_fc1.bias" in info.name:
                 param_partitions = [p.chunk(2, dim=0) for p in param_partitions]
                 param_partitions = [p[0] for p in param_partitions] + [p[1] for p in param_partitions]
+                partition_dim = current_platform().megatron.adjust_tp_partition_dim(info.name, partition_dim)
             # this is bug in megatron's grouped moe.
             if "linear_fc2.weight" in info.name:
                 if partition_dim == 0:
@@ -289,7 +292,6 @@ def create_nccl_trainer(
 ):
     import ray
     from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
-    from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
 
     rendezvous = [None]
     if dist.get_rank() == 0:
@@ -299,7 +301,8 @@ def create_nccl_trainer(
     dist.broadcast_object_list(rendezvous, src=0, group=get_gloo_group())
     master_address, master_port = rendezvous[0]
     return WeightTransferTrainerFactory.trainer_init(
-        NCCLTrainerInitInfo(
+        current_platform().weight_transfer.trainer_init_info(
+            colocate=False,
             master_address=master_address,
             master_port=master_port,
             world_size=sum(engine_gpu_counts) + 1,

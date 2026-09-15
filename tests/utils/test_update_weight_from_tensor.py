@@ -188,6 +188,9 @@ def _install_ipc_trainer_stubs(monkeypatch, created):
 
 @pytest.mark.unit
 def test_connect_uses_native_ipc_and_nccl_trainers(update_module, monkeypatch):
+    from vime.platforms import get_platform
+
+    monkeypatch.setattr(update_module, "current_platform", lambda: get_platform("cuda"))
     updater = _updater(update_module)
     old_trainer = RecordingTrainer(object())
     updater._native_trainers = [old_trainer]

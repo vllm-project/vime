@@ -10,6 +10,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from vime.backends.vllm_utils.vllm_config import ServerGroupConfig
 from vime.backends.vllm_utils.vllm_engine import VLLMEngine, _resolve_parallel_sizes
+from vime.platforms import current_platform
 from vime.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, add_default_ray_env_vars
 
 GPU_MEMORY_TYPE_KV_CACHE = "kv_cache"
@@ -117,6 +118,7 @@ class ServerGroup:
         RolloutRayActor = ray.remote(VLLMEngine)
 
         rollout_engines = []
+        platform = current_platform()
         for i in range(len(self.all_engines)):
             if self.all_engines[i] is not None:
                 continue
@@ -142,13 +144,18 @@ class ServerGroup:
             env_vars["PYTORCH_CUDA_ALLOC_CONF"] = ",".join(
                 kv for kv in _alloc.split(",") if kv and not kv.strip().startswith("expandable_segments")
             )
+            if platform.is_npu:
+                env_vars = platform.ray.rollout_runtime_env(self.args, env_vars)
+            resource_options = {"num_gpus": num_gpus}
+            if platform.is_npu:
+                resource_options = {"num_gpus": 0, **platform.ray.actor_options(num_gpus)}
             rollout_engine = RolloutRayActor.options(
                 num_cpus=num_cpus,
-                num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
                 runtime_env={
                     "env_vars": add_default_ray_env_vars(env_vars),
                 },
+                **resource_options,
             ).remote(
                 self.args,
                 rank=global_rank,

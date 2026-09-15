@@ -13,6 +13,7 @@ from ray import ObjectRef
 from ray.actor import ActorHandle
 from tqdm import tqdm
 
+from vime.platforms import current_platform
 from vime.utils import accelerator
 from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.types import ParamInfo
@@ -23,6 +24,16 @@ from .common import HfWeightSource, VimeRayWeightSyncClient, create_nccl_trainer
 from .expert_routing import configure_expert_routing
 from .hf_weight_iterator_direct import HfWeightIteratorDirect
 from .update_weight_from_distributed import post_process_weights
+
+
+def _current_gpu_uuid() -> str:
+    platform = current_platform()
+    if platform.is_npu:
+        return platform.weight_transfer.current_device_uuid()
+
+    device_index = torch.cuda.current_device()
+    props = torch.cuda.get_device_properties(device_index)
+    return str(props.uuid)
 
 
 def _native_ipc_buffer_size(args: Namespace, param_info_buckets: Sequence[Sequence[ParamInfo]] | None) -> int:
@@ -64,7 +75,7 @@ def _build_packed_ipc_update_info(
     )
     assert chunk is not None
     _, ipc_args = reduce_tensor(chunk.packed_tensor)
-    gpu_uuid = str(torch.cuda.get_device_properties(torch.cuda.current_device()).uuid)
+    gpu_uuid = _current_gpu_uuid()
     return (
         {
             "names": chunk.names,
@@ -188,11 +199,11 @@ class UpdateWeightFromTensor:
         if not self._expert_transfer_plan or self.args.dspark_enabled:
             if self.rollout_engines:
                 from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
-                from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 
                 client = VimeRayWeightSyncClient(self.rollout_engines, lambda: self.weight_version)
                 trainer = WeightTransferTrainerFactory.trainer_init(
-                    IPCTrainerInitInfo(
+                    current_platform().weight_transfer.trainer_init_info(
+                        colocate=True,
                         rank=dist.get_rank(),
                         packed=True,
                         packed_buffer_size_bytes=_native_ipc_buffer_size(

@@ -8,7 +8,7 @@ import logging
 import random
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 _tests_root = Path(__file__).resolve().parents[1]
 if str(_tests_root) not in sys.path:
@@ -23,6 +23,20 @@ requires_vllm = pytest.mark.skipif(not _real_vllm, reason="requires real vllm in
 _unit_stubs.install_vllm_cli_stubs()
 
 NUM_GPUS = 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("preloaded", [False, True])
+def test_real_module_available_rejects_missing_package_and_stub(monkeypatch, preloaded):
+    name = "_vime_missing_optional_dependency"
+    if preloaded:
+        monkeypatch.setitem(sys.modules, name, ModuleType(name))
+    assert not _unit_stubs.real_module_available(name)
+
+
+@pytest.mark.unit
+def test_real_module_available_accepts_loaded_real_module():
+    assert _unit_stubs.real_module_available("sys")
 
 
 @pytest.fixture(scope="module")
@@ -206,11 +220,13 @@ def test_add_vllm_arguments_overrides_router_balance_threshold_defaults(args_mod
 
 
 def _patch_device_config(monkeypatch):
-    """Patch DeviceConfig.__post_init__ to avoid GPU device detection on CPU CI."""
+    """Avoid device detection and third-party plugin loading in parser tests."""
     try:
         from vllm.config.device import DeviceConfig
+        from vllm.engine import arg_utils
 
         monkeypatch.setattr(DeviceConfig, "__post_init__", lambda self: setattr(self, "device_type", "cpu"))
+        monkeypatch.setattr(arg_utils, "load_general_plugins", lambda: None)
     except ImportError:
         pass
 

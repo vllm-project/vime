@@ -10,6 +10,7 @@ import torch.distributed as dist
 
 import vime.utils.eval_config
 from vime.observability.logging_utils import configure_logger
+from vime.platforms import current_platform
 from vime.ray.ray_actor import RayActor
 from vime.utils import accelerator
 from vime.utils.distributed_utils import init_gloo_group
@@ -19,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 
 def get_local_gpu_id():
+    platform = current_platform()
+    if platform.is_npu:
+        return platform.ray.local_device_id()
+
     return accelerator.resolve_visible_device_id(ray.get_gpu_ids()[0])
 
 

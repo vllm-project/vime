@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from vime.utils.external_utils.launch import current_platform, launch_commands
 from vime.utils.external_utils.typer_utils import dataclass_cli
 from vime.utils.misc import exec_command
 
@@ -27,6 +28,11 @@ def convert_checkpoint(
     dir_dst: str = "/root",
     hf_checkpoint: str | None = None,
 ):
+    # Platforms without automatic conversion use native HF loading by default.
+    if not current_platform().torch_dist_convert:
+        print(f"convert_checkpoint skip on {current_platform().name} (native HF load)")
+        return
+
     hf_checkpoint = hf_checkpoint or f"/root/models/{model_name}"
     normalized_extra_args = f" {extra_args.strip()}" if extra_args.strip() else ""
 
@@ -104,6 +110,29 @@ def execute_train(
         extra_env_vars = {}
     if config is None:
         config = ExecuteTrainConfig()
+
+    # Platform seam: non-CUDA delegates to the launcher; the CUDA path below stays
+    # byte-identical to upstream.
+    platform = current_platform()
+    if platform.name != "cuda":
+        cmds = launch_commands(
+            platform,
+            train_args=train_args,
+            num_devices=num_gpus_per_node,
+            megatron_model_type=megatron_model_type,
+            repo_base_dir=str(repo_base_dir),
+            train_script=train_script,
+            extra_env={**extra_env_vars, **_parse_extra_env_vars(config.extra_env_vars)},
+            external_ray=get_bool_env_var("VIME_SCRIPT_EXTERNAL_RAY"),
+            master_addr=os.environ.get("MASTER_ADDR", "127.0.0.1"),
+        )
+        for cmd in cmds[:-1]:
+            exec_command(cmd)
+        if before_ray_job_submit is not None:
+            before_ray_job_submit()
+        exec_command(cmds[-1])
+        return
+
     external_ray = get_bool_env_var("VIME_SCRIPT_EXTERNAL_RAY")
     master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
 

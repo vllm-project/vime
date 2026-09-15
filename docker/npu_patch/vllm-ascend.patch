@@ -1,0 +1,472 @@
+diff --git a/vllm_ascend/distributed/weight_transfer/__init__.py b/vllm_ascend/distributed/weight_transfer/__init__.py
+index d6434f05f..fd7223836 100644
+--- a/vllm_ascend/distributed/weight_transfer/__init__.py
++++ b/vllm_ascend/distributed/weight_transfer/__init__.py
+@@ -33,6 +33,11 @@ def register_engine():
+         "vllm_ascend.distributed.weight_transfer.npu_ipc_engine",
+         "NPUIPCWeightTransferEngine",
+     )
++    WeightTransferTrainerFactory.register_engine(
++        "hccl",
++        "vllm_ascend.distributed.weight_transfer.hccl_engine",
++        "HCCLTrainerWeightTransferEngine",
++    )
+     WeightTransferTrainerFactory.register_engine(
+         "npu_ipc",
+         "vllm_ascend.distributed.weight_transfer.npu_ipc_engine",
+diff --git a/vllm_ascend/distributed/weight_transfer/hccl_engine.py b/vllm_ascend/distributed/weight_transfer/hccl_engine.py
+index 023ffd1ae..7b184e279 100644
+--- a/vllm_ascend/distributed/weight_transfer/hccl_engine.py
++++ b/vllm_ascend/distributed/weight_transfer/hccl_engine.py
+@@ -3,8 +3,9 @@
+ """HCCL-based weight transfer engine."""
+ 
+ from collections.abc import Callable, Iterator
+-from dataclasses import dataclass
+-from typing import TYPE_CHECKING, Any
++from concurrent.futures import ThreadPoolExecutor
++from dataclasses import asdict, dataclass
++from typing import TYPE_CHECKING, Any, ClassVar
+ 
+ import torch
+ 
+@@ -14,6 +15,11 @@ if TYPE_CHECKING:
+ from vllm.config import VllmConfig
+ from vllm.config.weight_transfer import WeightTransferConfig
+ from vllm.distributed.weight_transfer.base import (
++    ParamMeta,
++    TrainerInitInfo,
++    TrainerWeightTransferEngine,
++    VLLMWeightSyncClient,
++    WeightSource,
+     WeightTransferEngine,
+     WeightTransferInitInfo,
+     WeightTransferUpdateInfo,
+@@ -26,6 +32,19 @@ from vllm_ascend.distributed.weight_transfer.packed_tensor import (
+ )
+ 
+ 
++@dataclass
++class HCCLTrainerInitInfo(TrainerInitInfo):
++    """Stateful trainer configuration; rank 0 owns the HCCL endpoint."""
++
++    backend: ClassVar[str] = "hccl"
++    master_address: str
++    master_port: int
++    world_size: int
++    packed: bool = True
++    packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
++    packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
++
++
+ @dataclass
+ class HCCLWeightTransferInitInfo(WeightTransferInitInfo):
+     """Initialization info for HCCL weight transfer backend."""
+@@ -338,3 +357,114 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo,
+         pg = StatelessProcessGroup.create(host=master_address, port=master_port, rank=rank, world_size=world_size)
+         pyhccl = PyHcclCommunicator(pg, device=device)
+         return pyhccl
++
++
++class HCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[HCCLTrainerInitInfo]):
++    """Stateful control plane over the existing HCCL broadcast transport.
++
++    Every trainer rank replays the source collectives. Only rank 0 opens the
++    transfer communicator and drives worker RPCs. The frozen receiver expects
++    packed geometry on each update, so derive it from the trainer init info.
++    """
++
++    init_info_cls = HCCLTrainerInitInfo
++
++    def __init__(self, *, init_info: HCCLTrainerInitInfo, client: VLLMWeightSyncClient, source: WeightSource) -> None:
++        super().__init__(client=client, source=source, is_sender=init_info.is_sender)
++        self.init_info = init_info
++        self.model_update_group: PyHcclCommunicator | None = None
++
++    @classmethod
++    def trainer_init(
++        cls,
++        init_info: HCCLTrainerInitInfo,
++        *,
++        client: VLLMWeightSyncClient,
++        source: WeightSource,
++    ) -> "HCCLTrainerWeightTransferEngine":
++        engine = cls(init_info=init_info, client=client, source=source)
++        if not engine.is_sender:
++            return engine
++
++        worker_info = HCCLWeightTransferInitInfo(
++            master_address=init_info.master_address,
++            master_port=init_info.master_port,
++            rank_offset=1,
++            world_size=init_info.world_size,
++        )
++        # Both endpoints must rendezvous concurrently.
++        executor = ThreadPoolExecutor(max_workers=1)
++        try:
++            future = executor.submit(client.init_weight_transfer_engine, asdict(worker_info))
++            if future.done():
++                future.result()
++            engine.model_update_group = HCCLWeightTransferEngine.trainer_init(worker_info)
++            future.result()
++        finally:
++            executor.shutdown(wait=False)
++        return engine
++
++    def send_weights(self) -> None:
++        # Metadata export can itself contain Megatron collectives.
++        meta = self.source.metadata()
++        if not self.is_sender:
++            for _ in self.source:
++                pass
++            torch.npu.current_stream().synchronize()
++            return
++
++        assert self.model_update_group is not None, "HCCL trainer has been shut down."
++        info = self.init_info
++        update_info = HCCLWeightTransferUpdateInfo(
++            names=[m.name for m in meta],
++            dtype_names=[str(m.dtype).split(".")[-1] for m in meta],
++            shapes=[list(m.shape) for m in meta],
++            packed=info.packed,
++            packed_buffer_size_bytes=info.packed_buffer_size_bytes,
++            packed_num_buffers=info.packed_num_buffers,
++        )
++        self.client.start_weight_update()
++        executor = ThreadPoolExecutor(max_workers=1)
++        try:
++            future = executor.submit(self.client.update_weights, asdict(update_info))
++            if future.done():
++                future.result()
++            HCCLWeightTransferEngine.trainer_send_weights(
++                self._checked_iter(self.source, meta),
++                HCCLTrainerSendWeightsArgs(
++                    group=self.model_update_group,
++                    packed=info.packed,
++                    packed_buffer_size_bytes=info.packed_buffer_size_bytes,
++                    packed_num_buffers=info.packed_num_buffers,
++                ),
++            )
++            future.result()
++        finally:
++            # A failed broadcast can leave the worker RPC waiting in HCCL.
++            # Surface the error; joining that thread here would hide it forever.
++            executor.shutdown(wait=False)
++        self.client.finish_weight_update()
++        torch.npu.current_stream().synchronize()
++
++    @staticmethod
++    def _checked_iter(source: WeightSource, meta: list[ParamMeta]) -> Iterator[tuple[str, torch.Tensor]]:
++        # Receive buffer sizes and packed chunk boundaries come from metadata.
++        sent = 0
++        for name, tensor in source:
++            if sent >= len(meta):
++                raise ValueError(f"WeightSource yielded more parameters than metadata(): {name!r}.")
++            expected = meta[sent]
++            if name != expected.name or tensor.dtype != expected.dtype or tuple(tensor.shape) != expected.shape:
++                raise ValueError(
++                    f"WeightSource metadata() disagrees with iteration at index {sent}: "
++                    f"expected {expected.name!r} {expected.dtype} {expected.shape}, "
++                    f"got {name!r} {tensor.dtype} {tuple(tensor.shape)}."
++                )
++            sent += 1
++            # Unpacked HCCL reads contiguous storage from data_ptr().
++            yield name, tensor if tensor.is_contiguous() else tensor.contiguous()
++        if sent != len(meta):
++            raise ValueError(f"WeightSource yielded {sent} parameters but metadata() declared {len(meta)}.")
++
++    def shutdown(self) -> None:
++        self.model_update_group = None
+diff --git a/vllm_ascend/distributed/weight_transfer/npu_ipc_engine.py b/vllm_ascend/distributed/weight_transfer/npu_ipc_engine.py
+index 7a63adf7b..d3e3a7fc4 100644
+--- a/vllm_ascend/distributed/weight_transfer/npu_ipc_engine.py
++++ b/vllm_ascend/distributed/weight_transfer/npu_ipc_engine.py
+@@ -156,12 +156,14 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
+         self.packed = init_info.packed
+ 
+     def start_weight_update(self) -> None:
+-        """No-op for NPU IPC engine (no layerwise reloading)."""
+-        pass
++        from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
++
++        initialize_layerwise_reload(self.model)
+ 
+     def finish_weight_update(self) -> None:
+-        """No-op for NPU IPC engine (no layerwise reloading)."""
+-        pass
++        from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
++
++        finalize_layerwise_reload(self.model, self.model_config)
+ 
+     def receive_weights(self, update_info: NPUIPCWeightTransferUpdateInfo) -> None:
+         """Receive weights from the trainer via NPU IPC handles.
+@@ -170,6 +172,10 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
+             update_info: NPU IPC update info containing parameter names,
+                 dtypes, shapes, and IPC handles.
+         """
++        # A rank-local slot may have no weights in this chunk (and no handle).
++        if not update_info.names:
++            return
++
+         # Use the worker's assigned device rather than the ambient current
+         # device: the receive path is no longer wrapped in
+         # ``with torch.device(self.device)`` by the caller, so the current
+@@ -219,7 +225,7 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
+                 weight = rebuild_npu_tensor(*list_args)
+                 weights.append((name, weight))
+ 
+-            self.model.load_weights(weights)
++        self.model.load_weights(weights)
+ 
+     def shutdown(self) -> None:
+         pass
+@@ -288,6 +294,8 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
+             self.client.finish_weight_update()
+         self._post_send_sync()
+         del weight_refs
++        torch.npu.ipc_collect()
++        torch.npu.empty_cache()
+ 
+     def _send(self, source: "WeightSource") -> list[torch.Tensor] | None:
+         if self.packed:
+diff --git a/vllm_ascend/distributed/weight_transfer/packed_tensor.py b/vllm_ascend/distributed/weight_transfer/packed_tensor.py
+index a35d9af8d..d55c988c3 100644
+--- a/vllm_ascend/distributed/weight_transfer/packed_tensor.py
++++ b/vllm_ascend/distributed/weight_transfer/packed_tensor.py
+@@ -39,6 +39,7 @@ def packed_broadcast_producer(
+     target_packed_tensor_size = buffer_size_bytes
+ 
+     streams = [torch.npu.Stream() for _ in range(num_buffers)]
++    source_stream = torch.npu.current_stream()
+     buffer_idx = 0
+ 
+     packing_tensor_list: list[list[torch.Tensor]] = [[] for _ in range(num_buffers)]
+@@ -50,6 +51,8 @@ def packed_broadcast_producer(
+         # Synchronize the current stream (waits for previous
+         # iteration's work on this buffer to finish)
+         streams[buffer_idx].synchronize()
++        # Wait for tensors produced on the caller's stream before packing.
++        streams[buffer_idx].wait_stream(source_stream)
+         # Start tasks for the new buffer in a new stream
+         with torch.npu.stream(streams[buffer_idx]):
+             # Initialize the packing tensor list and sizes
+@@ -206,10 +209,10 @@ def packed_npu_ipc_producer(
+ ) -> Iterator[dict[str, Any]]:
+     """Pack tensors into a reusable NPU IPC buffer and yield chunks.
+ 
+-    Allocates a single NPU buffer of ``buffer_size_bytes`` and registers
+-    it for IPC once via ``reduce_tensor``.  Each chunk's packed data is
+-    copied into this buffer before yielding, so only one IPC-shared
+-    allocation exists for the lifetime of the transfer.
++    Allocates a single NPU buffer of ``buffer_size_bytes``. Each chunk
++    publishes a fresh IPC reference via ``reduce_tensor`` so its consumer
++    releases that reference exactly once. The underlying buffer is reused
++    for the lifetime of the transfer.
+ 
+     Args:
+         iterator: Iterator of (name, tensor) pairs.
+@@ -218,9 +221,6 @@ def packed_npu_ipc_producer(
+         buffer_size_bytes: Exact capacity of the reusable IPC buffer.
+     """
+     ipc_buffer = torch.empty(buffer_size_bytes, dtype=torch.uint8, device="npu")
+-    # Store only the rebuild args (drop the func); the consumer rebuilds with
+-    # the well-known ``rebuild_npu_tensor``, mirroring upstream's CUDA IPC engine.
+-    _, ipc_args = reduce_tensor(ipc_buffer)
+ 
+     names: list[str] = []
+     shapes: list[list[int]] = []
+@@ -240,6 +240,7 @@ def packed_npu_ipc_producer(
+ 
+         if total_bytes and total_bytes + flat.numel() > buffer_size_bytes:
+             torch.npu.current_stream().synchronize()
++            _, ipc_args = reduce_tensor(ipc_buffer)
+             yield {
+                 "names": names,
+                 "shapes": shapes,
+@@ -259,6 +260,7 @@ def packed_npu_ipc_producer(
+ 
+     if total_bytes:
+         torch.npu.current_stream().synchronize()
++        _, ipc_args = reduce_tensor(ipc_buffer)
+         yield {
+             "names": names,
+             "shapes": shapes,
+diff --git a/vllm_ascend/worker/v2/model_runner.py b/vllm_ascend/worker/v2/model_runner.py
+index c388619f2..38a7d2fb7 100644
+--- a/vllm_ascend/worker/v2/model_runner.py
++++ b/vllm_ascend/worker/v2/model_runner.py
+@@ -17,7 +17,7 @@
+ # This file is a part of the vllm-ascend project.
+ #
+ 
+-from contextlib import contextmanager
++from contextlib import AbstractContextManager, contextmanager
+ 
+ import numpy as np
+ import torch
+@@ -239,9 +239,13 @@ class NPUModelRunner(GPUModelRunner):
+             self.pp_handler.broadcast_draft_tokens()
+         return output
+ 
+-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
++    def initialize_kv_cache(
++        self,
++        kv_cache_config: KVCacheConfig,
++        kv_cache_allocation_context: AbstractContextManager | None = None,
++    ) -> None:
+         with graph_manager_wrapper(self):
+-            super().initialize_kv_cache(kv_cache_config)
++            super().initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=kv_cache_allocation_context)
+             if self.pcp_manager is not None:
+                 assert isinstance(self.pcp_manager, AscendPCPManager)
+                 self.pcp_manager.vllm_config = self.vllm_config
+diff --git a/vllm_ascend/worker/worker.py b/vllm_ascend/worker/worker.py
+index 6d99ac76a..b7df4df22 100644
+--- a/vllm_ascend/worker/worker.py
++++ b/vllm_ascend/worker/worker.py
+@@ -321,7 +321,48 @@ class NPUWorker(WorkerBase):
+
+     def start_weight_update(self) -> None:
+         """Begin a new weight update; prepares the model for layerwise reload."""
++        with set_current_vllm_config(self.vllm_config):
++            self._start_weight_update()
++
++    def get_draft_model(self) -> nn.Module | None:
++        return self.model_runner.get_draft_model()
++
++    def supports_draft_weight_updates(self) -> bool:
++        engine = self.weight_transfer_engine
++        speculative_config = self.speculative_config
++        get_draft_model = getattr(self.model_runner, "get_draft_model", None)
++        return (
++            engine is not None
++            and engine.supports_draft_weight_update
++            and callable(get_draft_model)
++            and get_draft_model() is not None
++            and speculative_config is not None
++            and speculative_config.draft_model_config is not None
++        )
++
++    def _set_draft_weight_update_target(self) -> None:
++        assert self.weight_transfer_engine is not None
++        draft_model = self.get_draft_model()
++        if draft_model is None:
++            raise RuntimeError("Draft model weight update requested, but no draft model is configured.")
++        speculative_config = self.speculative_config
++        if speculative_config is None or speculative_config.draft_model_config is None:
++            raise RuntimeError("Draft model weight update requested, but no draft model config is configured.")
++        self.weight_transfer_engine.set_weight_update_target(draft_model, speculative_config.draft_model_config)
++
++    def start_draft_weight_update(self) -> None:
++        """Retarget the native engine at the draft model for this session."""
++        with set_current_vllm_config(self.vllm_config):
++            self._start_weight_update(is_draft=True)
++
++    def _start_weight_update(self, is_draft: bool = False) -> None:
+         self._check_weight_transfer_engine()
++        assert self.weight_transfer_engine is not None
++
++        if is_draft and not self.weight_transfer_engine.supports_draft_weight_update:
++            raise RuntimeError(
++                f"{type(self.weight_transfer_engine).__name__} does not support draft model weight updates."
++            )
+
+         if self._weight_update_active:
+             raise RuntimeError(
+@@ -330,11 +371,16 @@ class NPUWorker(WorkerBase):
+
+         self._check_nz_disabled()
+
+-        assert self.weight_transfer_engine is not None
+-        self.weight_transfer_engine.start_weight_update()
++        try:
++            if is_draft:
++                self._set_draft_weight_update_target()
++            self.weight_transfer_engine.start_weight_update()
++        except BaseException:
++            self.weight_transfer_engine.reset_weight_update_target()
++            raise
+         self._weight_update_active = True
+
+-    def update_weights(self, update_info: dict) -> None:
++    def update_weights(self, update_info: dict | list[dict]) -> None:
+         """Receive a chunk of weights from the trainer and load them in place."""
+         self._check_weight_transfer_engine()
+         assert self.weight_transfer_engine is not None
+@@ -343,11 +389,19 @@ class NPUWorker(WorkerBase):
+         if not self._weight_update_active:
+             raise RuntimeError("start_weight_update must be called before update_weights.")
+
+-        try:
+-            self.weight_transfer_engine.update_weights(update_info)
+-        except BaseException:
+-            self._weight_update_active = False
+-            raise
++        with set_current_vllm_config(self.vllm_config):
++            try:
++                if isinstance(update_info, list):
++                    parallel_config = self.vllm_config.parallel_config
++                    worker_rank = parallel_config.data_parallel_rank * parallel_config.world_size + self.rank
++                    local_update_info = update_info[worker_rank]
++                else:
++                    local_update_info = update_info
++                self.weight_transfer_engine.update_weights(local_update_info)
++            except BaseException:
++                self._weight_update_active = False
++                self.weight_transfer_engine.reset_weight_update_target()
++                raise
+
+     def finish_weight_update(self) -> None:
+         """Finish the current weight update; runs layerwise postprocessing."""
+@@ -357,8 +411,12 @@ class NPUWorker(WorkerBase):
+             raise RuntimeError("start_weight_update must be called before finish_weight_update.")
+
+         assert self.weight_transfer_engine is not None
+-        self.weight_transfer_engine.finish_weight_update()
+-        self._weight_update_active = False
++        with set_current_vllm_config(self.vllm_config):
++            try:
++                self.weight_transfer_engine.finish_weight_update()
++            finally:
++                self._weight_update_active = False
++                self.weight_transfer_engine.reset_weight_update_target()
+
+     def shutdown(self) -> None:
+         if ensure_kv_transfer_shutdown is not None:
+@@ -448,7 +506,9 @@ class NPUWorker(WorkerBase):
+         # take current memory snapshot
+         self.init_snapshot = MemorySnapshot(device=device)
+         self.requested_memory = self.init_snapshot.total_memory * self.cache_config.gpu_memory_utilization
+-        if self.init_snapshot.free_memory < self.requested_memory:
++        weight_transfer_config = self.vllm_config.weight_transfer_config
++        uses_ipc_weight_transfer = weight_transfer_config is not None and weight_transfer_config.backend == "npu_ipc"
++        if not uses_ipc_weight_transfer and self.init_snapshot.free_memory < self.requested_memory:
+             GiB = lambda b: round(b / GiB_bytes, 2)
+             raise ValueError(
+                 f"Free memory on device "
+@@ -597,7 +657,9 @@ class NPUWorker(WorkerBase):
+         self.non_torch_memory = profile_result.non_torch_increase
+
+         free_gpu_memory = profile_result.after_profile.free_memory
+-        assert self.init_snapshot.free_memory > free_gpu_memory, (
++        weight_transfer_config = self.vllm_config.weight_transfer_config
++        uses_ipc_weight_transfer = weight_transfer_config is not None and weight_transfer_config.backend == "npu_ipc"
++        assert uses_ipc_weight_transfer or self.init_snapshot.free_memory > free_gpu_memory, (
+             "Error in memory profiling. "
+             f"Initial free memory {GiB(self.init_snapshot.free_memory)} GiB, "
+             f"current free memory {GiB(free_gpu_memory)} GiB. "
+@@ -1118,8 +1180,12 @@ class NPUWorker(WorkerBase):
+             from contextlib import nullcontext
+
+             context = nullcontext()  # type: ignore
+-        with context:
+-            self.model_runner.initialize_kv_cache(kv_cache_config)
++        if self.use_v2_model_runner:
++            # MRV2 bookkeeping must survive sleep; pool only the KV data.
++            self.model_runner.initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=context)
++        else:
++            with context:
++                self.model_runner.initialize_kv_cache(kv_cache_config)
+
+         # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
+         # set, so its worker-side consumer must use the same condition. Keep the

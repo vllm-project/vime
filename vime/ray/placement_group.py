@@ -6,6 +6,8 @@ import ray
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+from vime.platforms import current_platform
+
 from .actor_group import RayTrainGroup
 from .utils import add_default_ray_env_vars
 
@@ -15,6 +17,17 @@ logger = logging.getLogger(__name__)
 @ray.remote(num_gpus=1)
 class InfoActor:
     def get_ip_and_gpu_id(self):
+        platform = current_platform()
+        if platform.is_npu:
+            accelerator_ids = platform.ray.accelerator_ids()
+            if accelerator_ids:
+                return ray.util.get_node_ip_address(), accelerator_ids[0]
+
+            raise RuntimeError(
+                f"No {platform.ray.resource_name} accelerator IDs found. "
+                f"Accelerator IDs: {ray.get_runtime_context().get_accelerator_ids()}"
+            )
+
         return ray.util.get_node_ip_address(), ray.get_gpu_ids()[0]
 
 
@@ -44,7 +57,11 @@ def _create_placement_group(num_gpus):
     if num_gpus == 0:
         return None, [], []
 
+    platform = current_platform()
+    resource_name = platform.ray.resource_name
     bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_gpus)]
+    if platform.is_npu:
+        bundles = [platform.ray.bundle_resources() for _ in range(num_gpus)]
     pg = placement_group(bundles, strategy="PACK")
     num_bundles = len(bundles)
 
@@ -59,22 +76,24 @@ def _create_placement_group(num_gpus):
     log_interval = 30
     while not ray.wait([ready_ref], timeout=log_interval)[0]:
         elapsed += log_interval
-        total = ray.cluster_resources().get("GPU", 0)
-        available = ray.available_resources().get("GPU", 0)
+        total = ray.cluster_resources().get(resource_name, 0)
+        available = ray.available_resources().get(resource_name, 0)
         logger.info(
-            f"Waiting for placement group of {num_gpus} GPUs (elapsed {elapsed}s): "
-            f"{total:g} GPUs registered with Ray, {available:g} available."
+            f"Waiting for placement group of {num_gpus} {resource_name} devices (elapsed {elapsed}s): "
+            f"{total:g} registered with Ray, {available:g} available."
         )
 
     # use info actor to get the GPU id
     info_actors = []
     for i in range(num_bundles):
+        resource_options = {"num_gpus": 0, **platform.ray.actor_options(1)} if platform.is_npu else {}
         info_actors.append(
             InfoActor.options(
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg,
                     placement_group_bundle_index=i,
                 ),
+                **resource_options,
             ).remote()
         )
     gpu_ids = ray.get([actor.get_ip_and_gpu_id.remote() for actor in info_actors])

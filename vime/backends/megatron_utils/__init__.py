@@ -2,6 +2,11 @@ import logging
 
 import torch
 
+from vime.platforms import current_platform
+
+# Load NPU prerequisites before the shared Megatron patches.
+current_platform().megatron.bootstrap()
+
 from vime.utils import accelerator
 
 accelerator.initialize_accelerator()

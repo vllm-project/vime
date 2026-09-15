@@ -22,7 +22,7 @@ if not _has_megatron:
 
 from vime.backends.megatron_utils import megatron_to_hf as megatron_to_hf_module
 from vime.backends.megatron_utils.hf_to_megatron import _LOADERS
-from vime.backends.megatron_utils.hf_to_megatron.common import SafetensorReader
+from vime.backends.megatron_utils.hf_to_megatron.common import SafetensorReader, shard_mcore_tensor
 from vime.backends.megatron_utils.hf_to_megatron.deepseek import deepseek_hf_tensor
 from vime.backends.megatron_utils.hf_to_megatron.glm import glm4_hf_tensor, glm4_moe_hf_tensor
 from vime.backends.megatron_utils.hf_to_megatron.qwen import (
@@ -33,6 +33,7 @@ from vime.backends.megatron_utils.hf_to_megatron.qwen import (
 )
 from vime.backends.megatron_utils.hf_to_megatron.qwen3_next import qwen3_next_hf_tensor
 from vime.backends.megatron_utils.hf_to_megatron.qwen3_omni import qwen3_omni_hf_tensor
+from vime.backends.megatron_utils.hf_to_megatron.qwen3_vl import qwen3_vl_hf_tensor
 from vime.backends.megatron_utils.megatron_to_hf import _convert_to_hf_core, convert_to_hf
 from vime.backends.megatron_utils.megatron_to_hf.deepseekv3 import convert_deepseekv3_to_hf
 from vime.backends.megatron_utils.megatron_to_hf.glm4 import convert_glm4_to_hf
@@ -42,6 +43,7 @@ from vime.backends.megatron_utils.megatron_to_hf.minimax_m2 import convert_minim
 from vime.backends.megatron_utils.megatron_to_hf.qwen2 import convert_qwen2_to_hf
 from vime.backends.megatron_utils.megatron_to_hf.qwen3_next import convert_qwen3_next_to_hf
 from vime.backends.megatron_utils.megatron_to_hf.qwen3_omni import convert_qwen3_omni_to_hf
+from vime.backends.megatron_utils.megatron_to_hf.qwen3_vl import convert_qwen3vl_to_hf
 from vime.backends.megatron_utils.megatron_to_hf.qwen3moe import convert_qwen3moe_to_hf
 
 NUM_GPUS = 0
@@ -222,7 +224,7 @@ def test_qwen3_omni_encoder_mapping_is_replicated():
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("model_name", ["deepseekv32config", "kimik2config"])
+@pytest.mark.parametrize("model_name", ["deepseekv32config", "kimik2config", "glm4moeliteconfig"])
 def test_deepseek_family_parameter_updates_use_the_direct_exporter(model_name):
     parameter = torch.randn(8, 8)
 
@@ -255,6 +257,58 @@ def test_qwen2_moe_parameter_updates_use_the_moe_exporter():
     ]
     assert torch.equal(converted[0][1], parameter[:6])
     assert torch.equal(converted[1][1], parameter[6:])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "rest,shape",
+    [
+        ("input_layernorm.weight", (8,)),
+        ("self_attention.linear_q_down_proj.weight", (4, 8)),
+        ("self_attention.linear_q_up_proj.weight", (8, 4)),
+        ("self_attention.linear_q_up_proj.layer_norm_weight", (4,)),
+        ("self_attention.linear_kv_down_proj.weight", (6, 8)),
+        ("self_attention.linear_kv_up_proj.weight", (8, 4)),
+        ("self_attention.linear_kv_up_proj.layer_norm_weight", (4,)),
+        ("self_attention.linear_proj.weight", (8, 8)),
+        ("pre_mlp_layernorm.weight", (8,)),
+        ("mlp.linear_fc1.weight", (12, 8)),
+        ("mlp.linear_fc2.weight", (8, 6)),
+        ("mlp.shared_experts.linear_fc1.weight", (12, 8)),
+        ("mlp.shared_experts.linear_fc2.weight", (8, 6)),
+        ("mlp.experts.linear_fc1.weight3", (12, 8)),
+        ("mlp.experts.linear_fc2.weight3", (8, 6)),
+        ("mlp.router.weight", (4, 8)),
+        ("mlp.router.expert_bias", (4,)),
+    ],
+)
+@pytest.mark.parametrize("mtp", [False, True])
+def test_glm_lite_native_mla_and_moe_round_trip(rest, shape, mtp):
+    prefix = "mtp.layers.0.transformer_layer" if mtp else "decoder.layers.1"
+    name = f"module.module.{prefix}.{rest}"
+    parameter = torch.randn(shape)
+    exported = _convert_to_hf_core(_EXPORT_ARGS, "glm4moeliteconfig", name, parameter)
+    loaded = _LOADERS["glm4_moe_lite"](name, Reader(**dict(exported)), _config("glm4_moe_lite"))
+    assert torch.equal(loaded, parameter)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "rest,hf_rest,shape",
+    [
+        ("eh_proj.weight", "eh_proj.weight", (8, 16)),
+        ("enorm.weight", "enorm.weight", (8,)),
+        ("hnorm.weight", "hnorm.weight", (8,)),
+        ("final_layernorm.weight", "shared_head.norm.weight", (8,)),
+    ],
+)
+def test_glm_lite_native_mtp_projection_and_norm_round_trip(rest, hf_rest, shape):
+    name = f"module.module.mtp.layers.0.{rest}"
+    parameter = torch.randn(shape)
+    exported = _convert_to_hf_core(_EXPORT_ARGS, "glm4moeliteconfig", name, parameter)
+    assert [key for key, _ in exported] == [f"model.layers.{_EXPORT_ARGS.num_layers}.{hf_rest}"]
+    loaded = _LOADERS["glm4_moe_lite"](name, Reader(**dict(exported)), _config("glm4_moe_lite"))
+    assert torch.equal(loaded, parameter)
 
 
 @pytest.mark.unit
@@ -398,7 +452,106 @@ def test_loader_scope_stays_explicit():
         "qwen3_moe",
         "qwen3_next",
         "qwen3_omni_moe",
+        "qwen3_vl",
     }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("model_name", "prefix"), [("qwen3", ""), ("qwen3_vl", "language_model.")])
+@pytest.mark.parametrize(
+    ("name", "shape", "is_vocab"),
+    [
+        ("embedding.word_embeddings.weight", (16, 8), True),
+        ("output_layer.weight", (16, 8), True),
+        ("decoder.final_layernorm.weight", (16,), False),
+    ],
+)
+def test_native_export_removes_only_vocab_padding(model_name, prefix, name, shape, is_vocab):
+    args = types.SimpleNamespace(vocab_size=8)
+    weight = torch.randn(shape)
+    [(_, exported)] = convert_to_hf(args, model_name, "module.module." + prefix + name, weight)
+    expected = weight[: args.vocab_size] if is_vocab else weight
+    assert torch.equal(exported, expected)
+    if not is_vocab:
+        assert exported is weight
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("name", "shape"),
+    [
+        ("embedding.word_embeddings.weight", (16, 8)),
+        ("output_layer.weight", (16, 8)),
+        ("decoder.final_layernorm.weight", (8,)),
+        ("decoder.layers.0.self_attention.linear_qkv.weight", (16, 8)),
+        ("decoder.layers.0.self_attention.linear_qkv.bias", (16,)),
+        ("decoder.layers.0.self_attention.linear_proj.weight", (8, 8)),
+        ("decoder.layers.0.self_attention.linear_qkv.layer_norm_weight", (8,)),
+        ("decoder.layers.0.self_attention.q_layernorm.weight", (2,)),
+        ("decoder.layers.0.self_attention.k_layernorm.weight", (2,)),
+        ("decoder.layers.0.mlp.linear_fc1.weight", (24, 8)),
+        ("decoder.layers.0.mlp.linear_fc2.weight", (8, 12)),
+        ("decoder.layers.0.mlp.linear_fc1.layer_norm_weight", (8,)),
+    ],
+)
+def test_qwen3_vl_language_round_trip(name, shape):
+    name = "module.module.language_model." + name
+    weight = torch.randn(shape)
+    config = types.SimpleNamespace(
+        tie_word_embeddings=False,
+        text_config=types.SimpleNamespace(
+            hidden_size=8, num_attention_heads=4, num_key_value_heads=2, head_dim=2, tie_word_embeddings=False
+        ),
+    )
+    reader = Reader(**dict(convert_qwen3vl_to_hf(_EXPORT_ARGS, name, weight)))
+    assert torch.equal(qwen3_vl_hf_tensor(name, reader, config), weight)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("top_tied", "text_tied", "has_head"), [(True, False, True), (False, True, True), (False, False, False)]
+)
+def test_qwen3_vl_tied_output_uses_language_embedding(top_tied, text_tied, has_head):
+    embedding = torch.randn(8, 4)
+    tensors = {"model.language_model.embed_tokens.weight": embedding}
+    if has_head:
+        tensors["lm_head.weight"] = torch.zeros_like(embedding)
+    config = types.SimpleNamespace(
+        tie_word_embeddings=top_tied, text_config=types.SimpleNamespace(tie_word_embeddings=text_tied)
+    )
+    assert qwen3_vl_hf_tensor("output_layer.weight", Reader(**tensors), config) is embedding
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("platform", ["cuda", "npu"])
+@pytest.mark.parametrize("expert", [False, True])
+@pytest.mark.parametrize("parallel_size", [1, 2, 4])
+def test_native_fc1_loading_uses_platform_partition_metadata(monkeypatch, platform, expert, parallel_size):
+    mpu = pytest.importorskip("megatron.core").mpu
+    monkeypatch.setenv("VIME_PLATFORM", platform)
+    monkeypatch.setattr(mpu, "get_tensor_model_parallel_world_size", lambda: 8 if expert else parallel_size)
+    monkeypatch.setattr(mpu, "get_tensor_model_parallel_rank", lambda: 0 if expert else parallel_size - 1)
+    monkeypatch.setattr(mpu, "get_expert_tensor_parallel_world_size", lambda: parallel_size if expert else 8)
+    monkeypatch.setattr(mpu, "get_expert_tensor_parallel_rank", lambda: parallel_size - 1 if expert else 0)
+    name = "decoder.layers.0.mlp." + ("experts.linear_fc1.weight0" if expert else "linear_fc1.weight")
+    weight = torch.arange(16 * 8).reshape(16, 8)
+    # MindSpeed grouped column-parallel weights carry dim=1, but store [out, in].
+    parameter = types.SimpleNamespace(
+        tensor_model_parallel=True, partition_dim=1 if platform == "npu" and expert else 0, partition_stride=1
+    )
+    shard = shard_mcore_tensor(name, weight, parameter)
+    gate, up = weight.chunk(2)
+    assert torch.equal(shard, torch.cat((gate.chunk(parallel_size)[-1], up.chunk(parallel_size)[-1])))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("parallel_mode", [None, "duplicated"])
+def test_native_loading_does_not_shard_replicated_parameters(monkeypatch, parallel_mode):
+    pytest.importorskip("megatron.core")
+    monkeypatch.setenv("VIME_PLATFORM", "npu")
+    parameter = types.SimpleNamespace(tensor_model_parallel=parallel_mode is not None, parallel_mode=parallel_mode)
+    weight = torch.randn(4, 8)
+    assert shard_mcore_tensor("model.visual.blocks.0.mlp.linear_fc1.weight", weight, parameter) is weight
 
 
 @pytest.mark.unit

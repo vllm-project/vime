@@ -187,7 +187,10 @@ def test_weight_source_switches_to_draft_weights(update_module, monkeypatch):
 
 @pytest.mark.unit
 def test_nccl_trainer_uses_single_packed_buffer(update_module, monkeypatch):
+    from vime.platforms import get_platform
+
     adapter = sys.modules[update_module.create_nccl_trainer.__module__]
+    monkeypatch.setattr(adapter, "current_platform", lambda: get_platform("cuda"))
     created = []
 
     class NCCLTrainerInitInfo:

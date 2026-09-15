@@ -7,6 +7,7 @@ import ray
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+from vime.platforms import current_platform
 from vime.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, add_default_ray_env_vars
 
 
@@ -70,28 +71,24 @@ class RayTrainGroup:
             **self.args.train_env_vars,
         }
 
-        if self.args.offload_train:
-            import torch_memory_saver
-
-            for path in [
-                "torch_memory_saver_hook_mode_preload_cu13.abi3.so",
-                "torch_memory_saver_hook_mode_preload_cu12.abi3.so",
-                "torch_memory_saver_hook_mode_preload.abi3.so",
-            ]:
-                dynlib_path = os.path.join(
-                    os.path.dirname(os.path.dirname(torch_memory_saver.__file__)),
-                    path,
-                )
-                if os.path.exists(dynlib_path):
-                    break
+        platform = current_platform()
+        if self.args.offload_train and self.args.train_backend == "megatron":
+            if platform.is_npu:
+                env_vars = platform.ray.train_runtime_env(self.args, env_vars)
             else:
-                raise FileNotFoundError(
-                    "Cannot find torch_memory_saver dynamic library. Please make sure torch_memory_saver is properly installed."
-                )
+                import torch_memory_saver
 
-            env_vars["LD_PRELOAD"] = dynlib_path
-            env_vars["TMS_INIT_ENABLE"] = "1"
-            env_vars["TMS_INIT_ENABLE_CPU_BACKUP"] = "1"
+                for path in [
+                    "torch_memory_saver_hook_mode_preload_cu13.abi3.so",
+                    "torch_memory_saver_hook_mode_preload_cu12.abi3.so",
+                    "torch_memory_saver_hook_mode_preload.abi3.so",
+                ]:
+                    dynlib_path = os.path.join(
+                        os.path.dirname(os.path.dirname(torch_memory_saver.__file__)),
+                        path,
+                    )
+                    if os.path.exists(dynlib_path):
+                        break
 
         # We cannot do routing replay for critic.
         if self.args.use_routing_replay and self.role == "actor":
@@ -116,13 +113,16 @@ class RayTrainGroup:
         self._actor_handlers = []
         master_addr, master_port = None, None
         for rank in range(world_size):
+            resource_options = {"num_gpus": num_gpus_per_actor}
+            if platform.is_npu:
+                resource_options = {"num_gpus": 0, **platform.ray.actor_options(num_gpus_per_actor)}
             actor = TrainRayActor.options(
                 num_cpus=num_gpus_per_actor,
-                num_gpus=num_gpus_per_actor,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg,
                     placement_group_bundle_index=reordered_bundle_indices[rank],
                 ),
+                **resource_options,
             ).remote(world_size, rank, master_addr, master_port)
             if rank == 0:
                 master_addr, master_port = ray.get(actor.get_master_addr_and_port.remote())

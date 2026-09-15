@@ -16,6 +16,7 @@ from vime.observability import train_data_utils, train_metric_utils
 from vime.observability.logging_utils import init_tracking
 from vime.observability.profile_utils import TrainProfiler
 from vime.observability.timer import Timer, inverse_timer, timer, with_defer
+from vime.platforms import current_platform
 from vime.ray.train_actor import TrainRayActor
 from vime.utils import accelerator
 from vime.utils.data import process_rollout_data
@@ -77,6 +78,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
         init(args)
 
+        current_platform().megatron.repatch(args)
         if is_megatron_main_rank():
             init_tracking(args, primary=False, role=role)
 
@@ -91,9 +93,12 @@ class MegatronTrainRayActor(TrainRayActor):
 
         dist.barrier(group=get_gloo_group())
 
-        self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id = initialize_model_and_optimizer(
-            args, role
-        )
+        with current_platform().megatron.training_context(args.offload_train):
+            self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id = initialize_model_and_optimizer(
+                args, role
+            )
+            if args.offload_train:
+                current_platform().megatron.initialize_optimizer_state(self.optimizer)
 
         vpp_size = mpu.get_virtual_pipeline_model_parallel_world_size() or 1
         if vpp_size > 1:
@@ -602,7 +607,11 @@ class MegatronTrainRayActor(TrainRayActor):
             if dist.get_rank() == 0:
                 ray.get(self.rollout_manager.clear_updatable_num_new_engines.remote())
 
-        with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
+        with (
+            torch_memory_saver.disable()
+            if (self.args.offload_train and not current_platform().is_npu)
+            else nullcontext()
+        ):
             if self.args.dspark_enabled and self.args.offload_train:
                 backup = self.weights_backuper.get("actor")
                 for name, param in named_params_and_buffers(self.args, self.model):
