@@ -1,6 +1,6 @@
 import dataclasses
 
-
+import torch
 from vime.utils import megatron_bridge_utils
 from vime.utils.misc import chunk_named_params_by_size
 
@@ -30,7 +30,10 @@ def _patch_bridge_expert_cache_to_cpu():
         cpu_dict = {k: v.cpu() for k, v in converted_weights_dict.items()}
         result = _orig(self, task, cpu_dict)
         # Move merged result back to GPU for CUDA IPC serialization
-        return {k: v.cuda() for k, v in result.items()} if result else result
+        if getattr(torch, "npu", None) and torch.npu.is_available():
+            return {k: v.npu() for k, v in result.items()} if result else result
+        else:
+            return {k: v.cuda() for k, v in result.items()} if result else result
 
     GPTOSSBridge.maybe_modify_converted_hf_weight = _patched
     GPTOSSBridge._cpu_cache_patched = True
@@ -49,6 +52,25 @@ class HfWeightIteratorBridge(HfWeightIteratorBase):
         )
         _patch_bridge_expert_cache_to_cpu()
 
+        # Patch megatron-bridge to handle None parallelism_type
+        try:
+            from megatron.bridge.models.conversion.param_mapping import AutoMapping
+
+            _orig_megatron_to_hf = AutoMapping.megatron_to_hf
+
+            def _patched_megatron_to_hf(self, megatron_weight, megatron_module):
+                try:
+                    return _orig_megatron_to_hf(self, megatron_weight, megatron_module)
+                except ValueError as e:
+                    if "Unknown parallelism type: None" in str(e):
+                        hf_param = getattr(self, "hf_param", None)
+                        return {hf_param: megatron_weight}
+                    raise
+
+            AutoMapping.megatron_to_hf = _patched_megatron_to_hf
+        except (ImportError, AttributeError):
+            pass
+
     def get_hf_weight_chunks(self, megatron_local_weights, progress_desc: str = "Update weights"):
         # TODO support quantization (e.g. modify megatron-bridge to provide megatron param name)
         renamed_megatron_local_weights = {strip_param_name_prefix(k): v for k, v in megatron_local_weights.items()}
@@ -60,12 +82,16 @@ class HfWeightIteratorBridge(HfWeightIteratorBase):
 
             def _streaming_quantized():
                 for hf_param_name, weight, megatron_param_name in named_weights:
+                    if weight is None:
+                        continue
                     processed_weight = postprocess_hf_param(
                         args=self.args,
                         megatron_param_name=megatron_param_name,
                         hf_param_name=hf_param_name,
                         param=weight,
                     )
+                    if processed_weight is None:
+                        continue
                     converted_named_params = [(hf_param_name, processed_weight)]
                     quantized_batch = quantize_params(
                         args=self.args,
@@ -93,7 +119,10 @@ def _process_conversion_tasks(vanilla_conversion_tasks, new_weight_dict):
         ), f"{weight_dict_key=} not in new_weight_dict ({task.vp_stage=}, {task.param_name=}, {list(new_weight_dict)=})"
 
         new_param_weight = new_weight_dict[weight_dict_key]
-        new_param_weight = new_param_weight.cuda()
+        if getattr(torch, "npu", None) and torch.npu.is_available():
+            new_param_weight = new_param_weight.npu()
+        else:
+            new_param_weight = new_param_weight.cuda()
         return dataclasses.replace(task, param_weight=new_param_weight)
 
     return _MapWithLen(_handle_one, vanilla_conversion_tasks)
