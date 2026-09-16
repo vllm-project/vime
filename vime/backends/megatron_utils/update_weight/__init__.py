@@ -32,6 +32,10 @@ def create_weight_updater(
         from .update_weight_from_disk import UpdateWeightFromDisk
 
         update_weight_cls = UpdateWeightFromDisk
+    elif update_weight_transport == "modelexpress":
+        from .update_weight_from_modelexpress import UpdateWeightFromModelExpress
+
+        update_weight_cls = UpdateWeightFromModelExpress
     elif args.colocate:
         from .update_weight_from_tensor import UpdateWeightFromTensor
 

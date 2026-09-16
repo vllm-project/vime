@@ -259,6 +259,7 @@ def make_vime_validate_args(**overrides):
         update_weight_local_checkpoint_dir=None,
         update_weight_mode="full",
         rollout_temperature=1.0,
+        modelexpress_config={},
     )
     values.update(overrides)
     return types.SimpleNamespace(**values)
@@ -428,6 +429,71 @@ def test_force_fp8_ue8m0_scale_argument(monkeypatch):
 
     assert defaults.force_fp8_ue8m0_scale is False
     assert configured.force_fp8_ue8m0_scale is True
+
+
+@pytest.mark.unit
+def test_modelexpress_does_not_require_native_disk_configuration(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(
+        update_weight_transport="modelexpress",
+        modelexpress_config={
+            "model_name": "policy",
+            "server_url": "dns:///mx:50051",
+            "initial_base_version_id": "base-uid",
+            "s3_uri_prefix": "s3://weights/run/policy",
+            "seed_checkpoint_path": "/models/seed",
+            "refit_checkpoint_dir": "/mxdelta/refit",
+        },
+    )
+
+    module.vime_validate_args(args)
+
+
+@pytest.mark.unit
+def test_modelexpress_uses_existing_transfer_selector_and_one_json_config(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    parser = argparse.ArgumentParser()
+    module.get_vime_extra_args_provider()(parser)
+
+    args = parser.parse_args(
+        [
+            "--update-weight-transport",
+            "modelexpress",
+            "--modelexpress-config",
+            '{"model_name":"policy","future_option":{"enabled":true}}',
+            "--rollout-batch-size",
+            "1",
+        ]
+    )
+
+    assert args.update_weight_transport == "modelexpress"
+    assert args.modelexpress_config == {
+        "model_name": "policy",
+        "future_option": {"enabled": True},
+    }
+    assert not hasattr(args, "update_weight_backend")
+    assert not hasattr(args, "modelexpress_model_id")
+
+
+@pytest.mark.unit
+def test_modelexpress_config_rejects_non_object_json(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(
+        update_weight_transport="modelexpress",
+        modelexpress_config=["not", "an", "object"],
+    )
+
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        module.vime_validate_args(args)
+
+
+@pytest.mark.unit
+def test_modelexpress_config_requires_modelexpress_transport(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(modelexpress_config={"future_option": True})
+
+    with pytest.raises(ValueError, match="requires --update-weight-transport=modelexpress"):
+        module.vime_validate_args(args)
 
 
 if __name__ == "__main__":
