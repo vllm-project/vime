@@ -1,206 +1,84 @@
-# vime on AMD ROCm 7.0.2, gfx950 (MI350/MI355X).
+# vime on AMD ROCm, layered on AMD's published vLLM ROCm nightly image.
+#
+# The base (vllm/vllm-openai-rocm:nightly) already ships the whole inference
+# half of the stack — ROCm 7.2.x, a ROCm PyTorch build, triton, aiter,
+# flash-attn (CK), amdsmi, cupy and vLLM itself — so this file only adds the
+# training half that vime needs: TransformerEngine, apex, Megatron-LM (+ AMD
+# patches), torch_memory_saver, vime's Python requirements and vime.
+#
+# Targets gfx950 (MI350X/MI355X) by default; pass --build-arg GPU_ARCH=... for
+# another CDNA arch.
 #
 # Build:
-#   DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm \
-#     --build-arg GPU_ARCH=gfx950 -t vime-rocm702 .
+#   DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm/vime-rocm:latest .
 
-ARG GPU_ARCH="gfx950"
+ARG BASE_IMAGE=vllm/vllm-openai-rocm:nightly
+FROM ${BASE_IMAGE}
 
-FROM ubuntu:22.04 AS base
+# ======================================== Arguments =============================================
 
-ENV DEBIAN_FRONTEND=noninteractive
-ARG PYTHON_VERSION=3.12
+ARG PATCH_VERSION=latest
+ARG MEGATRON_COMMIT=1dcf0dafa884ad52ffb243625717a3471643e087
+ARG GPU_ARCH=gfx950
 
-RUN --mount=target=/var/lib/apt/lists,type=cache,sharing=locked \
-    --mount=target=/var/cache/apt,type=cache,sharing=locked \
-    apt update && \
-    apt install -y git software-properties-common curl rsync dialog gfortran wget sqlite3 ccache vim && \
-    if ! python3 --version | grep -q ${PYTHON_VERSION} ; then \
-    add-apt-repository -y ppa:deadsnakes/ppa && apt update ; fi && \
-    apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
-    python${PYTHON_VERSION}-lib2to3 python-is-python3
+# ROCm's prebuilt apex, from the wheel index matching the base image's ROCm.
+ARG ROCM_WHEEL_RELEASE=rocm-rel-7.2.3
+ARG APEX_WHEEL=apex-1.10.0%2Brocm7.2.3.git751f5dd5-cp312-cp312-linux_x86_64.whl
 
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
-    update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} && \
-    ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config && \
-    curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION}
+ARG TE_TAG=v2.15_rocm
+# CK fused attention is not built: it costs hours of compile time and TE falls
+# back to the base image's flash-attn. Set to 1 to build it in.
+ARG NVTE_FUSED_ATTN=0
 
-RUN wget -nv -O /tmp/cmake-3.26.4-linux-x86_64.tar.gz https://cmake.org/files/v3.26/cmake-3.26.4-linux-x86_64.tar.gz && \
-    tar zfx /tmp/cmake-3.26.4-linux-x86_64.tar.gz -C /opt/ && \
-    mv /opt/cmake-3.26.4-linux-x86_64 /opt/cmake-3.26.4 && \
-    rm -f /tmp/cmake-3.26.4-linux-x86_64.tar.gz
+# ROCm/HIP fork of torch_memory_saver (--offload-train).
+ARG TMS_COMMIT=d64a639
 
-ENV PATH=/opt/cmake-3.26.4/bin:$PATH
+# Named TE_MAX_JOBS, not MAX_JOBS: the base image sets ENV MAX_JOBS=16, and an
+# inherited ENV shadows a same-named ARG inside RUN.
+ARG TE_MAX_JOBS=64
 
-ENV CCACHE_DIR=/root/.cache/ccache
-ENV CCACHE_MAXSIZE=50G
-ENV CMAKE_C_COMPILER_LAUNCHER=ccache
-ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
-ENV CMAKE_HIP_COMPILER_LAUNCHER=ccache
+WORKDIR /root/
 
-# ======================================== ROCm 7.0.2 ==========================
-FROM base AS rocm_deb
+# ======================================== Apt dependencies =============================================
 
-ARG ROCM_VERSION=7.0.2
-ARG AMDGPU_VERSION=7.0.2
-ARG GFX_ARCH=gfx950
-
-RUN --mount=target=/var/lib/apt/lists,type=cache,sharing=locked \
-    --mount=target=/var/cache/apt,type=cache,sharing=locked \
-    curl -sL https://repo.radeon.com/rocm/rocm.gpg.key | apt-key add - \
-    && printf "deb [arch=amd64] https://repo.radeon.com/rocm/apt/$ROCM_VERSION/ jammy main\n" | tee /etc/apt/sources.list.d/rocm.list \
-    && printf "deb [arch=amd64] https://repo.radeon.com/amdgpu/$AMDGPU_VERSION/ubuntu jammy main\n" | tee /etc/apt/sources.list.d/amdgpu.list \
-    && printf "Package: *\nPin: release o=repo.radeon.com\nPin-Priority: 600\n" | tee /etc/apt/preferences.d/rocm-pin-600 \
-    && apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y rocm && \
-    find /opt/rocm/lib -type f -name '*gfx*' | grep -Ev "${GFX_ARCH}" | xargs rm -f && \
-    find /opt/rocm/lib/hipblaslt/library -type f -name '*gfx*' | grep -Ev "${GFX_ARCH}" | xargs rm -f && \
-    find /opt/rocm/lib/rocblas/library -type f -name '*gfx*' | grep -Ev "${GFX_ARCH}" | xargs rm -f && \
-    find /opt/rocm/share/miopen/db -type f -name '*gfx*' | grep -Ev "${GFX_ARCH}" | xargs rm -f
-
-ENV ROCM_HOME=/opt/rocm
-ENV CPLUS_INCLUDE_PATH=/opt/rocm/include
-ENV LD_LIBRARY_PATH=/opt/rocm/lib
-ENV PATH=/opt/rocm/bin:/opt/rocm/llvm/bin:$PATH
-
-# ======================================== torch + triton ======================
-FROM rocm_deb AS rocm_torch
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade pip "setuptools<80" wheel numpy einops packaging psutil ninja build pybind11 && \
-    pip install /opt/rocm/share/amd_smi
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip3 install --index-url https://download.pytorch.org/whl/rocm7.0 \
-      --extra-index-url https://pypi.org/simple \
-      torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip3 install --no-deps \
-    https://repo.radeon.com/rocm/manylinux/rocm-rel-7.0.2/apex-1.9.0a0+rocm7.0.2.git07c3ee53-cp312-cp312-linux_x86_64.whl || \
-    echo "WARN: apex install skipped/failed (training-only, vime uses --no-gradient-accumulation-fusion)"
-
-ARG TRITON_REPO="https://github.com/ROCm/triton.git"
-ARG TRITON_BRANCH="ba5c1517"
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    git config --global user.email "build@vime" && git config --global user.name "vime-build" && \
-    git clone ${TRITON_REPO} /opt/triton && cd /opt/triton && \
-    git checkout ${TRITON_BRANCH} && \
-    git cherry-pick 555d04f && \
-    git cherry-pick dd998b6 && \
-    ( [ -f setup.py ] || cd python ) && \
-    python3 setup.py bdist_wheel --dist-dir=/opt/triton-dist && \
-    pip install --force-reinstall --no-deps /opt/triton-dist/*.whl && \
-    cd /opt/triton/python/triton_kernels && python3 -m build --wheel --outdir /opt/triton-dist && \
-    pip install --force-reinstall --no-deps /opt/triton-dist/triton_kernels-*.whl
-
-ARG GPU_ARCH
-ENV PYTORCH_ROCM_ARCH=${GPU_ARCH}
-
-WORKDIR /root
-
-# ======================================== flash-attention (ROCm) ==============
-FROM rocm_torch AS fa_build
-
-ARG FA_REPO="https://github.com/ROCm/flash-attention"
-ARG FA_TAG="83f9e450cd10e20701fb109db9c7703d376f282b"
-
-RUN git clone ${FA_REPO} \
-    && cd flash-attention \
-    && git checkout ${FA_TAG} \
-    && git submodule init \
-    && git submodule update
-
-ARG GPU_ARCH
-ARG MAX_JOBS=
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    cd flash-attention \
-    && GPU_ARCHS=${GPU_ARCH} BUILD_TARGET=rocm MAX_JOBS=${MAX_JOBS:-$(nproc)} python3 setup.py bdist_wheel \
-    && mkdir /install && cp dist/*.whl /install \
-    && ccache -s
-
-FROM fa_build AS install_fa
-
-RUN --mount=type=bind,from=fa_build,source=/install,target=/tmp/install \
-    --mount=type=cache,target=/root/.cache/pip \
-    pip install /tmp/install/*.whl
+# The base is an inference image: git, cmake, ninja, ccache, patch and hipcc are
+# already there. rsync backs vime.utils.external_utils.command_utils.rsync_simple;
+# the rest are Ray/network debugging tools, matching docker/Dockerfile.
+RUN apt-get update && apt-get install -y \
+    rsync dnsutils iproute2 prometheus && \
+    rm -rf /var/lib/apt/lists/*
 
 # ======================================== TransformerEngine ===================
-FROM install_fa AS te
 
-ARG GPU_ARCH
-ENV NVTE_USE_HIPBLASLT=1
 ENV NVTE_USE_ROCM=1
+ENV NVTE_USE_HIPBLASLT=1
 ENV NVTE_FRAMEWORK=pytorch
-ENV NVTE_ROCM_ARCH=${GPU_ARCH}
 
-ARG TE_TAG="86438dc3d04e7726a2f8f7dc2bcbe74e2bc1f282"
-ARG MAX_JOBS=
 RUN --mount=type=cache,target=/root/.cache/ccache \
-    pip install pybind11 pandas && \
-    git clone --recursive https://github.com/ROCm/TransformerEngine.git /root/TransformerEngine && \
-    cd /root/TransformerEngine && git checkout ${TE_TAG} && \
-    git submodule sync --recursive && git submodule update --init --recursive && \
-    GPU_ARCHS=${GPU_ARCH} MAX_JOBS=${MAX_JOBS:-$(nproc)} NVTE_FUSED_ATTN=0 \
-    pip install . --no-build-isolation -v && \
+    git clone --depth 1 --branch ${TE_TAG} --recursive \
+      https://github.com/ROCm/TransformerEngine.git /root/TransformerEngine && \
+    cd /root/TransformerEngine && \
+    NVTE_ROCM_ARCH=${GPU_ARCH} NVTE_FUSED_ATTN=${NVTE_FUSED_ATTN} \
+    MAX_JOBS=${TE_MAX_JOBS} \
+    pip install . --no-build-isolation && \
     ccache -s && \
     cd / && rm -rf /root/TransformerEngine
 
-RUN F=$(find /usr/local/lib/python3.12/dist-packages/ -path "*transformer_engine*/pytorch/attention/dot_product_attention/utils.py" | head -1) && \
-    if [ -z "$F" ]; then echo "ERROR: TE utils.py not found" && exit 1; fi && \
-    sed -i 's/max_version = PkgVersion("2.8.3")/max_version = PkgVersion("2.8.4")/' "$F" && \
-    grep -n 'max_version = PkgVersion' "$F"
+# ======================================== apex ================================
 
-# ======================================== vLLM ================================
-FROM te AS install_vllm
+# Prebuilt against the same ROCm as the base image. Training runs pass
+# --no-gradient-accumulation-fusion when apex is absent, so this is best-effort.
+RUN pip install --no-deps --no-cache-dir \
+      "https://repo.radeon.com/rocm/manylinux/${ROCM_WHEEL_RELEASE}/${APEX_WHEEL}" || \
+    echo "WARN: apex install skipped/failed (train with --no-gradient-accumulation-fusion)"
 
-ARG VLLM_TAG="6e448d0ea9bf3d88d898b65449ca6dc2aec170ac"
-ARG MAX_JOBS=
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    pip install setuptools_scm && \
-    mkdir -p /workspace && cd /workspace && \
-    ln -sf /opt/rocm/lib/libamdhip64.so /usr/lib/libamdhip64.so && \
-    git clone https://github.com/vllm-project/vllm && \
-    cd vllm && git checkout ${VLLM_TAG} && \
-    pip install -r requirements/rocm.txt && \
-    MAX_JOBS=${MAX_JOBS:-$(nproc)} python3 setup.py develop --no-deps && \
-    ccache -s
+# ======================================== Megatron-LM =========================
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip uninstall tilelang -y && pip install xgrammar==0.1.32
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install "fastapi==0.136.3" "starlette==1.2.1"
-
-# ======================================== aiter ===============================
-FROM install_vllm AS aiter
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install cupy-rocm-7-0
-
-ENV MIOPEN_DEBUG_CONV_DIRECT=0
-
-ARG AITER_TAG="v0.1.13.post1"
-ARG GPU_ARCH
-ARG MAX_JOBS=
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    cd /workspace && git clone --recursive https://github.com/ROCm/aiter.git && \
-    cd aiter && git checkout ${AITER_TAG} && git submodule update --init --recursive && \
-    pip install -r requirements.txt && \
-    PREBUILD_KERNELS=1 GPU_ARCHS="${GPU_ARCH}" MAX_JOBS=${MAX_JOBS:-$(nproc)} python3 setup.py develop && \
-    ccache -s
-
-# ======================================== vime ===============================
-FROM aiter AS install_vime
-
-# Use vime's mainline Megatron (NVIDIA/Megatron-LM at ${MEGATRON_COMMIT}) plus the
-# AMD megatron.patch under docker/amd_patch/${PATCH_VERSION}/.
-# The ROCm fork-after-HIP-init checkpoint segfault is handled at runtime by
+# vime's mainline Megatron (NVIDIA/Megatron-LM at ${MEGATRON_COMMIT}) plus the
+# AMD patches under docker/amd_patch/${PATCH_VERSION}/. The ROCm
+# fork-after-HIP-init checkpoint segfault is handled at runtime by
 # vime.utils.rocm_checkpoint_writer.
-ARG PATCH_VERSION=latest
-ARG MEGATRON_COMMIT=1dcf0dafa884ad52ffb243625717a3471643e087
-RUN --mount=type=cache,target=/root/.cache/pip \
-    git clone https://github.com/NVIDIA/Megatron-LM.git --recursive /root/Megatron-LM && \
+RUN git clone https://github.com/NVIDIA/Megatron-LM.git --recursive /root/Megatron-LM && \
     cd /root/Megatron-LM && git checkout ${MEGATRON_COMMIT}
 
 COPY docker/amd_patch/${PATCH_VERSION}/megatron.patch /root/Megatron-LM/
@@ -214,42 +92,133 @@ RUN cd /root/Megatron-LM && \
       exit 1; \
     fi && \
     rm megatron.patch amd_megatron_fused_kernels_init.patch && \
-    pip install -e .
+    pip install -e . --no-deps
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --ignore-installed PyJWT && \
-    pip install flash-linear-attention==0.4.2 && \
-    pip install megatron-energon --no-deps && \
-    pip install multi-storage-client --no-deps
+# ====================================== Python dependencies ============================================
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@d64a639 \
+RUN pip install --no-cache-dir --ignore-installed PyJWT && \
+    pip install --no-cache-dir flash-linear-attention==0.4.2 && \
+    pip install --no-cache-dir megatron-energon --no-deps && \
+    pip install --no-cache-dir multi-storage-client --no-deps
+
+RUN pip install "git+https://github.com/fzyzcjy/torch_memory_saver.git@${TMS_COMMIT}" \
         --no-cache-dir --force-reinstall
 
 COPY requirements.txt /tmp/vime-requirements.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r /tmp/vime-requirements.txt && \
-    pip install "numpy<2" "scipy<1.16"
+RUN pip install --no-cache-dir -r /tmp/vime-requirements.txt
+
+# vime.backends.megatron_utils.initialize asserts numpy 1.x, while the base
+# image ships numpy 2 and SciPy 1.18+ requires it — so both get pinned back,
+# same as docker/Dockerfile. The base's cupy-rocm-7-0 is built against the
+# numpy 2 ABI and stops importing here; nothing in vime, vLLM, aiter or Megatron
+# imports it.
+RUN pip install --no-cache-dir "numpy==1.26.4" "scipy==1.17.1"
+
+
+# ====================================== Patches ============================================
+
+# Patch vLLM with vime's local fixes. vLLM is a pip install (not a git checkout),
+# so there is no index to fall back on: every patch is applied with `patch`
+# rather than `git apply`, and a single .rej sweep at the end is what proves each
+# hunk landed. Pull-weights goes first because the general patch also updates
+# gpu_worker.py against the resulting line layout.
+COPY docker/patch/${PATCH_VERSION}/vllm-pull_weights.patch /tmp/vllm-pull_weights.patch
+COPY docker/patch/${PATCH_VERSION}/vllm.patch /tmp/vllm.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-inflight-queue-diagnostics.patch /tmp/vllm-inflight.patch
+#
+# Four ROCm-only deviations from docker/Dockerfile. The ROCm nightly is cut from
+# a different point on vLLM main than the CUDA base the patches are written
+# against, so it is ahead on some files and behind on others. Each deviation is
+# paired with a check that fails the build once the base converges, so none of
+# them can quietly outlive the drift that motivated it:
+#
+#   * `patch --fuzz=3` throughout. Context drifts by tens of lines on this base;
+#     the .rej sweep is what keeps that tolerance honest.
+#   * The Qwen3-Omni audio-encoder hunk is already upstream here, in a better
+#     form (TP sharding when the head count divides, disable_tp otherwise), so
+#     that file is dropped. The grep fails the build if a base stops carrying it.
+#   * The output_processor delta-sampling-mask hunk is dropped: it rewrites a
+#     block built on SamplingMaskLists.merge, which this base does not have yet.
+#     ROCm therefore keeps the finish-only mask behaviour it ships today.
+#   * vllm-pd-request-metrics.patch is skipped entirely: it patches
+#     vllm/entrypoints/openai/engine/protocol.py, which this base splits across
+#     generate/base/ and serve/engine/. The effect is missing per-request PD
+#     telemetry, which vime reads defensively (observability/trace_utils.py).
+#
+# The test-suite hunks are dropped from the inflight patch because site-packages
+# ships no tests/ tree; the same is true of the rust/ hunks skipped above.
+RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirname(vllm.__file__)))')" && \
+    cd "$VLLM_SITE" && \
+    grep -q 'disable_tp=self.disable_tp' vllm/model_executor/models/qwen3_omni_moe_thinker.py && \
+    if [ ! -f vllm/v1/outputs.py ] || grep -q 'def merge' vllm/v1/outputs.py; then \
+      echo "vllm/v1/outputs.py moved, or the base gained SamplingMaskLists.merge —" && \
+      echo "recheck whether the output_processor hunk still has to be dropped." && \
+      exit 1; \
+    fi && \
+    if [ -e vllm/entrypoints/openai/engine/protocol.py ]; then \
+      echo "Base converged on the CUDA protocol layout — apply vllm-pd-request-metrics.patch here." && \
+      exit 1; \
+    fi && \
+    awk '/^diff --git /{keep = ($0 !~ /qwen3_omni_moe_thinker|v1\/engine\/output_processor/)} keep' \
+      /tmp/vllm.patch > /tmp/vllm-rocm.patch && \
+    awk '/^diff --git /{keep = ($0 !~ / b\/tests\//)} keep' \
+      /tmp/vllm-inflight.patch > /tmp/vllm-inflight-rocm.patch && \
+    patch -p1 --forward --fuzz=3 --no-backup-if-mismatch < /tmp/vllm-pull_weights.patch && \
+    patch -p1 --forward --fuzz=3 --no-backup-if-mismatch < /tmp/vllm-rocm.patch && \
+    patch -p1 --forward --fuzz=3 --no-backup-if-mismatch < /tmp/vllm-inflight-rocm.patch && \
+    if find . -name '*.rej' | grep -q .; then \
+      echo "A vLLM patch did not apply cleanly — rebase docker/patch/${PATCH_VERSION}/." && \
+      exit 1; \
+    fi && \
+    rm /tmp/vllm-pull_weights.patch /tmp/vllm.patch /tmp/vllm-rocm.patch \
+       /tmp/vllm-inflight.patch /tmp/vllm-inflight-rocm.patch
+
+# ====================================== Install main package ============================================
 
 COPY . /root/vime
-RUN --mount=type=cache,target=/root/.cache/pip \
-    cd /root/vime && pip install -e . --no-deps
+RUN cd /root/vime && pip install --no-cache-dir -e . --no-deps
+
+RUN cd /root/vime/vime/backends/megatron_utils/kernels/int4_qat && \
+    PYTORCH_ROCM_ARCH=${GPU_ARCH} pip install . --no-build-isolation
+
+# ====================================== Runtime environment ============================================
 
 RUN mkdir -p /opt/amdgpu/share/libdrm && \
     ln -sf /usr/share/libdrm/amdgpu.ids /opt/amdgpu/share/libdrm/amdgpu.ids 2>/dev/null || true
 
 ENV CUDA_DEVICE_MAX_CONNECTIONS=1
 ENV HSA_NO_SCRATCH_RECLAIM=1
+# Pin aiter's build-time codegen arch instead of letting it sniff the host with
+# rocminfo. (aiter's runtime dispatch still reads the live GPU, so a process with
+# no visible device cannot `import aiter` — and ROCm apex imports it for fused
+# RoPE, which is why the check below stops short of megatron.training.)
+ENV GPU_ARCHS=${GPU_ARCH}
 ENV VLLM_ROCM_USE_AITER=1
+# vime's rollout posts to vLLM's token-in-token-out /inference/v1/generate, and
+# this vLLM gates the scale-out endpoints behind an env var that defaults to off
+# (older nightlies mounted them unconditionally). Without this the rollout 404s.
+ENV VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1
+ENV MIOPEN_DEBUG_CONV_DIRECT=0
 ENV PYTHONPATH=/root/vime:/root/Megatron-LM
 
+# `docker build` has no GPU, so this covers everything importable without one.
+# megatron.training (via apex -> aiter) and the Megatron train actor are covered
+# by the ROCm Buildkite suites, which run this image on real MI355X GPUs.
 RUN python3 -c "\
-import vllm, vime; \
+import torch, vllm, vime, transformer_engine, megatron.core; \
+import fake_int4_quant_cuda; \
 from vllm.distributed.weight_transfer.ipc_engine import IPCWeightTransferEngine; \
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateResponse; \
 from vime.backends.vllm_utils.vllm_engine import VLLMEngine; \
+assert 'weight_version' in GenerateResponse.model_fields, 'vllm.patch did not apply'; \
+print('torch', torch.__version__, 'hip', torch.version.hip); \
 print('vllm', vllm.__version__); \
-print('IPCWeightTransferEngine + VLLMEngine import ok')"
+print('transformer_engine', transformer_engine.__version__); \
+print('vime import ok')"
 
+# Reset ENTRYPOINT inherited from the vllm/vllm-openai-rocm base (`vllm serve`),
+# so the image is a plain bash/ray environment. Without this, `docker run ... bash -c ...`
+# and `ray job submit` append to `vllm serve` and break.
 WORKDIR /root/vime
-ENTRYPOINT ["sleep"]
-CMD ["infinity"]
+ENTRYPOINT []
+CMD ["/bin/bash"]
