@@ -92,6 +92,7 @@ steps:
           python tests/test_expert_routing.py
           python tests/test_reloadable_process_group_memory_check.py
           python tests/test_ppo_logprob_entropy.py
+          python -m pytest tests/test_dspark_rotary_embedding.py -q
           python tests/utils/test_hf_checkpoint_saver.py
         '
 
