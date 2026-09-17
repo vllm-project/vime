@@ -60,6 +60,7 @@ class SweConfig:
     adapter_bind_host: str
     adapter_port: int
     fork_merge_threshold: int | None
+    max_turns_per_sid: int | None
     agent_time_budget_sec: int
     eval_timeout_sec: int
     rollout_guard_sec: int
@@ -72,6 +73,7 @@ class SweConfig:
         eval_timeout = int(os.environ.get("SWE_EVAL_TIMEOUT_SEC", "600"))
         guard = int(os.environ.get("SWE_ROLLOUT_GUARD_SEC", "0") or 0) or (agent_time_budget + eval_timeout + 180)
         fork = int(v) if (v := os.environ.get("VIME_FORK_MERGE_MAX_RESPONSE_TOKENS")) else None
+        max_turns = int(v) if (v := os.environ.get("VIME_MAX_TURNS_PER_SID")) else None
         return cls(
             eval_protocol=os.environ.get("SWE_EVAL_PROTOCOL", swe.PROTOCOL_SCALESWE),
             train_protocol=os.environ.get("SWE_TRAIN_PROTOCOL", swe.PROTOCOL_SCALESWE),
@@ -79,6 +81,7 @@ class SweConfig:
             adapter_bind_host=os.environ.get("ADAPTER_BIND_HOST", "0.0.0.0"),
             adapter_port=int(os.environ.get("ADAPTER_PORT", "18001")),
             fork_merge_threshold=fork,
+            max_turns_per_sid=max_turns,
             agent_time_budget_sec=agent_time_budget,
             eval_timeout_sec=eval_timeout,
             rollout_guard_sec=guard,
@@ -153,6 +156,7 @@ class _AdapterService(metaclass=SingletonMeta):
             tool_parser=self.tool_parser,
             reasoning_parser=self.reasoning_parser,
             fork_threshold_tokens=CONFIG.fork_merge_threshold,
+            max_turns_per_sid=CONFIG.max_turns_per_sid,
         )
         # handler_cancellation=True so a client disconnect cancels the handler
         # coroutine, tearing down the in-flight engine ``/inference/v1/generate``
