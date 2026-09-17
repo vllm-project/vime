@@ -590,6 +590,31 @@ def _resolve_parallel_sizes(
     return tp, pp, pcp, dp
 
 
+def _engine_visible_devices(base: int, local_num_gpus: int, num_gpus_per_node: int) -> str:
+    """Build the visibility mask for a rollout engine subprocess.
+
+    On ROCm the engine's own GPUs must not be the ONLY ones it can see. A HIP IPC handle carries the
+    EXPORTING process's device ordinal and ``hipIpcOpenMemHandle`` resolves that ordinal against the
+    IMPORTING process's device list, whereas CUDA honours the importer's current device. A trainer
+    rank N exporting weights to an engine that enumerates a single device therefore fails with
+    ``hipErrorInvalidValue`` for every N > 0, which is why colocate weight sync appears to work on
+    GPU 0 only. Listing the engine's own GPUs first and the rest of the node's afterwards keeps the
+    engine on its intended devices while putting the trainer's ordinal back in range; only the mask's
+    LENGTH matters, not any agreement between the two numberings.
+    """
+    own = [base + i for i in range(local_num_gpus)]
+    try:
+        import torch
+
+        is_hip = torch.version.hip is not None
+    except Exception:
+        is_hip = False
+    if not is_hip:
+        return ",".join(str(g) for g in own)
+    rest = [g for g in range(num_gpus_per_node) if g not in own]
+    return ",".join(str(g) for g in own + rest)
+
+
 def _compute_server_args(
     args,
     rank,
@@ -747,7 +772,7 @@ def _compute_server_args(
     kwargs["_args"] = args
     kwargs["_rank"] = rank
     kwargs["_worker_type"] = worker_type
-    kwargs["_visible_devices"] = ",".join(str(base + i) for i in range(local_num_gpus))
+    kwargs["_visible_devices"] = _engine_visible_devices(base, local_num_gpus, args.num_gpus_per_node)
     kwargs["_tp_size"] = tp
     kwargs["_pp_size"] = pp
     kwargs["_pcp_size"] = pcp
