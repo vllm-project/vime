@@ -325,12 +325,81 @@ class _VLLMHijack:
             TokenDispatcherWithAll2AllV._vime_expert_ids_generation += 1
 
     @staticmethod
+    def _restore_rope_cache(worker) -> None:
+        """Recompute & re-record RoPE cos/sin after colocate weight-update.
+
+        Root cause of the colocate first-rollout garble: ``start_weight_update``
+        -> layerwise reload (``capture_layer_to_meta``/``restore_layer_on_meta``,
+        vllm ``model_loader/reload/meta.py``) puts the rotary ``cos_sin_cache``
+        buffer (``persistent=False``) on *meta*; layerwise IPC reload only
+        refills *parameters*, and ``finish_weight_update`` -> ``finalize_layerwise_reload``
+        /``materialize_layer`` re-creates buffer storage *empty*. The MLA rope path
+        reads vllm-ascend module globals ``_cos_cache``/``_sin_cache``
+        (``get_cos_sin_mla`` -> ``_cos_cache[positions]``), which end up zeroed ->
+        first rollout's ``npu_interleave_rope`` gets all-zero cos/sin, zeroes q,
+        attention collapses -> garbled output.
+
+        Fix (called from ``_patched_finish_weight_update`` after ``finalize_layerwise_reload``):
+        recompute ``cos_sin_cache`` deterministically (from ``base``/``rotary_dim``/
+        ``max_position_embeddings`` -- no clobbered buffer/inv_freq read), write it back,
+        and FORCE-re-record the globals (bypassing the ``if _cos_cache is not None: return``
+        guard in ``_record_cos_and_sin_cache_interleaved`` by resetting them to None first).
+        """
+        if os.getenv("VIME_RESTORE_ROPE", "1") not in ("1", "true", "yes"):
+            return
+        import logging
+
+        _log = logging.getLogger(__name__)
+        try:
+            from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+            from vllm_ascend.ops import rotary_embedding as asc_rope
+        except Exception:  # noqa: BLE001
+            _log.warning("[VIME-ROPE-RESTORE] import failed", exc_info=True)
+            return
+        model_runner = getattr(worker, "model_runner", None)
+        model = getattr(model_runner, "model", None)
+        if model is None:
+            _log.warning("[VIME-ROPE-RESTORE] worker model not available, skipping restore")
+            return
+        inner = getattr(model, "model", None) or model
+        # MLA reads the globals _cos_cache/_sin_cache (NOT the buffer);
+        # _record_cos_and_sin_cache_interleaved is a "record once" no-op once
+        # they are set, so reset to None once before the loop to force
+        # re-record: the first rotary module then re-records, matching the
+        # guard's native first-writer semantics (GLM-4.7-Flash has exactly
+        # one rotary module).
+        asc_rope._cos_cache = None
+        asc_rope._sin_cache = None
+        asc_rope._cos_sin_cache = None
+        count = 0
+        for mod in inner.modules():
+            if not isinstance(mod, RotaryEmbedding):
+                continue
+            try:
+                buf = getattr(mod, "cos_sin_cache", None)
+                if buf is None:
+                    continue
+                cache = mod._compute_cos_sin_cache()
+                cache = cache.to(device=buf.device, dtype=buf.dtype)
+                with torch.no_grad():
+                    buf.copy_(cache)
+                if hasattr(asc_rope, "_record_cos_sin_cache"):
+                    asc_rope._record_cos_sin_cache(buf)
+                if hasattr(asc_rope, "_record_cos_and_sin_cache_interleaved"):
+                    asc_rope._record_cos_and_sin_cache_interleaved(buf)
+                count += 1
+            except Exception:  # noqa: BLE001
+                _log.warning("[VIME-ROPE-RESTORE] failed for a rotary module", exc_info=True)
+        _log.info("[VIME-ROPE-RESTORE] recomputed cos_sin_cache for %d rotary module(s)", count)
+
+    @staticmethod
     def _patch_one_worker(worker_cls: type) -> None:
         import inspect
 
         _orig_load_model = worker_cls.load_model
         _orig_start_weight_update = worker_cls.start_weight_update
         _orig_wake_up = worker_cls.wake_up
+        _orig_finish_weight_update = worker_cls.finish_weight_update
         has_dummy_kw = "load_dummy_weights" in inspect.signature(_orig_load_model).parameters
 
         if has_dummy_kw:
@@ -369,9 +438,19 @@ class _VLLMHijack:
                 self.vllm_config.quant_config = quant_config
             _VLLMHijack._invalidate_moe_alltoall_expert_ids()
 
+        def _patched_finish_weight_update(self, _orig=_orig_finish_weight_update) -> None:
+            _orig(self)  # finalize_layerwise_reload: materialize_layer gives buffers empty storage
+            _VLLMHijack._invalidate_moe_alltoall_expert_ids()
+            # finish is the weight-update endpoint; the cos_sin_cache clobber
+            # (start_weight_update -> layerwise reload -> restore_layer_on_meta ->
+            # materialize empty) already happened. Recompute + re-record here so the
+            # MLA rope path sees real cos/sin on the first post-update rollout.
+            _VLLMHijack._restore_rope_cache(self)
+
         worker_cls.load_model = _patched_load_model  # type: ignore[attr-defined]
         worker_cls.start_weight_update = _patched_start_weight_update  # type: ignore[attr-defined]
         worker_cls.wake_up = _patched_wake_up  # type: ignore[attr-defined]
+        worker_cls.finish_weight_update = _patched_finish_weight_update  # type: ignore[attr-defined]
 
     @staticmethod
     def patch_moe_weight_loader(model: torch.nn.Module) -> None:
