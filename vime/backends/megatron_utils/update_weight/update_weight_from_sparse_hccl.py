@@ -326,13 +326,14 @@ class UpdateWeightFromSparseHCCL:
         executor = ThreadPoolExecutor(max_workers=1)
         try:
             future = executor.submit(self._client.update_weights, asdict(update_info))
-            # The HTTP control plane should enter receive_weights before the
-            # trainer starts the matching HCCL collectives.  Surface an
-            # immediately rejected request instead of blocking forever in the
-            # first broadcast with no receiver.
-            time.sleep(2.0)
-            if future.done():
-                future.result()
+            # verl-equivalent handshake-free publish: HCCL broadcast is
+            # rendezvous-safe (an early sender simply waits for the receiver
+            # to join the collective), so no fixed sleep is needed before
+            # entering it.  A rejected/dead receiver hangs until the job
+            # supervisor kills us -- the same failure semantics verl's
+            # ZMQ PUB manifest + NCCL broadcast accepts; receiver-side
+            # errors (checksum/decode/apply) still surface via the
+            # future.result() below.
             SparseHCCLWeightTransferEngine.trainer_send_weights(
                 iter(patches),
                 SparseHCCLTrainerSendWeightsArgs(group=self._group),
