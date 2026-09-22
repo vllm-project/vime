@@ -44,11 +44,7 @@ source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 : "${MODEL_PATH:?Set MODEL_PATH}"
 : "${PROMPT_DATA_PATH:?Set PROMPT_DATA_PATH}"
 UPDATE_WEIGHT_MODE="${UPDATE_WEIGHT_MODE:-delta}"
-UPDATE_WEIGHT_TRANSPORT="${UPDATE_WEIGHT_TRANSPORT:-disk}"
-UPDATE_WEIGHT_DISK_DIR="${UPDATE_WEIGHT_DISK_DIR:-}"
-UPDATE_WEIGHT_LOCAL_CHECKPOINT_DIR="${UPDATE_WEIGHT_LOCAL_CHECKPOINT_DIR:-/tmp/vime-rollout-checkpoint}"
-UPDATE_WEIGHT_MODE="${UPDATE_WEIGHT_MODE:-delta}"
-UPDATE_WEIGHT_TRANSPORT="${UPDATE_WEIGHT_TRANSPORT:-disk}"
+UPDATE_WEIGHT_TRANSPORT="${UPDATE_WEIGHT_TRANSPORT:-sparse_hccl}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.6}"
 NUM_ROLLOUT="${NUM_ROLLOUT:-200}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-32}"
@@ -147,13 +143,14 @@ if [[ "${UPDATE_WEIGHT_TRANSPORT}" == "disk" ]]; then
    UPDATE_WEIGHT_ARGS+=(
       --update-weight-disk-dir "${UPDATE_WEIGHT_DISK_DIR}"
    )
-fi
-if [[ "${UPDATE_WEIGHT_MODE}" == "delta" ]]; then
-   UPDATE_WEIGHT_ARGS+=(
-      --update-weight-local-checkpoint-dir "${UPDATE_WEIGHT_LOCAL_CHECKPOINT_DIR}"
-      --update-weight-delta-encoding "${UPDATE_WEIGHT_DELTA_ENCODING:-xor}"
-      --update-weight-delta-checksum xxh3-128
-   )
+   if [[ "${UPDATE_WEIGHT_MODE}" == "delta" ]]; then
+      UPDATE_WEIGHT_LOCAL_CHECKPOINT_DIR="${UPDATE_WEIGHT_LOCAL_CHECKPOINT_DIR:-/tmp/vime-rollout-checkpoint}"
+      UPDATE_WEIGHT_ARGS+=(
+         --update-weight-local-checkpoint-dir "${UPDATE_WEIGHT_LOCAL_CHECKPOINT_DIR}"
+         --update-weight-delta-encoding "${UPDATE_WEIGHT_DELTA_ENCODING:-xor}"
+         --update-weight-delta-checksum xxh3-128
+      )
+   fi
 fi
 
 MISC_ARGS=(
