@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import socket
 import time
 from argparse import Namespace
@@ -31,7 +32,7 @@ from .delta_sync import (
     checksum,
     gather_slot_entries_to_rank0,
 )
-from .hf_weight_iterator_direct import HfWeightIteratorDirect
+from .hf_weight_iterator_sparse_bridge import HfWeightIteratorSparseBridge
 from .megatron_delta_export import (
     build_export_index,
     iter_delta_entries,
@@ -105,9 +106,10 @@ class _GatherQueue:
 class _SparseFlushBucket:
     """One homogeneous-dtype sparse flush with bounded wire size."""
 
-    def __init__(self, capacity: int, publish):
+    def __init__(self, capacity: int, publish, *, checksum_enabled: bool):
         self.capacity = int(capacity)
         self.publish = publish
+        self.checksum_enabled = checksum_enabled
         self.patches: list[SparseWeightPatch] = []
         self.shapes: list[list[int]] = []
         self.nbytes = 0
@@ -162,7 +164,7 @@ class _SparseFlushBucket:
                 params=params,
                 positions=positions,
                 values=values,
-                checksum=checksum(positions, values),
+                checksum=(checksum(positions, values) if self.checksum_enabled else None),
             )
         )
         self.patches, self.shapes, self.nbytes = [], [], 0
@@ -191,21 +193,16 @@ class UpdateWeightFromSparseHCCL:
         self.quantization_config = quantization_config
         self.weight_version = 0
         self.update_weight_metrics: dict[str, float] = {}
-        self._iterator = HfWeightIteratorDirect(
-            args=args,
-            model=model,
-            model_name=model_name,
-            quantization_config=quantization_config,
-        )
-        self._param_infos = [
-            info
-            for bucket in self._iterator.megatron_local_param_info_buckets
-            for info in bucket
-        ]
+        self._iterator = HfWeightIteratorSparseBridge(args, model)
         self._index = None
         self._snapshots: dict[str, torch.Tensor] = {}
         self._seeded = False
         self._steady_updates = 0
+        self._publish_seconds = 0.0
+        # torch.hash_tensor currently falls back to CPU on Ascend.  HCCL
+        # already reports transport failures, so keep the extra payload scan
+        # opt-in on NPU while retaining it for debugging/cross-device tests.
+        self._checksum_enabled = os.getenv("VIME_SPARSE_HCCL_CHECKSUM", "0") == "1"
         self._group = None
         self._client = None
         self.rollout_engines: list[ActorHandle] = []
@@ -220,6 +217,8 @@ class UpdateWeightFromSparseHCCL:
     ) -> None:
         del rollout_engine_lock, engine_gpu_offsets, engine_parallel_configs
         self.disconnect_rollout_engines()
+        self._seeded = False
+        self._index = None
         self.rollout_engines = list(rollout_engines)
         gpu_counts = list(
             engine_gpu_counts
@@ -265,16 +264,10 @@ class UpdateWeightFromSparseHCCL:
         return metrics
 
     def _ensure_export_index(self) -> None:
-        if self._index is not None:
+        if self._index is not None and not self.args.offload_train:
             return
-        local_weights = dict(self.weights_getter())
-        self._index = build_export_index(
-            self.args,
-            self.model_name,
-            self.quantization_config,
-            self._param_infos,
-            local_weights,
-        )
+        with self._iterator.model_context():
+            self._index = build_export_index(self._iterator.bridge, self.model, {})
 
     def _begin_update(self) -> None:
         if dist.get_rank() != 0:
@@ -292,76 +285,30 @@ class UpdateWeightFromSparseHCCL:
         torch.accelerator.synchronize()
         ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
 
-    def _publish(
-        self,
-        patches: list[SparseWeightPatch],
-        shapes: list[list[int]],
-        encoding: str,
-        *,
-        verify: bool = False,
-        wire_checksum: int | None = None,
-    ) -> None:
-        if dist.get_rank() != 0 or not patches:
+    def _publish_flush(self, flush: DeltaFlush, *, verify: bool = False) -> None:
+        if dist.get_rank() != 0 or not flush.params:
             return
         assert self._client is not None and self._group is not None
-        dtype_names = [str(patch.values.dtype).replace("torch.", "") for patch in patches]
-        if len(set(dtype_names)) != 1:
-            raise ValueError("Each delta flush must contain exactly one values dtype")
-        num_updates = [patch.values.numel() for patch in patches]
-        positions = (
-            torch.cat([patch.indices for patch in patches]).contiguous().view(torch.uint8)
-            if encoding == "indices"
-            else torch.empty(0, dtype=torch.uint8, device=patches[0].values.device)
-        )
-        values = torch.cat([patch.values for patch in patches]).contiguous()
         update_info = SparseHCCLWeightTransferUpdateInfo(
-            names=[patch.name for patch in patches],
-            dtype_names=dtype_names,
-            shapes=shapes,
-            num_updates_list=num_updates,
-            encoding=encoding,
-            checksum=(checksum(positions, values) if wire_checksum is None else wire_checksum),
+            names=[param.name for param in flush.params],
+            dtype_names=[param.dtype for param in flush.params],
+            shapes=[param.shape for param in flush.params],
+            num_updates_list=[param.val_end - param.val_start for param in flush.params],
+            encoding=flush.encoding,
+            checksum=flush.checksum,
             verify=verify,
         )
-        executor = ThreadPoolExecutor(max_workers=1)
-        try:
+        # Same-stream HCCL uses the already assembled buffers. Keep the flush
+        # alive until both the collective and receiver apply have completed.
+        publish_started = time.perf_counter()
+        with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(self._client.update_weights, asdict(update_info))
-            # verl-equivalent handshake-free publish: HCCL broadcast is
-            # rendezvous-safe (an early sender simply waits for the receiver
-            # to join the collective), so no fixed sleep is needed before
-            # entering it.  A rejected/dead receiver hangs until the job
-            # supervisor kills us -- the same failure semantics verl's
-            # ZMQ PUB manifest + NCCL broadcast accepts; receiver-side
-            # errors (checksum/decode/apply) still surface via the
-            # future.result() below.
-            SparseHCCLWeightTransferEngine.trainer_send_weights(
-                iter(patches),
+            SparseHCCLWeightTransferEngine.trainer_send_packed(
+                flush.positions.view(torch.int32), flush.values,
                 SparseHCCLTrainerSendWeightsArgs(group=self._group),
             )
             future.result()
-        finally:
-            executor.shutdown(wait=False)
-
-    def _publish_flush(self, flush: DeltaFlush, *, verify: bool = False) -> None:
-        patches = []
-        shapes = []
-        for param in flush.params:
-            positions = flush.positions[param.pos_start : param.pos_end]
-            indices = (
-                positions.view(torch.int32)
-                if flush.encoding == "indices"
-                else torch.empty(0, dtype=torch.int32, device=flush.values.device)
-            )
-            values = flush.values[param.val_start : param.val_end]
-            patches.append(SparseWeightPatch(param.name, indices, values))
-            shapes.append(param.shape)
-        self._publish(
-            patches,
-            shapes,
-            flush.encoding,
-            verify=verify,
-            wire_checksum=flush.checksum,
-        )
+        self._publish_seconds += time.perf_counter() - publish_started
 
     def _send_dense(self, *, verify: bool = False) -> tuple[int, int]:
         flushes = wire_bytes = 0
@@ -405,7 +352,7 @@ class UpdateWeightFromSparseHCCL:
                     params=params,
                     positions=positions,
                     values=values,
-                    checksum=checksum(positions, values),
+                    checksum=(checksum(positions, values) if self._checksum_enabled else None),
                 )
                 self._publish_flush(flush, verify=verify)
                 flushes += 1
@@ -431,7 +378,11 @@ class UpdateWeightFromSparseHCCL:
         def consume(name, dtype_name, shape, indices, values):
             bucket = buckets.setdefault(
                 dtype_name,
-                _SparseFlushBucket(self.args.update_weight_buffer_size, publish),
+                _SparseFlushBucket(
+                    self.args.update_weight_buffer_size,
+                    publish,
+                    checksum_enabled=self._checksum_enabled,
+                ),
             )
             bucket.add(name, shape, indices, values)
 
@@ -442,11 +393,7 @@ class UpdateWeightFromSparseHCCL:
             consume,
         )
         for slots, dtype_name, counts, indices, values, group in iter_delta_entries(
-            self.args,
-            self.model_name,
-            self.quantization_config,
-            self._index,
-            self._snapshots,
+            self._index, self._snapshots,
         ):
             queue.put(group, slots, dtype_name, counts, indices, values)
         queue.flush_all()
@@ -460,12 +407,14 @@ class UpdateWeightFromSparseHCCL:
         if self._client is None:
             raise RuntimeError("Sparse HCCL updater is not connected")
         started = time.perf_counter()
+        verify_seconds = 0.0
+        self._publish_seconds = 0.0
         self.weight_version += 1
         self._begin_update()
         dist.barrier(group=get_gloo_group())
+        self._ensure_export_index()
         if not self._seeded:
             flushes, wire_bytes = self._send_dense()
-            self._ensure_export_index()
             assert self._index is not None
             prime_delta_snapshots(self._index, self._snapshots, pin=False)
             torch.accelerator.synchronize()
@@ -475,24 +424,32 @@ class UpdateWeightFromSparseHCCL:
             flushes, wire_bytes, updates = self._send_sparse_delta()
             self._steady_updates += 1
             if self._verify_due():
-                verify_flushes, verify_bytes = self._send_dense(verify=True)
-                flushes += verify_flushes
-                wire_bytes += verify_bytes
+                verify_started = time.perf_counter()
+                self._send_dense(verify=True)
+                torch.accelerator.synchronize()
+                verify_seconds = time.perf_counter() - verify_started
         dist.barrier(group=get_gloo_group())
         self._finish_update()
         dist.barrier(group=get_gloo_group())
         if dist.get_rank() == 0:
+            total_seconds = time.perf_counter() - started
             self.update_weight_metrics = {
-                "perf/update_weights_sparse_hccl_seconds": time.perf_counter() - started,
+                "perf/update_weights_sparse_hccl_seconds": total_seconds - verify_seconds,
+                "perf/update_weights_sparse_hccl_publish_seconds": self._publish_seconds - verify_seconds,
+                "perf/update_weights_sparse_hccl_prepare_seconds": total_seconds - self._publish_seconds,
+                "perf/update_weights_sparse_hccl_verify_seconds": verify_seconds,
                 "perf/update_weights_sparse_hccl_wire_mbytes": wire_bytes / (1024**2),
                 "perf/update_weights_sparse_hccl_flushes": float(flushes),
                 "perf/update_weights_sparse_hccl_updates": float(updates),
             }
             logger.info(
-                "Sparse HCCL weight sync v=%d seed=%s flushes=%d wire=%.2f MiB updates=%d",
+                "Sparse HCCL weight sync v=%d seed=%s flushes=%d wire=%.2f MiB "
+                "updates=%d prepare=%.3fs publish=%.3fs",
                 self.weight_version,
                 self.weight_version == 1,
                 flushes,
                 wire_bytes / (1024**2),
                 updates,
+                total_seconds - self._publish_seconds,
+                self._publish_seconds,
             )

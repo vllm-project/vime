@@ -96,6 +96,9 @@ VLLM_ARGS=(
    --rollout-num-gpus-per-engine 4
    --vllm-gpu-memory-utilization 0.6
 )
+if [[ -n "${VLLM_MAX_NUM_SEQS:-}" ]]; then
+   VLLM_ARGS+=(--vllm-max-num-seqs "${VLLM_MAX_NUM_SEQS}")
+fi
 
 MISC_ARGS=(
    --attention-dropout 0.0
