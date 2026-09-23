@@ -303,12 +303,20 @@ class RolloutManager:
             return self.custom_reward_post_process_func(self.args, samples)
 
         raw_rewards = [sample.get_reward_value(self.args) for sample in samples]
+        rewards_for_norm = raw_rewards
+        if cache := getattr(self.args, "soft_overlong_cache", 0):
+            max_len = self.args.rollout_max_response_len
+            rewards_for_norm = [
+                float(reward) - min(1.0, max(0.0, (sample.response_length - max_len + cache) / cache))
+                for sample, reward in zip(samples, raw_rewards, strict=True)
+            ]
+
         if (
             self.args.advantage_estimator in ["grpo", "gspo", "cispo", "reinforce_plus_plus_baseline"]
             and self.args.rewards_normalization
         ):
             # group norm
-            rewards = torch.tensor(raw_rewards, dtype=torch.float)
+            rewards = torch.tensor(rewards_for_norm, dtype=torch.float)
             if rewards.shape[-1] == self.args.n_samples_per_prompt * self.args.rollout_batch_size:
                 rewards = rewards.reshape(-1, self.args.n_samples_per_prompt)
             else:
@@ -323,7 +331,7 @@ class RolloutManager:
 
             return raw_rewards, rewards.flatten().tolist()
 
-        return raw_rewards, raw_rewards
+        return raw_rewards, rewards_for_norm
 
     def _convert_samples_to_train_data(self, samples: list[Sample] | list[list[Sample]]):
         """
