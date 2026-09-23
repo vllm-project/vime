@@ -147,6 +147,7 @@ steps:
             tests/test_advantage_whiten_cp.py \
             tests/test_accelerator.py \
             tests/test_block_fp8_zero_block.py \
+            tests/test_build_messages.py \
             tests/test_deep_ep_tms_patch.py \
             tests/test_discounted_returns.py \
             tests/test_eval_config.py \
