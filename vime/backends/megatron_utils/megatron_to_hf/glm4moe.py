@@ -2,6 +2,8 @@ import re
 
 import torch
 
+from vime.utils.common import is_npu
+
 
 def convert_glm4moe_to_hf(args, name, param):
     if name == "module.module.embedding.word_embeddings.weight":
@@ -22,25 +24,30 @@ def convert_glm4moe_to_hf(args, name, param):
     if match:
         layer_idx, rest = match.groups()
 
-        # experts
-        expert_pattern = r"mlp.experts\.(.+)\.weight(\d+)"
-        match = re.match(expert_pattern, rest)
-        if match:
-            rest, expert_idx = match.groups()
-            if rest == "linear_fc1":
-                gate_weight, up_weight = param.chunk(2, dim=0)
-                outputs = [
-                    (f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj.weight", gate_weight),
-                    (f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.up_proj.weight", up_weight),
-                ]
-                return outputs
-            elif rest == "linear_fc2":
-                outputs = [
-                    (f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight", param),
-                ]
-                return outputs
-            else:
-                raise ValueError(f"Unknown expert parameter name: {name}")
+        if is_npu():
+            npu_outputs = _convert_npu_experts_and_mla(args, name, param, layer_idx, rest)
+            if npu_outputs is not None:
+                return npu_outputs
+        else:
+            # Standard Megatron: one set of weights per expert
+            expert_pattern = r"mlp.experts\.(.+)\.weight(\d+)"
+            match = re.match(expert_pattern, rest)
+            if match:
+                rest, expert_idx = match.groups()
+                if rest == "linear_fc1":
+                    gate_weight, up_weight = param.chunk(2, dim=0)
+                    outputs = [
+                        (f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj.weight", gate_weight),
+                        (f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.up_proj.weight", up_weight),
+                    ]
+                    return outputs
+                elif rest == "linear_fc2":
+                    outputs = [
+                        (f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight", param),
+                    ]
+                    return outputs
+                else:
+                    raise ValueError(f"Unknown expert parameter name: {name}")
 
         # shared expert
         shared_expert_pattern = r"mlp.shared_experts\.(.+)"
@@ -97,7 +104,7 @@ def convert_glm4moe_to_hf(args, name, param):
             ]
         elif rest == "mlp.linear_fc2.weight":
             return [(f"model.layers.{layer_idx}.mlp.down_proj.weight", param)]
-        elif rest == "self_attention.linear_qkv.layer_norm_weight":
+        elif rest == "self_attention.linear_qkv.layer_norm_weight" or (is_npu() and rest == "input_layernorm.weight"):
             return [(f"model.layers.{layer_idx}.input_layernorm.weight", param)]
         elif rest == "mlp.linear_fc1.layer_norm_weight":
             return [(f"model.layers.{layer_idx}.post_attention_layernorm.weight", param)]
@@ -114,9 +121,14 @@ def convert_glm4moe_to_hf(args, name, param):
 
         # qk norm
         elif rest == "self_attention.q_layernorm.weight":
+            if is_npu():
+                # MindSpeed MLA
+                return [(f"model.layers.{layer_idx}.self_attn.q_a_layernorm.weight", param)]
             return [(f"model.layers.{layer_idx}.self_attn.q_norm.weight", param)]
         elif rest == "self_attention.k_layernorm.weight":
             return [(f"model.layers.{layer_idx}.self_attn.k_norm.weight", param)]
+        elif is_npu() and rest == "self_attention.kv_layernorm.weight":
+            return [(f"model.layers.{layer_idx}.self_attn.kv_a_layernorm.weight", param)]
 
     mtp_layer_pattern = r"module\.module\.mtp\.layers\.(\d+)\.(.+)"
     match = re.match(mtp_layer_pattern, name)
@@ -137,3 +149,115 @@ def convert_glm4moe_to_hf(args, name, param):
             return convert_glm4moe_to_hf(args, name, param)
 
     raise ValueError(f"Unknown parameter name: {name}")
+
+
+def _convert_npu_experts_and_mla(args, name, param, layer_idx, rest):
+    """MindSpeed GroupedGemm / MLA mappings used only on NPU."""
+    # MindSpeed GmmExpertsImpl: "mlp.experts.experts.linear_fc{1,2}.weight"
+    # Standard Megatron: "mlp.experts.linear_fc{1,2}.weight{N}"
+    expert_pattern = r"mlp.experts\.(.+)\.weight(\d*)$"
+    match = re.match(expert_pattern, rest)
+    if match:
+        fc_name, expert_idx = match.groups()
+        # Handle double "experts" in MindSpeed naming
+        if fc_name.startswith("experts."):
+            fc_name = fc_name[len("experts.") :]
+        if fc_name == "linear_fc1":
+            if expert_idx:
+                # Standard Megatron: one expert per param
+                gate_weight, up_weight = param.chunk(2, dim=0)
+                return [
+                    (f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.gate_proj.weight", gate_weight),
+                    (f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.up_proj.weight", up_weight),
+                ]
+            # MindSpeed GroupedGemm: all experts packed in one 3D param
+            # Shape: [num_experts, fc1_output, hidden_size]
+            # fc1_output = 2 * moe_ffn_hidden_size (gate+up packed)
+            # vLLM expects gate_proj/up_proj: [intermediate, hidden_size]
+            num_experts = args.num_experts
+            if param.dim() == 3:
+                # 3D: [num_experts, fc1_output, hidden_size] - slice on dim=1
+                gate_weight, up_weight = param.chunk(2, dim=1)
+                outputs = []
+                for i in range(num_experts):
+                    outputs.append((f"model.layers.{layer_idx}.mlp.experts.{i}.gate_proj.weight", gate_weight[i]))
+                    outputs.append((f"model.layers.{layer_idx}.mlp.experts.{i}.up_proj.weight", up_weight[i]))
+            else:
+                # 2D: [hidden_size, fc1_output * num_experts] - old format
+                gate_up = param.view(num_experts, args.hidden_size, -1)
+                gate_weight, up_weight = gate_up.chunk(2, dim=2)
+                outputs = []
+                for i in range(num_experts):
+                    outputs.append((f"model.layers.{layer_idx}.mlp.experts.{i}.gate_proj.weight", gate_weight[i].t()))
+                    outputs.append((f"model.layers.{layer_idx}.mlp.experts.{i}.up_proj.weight", up_weight[i].t()))
+            return outputs
+        elif fc_name == "linear_fc2":
+            if expert_idx:
+                # Standard Megatron: one expert per param
+                return [
+                    (f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight", param),
+                ]
+            # MindSpeed GroupedGemm: all experts packed in one 3D param
+            # Shape: [num_experts, hidden_size, fc2_input]
+            # vLLM expects down_proj: [hidden_size, intermediate]
+            num_experts = args.num_experts
+            if param.dim() == 3:
+                # 3D: [num_experts, hidden_size, fc2_input] - use directly
+                outputs = []
+                for i in range(num_experts):
+                    outputs.append((f"model.layers.{layer_idx}.mlp.experts.{i}.down_proj.weight", param[i]))
+            else:
+                # 2D: [fc2_input * num_experts, hidden_size] - old format
+                down = param.view(num_experts, -1, args.hidden_size)
+                outputs = []
+                for i in range(num_experts):
+                    outputs.append((f"model.layers.{layer_idx}.mlp.experts.{i}.down_proj.weight", down[i].t()))
+            return outputs
+        else:
+            raise ValueError(f"Unknown expert parameter name: {name}")
+
+    # GroupedGemm format: weight1/weight2 (all experts packed together)
+    if rest == "mlp.experts.weight1":
+        # 3D: [num_experts, fc1_output, hidden_size] (MindSpeed GmmExpertsImpl)
+        # 2D: [hidden_size, fc1_output * num_experts] (after EP all-gather + concat)
+        num_experts = args.num_experts
+        if param.dim() == 3:
+            gate_weight, up_weight = param.chunk(2, dim=1)
+            outputs = []
+            for i in range(num_experts):
+                outputs.append((f"model.layers.{layer_idx}.mlp.experts.{i}.gate_proj.weight", gate_weight[i]))
+                outputs.append((f"model.layers.{layer_idx}.mlp.experts.{i}.up_proj.weight", up_weight[i]))
+        else:
+            gate_up = param.view(num_experts, args.hidden_size, -1)
+            gate_weight, up_weight = gate_up.chunk(2, dim=2)
+            outputs = []
+            for i in range(num_experts):
+                outputs.append((f"model.layers.{layer_idx}.mlp.experts.{i}.gate_proj.weight", gate_weight[i].t()))
+                outputs.append((f"model.layers.{layer_idx}.mlp.experts.{i}.up_proj.weight", up_weight[i].t()))
+        return outputs
+    elif rest == "mlp.experts.weight2":
+        # 3D: [num_experts, hidden_size, fc2_input] (MindSpeed GmmExpertsImpl)
+        # 2D: [fc2_input * num_experts, hidden_size] (after EP all-gather + concat)
+        num_experts = args.num_experts
+        if param.dim() == 3:
+            outputs = []
+            for i in range(num_experts):
+                outputs.append((f"model.layers.{layer_idx}.mlp.experts.{i}.down_proj.weight", param[i]))
+        else:
+            down = param.view(num_experts, -1, args.hidden_size)
+            outputs = []
+            for i in range(num_experts):
+                outputs.append((f"model.layers.{layer_idx}.mlp.experts.{i}.down_proj.weight", down[i].t()))
+        return outputs
+
+    # MindSpeed MLA attention: separate q/kv projections
+    if rest == "self_attention.linear_q_down_proj.weight":
+        return [(f"model.layers.{layer_idx}.self_attn.q_a_proj.weight", param)]
+    elif rest == "self_attention.linear_q_up_proj.weight":
+        return [(f"model.layers.{layer_idx}.self_attn.q_b_proj.weight", param)]
+    elif rest == "self_attention.linear_kv_down_proj.weight":
+        return [(f"model.layers.{layer_idx}.self_attn.kv_a_proj_with_mqa.weight", param)]
+    elif rest == "self_attention.linear_kv_up_proj.weight":
+        return [(f"model.layers.{layer_idx}.self_attn.kv_b_proj.weight", param)]
+
+    return None
