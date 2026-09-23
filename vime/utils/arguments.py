@@ -431,6 +431,62 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 default=1,
                 help="Interval for updating the weights",
             )
+            # Delta weight sync.
+            parser.add_argument(
+                "--update-weight-mode",
+                choices=["full", "delta"],
+                default="full",
+                help=(
+                    "Weight sync strategy. 'full' (default) broadcasts every parameter "
+                    "every sync. 'delta' diffs each sync against a pinned-CPU snapshot of the "
+                    "previous one and ships only the changed values."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-transport",
+                choices=["nccl", "disk", "sparse_hccl"],
+                default="nccl",
+                help=(
+                    "Carrier for weight sync. In full mode, 'nccl' broadcasts chunks and "
+                    "'disk' writes a complete HF checkpoint under --update-weight-disk-dir "
+                    "before engines reload it. Delta mode supports disk or Ascend sparse_hccl; "
+                    "sparse_hccl sends a dense seed once, then final-HF int32 positions and values."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-delta-batch-gather",
+                type=int,
+                default=32,
+                help=(
+                    "Number of globally ordered Megatron directory rows combined into one "
+                    "sparse gather count matrix. The trigger is row-count-only so all ranks "
+                    "issue collectives in identical order."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-delta-verify-every",
+                type=int,
+                default=0,
+                help=(
+                    "For sparse_hccl, replay a dense state-equivalence sweep every K steady "
+                    "delta updates. Zero disables verification."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-local-checkpoint-dir",
+                type=str,
+                default=None,
+                help=(
+                    "Rollout-host-local directory (NVMe) holding a full HF checkpoint kept in "
+                    "sync by each engine's pull_weights: every host copies a published full "
+                    "checkpoint as-is or patches published deltas in place, and the engines "
+                    "reload from it. Required for --update-weight-mode=delta "
+                    "--update-weight-transport=disk; optional for full disk sync (engines then "
+                    "pull to local disk instead of reading the shared dir directly). The "
+                    "read-side counterpart of --custom-update-weight-post-write-path is "
+                    "--custom-update-weight-pre-read-path."
+                ),
+            )
             parser.add_argument(
                 "--keep-old-actor",
                 action="store_true",
@@ -1608,6 +1664,28 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
 
 def vime_validate_args(args):
     args.eval_datasets = _resolve_eval_datasets(args)
+
+    if args.update_weight_mode == "delta":
+        if args.update_weight_transport not in {"disk", "sparse_hccl"}:
+            raise ValueError(
+                "--update-weight-mode=delta requires --update-weight-transport=disk or sparse_hccl, "
+                f"got {args.update_weight_transport!r}."
+            )
+        if args.colocate:
+            raise ValueError(
+                "--update-weight-mode=delta is not supported with --colocate. Colocate transfers "
+                "weights via CUDA IPC (only a handle crosses processes), so the delta bookkeeping "
+                "(snapshot + diff + encode) is pure overhead."
+            )
+        if args.update_weight_delta_batch_gather < 1:
+            raise ValueError("--update-weight-delta-batch-gather must be at least 1.")
+        if args.update_weight_delta_verify_every < 0:
+            raise ValueError("--update-weight-delta-verify-every cannot be negative.")
+        if args.update_weight_transport == "disk" and not args.update_weight_local_checkpoint_dir:
+            raise ValueError(
+                "disk delta sync requires --update-weight-local-checkpoint-dir "
+                "(a rollout-host-local NVMe directory)."
+            )
 
     if args.kl_coef != 0 or args.use_kl_loss:
         if not os.path.exists(args.ref_load):

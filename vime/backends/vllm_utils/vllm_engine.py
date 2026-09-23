@@ -460,6 +460,10 @@ def build_vllm_cmd_and_env(server_args: dict[str, Any]) -> tuple[list[str], dict
         ]
     elif getattr(args, "colocate", False):
         cmd += ["--weight-transfer-config", '{"backend":"ipc"}']
+    elif getattr(args, "update_weight_mode", None) == "delta" and getattr(
+        args, "update_weight_transport", None
+    ) == "sparse_hccl":
+        cmd += ["--weight-transfer-config", '{"backend":"sparse_hccl"}']
     else:
         cmd += ["--weight-transfer-config", '{"backend":"nccl"}']
 

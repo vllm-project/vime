@@ -177,6 +177,10 @@ class MegatronTrainRayActor(TrainRayActor):
 
         if self.args.colocate:
             update_weight_cls = UpdateWeightFromTensor
+        elif self.args.update_weight_mode == "delta" and self.args.update_weight_transport == "sparse_hccl":
+            from .update_weight.update_weight_from_sparse_hccl import UpdateWeightFromSparseHCCL
+
+            update_weight_cls = UpdateWeightFromSparseHCCL
         else:
             update_weight_cls = UpdateWeightFromDistributed
         self.weight_updater = update_weight_cls(
@@ -640,7 +644,8 @@ class MegatronTrainRayActor(TrainRayActor):
 
         reconnect_rollout_engines = self.args.offload_train and self.args.use_critic and not self.args.colocate
 
-        if reconnect_rollout_engines:
+        sparse_live_weights = self.args.offload_train and self.args.update_weight_transport == "sparse_hccl"
+        if reconnect_rollout_engines or sparse_live_weights:
             self.wake_up()
         elif self.args.offload_train:
             reload_process_groups()
@@ -680,7 +685,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 else:
                     self.weights_backuper.backup("old_actor")
 
-        if reconnect_rollout_engines:
+        if reconnect_rollout_engines or sparse_live_weights:
             self.sleep()
         elif self.args.offload_train:
             destroy_process_groups()
