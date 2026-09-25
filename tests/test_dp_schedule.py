@@ -36,6 +36,8 @@ def make_args(
         num_experts=None,
         num_layers=2,
         kv_channels=8,
+        variable_global_batch_size=False,
+        global_batch_size_schedule=None,
     )
 
 
@@ -320,6 +322,38 @@ def test_rejects_when_fewer_rollouts_than_gbs():
     tp = make_tp(dp_size=1)
     with pytest.raises(AssertionError, match="num_rollouts"):
         build_dp_schedule(args, tp, [3] * 6, global_batch_size=4, rollout_indices=[0, 0, 1, 1, 2, 2])
+
+
+@pytest.mark.unit
+def test_variable_global_batch_keeps_final_partial_group():
+    rollout_indices = list(range(6))
+    args = make_args(use_dynamic_batch_size=False, micro_batch_size=1)
+    args.variable_global_batch_size = True
+    partitions, mbi, nmb, gbs_per_step = build_dp_schedule(
+        args, make_tp(dp_size=2), [3] * 6, global_batch_size=4, rollout_indices=rollout_indices
+    )
+    assert gbs_per_step == [4, 2]
+    assert nmb == [2, 1]
+    assert_invariants(
+        partitions,
+        mbi,
+        nmb,
+        dp_size=2,
+        expected_global_sample_indices=range(6),
+        total_lengths=[3] * 6,
+    )
+
+
+@pytest.mark.unit
+def test_explicit_global_batch_schedule():
+    rollout_indices = list(range(6))
+    args = make_args(use_dynamic_batch_size=False, micro_batch_size=1)
+    args.global_batch_size_schedule = [2, 4]
+    partitions, mbi, nmb, gbs_per_step = build_dp_schedule(
+        args, make_tp(dp_size=2), [3] * 6, global_batch_size=4, rollout_indices=rollout_indices
+    )
+    assert gbs_per_step == [2, 4]
+    assert nmb == [1, 2]
 
 
 if __name__ == "__main__":

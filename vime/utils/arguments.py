@@ -718,6 +718,25 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
             # `rollout_batch_size * n_samples_per_prompt`.
             reset_arg(parser, "--global-batch-size", type=int, default=None)
             parser.add_argument(
+                "--variable-global-batch-size",
+                action="store_true",
+                default=False,
+                help=(
+                    "Keep a final partial rollout group instead of dropping it. "
+                    "The resulting per-step global_batch_sizes can vary, and loss normalization "
+                    "and the LR scheduler use the actual value."
+                ),
+            )
+            parser.add_argument(
+                "--global-batch-size-schedule",
+                type=str,
+                default=None,
+                help=(
+                    "Optional comma-separated rollout counts per optimizer step, e.g. 8,8,4. "
+                    "The entries must cover exactly the rollout batch when variable global batching is enabled."
+                ),
+            )
+            parser.add_argument(
                 "--num-steps-per-rollout",
                 type=int,
                 default=None,
@@ -1050,6 +1069,34 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                     "Whether to reset optimizer states after each rollout. "
                     "If enabled, the optimizer's history will be cleared at the end of each rollout, which can sometimes help with training stability or fulfill specific experiment requirements."
                 ),
+            )
+            parser.add_argument(
+                "--stream-optimizer-state-to-disk",
+                action="store_true",
+                default=False,
+                help=(
+                    "Stream DistributedOptimizer FP32 main parameters and Adam moments through "
+                    "node-local NVMe buckets. Requires Megatron PR86 deferred main-param initialization "
+                    "and the distributed Adam optimizer."
+                ),
+            )
+            parser.add_argument(
+                "--stream-optimizer-state-moment-dtype",
+                choices=["fp32", "bf16", "fp16"],
+                default="bf16",
+                help="Storage dtype for NVMe Adam moments; FP32 main parameters remain exact.",
+            )
+            parser.add_argument(
+                "--offload-train-disk-dir",
+                type=str,
+                default=None,
+                help="Node-local directory used for streamed optimizer state.",
+            )
+            parser.add_argument(
+                "--offload-train-disk-chunk-mb",
+                type=int,
+                default=64,
+                help="Pinned staging buffer size in MiB for NVMe optimizer transfers.",
             )
             parser.add_argument(
                 "--use-stateless-adam",
@@ -1994,6 +2041,41 @@ def vime_validate_args(args):
         if args.log_probs_max_tokens_per_gpu is None:
             args.log_probs_max_tokens_per_gpu = args.max_tokens_per_gpu
 
+    if getattr(args, "stream_optimizer_state_to_disk", False):
+        for flag in ("reset_optimizer_states", "load_main_params_from_ckpt"):
+            assert not getattr(
+                args, flag, False
+            ), f"--stream-optimizer-state-to-disk is incompatible with --{flag.replace('_', '-')}"
+        if getattr(args, "fp16", False) or not getattr(args, "bf16", False):
+            raise ValueError("--stream-optimizer-state-to-disk currently requires BF16 model training")
+        if getattr(args, "ckpt_format", "torch_dist") != "torch_dist":
+            raise ValueError("--stream-optimizer-state-to-disk currently requires --ckpt-format torch_dist")
+        assert (
+            getattr(args, "optimizer", "adam").lower() == "adam"
+        ), "--stream-optimizer-state-to-disk currently requires --optimizer adam"
+        assert getattr(
+            args, "use_distributed_optimizer", True
+        ), "--stream-optimizer-state-to-disk requires --use-distributed-optimizer"
+        assert not getattr(
+            args, "optimizer_cpu_offload", False
+        ), "--stream-optimizer-state-to-disk excludes --optimizer-cpu-offload"
+        assert not getattr(
+            args, "offload_optimizer_states", False
+        ), "--stream-optimizer-state-to-disk excludes --offload-optimizer-states"
+        assert not getattr(
+            args, "async_save", False
+        ), "--stream-optimizer-state-to-disk currently requires synchronous checkpoint saving"
+        assert args.offload_train_disk_chunk_mb > 0, "--offload-train-disk-chunk-mb must be positive"
+        if args.offload_train_disk_dir is None:
+            uid = os.environ.get("VIME_RUN_ID", str(os.getpid()))
+            args.offload_train_disk_dir = os.path.join(os.environ.get("SCRATCH", "/tmp"), f"vime_train_offload_{uid}")
+        logger.info(
+            "Streaming optimizer state through NVMe: dir=%s, chunk=%d MiB, moments=%s",
+            args.offload_train_disk_dir,
+            args.offload_train_disk_chunk_mb,
+            args.stream_optimizer_state_moment_dtype,
+        )
+
     if getattr(args, "balance_by_flops", False):
         assert args.use_dynamic_batch_size, "--balance-by-flops requires --use-dynamic-batch-size"
         args.balance_data = True
@@ -2105,6 +2187,20 @@ def vime_validate_args(args):
 
     if args.eval_function_path is None:
         args.eval_function_path = args.rollout_function_path
+
+    if getattr(args, "global_batch_size_schedule", None) is not None:
+        try:
+            args.global_batch_size_schedule = [
+                int(item.strip()) for item in args.global_batch_size_schedule.split(",") if item.strip()
+            ]
+        except ValueError as exc:
+            raise ValueError("--global-batch-size-schedule must be comma-separated positive integers") from exc
+        assert args.global_batch_size_schedule and all(
+            item > 0 for item in args.global_batch_size_schedule
+        ), "--global-batch-size-schedule must contain positive integers"
+        if args.global_batch_size is None:
+            args.global_batch_size = args.global_batch_size_schedule[0]
+        args.variable_global_batch_size = True
 
     if args.num_steps_per_rollout is not None:
         global_batch_size = args.rollout_batch_size * args.n_samples_per_prompt // args.num_steps_per_rollout

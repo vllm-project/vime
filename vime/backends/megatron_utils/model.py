@@ -37,6 +37,19 @@ from .loss import ROLLOUT_TOP_P_TOKEN_KEYS, get_rollout_top_p_logprob_kwargs, lo
 from .model_provider import get_model_provider_func
 from .stateless_adam import StatelessAdam
 
+
+def _stream_optimizer_state_if_requested(args, optimizer, role):
+    if not getattr(args, "stream_optimizer_state_to_disk", False):
+        return
+    if getattr(args, "use_stateless_adam", False):
+        raise ValueError("--stream-optimizer-state-to-disk is incompatible with --use-stateless-adam")
+    from vime_plugins.optimizers.nvme_stream import setup_optimizer_state_streaming
+
+    # Actor and critic can coexist on one node; keep their rank namespaces separate.
+    args._vime_nvme_role = role
+    setup_optimizer_state_streaming(args, optimizer)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -302,6 +315,16 @@ def setup_model_and_optimizer(
         if hasattr(args, f.name):
             kwargs[f.name] = getattr(args, f.name)
     config = OptimizerConfig(**kwargs)
+    # Megatron PR86: keep stable FP32 main-param handles but defer their CUDA
+    # storage so the NVMe store can materialize one bucket at a time.
+    if getattr(args, "stream_optimizer_state_to_disk", False):
+        if str(config.optimizer).lower() != "adam":
+            raise ValueError("--stream-optimizer-state-to-disk currently supports only --optimizer adam")
+        if not hasattr(config, "defer_main_param_initialization"):
+            raise RuntimeError(
+                "NVMe optimizer streaming requires Megatron PR86 " "(OptimizerConfig.defer_main_param_initialization)"
+            )
+        config.defer_main_param_initialization = True
     config.timers = None
 
     if args.use_stateless_adam:
@@ -317,6 +340,7 @@ def setup_model_and_optimizer(
         )
     if args.use_stateless_adam:
         _disable_distributed_optimizer_state_initialization(optimizer)
+    _stream_optimizer_state_if_requested(args, optimizer, role)
     opt_param_scheduler = get_optimizer_param_scheduler(args, optimizer)
     return model, optimizer, opt_param_scheduler
 

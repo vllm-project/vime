@@ -69,6 +69,7 @@ vime 构建于 `slime <https://github.com/THUDM/slime>`_ 之上，slime 正是 G
    advanced/delta-weight-sync.md
    advanced/vllm-config.md
    advanced/megatron-config.md
+   advanced/nvme-optimizer.md
    advanced/arch-support-beyond-megatron.md
 
 .. toctree::
