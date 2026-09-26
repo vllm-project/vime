@@ -1658,6 +1658,13 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--ci-save-parameter-grads",
+                type=str,
+                default=None,
+                help="Save dense BF16/FP32 gradient shards before optimizer clipping for offline parallel replay checks. "
+                "Use a fresh shared directory per run; adds CPU copies and disk I/O only when enabled.",
+            )
+            parser.add_argument(
                 "--ci-save-grad-norm",
                 type=str,
                 default=None,

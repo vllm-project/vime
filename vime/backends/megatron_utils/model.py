@@ -695,6 +695,15 @@ def train_one_step(
         forward_only=False,
     )
 
+    if getattr(args, "ci_save_parameter_grads", None):
+        from pathlib import Path
+
+        from vime.backends.megatron_utils.gradient_check import save_gradient_snapshot
+
+        role = getattr(model[0], "role", "actor")
+        snapshot_dir = Path(args.ci_save_parameter_grads) / role / f"rollout-{rollout_id}" / f"step-{step_id}"
+        save_gradient_snapshot(args, model, snapshot_dir)
+
     valid_step = True
     grad_norm = float("nan")
     if not getattr(args, "check_for_nan_in_loss_and_grad", True):
