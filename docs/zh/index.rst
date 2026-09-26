@@ -86,6 +86,7 @@ vime 构建于 `slime <https://github.com/THUDM/slime>`_ 之上，slime 正是 G
 
    developer_guide/ci.md
    developer_guide/debug.md
+   developer_guide/parallel_gradient_check.md
    developer_guide/trace.md
    developer_guide/profiling.md
 

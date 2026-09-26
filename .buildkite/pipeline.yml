@@ -82,6 +82,7 @@ steps:
           python tests/test_rm_math_dapo.py
           python tests/test_dp_schedule.py
           python tests/test_cp_utils.py
+          python -m pytest tests/test_gradient_check.py
           python tests/test_metric_report.py
           python tests/test_metric_report_dist.py
           python tests/test_loss_cp_invariance.py

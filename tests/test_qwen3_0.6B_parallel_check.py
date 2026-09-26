@@ -1,4 +1,6 @@
 import os
+import tempfile
+from pathlib import Path
 
 import vime.utils.external_utils.command_utils as U
 
@@ -8,6 +10,7 @@ ENABLE_EVAL = bool(int(os.environ.get("VIME_TEST_ENABLE_EVAL", "1")))
 MODEL_NAME = "Qwen3-0.6B"
 MODEL_TYPE = "qwen3-0.6B"
 NUM_GPUS = 8
+CHECK_PARAMETER_GRADS = bool(int(os.environ.get("VIME_TEST_CHECK_PARAMETER_GRADS", "0")))
 
 # Cover pure DP scaling, all dense parallel dimensions together, and one
 # size-4 case per dimension.
@@ -103,6 +106,14 @@ def execute():
     )
 
     rollout_data_path = "parallel-check-rollout-data.pt"
+    # Keep artifacts on failure so the offline checker can diagnose the exact tensor.
+    grad_root = Path(tempfile.mkdtemp(prefix="parallel-grads-")) if CHECK_PARAMETER_GRADS else None
+    if grad_root is not None:
+        from vime.backends.megatron_utils.gradient_check import compare_runs
+
+    def grad_args(directory):
+        return f"--ci-save-parameter-grads {directory} " if CHECK_PARAMETER_GRADS else ""
+
     for i, calculate_per_token_loss in enumerate((False, True)):
         loss_args = "--calculate-per-token-loss " if calculate_per_token_loss else ""
         rollout_data_args = (
@@ -115,6 +126,7 @@ def execute():
                 train_args
                 + loss_args
                 + rollout_data_args
+                + grad_args(grad_root / f"reference-{i}" if grad_root else None)
                 + f"--ci-save-grad-norm grad_norms-{i}.pt "
                 + f"--actor-num-gpus-per-node {NUM_GPUS} "
             ),
@@ -122,11 +134,13 @@ def execute():
             megatron_model_type=MODEL_TYPE,
         )
         for num_gpus, tp_size, pp_size, cp_size in PARALLEL_CONFIGS:
+            run_dir = grad_root / f"replay-{i}-{num_gpus}-{tp_size}-{pp_size}-{cp_size}" if grad_root else None
             args = (
                 train_args
                 + loss_args
                 + f"--load-debug-rollout-data {rollout_data_path} "
                 + f"--ci-load-grad-norm grad_norms-{i}.pt "
+                + grad_args(run_dir)
                 + f"--context-parallel-size {cp_size} "
                 + f"--tensor-model-parallel-size {tp_size} "
                 + f"--pipeline-model-parallel-size {pp_size} "
@@ -141,6 +155,13 @@ def execute():
                 num_gpus_per_node=num_gpus,
                 megatron_model_type=MODEL_TYPE,
             )
+            if CHECK_PARAMETER_GRADS:
+                compare_runs(
+                    grad_root / f"reference-{i}",
+                    run_dir,
+                    rtol=float(os.environ.get("VIME_TEST_GRAD_RTOL", "0.01")),
+                    atol=float(os.environ.get("VIME_TEST_GRAD_ATOL", "1e-6")),
+                )
 
 
 if __name__ == "__main__":

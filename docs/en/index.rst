@@ -86,6 +86,7 @@ Start by Use Case
 
    developer_guide/ci.md
    developer_guide/debug.md
+   developer_guide/parallel_gradient_check.md
    developer_guide/trace.md
    developer_guide/profiling.md
 
