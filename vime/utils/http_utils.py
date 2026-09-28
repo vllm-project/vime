@@ -2,7 +2,6 @@ import asyncio
 import ipaddress
 import json
 import logging
-import multiprocessing
 import os
 import random
 import socket
@@ -127,23 +126,6 @@ def run_router(args):
         return 1
 
 
-def terminate_process(process: multiprocessing.Process, timeout: float = 1.0) -> None:
-    """Terminate a process gracefully, with forced kill as fallback.
-
-    Args:
-        process: The process to terminate
-        timeout: Seconds to wait for graceful termination before forcing kill
-    """
-    if not process.is_alive():
-        return
-
-    process.terminate()
-    process.join(timeout=timeout)
-    if process.is_alive():
-        process.kill()
-        process.join()
-
-
 _http_client: httpx.AsyncClient | None = None
 _client_concurrency: int = 0
 
@@ -198,18 +180,31 @@ async def _post(client, url, payload, max_retries=60, headers=None):
     return output
 
 
+def get_rollout_num_engines(args) -> int:
+    """Return the number of rollout HTTP engines behind the router."""
+    if (num_engines := getattr(args, "rollout_num_engines", None)) is not None:
+        return int(num_engines)
+
+    rollout_num_gpus = getattr(args, "rollout_num_gpus", None) or 0
+    rollout_num_gpus_per_engine = getattr(args, "rollout_num_gpus_per_engine", None) or 1
+    if rollout_num_gpus <= 0:
+        return 0
+    return max(1, rollout_num_gpus // rollout_num_gpus_per_engine)
+
+
 def init_http_client(args):
     """Initialize HTTP client and optionally enable distributed POST via Ray."""
     global _http_client, _client_concurrency, _distributed_post_enabled
-    if not args.rollout_num_gpus:
+    num_engines = get_rollout_num_engines(args)
+    if num_engines <= 0:
         return
 
-    _client_concurrency = args.vllm_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
+    _client_concurrency = args.vllm_server_concurrency * num_engines
     if _http_client is None:
         _http_client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=_client_concurrency),
             timeout=httpx.Timeout(None),
-            trust_env=False,  # internal vLLM comm only — never route through system proxy
+            trust_env=False,  # internal VLLM comm only — never route through system proxy
         )
 
     # Optionally initialize distributed POST via Ray without changing interfaces
@@ -231,6 +226,8 @@ def _init_ray_distributed_post(args):
     import ray
     from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
+    from vime.ray.utils import add_default_ray_env_vars
+
     # Discover alive nodes
     nodes = [n for n in ray.nodes() if n.get("Alive")]
     if not nodes:
@@ -244,7 +241,7 @@ def _init_ray_distributed_post(args):
             self._client = httpx.AsyncClient(
                 limits=httpx.Limits(max_connections=max(1, concurrency)),
                 timeout=httpx.Timeout(None),
-                trust_env=False,  # internal vLLM comm only — never route through system proxy
+                trust_env=False,  # internal VLLM comm only — never route through system proxy
             )
 
         async def do_post(self, url, payload, max_retries=60, headers=None):
@@ -262,6 +259,7 @@ def _init_ray_distributed_post(args):
             actor = _HttpPosterActor.options(
                 name=None,
                 lifetime="detached",
+                runtime_env={"env_vars": add_default_ray_env_vars()},
                 scheduling_strategy=scheduling,
                 max_concurrency=per_actor_conc,
                 # Use tiny CPU to schedule

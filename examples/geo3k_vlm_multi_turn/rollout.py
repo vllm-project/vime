@@ -106,7 +106,7 @@ def _multimodal_train_inputs_from_features(features: Any) -> dict[str, torch.Ten
     if not isinstance(encoded_images, list):
         raise TypeError("vLLM features.kwargs_data.image must be a list")
 
-    from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item as vllm_decode
+    from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import decode_mm_kwargs_item as vllm_decode
 
     parts_by_key: dict[str, list[torch.Tensor]] = {}
     for encoded in encoded_images:
@@ -334,28 +334,6 @@ class _Geo3kRollout:
             return None
         return self.max_response_budget - self.sample.response_length
 
-    def _append_response(
-        self,
-        tokens: list[int],
-        log_probs: list[float] | None = None,
-        *,
-        trainable: bool,
-        meta: dict[str, Any] | None = None,
-    ) -> None:
-        # NPU-fork adaptation: this branch's Sample has no append_response_tokens(); maintain the
-        # token / loss_mask / rollout_log_probs windows directly (equivalent bookkeeping to the rest
-        # of vime's NPU rollout). Everything else in this file is upstream PR #341 verbatim.
-        if not tokens:
-            return
-        self.sample.tokens.extend(tokens)
-        self.sample.loss_mask.extend([1 if trainable else 0] * len(tokens))
-        self.sample.rollout_log_probs.extend(log_probs if log_probs is not None else [0.0] * len(tokens))
-        self.sample.response_length += len(tokens)
-        if meta and meta.get("routed_experts") is not None:
-            self.sample.rollout_routed_experts = np.ascontiguousarray(
-                meta["routed_experts"].astype(np.int32, copy=True)
-            )
-
     async def _initialize_prompt(self) -> None:
         payload: dict[str, Any] = {
             "model": self.args.hf_checkpoint,
@@ -440,7 +418,14 @@ class _Geo3kRollout:
         if eos_token_id is not None and getattr(self.args, "use_rollout_routing_replay", False):
             raise RuntimeError("Routing replay cannot append an artificial EOS after a stop string")
 
-        self._append_response(turn.tokens, turn.log_probs, trainable=True, meta=meta)
+        self.sample.append_response_tokens(
+            self.args,
+            tokens=turn.tokens,
+            log_probs=turn.log_probs,
+            trainable=True,
+            meta_info=meta,
+            update_terminal_info=False,
+        )
         self.response_tokens.extend(turn.tokens)
         if eos_token_id is None:
             return False
@@ -452,7 +437,7 @@ class _Geo3kRollout:
                 "remaining_budget": remaining,
             }
             return True
-        self._append_response([eos_token_id], trainable=False)
+        self.sample.append_response_tokens(tokens=[eos_token_id], trainable=False)
         return False
 
     def _advance_environment(self, env: Any, turn: _Turn, turn_index: int) -> bool:
@@ -475,7 +460,7 @@ class _Geo3kRollout:
         )
         remaining = self._remaining_budget
         if remaining is None or len(token_ids) < remaining:
-            self._append_response(token_ids, trainable=False)
+            self.sample.append_response_tokens(tokens=token_ids, trainable=False)
             return False
         self.sample.status = Sample.Status.TRUNCATED
         self.sample.metadata["multiturn_truncation"] = {

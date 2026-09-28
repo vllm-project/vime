@@ -41,7 +41,7 @@ By default it also starts a local static server so you can open the generated HT
 
 ## Instrument custom code
 
-For custom rollout or reward code — including custom agent steps, tool calls, sandbox execution, and verifier calls in agentic workflows — reuse helpers from `vime.utils.trace_utils`:
+For custom rollout or reward code — including custom agent steps, tool calls, sandbox execution, and verifier calls in agentic workflows — reuse helpers from `vime.observability.trace_utils`:
 
 - `trace_span(target, name, attrs=...)`: record a duration span.
 - `trace_event(target, name, attrs=...)`: record an instant event.
@@ -57,7 +57,7 @@ Use `trace_function(...)` when the whole function should be represented as one s
 The decorator is what vime uses for the main rollout pipeline. For example, `generate_and_rm(...)` is traced per sample and `generate_and_rm_group(...)` is traced per sample group:
 
 ```python
-from vime.utils.trace_utils import trace_function
+from vime.observability.trace_utils import trace_function
 
 
 @trace_function("generate_and_rm", target="sample")
@@ -104,7 +104,7 @@ If you need to add attrs after part of the function has executed, use an inner `
 If you want to record vLLM generation metadata in a consistent way, reuse `build_vllm_meta_trace_attrs`:
 
 ```python
-from vime.utils.trace_utils import build_vllm_meta_trace_attrs, trace_span
+from vime.observability.trace_utils import build_vllm_meta_trace_attrs, trace_span
 
 with trace_span(sample, "vllm_generate") as span:
     output = await post(url, payload)
@@ -116,4 +116,3 @@ with trace_span(sample, "vllm_generate") as span:
 - Save a small number of rollouts first; the viewer is easiest to read when each dump contains a manageable number of samples.
 - The viewer is built from the saved `.pt` dump, so traces can be inspected offline on another machine.
 - For GPU/kernel-level vLLM profiling traces, see [Profiling](./profiling.md).
-

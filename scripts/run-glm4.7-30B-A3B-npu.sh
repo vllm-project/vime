@@ -24,24 +24,25 @@ export HYDRA_FULL_ERROR=1
 export DISABLE_L2_CACHE=1
 export VLLM_ASCEND_ENABLE_NZ=0
 export VLLM_USE_AOT_COMPILE=0
-export PYTHONPATH="/root/Megatron-Bridge/src:/root/Megatron-LM/:${PYTHONPATH:-}"
+export PYTHONPATH="/root/Megatron-LM:/root/MegatronAdaptor:/root/TransformerEngineNPU:${PYTHONPATH:-}"
 
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-source "${SCRIPT_DIR}/models/glm4.7-30B-A3B-npu.sh"
+source "${SCRIPT_DIR}/models/glm4.7-30B-A3B.sh"
 
 DATA_ROOT="${DATA_ROOT:-/root}"
+MODEL_DIR="${DATA_ROOT}/weights/GLM-4.7-Flash"
+DATASET_DIR="${DATA_ROOT}/datasets/dapo-math-17k"
 
 CKPT_ARGS=(
-   --hf-checkpoint ${DATA_ROOT}/weights/GLM-4.7-Flash/
-   --load ${DATA_ROOT}/weights/GLM-4.7-Flash/
-   --ref-load ${DATA_ROOT}/weights/GLM-4.7-Flash/
-   --megatron-to-hf-mode bridge
+   --hf-checkpoint "${MODEL_DIR}"
+   --load "${MODEL_DIR}"
+   --ref-load "${MODEL_DIR}"
 )
 
 ROLLOUT_ARGS=(
-   --prompt-data ${DATA_ROOT}/datasets/dapo-math-17k/dapo-math-17k.jsonl
+   --prompt-data "${DATASET_DIR}/dapo-math-17k.jsonl"
    --input-key prompt
    --label-key label
    --apply-chat-template
@@ -81,12 +82,6 @@ PERF_ARGS=(
    --seq-length 24576
 )
 
-MTP_ARGS=(
-   --mtp-num-layers 1
-   --enable-mtp-training
-   --mtp-loss-scaling-factor 0.2
-)
-
 GRPO_ARGS=(
    --advantage-estimator grpo
    --use-kl-loss
@@ -111,13 +106,16 @@ OPTIMIZER_ARGS=(
 
 
 VLLM_ARGS=(
+   --vllm-additional-config '{"weight_nz_mode":0}'
    --rollout-num-gpus-per-engine 4
    --vllm-gpu-memory-utilization 0.7
+   --vllm-enable-expert-parallel
    --vllm-cudagraph-capture-sizes 1 2 4 8 $(seq 16 8 256)
-   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":1}'
 )
 
 MISC_ARGS=(
+   # Match GLM's unscaled RoPE without changing main's shared model script.
+   --rope-type rope
    --attention-dropout 0.0
    --hidden-dropout 0.0
    --accumulate-allreduce-grads-in-fp32
@@ -130,7 +128,7 @@ MISC_ARGS=(
 
 # launch the master node of ray in container
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
-ray start --head --node-ip-address ${MASTER_ADDR} --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+ray start --head --num-gpus 0 --resources '{"NPU": 16}' --node-ip-address ${MASTER_ADDR} --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 
 ray job submit --address="http://127.0.0.1:8265" \
    -- python3 train.py \
@@ -145,5 +143,4 @@ ray job submit --address="http://127.0.0.1:8265" \
    "${PERF_ARGS[@]}" \
    "${EVAL_ARGS[@]}" \
    "${VLLM_ARGS[@]}" \
-   "${MISC_ARGS[@]}" \
-   "${MTP_ARGS[@]}"
+   "${MISC_ARGS[@]}"

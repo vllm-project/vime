@@ -1,1 +1,1 @@
-# Multi-turn VLM Sokoban example package
+# Multi-turn VLM Geo3K example package

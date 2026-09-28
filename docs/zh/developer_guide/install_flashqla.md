@@ -19,10 +19,11 @@ FlashQLA 是 Qwen GDN kernel 的可选运行后端。安装 FlashQLA 后，仍�
 
 ## Docker 镜像
 
-标准 CUDA Docker 镜像会默认安装 FlashQLA：
+直接构建 Dockerfile 时默认不安装 FlashQLA；发布 target 会显式开启。手动构建时请传入相同参数：
 
 ```bash
 docker build \
   -f docker/Dockerfile \
+  --build-arg INSTALL_FLASHQLA=1 \
   -t vime:flashqla .
 ```

@@ -4,9 +4,17 @@ These examples provide concrete examples to leverage vime in your own RL workflo
 
 ## Directory Structure
 
-- **[coding_agent_rl](./coding_agent_rl)**: End-to-end SWE coding-agent RL: a real coding agent (claude-code) edits code in a per-sample sandbox, and the resulting `git diff` is graded against the dataset's test harness.
+- **[coding_agent_rl](./coding_agent_rl)**: End-to-end SWE coding-agent RL — a real coding agent (claude-code / codex) edits code in a per-sample sandbox, and the resulting `git diff` is graded against the dataset's test harness.
+- **[eval_multi_task](./eval_multi_task)**: Example for supporting evaluation multiple tasks with different configs.
 - **[fully_async](./fully_async)**: Demonstrates fully asynchronous rollout generation for higher efficiency.
 - **[geo3k_vlm](./geo3k_vlm)**: Training VLMs on a single-turn reasoning task using GRPO on the GEO3K dataset.
 - **[geo3k_vlm_multi_turn](./geo3k_vlm_multi_turn)**: VLM multi-turn training on Geo3k dataset.
+- **[low_precision](../scripts/low_precision/)**: Launch recipes for FP8/INT4 training and inference.
+- **[mem_agent](./mem_agent)**: MemAgent long-context RL — chunk-wise memory update, HotpotQA GRPO training, and RULER-HQA evaluation.
 - **[multi_agent](./multi_agent)**: Example of running multi-agent RL with `vime`.
+- **[on_policy_distillation](./on_policy_distillation)**: On-policy distillation (OPD) with an external vLLM teacher or a Megatron-loaded teacher.
+- **[dspark](./dspark)**: DSpark speculative decoding draft model training — colocate and non-colocate modes for accelerating RL rollouts.
+- **[delta_weight_sync](./delta_weight_sync)**: Non-colocated weight sync that ships only the changed bytes over a shared filesystem (training/inference disaggregation), reloading via the vanilla `update_weights_from_disk` path.
+- **[reproducibility](../docs/en/advanced/reproducibility.md)**: Guide to bitwise experiment reproduction using deterministic modes.
+- **[tau-bench](./tau-bench)**: Multi-turn tool-use agent training in tau-bench environments.
 - **[train_infer_mismatch_helper](./train_infer_mismatch_helper)**: Algorithmic methods for rollout correction (e.g., TIS, MIS).

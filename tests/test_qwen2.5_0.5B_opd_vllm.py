@@ -171,7 +171,6 @@ def execute():
             "--actor-num-nodes 1 "
             f"--actor-num-gpus-per-node {NUM_TRAIN_GPUS} "
             "--colocate "
-            "--megatron-to-hf-mode bridge "
         )
 
         train_args = (

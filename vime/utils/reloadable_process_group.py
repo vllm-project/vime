@@ -1,16 +1,130 @@
 import logging
 import os
 from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import timedelta
+from typing import Any
 
 import torch
 import torch.distributed as dist
+from torch.distributed.distributed_c10d import PrefixStore, _get_default_group, _get_default_store
 
-from vime.utils.common import is_npu
+from vime.utils import accelerator
+from vime.utils.distributed_utils import get_gloo_group, init_gloo_group, set_gloo_group
 from vime.utils.memory_utils import available_memory, clear_memory, print_memory
 
 logger = logging.getLogger(__name__)
 
 old_new_group_dict = {}
+default_process_group_states = {}
+
+
+@dataclass
+class _DefaultProcessGroupState:
+    backend: str
+    timeout: timedelta
+    store: Any
+    rank: int
+    world_size: int
+    generation: int = 0
+    accelerator_world_destroyed: bool = False
+
+
+def register_default_process_group(timeout: timedelta) -> None:
+    """Register the accelerator WORLD group so it can be destroyed and rebuilt.
+
+    Keeping a reference to the rendezvous store is intentional.  It keeps the
+    rank-0 TCPStore alive after ``destroy_process_group()`` and lets every
+    generation use a fresh PrefixStore namespace, avoiding stale rendezvous
+    keys when WORLD is recreated repeatedly.
+    """
+    if not dist.is_initialized():
+        raise RuntimeError("Cannot register WORLD before torch.distributed is initialized")
+
+    pid = os.getpid()
+    backend = str(dist.get_backend())
+    state = _DefaultProcessGroupState(
+        backend=backend,
+        timeout=timeout,
+        store=_get_default_store(),
+        rank=dist.get_rank(),
+        world_size=dist.get_world_size(),
+    )
+    default_process_group_states[pid] = state
+    logger.info(
+        "Registered default WORLD process group for reload: backend=%s, rank=%s, world_size=%s",
+        backend,
+        state.rank,
+        state.world_size,
+    )
+
+
+def _uses_accelerator_backend(backend: str) -> bool:
+    return accelerator.is_accelerator_backend(backend)
+
+
+def _new_default_process_group(state: _DefaultProcessGroupState, backend: str) -> None:
+    state.generation += 1
+    store = PrefixStore(f"vime-reloadable-world-{state.generation}-{backend}", state.store)
+    dist.init_process_group(
+        backend=backend,
+        store=store,
+        rank=state.rank,
+        world_size=state.world_size,
+        timeout=state.timeout,
+    )
+
+
+def _destroy_default_accelerator_process_group() -> None:
+    state = default_process_group_states.get(os.getpid())
+    if state is None or state.accelerator_world_destroyed or not _uses_accelerator_backend(state.backend):
+        return
+
+    # Pure PP=4 exposed a teardown ordering deadlock here.  Pipeline ranks own
+    # different overlapping subsets of singleton, embedding, and PP groups, so
+    # destroying the local wrapper list one group at a time let rank 0 enter
+    # subgroup reload while another rank was still shutting down.  The first
+    # rank then blocked forever in new_group(), waiting for the others.
+    #
+    # Destroying WORLD once makes PyTorch shut down every registered NCCL and
+    # Gloo backend in its global process-group order.  This still releases all
+    # communicator memory; invalidating the wrappers below only drops stale
+    # Python handles after their native backends have already been shut down.
+    dist.barrier(group=get_gloo_group())
+    dist.destroy_process_group()
+    ReloadableProcessGroup.invalidate_process_groups()
+    set_gloo_group(None)
+
+    _new_default_process_group(state, backend="gloo")
+    set_gloo_group(_get_default_group())
+    state.accelerator_world_destroyed = True
+    logger.info(
+        "Destroyed default %s WORLD process group and initialized a temporary Gloo WORLD (generation %s)",
+        state.backend,
+        state.generation,
+    )
+
+
+def _reload_default_process_group() -> None:
+    state = default_process_group_states.get(os.getpid())
+    if state is None or not state.accelerator_world_destroyed:
+        return
+
+    # WORLD uses Gloo while the accelerator WORLD is destroyed, so this barrier
+    # does not recreate an accelerator communicator before all ranks are ready.
+    dist.barrier()
+    dist.destroy_process_group()
+    set_gloo_group(None)
+
+    _new_default_process_group(state, backend=state.backend)
+    init_gloo_group()
+    state.accelerator_world_destroyed = False
+    logger.info(
+        "Reloaded default WORLD process group with backend %s (generation %s)",
+        state.backend,
+        state.generation,
+    )
+
 
 _COMM_MEMORY_CHECK_SKIP_OPS = {
     "all_gather_into_tensor",
@@ -41,9 +155,23 @@ def monkey_patch_torch_dist():
     dist.old_new_group = old_new_group
 
     def new_group(*args, **kwargs):
+        explicit_backend = args[2] if len(args) >= 3 else kwargs.get("backend")
+        backend = str(explicit_backend) if explicit_backend is not None else str(dist.get_backend())
+        normalized_backend = accelerator.process_group_backend(backend) if backend == "nccl" else backend
+        if normalized_backend != backend:
+            if len(args) >= 3:
+                args = (*args[:2], normalized_backend, *args[3:])
+            else:
+                kwargs = {**kwargs, "backend": normalized_backend}
+            backend = normalized_backend
+
         group = old_new_group(*args, **kwargs)
-        # skip none nccl group.
-        if len(args) >= 3 and args[2] == "gloo" or "backend" in kwargs and kwargs["backend"] == "gloo":
+
+        # Before WORLD is registered, preserve the historical behavior of
+        # leaving CPU groups and singleton groups untouched.  Afterwards every
+        # cached subgroup must be reloadable because destroying WORLD
+        # invalidates all of them, including Gloo and singleton groups.
+        if backend == "gloo" and pid not in default_process_group_states:
             return group
 
         # Get ranks from arguments
@@ -55,10 +183,22 @@ def monkey_patch_torch_dist():
             # If no ranks specified, use all ranks in world
             ranks = list(range(dist.get_world_size()))
 
-        if len(ranks) == 1:
+        # Historically singleton groups were left unwrapped because they do
+        # not own a useful communicator.  Once WORLD itself is destroyed,
+        # however, PyTorch invalidates *every* registered subgroup, including
+        # singleton groups cached by Megatron.  Wrap them for actors that have
+        # registered a reloadable WORLD so those cached references remain
+        # usable after wake-up.  Preserve the old behavior for other callers.
+        if len(ranks) == 1 and pid not in default_process_group_states:
             return group
 
-        group = ReloadableProcessGroup(group, ranks)
+        group = ReloadableProcessGroup(
+            group,
+            ranks,
+            creation_args=args,
+            creation_kwargs=kwargs,
+            backend=backend,
+        )
         return group
 
     dist.new_group = new_group
@@ -104,10 +244,14 @@ def monkey_patch_torch_dist():
     dist.reduce_scatter = get_new_comm_function(dist.reduce_scatter)
     dist.reduce_scatter_tensor = get_new_comm_function(dist.reduce_scatter_tensor, "reduce_scatter_tensor")
     dist.scatter = get_new_comm_function(dist.scatter)
+    dist.scatter_object_list = get_new_comm_function(dist.scatter_object_list)
     dist.gather = get_new_comm_function(dist.gather)
+    dist.gather_object = get_new_comm_function(dist.gather_object)
     dist.barrier = get_new_comm_function(dist.barrier, "barrier")
     dist.send = get_new_comm_function(dist.send)
+    dist.send_object_list = get_new_comm_function(dist.send_object_list)
     dist.recv = get_new_comm_function(dist.recv)
+    dist.recv_object_list = get_new_comm_function(dist.recv_object_list)
     dist._coalescing_manager = get_new_comm_function(dist._coalescing_manager)
 
     # p2p
@@ -141,7 +285,7 @@ def monkey_patch_torch_dist():
 class ReloadableProcessGroup(torch.distributed.ProcessGroup):
     GROUPS = {}
 
-    def __init__(self, group, ranks):
+    def __init__(self, group, ranks, *, creation_args=(), creation_kwargs=None, backend="nccl"):
         super().__init__(
             rank=dist.get_rank(group),
             size=dist.get_world_size(group),
@@ -149,6 +293,9 @@ class ReloadableProcessGroup(torch.distributed.ProcessGroup):
         self.group = group
         self.group_info = {
             "ranks": ranks,
+            "args": tuple(creation_args),
+            "kwargs": dict(creation_kwargs or {}),
+            "backend": backend,
         }
         pid = os.getpid()
         if pid not in ReloadableProcessGroup.GROUPS:
@@ -176,18 +323,34 @@ class ReloadableProcessGroup(torch.distributed.ProcessGroup):
             reloadable_group.group = None
 
     @staticmethod
+    def invalidate_process_groups():
+        """Drop handles after destroying WORLD, which already shut down every subgroup."""
+        pid = os.getpid()
+        for reloadable_group in ReloadableProcessGroup.GROUPS.get(pid, []):
+            reloadable_group.group = None
+
+    @staticmethod
     def reload_process_groups():
         pid = os.getpid()
         reloadable_groups = ReloadableProcessGroup.GROUPS.get(pid, [])
-        logger.info(f"Reloading {len(reloadable_groups)} process groups in pid {pid}")
+        backend_counts = {}
+        for reloadable_group in reloadable_groups:
+            backend = reloadable_group.group_info["backend"]
+            backend_counts[backend] = backend_counts.get(backend, 0) + 1
+        logger.info(
+            "Reloading %s process groups in pid %s: %s",
+            len(reloadable_groups),
+            pid,
+            backend_counts,
+        )
         old_new_group = old_new_group_dict.get(pid)
-        backend = "nccl"
-        if is_npu():
-            backend = "hccl"
         for reloadable_group in reloadable_groups:
             if reloadable_group.group is not None:
                 continue
-            group = old_new_group(ranks=reloadable_group.group_info["ranks"], backend=backend)
+            group = old_new_group(
+                *reloadable_group.group_info["args"],
+                **reloadable_group.group_info["kwargs"],
+            )
             reloadable_group.group = group
 
     def rank(self) -> int:
@@ -224,6 +387,9 @@ class ReloadableProcessGroup(torch.distributed.ProcessGroup):
     def barrier(self, *a, **kw):
         return self._fwd("barrier", *a, **kw)
 
+    def monitored_barrier(self, *a, **kw):
+        return self._fwd("monitored_barrier", *a, **kw)
+
     def broadcast(self, *a, **kw):
         return self._fwd("broadcast", *a, **kw)
 
@@ -248,6 +414,12 @@ class ReloadableProcessGroup(torch.distributed.ProcessGroup):
     def allgather_into_tensor_coalesced(self, *a, **kw):
         return self._fwd("allgather_into_tensor_coalesced", *a, **kw)
 
+    def all_gather_single(self, *a, **kw):
+        return self._fwd("all_gather_single", *a, **kw)
+
+    def all_gather_single_coalesced(self, *a, **kw):
+        return self._fwd("all_gather_single_coalesced", *a, **kw)
+
     def gather(self, *a, **kw):
         return self._fwd("gather", *a, **kw)
 
@@ -256,6 +428,12 @@ class ReloadableProcessGroup(torch.distributed.ProcessGroup):
 
     def reduce_scatter(self, *a, **kw):
         return self._fwd("reduce_scatter", *a, **kw)
+
+    def reduce_scatter_single(self, *a, **kw):
+        return self._fwd("reduce_scatter_single", *a, **kw)
+
+    def reduce_scatter_single_coalesced(self, *a, **kw):
+        return self._fwd("reduce_scatter_single_coalesced", *a, **kw)
 
     def _reduce_scatter_base(self, *a, **kw):
         return self._fwd("_reduce_scatter_base", *a, **kw)
@@ -303,12 +481,17 @@ class ReloadableProcessGroup(torch.distributed.ProcessGroup):
 
 
 def destroy_process_groups():
-    """Destroy all reloadable process groups."""
-    ReloadableProcessGroup.destroy_process_groups()
+    """Destroy registered subgroups and replace accelerator WORLD with a temporary Gloo WORLD."""
+    state = default_process_group_states.get(os.getpid())
+    if state is not None and not state.accelerator_world_destroyed and _uses_accelerator_backend(state.backend):
+        _destroy_default_accelerator_process_group()
+    else:
+        ReloadableProcessGroup.destroy_process_groups()
 
 
 def reload_process_groups():
-    """Reload all reloadable process groups."""
+    """Restore accelerator WORLD and recreate all registered subgroups."""
+    _reload_default_process_group()
     ReloadableProcessGroup.reload_process_groups()
 
 

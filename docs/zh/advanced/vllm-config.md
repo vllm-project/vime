@@ -31,11 +31,11 @@ vllm:
   - name: <model_name>              # 必填。模型的唯一标识符。
     model_path: <path>              # 可选。HF checkpoint 路径。默认使用 --hf-checkpoint。
     update_weights: <bool>          # 可选。是否从训练同步权重。自动推断。
-    num_gpus_per_engine: <int>      # 可选。该模型所有组的默认 TP 大小。
+    num_gpus_per_engine: <int>      # 可选。该模型所有组中单引擎的默认 worker GPU 总数。
     server_groups:                  # 必填。服务器组配置列表。
       - worker_type: <type>         # 必填。可选：regular、prefill、decode、placeholder。
         num_gpus: <int>             # 必填。分配给该组的 GPU 总数。
-        num_gpus_per_engine: <int>  # 可选。该组的 TP 大小覆盖。
+        num_gpus_per_engine: <int>  # 可选。该组中单引擎的 worker GPU 总数覆盖。
         overrides: <dict>           # 可选。vLLM EngineArgs 字段覆盖。
 ```
 
@@ -48,7 +48,7 @@ vllm:
 | `name` | `str` | **必填** | 模型唯一名称（如 `"actor"`、`"ref"`、`"reward"`）。用作 `args.vllm_model_routers` 的 key。 |
 | `model_path` | `str` | `args.hf_checkpoint` | HuggingFace checkpoint 路径。同一模型内的所有服务器组必须使用相同的 model path。 |
 | `update_weights` | `bool` | 自动推断 | 该模型是否接收训练权重更新。未设置时自动推断：如果 `model_path` 与 `--hf-checkpoint` 匹配则为 `true`，否则为 `false`。 |
-| `num_gpus_per_engine` | `int` | `args.rollout_num_gpus_per_engine` | 该模型服务器组的默认 TP 大小。各组可单独覆盖。 |
+| `num_gpus_per_engine` | `int` | `args.rollout_num_gpus_per_engine` | 该模型中单引擎的默认 worker GPU 总数。各组可单独覆盖。 |
 | `server_groups` | `list` | **必填** | `ServerGroupConfig` 条目列表，定义引擎拓扑。（`engine_groups` 作为向后兼容别名仍可使用。） |
 
 #### 服务器组级字段
@@ -57,8 +57,8 @@ vllm:
 |------|------|--------|------|
 | `worker_type` | `str` | **必填** | 引擎类型：`regular`（标准）、`prefill`（PD prefill worker）、`decode`（PD decode worker）或 `placeholder`（占位，不启动引擎）。 |
 | `num_gpus` | `int` | **必填** | 该组的 GPU 总数。必须 > 0。 |
-| `num_gpus_per_engine` | `int` | 模型的 `num_gpus_per_engine` | TP 大小覆盖。每个引擎实例的 GPU 数量。 |
-| `overrides` | `dict` | `{}` | vLLM `ServerArgs` 字段覆盖。优先级最高，覆盖 `--vllm-*` CLI 参数和模型级默认值。 |
+| `num_gpus_per_engine` | `int` | 模型的 `num_gpus_per_engine` | 单个引擎实例的 worker GPU 总数。只有 DP 和 PP 都为 1 时才等于 TP。 |
+| `overrides` | `dict` | `{}` | vLLM `EngineArgs` 字段覆盖。优先级最高，覆盖 `--vllm-*` CLI 参数和模型级默认值。 |
 
 ### Worker 类型
 
@@ -107,10 +107,10 @@ vllm:
     server_groups:
       - worker_type: prefill
         num_gpus: 4
-        num_gpus_per_engine: 2    # 2 个 prefill 引擎，TP=2
+        num_gpus_per_engine: 2    # 默认 DP/PP 下为 2 个 prefill 引擎，TP=2
       - worker_type: decode
         num_gpus: 12
-        num_gpus_per_engine: 4    # 3 个 decode 引擎，TP=4
+        num_gpus_per_engine: 4    # 默认 DP/PP 下为 3 个 decode 引擎，TP=4
 ```
 
 ```bash
@@ -125,7 +125,7 @@ python train.py \
 - 为 decode 使用更大的 TP（降低延迟）
 - 独立扩展 prefill 和 decode 的容量
 
-> **注意：** PD 分离使用 vllm-router (vllm-router)，并设置 `pd_disaggregation=True`。
+> **注意：** PD 分离使用 vllm-router，并设置 `pd_disaggregation=True`。
 
 ### 3. 多模型服务
 
@@ -174,18 +174,25 @@ from vime.rollout.vllm_rollout import get_model_url
 from vime.utils.http_utils import post
 
 async def my_generate(args, sample, sampling_params):
-    # 路由到 actor 模型（默认）
-    actor_url = get_model_url(args, "actor", "/generate")
-    output = await post(actor_url, {"text": sample.prompt, "sampling_params": sampling_params})
-    
+    # 路由到 actor 模型（默认端点为 /inference/v1/generate）
+    actor_url = get_model_url(args, "actor")
+    output = await post(actor_url, {
+        "token_ids": sample.tokens,
+        "sampling_params": {"max_tokens": 1024, "temperature": 1.0, "top_p": 1.0, "logprobs": 1},
+    })
+    # output["choices"][0] 含 token_ids、logprobs.content[i].logprob 及 finish_reason
+
     # 路由到 reference 模型
-    ref_url = get_model_url(args, "ref", "/generate")
-    ref_output = await post(ref_url, {"text": sample.prompt, "sampling_params": sampling_params})
-    
+    ref_url = get_model_url(args, "ref")
+    ref_output = await post(ref_url, {
+        "token_ids": sample.tokens,
+        "sampling_params": {"max_tokens": 1024, "temperature": 1.0, "top_p": 1.0, "logprobs": 1},
+    })
+
     # 路由到 reward 模型（如 OpenAI 兼容 API）
     reward_url = get_model_url(args, "reward", "/v1/chat/completions")
     reward_output = await post(reward_url, {...})
-    
+
     ...
 ```
 
@@ -232,9 +239,9 @@ vllm:
         num_gpus: 2                   # 预留 2 个 GPU（不创建引擎）
 ```
 
-### 6. 按组覆盖 ServerArgs
+### 6. 按组覆盖 EngineArgs
 
-使用 `overrides` 将 vLLM `ServerArgs` 字段应用到特定服务器组，而不影响其他组：
+使用 `overrides` 将 vLLM `EngineArgs` 字段应用到特定服务器组，而不影响其他组：
 
 ```yaml
 vllm:
@@ -244,10 +251,12 @@ vllm:
         num_gpus: 8
         num_gpus_per_engine: 4
         overrides:
-          mem_fraction_static: 0.85
-          context_length: 32768
-          chunked_prefill_size: 4096
-          enable_torch_compile: true
+          gpu_memory_utilization: 0.85
+          max_model_len: 32768
+          enable_chunked_prefill: true
+          max_num_batched_tokens: 4096
+          compilation_config:
+            mode: 3
 ```
 
 覆盖具有**最高优先级**，会覆盖基础的 `--vllm-*` CLI 参数和模型级默认值。这对以下场景特别有用：
@@ -257,7 +266,7 @@ vllm:
 
 ### 7. 独立 vLLM 启动器
 
-虽然 `--vllm-config` 是为 vime 的训练流水线设计的，但它也可以作为纯推理场景的强大启动器，通过 `--rollout-external` 模式或配置 vime 仅关注推理服务。
+虽然 `--vllm-config` 是为 vime 的训练流水线设计的，但它也可以作为纯推理场景的强大启动器，通过外部 engine 地址或配置 vime 仅关注推理服务。
 
 **使用预启动的外部引擎：**
 
@@ -265,17 +274,23 @@ vllm:
 
 ```bash
 # 步骤 1：外部启动 vLLM 引擎
-vllm serve /path/to/model --port 10090 ...
-vllm serve /path/to/model --port 10091 ...
+VLLM_SERVER_DEV_MODE=1 vllm serve /path/to/model --port 10090 ...
+VLLM_SERVER_DEV_MODE=1 vllm serve /path/to/model --port 10091 ...
 
 # 步骤 2：将 vime 连接到外部引擎
 python train.py \
-  --rollout-external \
   --rollout-external-engine-addrs host1:10090 host2:10091 \
   ...
 ```
 
-> **注意：** `--vllm-config` 和 `--rollout-external` 互斥。当你希望 vime 管理完整的引擎生命周期时，使用 `--vllm-config`；当引擎已预部署时，使用 `--rollout-external`。
+vime 会请求每个外部引擎的 `/server_info`，自动推断
+`rollout_num_gpus`、单个 engine 的 GPU 数、vLLM 并行参数，以及
+prefill/decode worker 类型。如果没有提供 `--vllm-router-ip/--vllm-router-port`，
+vime 会自己启动 router，并把这些外部引擎注册进去。
+
+> **注意：** `--vllm-config` 和 `--rollout-external-engine-addrs` 互斥。当你希望 vime 管理完整的引擎生命周期时，使用 `--vllm-config`；当引擎已预部署时，使用 `--rollout-external-engine-addrs`。
+
+关于 external engine 的选择、update from disk 和 delta disk transport，见 [External Rollout Engines 配置路线图](external-rollout-engines.md)。
 
 ---
 
@@ -332,7 +347,7 @@ vime 自动为每个 sample 分配一个唯一的 `session_id`（存储在 `samp
 | 选项 | 冲突原因 |
 |------|----------|
 | `--prefill-num-servers` | PD 分离通过 YAML 中的 `server_groups` 配置 |
-| `--rollout-external` | 外部引擎有自己的拓扑；config 在内部管理生命周期 |
+| `--rollout-external-engine-addrs` | 外部引擎有自己的拓扑；config 在内部管理生命周期 |
 
 ---
 
@@ -351,12 +366,13 @@ vllm:
         num_gpus: 4
         num_gpus_per_engine: 2
         overrides:
-          chunked_prefill_size: 8192
+          enable_chunked_prefill: true
+          max_num_batched_tokens: 8192
       - worker_type: decode
         num_gpus: 12
         num_gpus_per_engine: 4
         overrides:
-          mem_fraction_static: 0.88
+          gpu_memory_utilization: 0.88
 
   - name: ref
     model_path: /data/models/Qwen3-32B
@@ -392,33 +408,42 @@ python train.py \
 **自定义 rollout 函数 (`my_agent/rollout.py`)：**
 
 ```python
+from transformers import AutoTokenizer
+
 from vime.rollout.vllm_rollout import get_model_url
 from vime.utils.http_utils import post
 
 async def generate_with_models(args, sample, sampling_params):
     """使用 actor 生成，用 reward 模型打分，与 reference 比较。"""
     
-    # 从 actor 生成
-    actor_url = get_model_url(args, "actor", "/generate")
+    # 从 actor 生成（默认端点为 /inference/v1/generate）
+    actor_url = get_model_url(args, "actor")
     actor_output = await post(actor_url, {
-        "text": sample.prompt,
-        "sampling_params": sampling_params,
-        "return_logprob": True,
+        "token_ids": sample.tokens,
+        "sampling_params": {"max_tokens": 1024, "temperature": 1.0, "top_p": 1.0, "logprobs": 1},
     })
-    
-    # 获取 reference logprobs 用于 KL penalty
-    ref_url = get_model_url(args, "ref", "/generate")
+    response_ids = actor_output["choices"][0]["token_ids"]
+
+    # 获取 reference logprobs 用于 KL penalty。max_tokens=1 + prompt_logprobs 对提交的
+    # token_ids 打分；从顶层 "prompt_logprobs" 字段读取。
+    ref_url = get_model_url(args, "ref")
     ref_output = await post(ref_url, {
-        "text": sample.prompt + actor_output["text"],
-        "sampling_params": {"max_new_tokens": 0, "temperature": 0},
-        "return_logprob": True,
+        "token_ids": sample.tokens + response_ids,
+        "sampling_params": {"max_tokens": 1, "temperature": 0.0, "prompt_logprobs": 1},
     })
-    
-    # 用 reward 模型打分
+
+    # 用 reward 模型为 actor response 打分（OpenAI 兼容）
+    tokenizer = AutoTokenizer.from_pretrained(args.hf_checkpoint, trust_remote_code=True)
+    response_text = tokenizer.decode(response_ids, skip_special_tokens=True)
+    prompt_messages = (
+        sample.prompt
+        if isinstance(sample.prompt, list)
+        else [{"role": "user", "content": sample.prompt}]
+    )
     reward_url = get_model_url(args, "reward", "/v1/chat/completions")
     reward_output = await post(reward_url, {
         "model": "reward",
-        "messages": [{"role": "user", "content": sample.prompt + actor_output["text"]}],
+        "messages": [*prompt_messages, {"role": "assistant", "content": response_text}],
     })
     
     # ... 处理输出并返回 Sample
@@ -446,7 +471,7 @@ async def generate_with_models(args, sample, sampling_params):
 
 ### Q: 可以不训练，只用 `--vllm-config` 做推理吗？
 
-虽然 `--vllm-config` 是为 vime 的训练循环设计的，但你可以通过配置仅 rollout 的运行来实现纯推理场景。对于完全独立的 vLLM 推理服务，建议直接使用 vLLM 原生的 `launch_server`，或使用 `--rollout-external` 模式连接预部署的引擎。
+虽然 `--vllm-config` 是为 vime 的训练循环设计的，但你可以通过配置仅 rollout 的运行来实现纯推理场景。对于完全独立的 vLLM 推理服务，建议直接使用公开的 `vllm serve` 命令，或使用 `--rollout-external-engine-addrs` 连接预部署的引擎。
 
 ### Q: `--vllm-config` 和 `--prefill-num-servers` 是什么关系？
 
