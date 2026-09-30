@@ -269,6 +269,11 @@ def test_native_update_runs_main_and_draft_lifecycles(update_module, monkeypatch
     assert len(engine.start_draft_weight_update.calls) == 1
     assert len(engine.finish_weight_update.calls) == 2
     assert len(engine.continue_generation.calls) == 1
+    metrics = updater.pop_metrics()
+    assert metrics["weight_update_total_seconds"] >= metrics["weight_update_transfer_phase_seconds"]
+    assert metrics["weight_update_prepare_seconds"] >= 0
+    assert metrics["weight_update_finish_seconds"] >= 0
+    assert updater.pop_metrics() == {}
 
 
 @pytest.mark.unit
@@ -306,6 +311,28 @@ def test_failed_native_update_does_not_resume_generation(update_module, monkeypa
         updater.update_weights()
 
     assert engine.continue_generation.calls == []
+
+
+@pytest.mark.unit
+def test_manual_transfer_materializes_lazy_chunk_before_send(update_module, monkeypatch):
+    updater = _updater(update_module)
+    tensor = torch.zeros(4, dtype=torch.float16)
+    updater._perf_export_seconds = 0.0
+    updater._perf_transferred_bytes = 0
+    updater._perf_chunk_count = 0
+    updater._hf_weight_iterator.get_hf_weight_chunks.return_value = iter(
+        [((name, value) for name, value in {"weight": tensor}.items())]
+    )
+    sent = []
+    monkeypatch.setattr(updater, "_send_hf_params", lambda chunk: (sent.append(chunk) or [], None))
+    monkeypatch.setattr(update_module.accelerator, "ipc_collect", lambda: None)
+    monkeypatch.setattr(update_module.accelerator, "empty_cache", lambda: None)
+
+    updater._send_weight_chunks({"weight": tensor})
+
+    assert sent == [[("weight", tensor)]]
+    assert updater._perf_transferred_bytes == 8
+    assert updater._perf_chunk_count == 1
 
 
 @pytest.mark.unit

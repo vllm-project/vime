@@ -283,6 +283,11 @@ def test_update_uses_native_main_and_draft_lifecycles(update_module, monkeypatch
     assert len(engine.start_draft_weight_update.calls) == 1
     assert len(engine.finish_weight_update.calls) == 2
     assert len(engine.continue_generation.calls) == 1
+    metrics = updater.pop_metrics()
+    assert metrics["weight_update_total_seconds"] >= metrics["weight_update_transfer_phase_seconds"]
+    assert metrics["weight_update_prepare_seconds"] >= 0
+    assert metrics["weight_update_finish_seconds"] >= 0
+    assert updater.pop_metrics() == {}
 
 
 @pytest.mark.unit
@@ -347,6 +352,28 @@ def test_vllm_weight_iterator_keeps_checkpoint_scale_layout(weight_modules):
     _, direct_module = weight_modules
 
     assert inspect.signature(direct_module.HfWeightIteratorDirect).parameters["transform_ue8m0"].default is False
+
+
+@pytest.mark.unit
+def test_weight_source_counts_lazy_chunks_once_per_update(weight_modules):
+    common, _ = weight_modules
+    tensor = torch.zeros(4, dtype=torch.float16)
+
+    class LazyIterator:
+        def get_hf_weight_chunks(self, weights):
+            yield ((name, value) for name, value in weights.items())
+
+    source = common.HfWeightSource(LazyIterator(), lambda: {"weight": tensor})
+    assert list(source) == [("weight", tensor)]
+    metrics = source.stop_metrics()
+    assert metrics["weight_update_bytes"] == 8
+    assert metrics["weight_update_chunks"] == 1
+    assert list(source) == [("weight", tensor)]
+    assert source.stop_metrics() == metrics
+
+    source.reset_metrics()
+    assert list(source) == [("weight", tensor)]
+    assert source.stop_metrics()["weight_update_chunks"] == 1
 
 
 def _param_info(name: str, param: torch.Tensor, src_rank: int = 0) -> ParamInfo:

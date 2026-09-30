@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import time
 from argparse import Namespace
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
@@ -331,11 +333,17 @@ class UpdateWeightFromTensor:
             desc="Update expert weights",
         ):
             for transfer_batch in transfer_group:
+                export_started = time.perf_counter()
                 hf_named_tensors = self._prepare_expert_weight_batch(
                     transfer_batch,
                     megatron_local_weights,
                     staging_buffers,
                 )
+                self._perf_export_seconds += time.perf_counter() - export_started
+                self._perf_transferred_bytes += sum(
+                    tensor.numel() * tensor.element_size() for _, tensor in hf_named_tensors
+                )
+                self._perf_chunk_count += 1
                 refs, long_lived_tensors = self._send_hf_params(hf_named_tensors)
                 ray.get(refs)
                 dist.barrier(group=get_gloo_group())
@@ -351,7 +359,20 @@ class UpdateWeightFromTensor:
         """
         version++, flush caches, process buckets. Progress on rank 0.
         """
+        self.update_weight_metrics = {}
+        self._perf_export_seconds = 0.0
+        self._perf_transferred_bytes = 0
+        self._perf_chunk_count = 0
+        self._perf_prepare_seconds = 0.0
+        self._perf_finish_seconds = 0.0
+        if hasattr(self._source, "reset_metrics"):
+            self._source.reset_metrics()
+        for trainer in self._native_trainers:
+            trainer.client.prepare_seconds = 0.0
+            trainer.client.finish_seconds = 0.0
+        total_started = time.perf_counter()
         self.weight_version += 1
+        pause_started = time.perf_counter()
         if self.rank == 0:
             ray.get([engine.pause_generation.remote() for engine in self._all_rollout_engines])
             ray.get([engine.flush_cache.remote() for engine in self._all_rollout_engines])
@@ -362,7 +383,9 @@ class UpdateWeightFromTensor:
                     rollout_engines=self._all_rollout_engines,
                 )
         dist.barrier(group=get_gloo_group())
+        pause_flush_seconds = time.perf_counter() - pause_started
 
+        transfer_started = time.perf_counter()
         if self._native_trainers:
             for trainer in self._native_trainers:
                 trainer.client.draft = False
@@ -383,8 +406,10 @@ class UpdateWeightFromTensor:
 
             if self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp":
                 self._update_rollout_weights(megatron_local_weights, draft=True)
+        transfer_phase_seconds = time.perf_counter() - transfer_started
 
         # int4/fp4 post_process
+        resume_started = time.perf_counter()
         if self.rank == 0:
             if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
                 post_process_weights(
@@ -394,30 +419,75 @@ class UpdateWeightFromTensor:
                 )
             ray.get([engine.continue_generation.remote() for engine in self._all_rollout_engines])
         dist.barrier(group=get_gloo_group())
+        resume_seconds = time.perf_counter() - resume_started
+
+        source_metrics = self._source.stop_metrics() if hasattr(self._source, "stop_metrics") else {}
+        export_seconds = source_metrics.get("weight_update_export_seconds", 0.0) + self._perf_export_seconds
+        transferred_bytes = source_metrics.get("weight_update_bytes", 0.0) + self._perf_transferred_bytes
+        prepare_seconds = self._perf_prepare_seconds + sum(
+            trainer.client.prepare_seconds for trainer in self._native_trainers
+        )
+        finish_seconds = self._perf_finish_seconds + sum(
+            trainer.client.finish_seconds for trainer in self._native_trainers
+        )
+        self.update_weight_metrics = {
+            "weight_update_total_seconds": time.perf_counter() - total_started,
+            "weight_update_pause_flush_seconds": pause_flush_seconds,
+            "weight_update_prepare_seconds": prepare_seconds,
+            "weight_update_transfer_phase_seconds": transfer_phase_seconds,
+            "weight_update_export_seconds": export_seconds,
+            "weight_update_transfer_load_seconds": max(
+                0.0, transfer_phase_seconds - export_seconds - prepare_seconds - finish_seconds
+            ),
+            "weight_update_finish_seconds": finish_seconds,
+            "weight_update_resume_seconds": resume_seconds,
+            "weight_update_bytes": transferred_bytes,
+            "weight_update_chunks": source_metrics.get("weight_update_chunks", 0.0) + self._perf_chunk_count,
+            "weight_update_effective_gib_per_second": (
+                transferred_bytes / (1024**3) / transfer_phase_seconds if transfer_phase_seconds > 0 else 0.0
+            ),
+        }
 
     def _update_rollout_weights(self, megatron_local_weights, *, draft: bool) -> None:
+        prepare_started = time.perf_counter()
         if self._ipc_engine is not None and self.rank == self._ipc_gather_src:
             method = self._ipc_engine.start_draft_weight_update if draft else self._ipc_engine.start_weight_update
             ray.get(method.remote())
         dist.barrier(group=get_gloo_group())
+        self._perf_prepare_seconds += time.perf_counter() - prepare_started
 
         self._send_weight_chunks(megatron_local_weights)
         dist.barrier(group=get_gloo_group())
         accelerator.ipc_collect()
         accelerator.empty_cache()
 
+        finish_started = time.perf_counter()
         if self._ipc_engine is not None and self.rank == self._ipc_gather_src:
             ray.get(self._ipc_engine.finish_weight_update.remote(weight_version=str(self.weight_version)))
         dist.barrier(group=get_gloo_group())
+        self._perf_finish_seconds += time.perf_counter() - finish_started
 
     def _send_weight_chunks(self, megatron_local_weights) -> None:
         param_info_buckets = (
             self._non_expert_param_info_buckets if self._expert_transfer_plan else self._full_param_info_buckets
         )
-        for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(
-            megatron_local_weights,
-            param_info_buckets=param_info_buckets,
-        ):
+        chunks = iter(
+            self._hf_weight_iterator.get_hf_weight_chunks(
+                megatron_local_weights,
+                param_info_buckets=param_info_buckets,
+            )
+        )
+        while True:
+            export_started = time.perf_counter()
+            try:
+                hf_named_tensors = list(next(chunks))
+            except StopIteration:
+                break
+            self._perf_export_seconds += time.perf_counter() - export_started
+            self._perf_transferred_bytes += sum(
+                tensor.numel() * tensor.element_size() for _, tensor in hf_named_tensors
+            )
+            self._perf_chunk_count += 1
             refs, long_lived_tensors = self._send_hf_params(hf_named_tensors)
             ray.get(refs)
             del refs, long_lived_tensors, hf_named_tensors

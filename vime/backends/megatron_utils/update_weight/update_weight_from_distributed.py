@@ -1,3 +1,4 @@
+import time
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
@@ -85,8 +86,16 @@ class UpdateWeightFromDistributed:
     @torch.no_grad()
     def update_weights(self) -> None:
         assert self._trainer is not None
+        self.update_weight_metrics = {}
+        if hasattr(self._source, "reset_metrics"):
+            self._source.reset_metrics()
+        client = self._trainer.client
+        client.prepare_seconds = 0.0
+        client.finish_seconds = 0.0
+        total_started = time.perf_counter()
         self.weight_version += 1
 
+        pause_started = time.perf_counter()
         if dist.get_rank() == 0:
             ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
             ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
@@ -97,8 +106,9 @@ class UpdateWeightFromDistributed:
                     rollout_engines=self.rollout_engines,
                 )
         dist.barrier(group=get_gloo_group())
+        pause_flush_seconds = time.perf_counter() - pause_started
 
-        client = self._trainer.client
+        transfer_started = time.perf_counter()
         client.draft = False
         self._trainer.send_weights()
         update_draft = self.args.dspark_enabled or (
@@ -110,7 +120,9 @@ class UpdateWeightFromDistributed:
             self._trainer.send_weights()
             self._source.draft = False
             client.draft = False
+        transfer_phase_seconds = time.perf_counter() - transfer_started
 
+        resume_started = time.perf_counter()
         if dist.get_rank() == 0:
             if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
                 post_process_weights(
@@ -120,6 +132,32 @@ class UpdateWeightFromDistributed:
                 )
             ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
+        resume_seconds = time.perf_counter() - resume_started
+
+        source_metrics = self._source.stop_metrics() if hasattr(self._source, "stop_metrics") else {}
+        transferred_bytes = source_metrics.get("weight_update_bytes", 0.0)
+        transfer_load_seconds = max(
+            0.0,
+            transfer_phase_seconds
+            - source_metrics.get("weight_update_export_seconds", 0.0)
+            - client.prepare_seconds
+            - client.finish_seconds,
+        )
+        self.update_weight_metrics = {
+            "weight_update_total_seconds": time.perf_counter() - total_started,
+            "weight_update_pause_flush_seconds": pause_flush_seconds,
+            "weight_update_prepare_seconds": client.prepare_seconds,
+            "weight_update_transfer_phase_seconds": transfer_phase_seconds,
+            "weight_update_export_seconds": source_metrics.get("weight_update_export_seconds", 0.0),
+            "weight_update_transfer_load_seconds": transfer_load_seconds,
+            "weight_update_finish_seconds": client.finish_seconds,
+            "weight_update_resume_seconds": resume_seconds,
+            "weight_update_bytes": transferred_bytes,
+            "weight_update_chunks": source_metrics.get("weight_update_chunks", 0.0),
+            "weight_update_effective_gib_per_second": (
+                transferred_bytes / (1024**3) / transfer_phase_seconds if transfer_phase_seconds > 0 else 0.0
+            ),
+        }
 
 
 def post_process_weights(

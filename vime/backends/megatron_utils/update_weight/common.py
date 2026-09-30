@@ -1,6 +1,7 @@
 import inspect
 import re
 import socket
+import time
 from argparse import Namespace
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
@@ -224,21 +225,54 @@ class HfWeightSource:
         self.draft_weights_getter = draft_weights_getter
         self.draft = False
         self._metadata = {}
+        self.reset_metrics()
+
+    def reset_metrics(self) -> None:
+        self.export_seconds = 0.0
+        self.transferred_bytes = 0
+        self.chunk_count = 0
+        self._record_metrics = True
+
+    def stop_metrics(self) -> dict[str, float]:
+        self._record_metrics = False
+        return {
+            "weight_update_export_seconds": self.export_seconds,
+            "weight_update_bytes": float(self.transferred_bytes),
+            "weight_update_chunks": float(self.chunk_count),
+        }
 
     def metadata(self):
         if self.draft not in self._metadata:
             from vllm.distributed.weight_transfer.base import ParamMeta
 
-            self._metadata[self.draft] = [ParamMeta(name, tensor.dtype, tuple(tensor.shape)) for name, tensor in self]
+            recording = self._record_metrics
+            self._record_metrics = False
+            try:
+                self._metadata[self.draft] = [
+                    ParamMeta(name, tensor.dtype, tuple(tensor.shape)) for name, tensor in self
+                ]
+            finally:
+                self._record_metrics = recording
         return self._metadata[self.draft]
 
     def __iter__(self):
         if self.draft:
             if self.draft_weights_getter is None:
                 raise RuntimeError("Draft weight update requested without a draft weight source")
-            yield from self.draft_weights_getter()
-            return
-        for chunk in self.iterator.get_hf_weight_chunks(self.weights_getter()):
+            chunks = ([item] for item in self.draft_weights_getter())
+        else:
+            chunks = self.iterator.get_hf_weight_chunks(self.weights_getter())
+        iterator = iter(chunks)
+        while True:
+            started = time.perf_counter()
+            try:
+                chunk = list(next(iterator))
+            except StopIteration:
+                break
+            if self._record_metrics:
+                self.export_seconds += time.perf_counter() - started
+                self.transferred_bytes += sum(tensor.numel() * tensor.element_size() for _, tensor in chunk)
+                self.chunk_count += 1
             yield from chunk
 
 
@@ -253,6 +287,8 @@ class VimeRayWeightSyncClient:
         self.version_getter = version_getter
         self.engine_gpu_counts = engine_gpu_counts
         self.draft = False
+        self.prepare_seconds = 0.0
+        self.finish_seconds = 0.0
 
     def init_weight_transfer_engine(self, init_info: dict[str, Any]) -> None:
         import ray
@@ -270,8 +306,10 @@ class VimeRayWeightSyncClient:
     def start_weight_update(self) -> None:
         import ray
 
+        started = time.perf_counter()
         method = "start_draft_weight_update" if self.draft else "start_weight_update"
         ray.get([getattr(engine, method).remote() for engine in self.engines])
+        self.prepare_seconds += time.perf_counter() - started
 
     def update_weights(self, update_info: dict[str, Any] | list[dict[str, Any]]) -> None:
         import ray
@@ -281,8 +319,10 @@ class VimeRayWeightSyncClient:
     def finish_weight_update(self, weight_version: str | None = None) -> None:
         import ray
 
+        started = time.perf_counter()
         version = str(self.version_getter()) if weight_version is None else str(weight_version)
         ray.get([engine.finish_weight_update.remote(weight_version=version) for engine in self.engines])
+        self.finish_seconds += time.perf_counter() - started
 
 
 def create_nccl_trainer(
