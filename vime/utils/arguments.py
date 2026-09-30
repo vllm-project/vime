@@ -1526,6 +1526,28 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help="Optional TEGroupedMLP module-name suffixes; defaults to mlp.experts.",
             )
+            parser.add_argument(
+                "--context-parallel-algo",
+                type=str,
+                default=None,
+                choices=[
+                    "ulysses_cp_algo",
+                    "megatron_cp_algo",
+                    "hybrid_cp_algo",
+                    "kvallgather_cp_algo",
+                    "adaptive_cp_algo",
+                ],
+                help=(
+                    "MindSpeed context-parallel algorithm. On NPU, CP>1 defaults to KV "
+                    "all-gather; pass kvallgather_cp_algo to select it explicitly."
+                ),
+            )
+            parser.add_argument(
+                "--ulysses-degree-in-cp",
+                type=int,
+                default=None,
+                help="Ulysses degree inside CP. Accepted for MindSpeed compatibility.",
+            )
             return parser
 
         def add_mtp_training_arguments(parser):

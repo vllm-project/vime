@@ -23,6 +23,25 @@ from .base import (
 
 logger = logging.getLogger(__name__)
 
+# Ring attention calls aclnnFlashAttentionVarLenScore, which fails on current CANN when CP>1.
+# KV all-gather is the path verified on Qwen3-4B CP=2.
+_NPU_CP_COMM_BY_ALGO = {
+    "kvallgather_cp_algo": "all_gather",
+    "ulysses_cp_algo": "a2a",
+    "megatron_cp_algo": "p2p",
+}
+
+
+def _npu_cp_comm_type(args: Any) -> str | None:
+    try:
+        cp_size = int(getattr(args, "context_parallel_size", 1) or 1)
+    except (TypeError, ValueError):
+        return None
+    if cp_size <= 1:
+        return None
+    algo = getattr(args, "context_parallel_algo", None)
+    return _NPU_CP_COMM_BY_ALGO.get(algo, "all_gather")
+
 
 class NPUAccelerator(TorchAccelerator):
     name = "npu"
@@ -135,6 +154,9 @@ class NpuRayResourceSpec(RayResourceSpec):
 
     def train_runtime_env(self, args: Any, env_vars=None) -> dict[str, str]:
         env = dict(env_vars or {})
+        cp_comm_type = _npu_cp_comm_type(args)
+        if cp_comm_type is not None:
+            env["CP_COMM_TYPE"] = cp_comm_type
         if not (getattr(args, "offload_train", False) and getattr(args, "train_backend", None) == "megatron"):
             return env
 
