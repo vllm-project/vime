@@ -292,10 +292,10 @@ ray job submit ... \
    --vllm-cudagraph-capture-sizes 1 2 4 8 $(seq 16 8 256)
    ```
 
-### 异步训练
+### 全异步 Rollout
 
-当进行训推分离时，你会发现训练和推理的 GPU 总是相互等待着，为了避免这种资源空闲，我们可以开启异步训练。开启的方式即为将启动脚本中的 `train.py` 改变为 `train_async.py`。这样 vime 就会在进行当前 rollout 的训练时进行下一个 rollout 的数据生成了。
+对于长尾 rollout 工作负载，使用 `train.py`，并设置
+`--rollout-function-path vime.rollout.fully_async_rollout.generate_rollout_fully_async`。
+后台 rollout worker 会持续生成数据，普通训练循环则消费已经完成的 group。
 
 ⚠️  异步训练时，vLLM 的性能统计日志与训练日志可能混在一起。可通过 `--vllm-disable-log-stats` 关闭性能统计，并用 `--vllm-uvicorn-log-level warning` 降低服务日志量。
-
-`train.py` 和 `train_async.py` 的差别只在于 train loop 的同步逻辑，我们通过 ray 的异步（`.remote`, `ray.get`）实现了这点。

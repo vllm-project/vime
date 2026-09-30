@@ -81,5 +81,3 @@ You can compare [run-qwen3-4B-base-sft.sh](https://github.com/vllm-project/vime/
     As for `--calculate-per-token-loss`, this is because `vime` defaults to calculating the per-sample mean for GRPO. In general SFT training, the average is taken over all unmasked tokens in a batch, so it is recommended to configure this.
 
     Finally, `--disable-compute-advantages-and-returns` indicates that there is no need to pre-calculate log probabilities during the SFT process, and `--debug-train-only` means that `vllm` does not need to be initialized.
-
-3.  Used `train_async.py` instead of `train.py`. This is to leverage the asynchronous training process to implement data prefetching.

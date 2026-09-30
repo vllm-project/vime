@@ -12,15 +12,15 @@ from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
-import vllm_router  # noqa: F401 — ensures vllm-router is importable on startup
 from tqdm import tqdm
 
-from vime.backends.vllm_utils.server_control import abort_inflight_requests
+from vime.backends.vllm_utils.server_control import abort_servers_until_idle
+from vime.data.transport import discard_rollout_group, inherit_queue_context, publish_rollout_async
 from vime.observability.trace_utils import build_vllm_meta_trace_attrs, trace_function, trace_span
-from vime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
+from vime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput, finalize_rollout_groups
 from vime.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter, should_drop_dynamic_filter_output
 from vime.rollout.sample_hooks import apply_rollout_sample_hooks
-from vime.utils.async_utils import run
+from vime.utils.async_utils import AsyncPacer, run
 from vime.utils.data import Dataset
 from vime.utils.eval_config import EvalDatasetConfig
 from vime.utils.http_utils import get, get_rollout_num_engines, post
@@ -40,9 +40,6 @@ __all__ = ["generate_rollout", "get_model_url", "prime_encoder"]
 logger = logging.getLogger(__name__)
 
 _PROCESSOR_PROMPT_KEYS = {"input_ids", "attention_mask"}
-
-# Re-sweep interval while draining; bounds how long a late straggler can run.
-_ABORT_RESWEEP_INTERVAL_S = 3.0
 
 
 def _coerce_flat_int_token_ids(ids: Any) -> list[int]:
@@ -147,13 +144,16 @@ class GenerateState(metaclass=SingletonMeta):
     The global state for the generation process.
     """
 
-    def __init__(self, args: Namespace) -> None:
+    def __init__(self, args: Namespace, *, concurrency: int | None = None) -> None:
         # persistent state for the generation process
         self.args = args
         self.tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
         self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
 
-        self.semaphore = asyncio.Semaphore(args.vllm_server_concurrency * get_rollout_num_engines(args))
+        self.semaphore = asyncio.Semaphore(
+            concurrency if concurrency is not None else args.vllm_server_concurrency * get_rollout_num_engines(args)
+        )
+        self.generation_pacer = AsyncPacer()
         self.sampling_params: dict[str, Any] = dict(
             temperature=args.rollout_temperature,
             top_p=args.rollout_top_p,
@@ -210,13 +210,13 @@ class GenerateState(metaclass=SingletonMeta):
         self.remaining_batch_size += len(samples)
 
 
-def _build_inference_sampling_params(sampling_params: dict[str, Any]) -> dict[str, Any]:
+def _build_inference_sampling_params(sampling_params: dict[str, Any], logprobs: int = 1) -> dict[str, Any]:
     """Map rollout ``sampling_params`` to vLLM ``/inference/v1/generate`` body."""
     sp: dict[str, Any] = {
         "max_tokens": sampling_params["max_new_tokens"],
         "temperature": sampling_params["temperature"],
         "top_p": sampling_params["top_p"],
-        "logprobs": 1,
+        "logprobs": logprobs,
     }
     tk = sampling_params.get("top_k")
     if tk is not None and (tk > 0 or tk == -1):
@@ -254,6 +254,55 @@ def _inference_generate_tokens_and_logprobs(choice: dict[str, Any]) -> tuple[lis
         for index in range(len(token_ids))
     ]
     return token_ids, log_probs
+
+
+def _score_centering_metadata(
+    choice: dict[str, Any], token_ids: list[int], *, top_p: float, top_k: int
+) -> tuple[dict[str, Any], list[float] | None]:
+    content = (choice.get("logprobs") or {}).get("content") or []
+    if len(content) != len(token_ids):
+        raise ValueError("Score centering requires top logprobs for every generated token.")
+
+    if top_p == 1.0:
+        rows = []
+        for item in content:
+            row = {}
+            for entry in item.get("top_logprobs") or []:
+                token = entry.get("token", "")
+                if token.startswith("token_id:"):
+                    row[int(token.removeprefix("token_id:"))] = float(entry["logprob"])
+            rows.append(row)
+        heads = [sorted(row.items(), key=lambda item: item[1], reverse=True)[:top_k] for row in rows]
+        if any(len(head) != top_k for head in heads):
+            raise ValueError(f"Score centering requires {top_k} sampler top logprobs per token.")
+        return {
+            "score_centering_topk": (
+                np.asarray([[token_id for token_id, _ in head] for head in heads], dtype=np.int32),
+                np.asarray([[logprob for _, logprob in head] for head in heads], dtype=np.float32),
+            )
+        }, None
+
+    support = choice.get("sampling_mask")
+    if not isinstance(support, list) or len(support) != len(token_ids):
+        raise ValueError("Top-p score centering requires a sampling mask for every generated token.")
+    support_logprobs = choice.get("sampling_mask_logprobs")
+    if not isinstance(support_logprobs, list) or len(support_logprobs) != len(support):
+        raise ValueError("Top-p score centering requires logprobs aligned with the sampling mask.")
+    ids = np.asarray([token_id for row in support for token_id in row], dtype=np.int32)
+    offsets = np.cumsum([0, *(len(row) for row in support)], dtype=np.int32)
+    normalized_logprobs = []
+    sampled_logprobs = []
+    for sampled_token, support_ids, logprobs in zip(token_ids, support, support_logprobs, strict=True):
+        if len(support_ids) != len(logprobs):
+            raise ValueError("Top-p score centering requires logprobs aligned with the sampling mask.")
+        try:
+            sampled_logprobs.append(float(logprobs[support_ids.index(sampled_token)]))
+        except ValueError as error:
+            raise ValueError("Sampled token is missing from the top-p sampling mask.") from error
+        normalized_logprobs.extend(logprobs)
+    return {
+        "score_centering_top_p": (ids, offsets, np.asarray(normalized_logprobs, dtype=np.float32))
+    }, sampled_logprobs
 
 
 def _mm_render_response_to_generate_body(render_data: Any, model: str) -> dict[str, Any]:
@@ -367,7 +416,22 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         sample.status = Sample.Status.TRUNCATED
         return sample
 
-    inference_sampling_params = _build_inference_sampling_params(sampling_params)
+    score_centering = getattr(args, "use_score_centering", False)
+    if score_centering:
+        from vime.utils.score_centering import score_centering_request
+
+        score_centering_request(args, sampling_params)
+    logprobs = args.score_centering_top_k + 1 if score_centering and args.rollout_top_p == 1 else 1
+    inference_sampling_params = _build_inference_sampling_params(sampling_params, logprobs)
+    routed_experts_start = 0
+    if args.use_rollout_routing_replay and sample.response_length:
+        routed_experts_start = sample.get_rollout_routed_experts_length()
+        if routed_experts_start != len(sample.tokens) - 1:
+            raise ValueError(
+                f"R3 continuation {sample.index} has {routed_experts_start} routes, "
+                f"expected {len(sample.tokens) - 1}"
+            )
+        inference_sampling_params["routed_experts_prompt_start"] = routed_experts_start
 
     messages = build_multimodal_messages(sample.prompt, sample.multimodal_inputs)
 
@@ -415,6 +479,19 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
 
     # Parse token_ids and logprobs from vLLM response
     new_response_tokens, new_response_log_probs = _inference_generate_tokens_and_logprobs(choice)
+    meta_info = _inference_generate_meta_info(output)
+    if routed_experts_start:
+        meta_info["routed_experts_start_len"] = routed_experts_start
+    if score_centering:
+        score_metadata, normalized_logprobs = _score_centering_metadata(
+            choice,
+            new_response_tokens,
+            top_p=args.rollout_top_p,
+            top_k=args.score_centering_top_k,
+        )
+        meta_info.update(score_metadata)
+        if normalized_logprobs is not None:
+            new_response_log_probs = normalized_logprobs
 
     # Decode text from token_ids
     skip_sp = sampling_params.get("skip_special_tokens")
@@ -426,11 +503,16 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         tokens=new_response_tokens,
         log_probs=new_response_log_probs,
         trainable=True,
-        meta_info=_inference_generate_meta_info(output),
+        meta_info=meta_info,
         text=text,
     )
 
     return sample
+
+
+def _inference_generate_metrics(output: dict[str, Any]) -> dict[str, Any]:
+    metrics = output.get("metrics")
+    return metrics if isinstance(metrics, dict) else {}
 
 
 def _inference_generate_meta_info(output: dict[str, Any]) -> dict[str, Any]:
@@ -453,7 +535,8 @@ def _inference_generate_meta_info(output: dict[str, Any]) -> dict[str, Any]:
         meta["prompt_tokens"] = usage.get("prompt_tokens", 0)
         meta["completion_tokens"] = usage.get("completion_tokens", 0)
         meta["cached_tokens"] = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
-    spec_stats = output.get("request_spec_decode_stats")
+    metrics = _inference_generate_metrics(output)
+    spec_stats = metrics.get("speculative_decoding")
     if spec_stats:
         meta["spec_accept_token_num"] = spec_stats.get(
             "num_accepted_draft_tokens", spec_stats.get("num_accepted_tokens", 0)
@@ -528,8 +611,25 @@ async def generate_and_rm(
 
     state = GenerateState(args)
 
+    if evaluation and getattr(args, "use_score_centering", False):
+        args = copy.copy(args)
+        args.use_score_centering = False
+
+    queue_input = copy.copy(sample)
+    if hasattr(sample, "_queue_lease") or hasattr(sample, "_queue_receipt"):
+        queue_input.queue_generation_requests = list(getattr(sample, "queue_generation_requests", [])) + [
+            {
+                "sampling_params": copy.deepcopy(sampling_params),
+                "generate_function": sample.generate_function_path or args.custom_generate_function_path,
+                "input_index": sample.index,
+                "input_group_index": sample.group_index,
+                "branch": getattr(args, "_rollout_queue_branch", None),
+            }
+        ]
+
     # generate
     async with state.semaphore:
+        await state.generation_pacer.wait()
         if state.aborted:
             sample.status = Sample.Status.ABORTED
             return sample
@@ -548,7 +648,9 @@ async def generate_and_rm(
             else:
                 sample = await _run_server_abort_generate(state, generate_call)
 
+    sample = inherit_queue_context(queue_input, sample)
     sample = await apply_rollout_sample_hooks(args, sample, evaluation=evaluation)
+    sample = inherit_queue_context(queue_input, sample)
 
     # for the rm that need the whole group, we will not do the rm here
     if args.group_rm:
@@ -635,33 +737,18 @@ async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
     for task in cancellable_tasks:
         task.cancel()
 
-    loop = asyncio.get_running_loop()
-    server_abort = state.active_server_generations > 0
-    if server_abort:
+    if state.active_server_generations > 0:
         base = f"http://{args.vllm_router_ip}:{args.vllm_router_port}"
         response = await get(f"{base}/workers")
         urls = [worker["url"] for worker in response["workers"]]
-
-        # Delete-type abort: drop in-flight requests without pausing the scheduler.
-        await abort_inflight_requests(urls)
-        last_sweep = loop.time()
+        await abort_servers_until_idle(urls)
 
     await asyncio.gather(*cancellable_tasks, return_exceptions=True)
 
     # make sure all the pending tasks are finished
     count = 0
     while state.pendings:
-        done, state.pendings = await asyncio.wait(
-            state.pendings,
-            timeout=_ABORT_RESWEEP_INTERVAL_S,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-
-        # Re-sweep on a fixed interval to truncate late stragglers (e.g. a
-        # multi-turn turn-2 fired after the initial abort), regardless of drain.
-        if server_abort and loop.time() - last_sweep >= _ABORT_RESWEEP_INTERVAL_S:
-            await abort_inflight_requests(urls)
-            last_sweep = loop.time()
+        done, state.pendings = await asyncio.wait(state.pendings, return_when=asyncio.FIRST_COMPLETED)
 
         if not args.partial_rollout:
             continue
@@ -698,9 +785,9 @@ async def generate_rollout_async(
             - data: a list of groups of samples generated by the rollout, length equals `rollout_batch_size`
             - aborted_samples: any partial groups collected during abort when partial_rollout is enabled
     """
-    assert args.rollout_global_dataset
 
     state = GenerateState(args)
+    controller = getattr(getattr(data_source, "__self__", None), "controller", None)
 
     # instantiate data filters
     dynamic_filter = (
@@ -714,12 +801,17 @@ async def generate_rollout_async(
 
     data = []
     all_data = []
+    keep_all_samples = args.rollout_all_samples_process_path is not None
     do_print = True
     pbar = tqdm(total=target_data_size * args.n_samples_per_prompt, desc="Rollout generation")
     while len(data) < target_data_size:
         while state.remaining_batch_size < target_data_size:
             # get samples from the buffer and submit the generation requests.
-            samples = data_source(args.over_sampling_batch_size)
+            reader = getattr(data_source, "__self__", None)
+            if hasattr(reader, "get_samples_async"):
+                samples = await reader.get_samples_async(args.over_sampling_batch_size)
+            else:
+                samples = data_source(args.over_sampling_batch_size)
             state.submit_generate_tasks(samples)
 
         # wait for the generation to finish
@@ -735,7 +827,8 @@ async def generate_rollout_async(
                 do_print = False
 
             assert len(group) == args.n_samples_per_prompt
-            all_data.append(group)
+            if keep_all_samples:
+                all_data.append(group)
 
             dynamic_filter_output = call_dynamic_filter(dynamic_filter, args, group)
             if should_drop_dynamic_filter_output(
@@ -743,6 +836,14 @@ async def generate_rollout_async(
                 remaining_batch_size=state.remaining_batch_size,
                 target_data_size=target_data_size,
             ):
+                if not keep_all_samples:
+                    await asyncio.to_thread(
+                        discard_rollout_group,
+                        group,
+                        args,
+                        dynamic_filter_output.reason or "dynamic_filter",
+                        controller=controller,
+                    )
                 metric_gatherer.on_dynamic_filter_drop(reason=dynamic_filter_output.reason)
                 state.remaining_batch_size -= 1
                 continue
@@ -750,11 +851,13 @@ async def generate_rollout_async(
             # add the samples to the data
             # NOTE: here we have not stored all the unused samples back to the data buffer.
             if len(data) < target_data_size:
+                sample = group[0][0] if isinstance(group[0], list) else group[0]
+                if args.rollout_data_transport == "straw" and not keep_all_samples:
+                    group = await publish_rollout_async(group, args, rollout_id, group=True, controller=controller)
                 data.append(group)
                 pbar.update(args.n_samples_per_prompt)
 
     pbar.close()
-    sample = data[-1][0][0] if isinstance(data[-1][0], list) else data[-1][0]
     logger.info(
         f"Finish rollout: {[str(sample.prompt) + sample.response]}, label: {str(sample.label)[:100]}, reward: {sample.reward}",
     )
@@ -763,23 +866,27 @@ async def generate_rollout_async(
     aborted_samples = await abort(args, rollout_id)
 
     assert len(data) == args.rollout_batch_size, f"Got {len(data)} samples, expected {args.rollout_batch_size}"
-    data = sorted(data, key=lambda group: group[0][0].index if isinstance(group[0], list) else group[0].index)
-    all_samples = sorted(
-        all_data, key=lambda group: group[0][0].index if isinstance(group[0], list) else group[0].index
-    )
-
     # reset the global state to prevent effects on the next rollout or eval.
     state.reset()
-    if args.rollout_sample_filter_path is not None:
-        filter_func = load_function(args.rollout_sample_filter_path)
-        filter_func(args, data)
-
-    # There can be circumstances where users want to process all samples including filtered ones.
-    if args.rollout_all_samples_process_path is not None:
+    if keep_all_samples:
+        data.sort(key=lambda group: group[0][0].index if isinstance(group[0], list) else group[0].index)
+        all_data.sort(key=lambda group: group[0][0].index if isinstance(group[0], list) else group[0].index)
+        if args.rollout_sample_filter_path is not None:
+            load_function(args.rollout_sample_filter_path)(args, data)
         process_func = load_function(args.rollout_all_samples_process_path)
-        process_func(args, all_samples, data_source)
-
-    return RolloutFnTrainOutput(samples=data, metrics=metric_gatherer.collect()), aborted_samples
+        process_func(args, all_data, data_source)
+        if args.rollout_data_transport == "straw":
+            data = [
+                await publish_rollout_async(group, args, rollout_id, group=True, controller=controller)
+                for group in data
+            ]
+            data = await publish_rollout_async(data, args, rollout_id)
+        output = RolloutFnTrainOutput(samples=data, metrics=metric_gatherer.collect())
+    elif args.rollout_sample_filter_path is not None:
+        output = finalize_rollout_groups(args, rollout_id, data, metric_gatherer.collect())
+    else:
+        output = await asyncio.to_thread(finalize_rollout_groups, args, rollout_id, data, metric_gatherer.collect())
+    return output, aborted_samples
 
 
 EVAL_PROMPT_DATASET = {}
@@ -949,7 +1056,6 @@ def generate_rollout(
     Returns:
         RolloutFnTrainOutput | RolloutFnEvalOutput: the output of the rollout
     """
-    assert args.rollout_global_dataset
     if evaluation:
         output, _ = run(eval_rollout(args, rollout_id))
         return output

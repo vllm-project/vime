@@ -292,8 +292,8 @@ In this case, 2 GPUs will be allocated for training, and 6 GPUs will be allocate
    --vllm-cudagraph-capture-sizes 1 2 4 8 $(seq 16 8 256)
    ```
 
-### Asynchronous Training
+### Fully-Asynchronous Rollout
 
-When you separate training and inference, you may notice that the training and inference GPUs are always waiting for each other. To prevent these resources from being idle, we can enable asynchronous training. This can be done by changing `train.py` to `train_async.py` in the startup script. By doing this, vime will generate data for the next rollout while training on the current one.
-
-The only difference between `train.py` and `train_async.py` lies in the synchronization logic of the training loop. We achieve this by using Ray's asynchronous features (`.remote`, `ray.get`).
+For long-tail rollout workloads, use `train.py` together with
+`--rollout-function-path vime.rollout.fully_async_rollout.generate_rollout_fully_async`.
+The background rollout worker keeps generation warm while the normal training loop consumes completed groups.

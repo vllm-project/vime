@@ -30,8 +30,11 @@ block step。可以选择一个或多个套件：
 - `ckpt`
 
 `.buildkite/gpu_suites.py` 会把所选套件展开为每个测试一个 Buildkite
-job。GPU 测试使用 `vllm/vime:latest`；验证 Dockerfile 或 vLLM patch 修改前，
-需要先重建并发布该镜像。
+job。验证 Dockerfile 或 vLLM patch 修改时，通过 `VIME_CI_IMAGE` 指定不可变的
+候选镜像 digest；未设置时使用 `vllm/vime:latest`，且 PR 合入前不得更新该标签。
+
+`megatron` 套件包含 `test_straw_checkpoint_fork.py`，覆盖 checkpoint
+步骤选择、回退分支和带索引的 debug 归档。
 
 ## 注册测试
 

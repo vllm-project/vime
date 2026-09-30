@@ -31,8 +31,12 @@ After the CPU steps pass, the Buildkite build exposes a block step named
 - `ckpt`
 
 `.buildkite/gpu_suites.py` expands each selected suite into one Buildkite job
-per test. GPU tests use `vllm/vime:latest`; rebuild and publish that image
-before validating a Dockerfile or vLLM patch change.
+per test. Set `VIME_CI_IMAGE` to an immutable candidate digest when validating
+Dockerfile or vLLM patch changes. Jobs otherwise use `vllm/vime:latest`, which
+must not be updated before the change merges.
+
+The `megatron` suite includes `test_straw_checkpoint_fork.py` for checkpoint
+step selection, rollback branches and indexed debug archives.
 
 ## Registering tests
 

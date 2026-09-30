@@ -1,579 +1,8 @@
-diff --git a/rust/src/engine-core-client/src/protocol/output.rs b/rust/src/engine-core-client/src/protocol/output.rs
-index cc7541eae1b..50eb218932e 100644
---- a/rust/src/engine-core-client/src/protocol/output.rs
-+++ b/rust/src/engine-core-client/src/protocol/output.rs
-@@ -130,6 +130,10 @@ pub struct EngineCoreOutput {
-     /// the Rust frontend does not yet surface it in responses.
-     #[serde(default)]
-     pub spec_decode_metrics: Option<OpaqueValue>,
-+    #[serde(default)]
-+    pub remote_kv_wait_time: Option<f64>,
-+    #[serde(default)]
-+    pub kv_transfer_metrics: Option<OpaqueValue>,
- }
- 
- impl EngineCoreOutput {
-@@ -449,6 +453,8 @@ mod tests {
-                             mm_cache_miss_hashes: None,
-                             new_sampling_mask: None,
-                             spec_decode_metrics: None,
-+                            remote_kv_wait_time: None,
-+                            kv_transfer_metrics: None,
-                         },
-                     ],
-                     scheduler_stats: None,
-diff --git a/rust/src/engine-core-client/src/tests/client.rs b/rust/src/engine-core-client/src/tests/client.rs
-index 6f4e53ff1b4..f0951ff1d97 100644
---- a/rust/src/engine-core-client/src/tests/client.rs
-+++ b/rust/src/engine-core-client/src/tests/client.rs
-@@ -2744,6 +2744,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
-                         mm_cache_miss_hashes: None,
-                         new_sampling_mask: None,
-                         spec_decode_metrics: None,
-+                        remote_kv_wait_time: None,
-+                        kv_transfer_metrics: None,
-                     },
-                 ],
-                 scheduler_stats: None,
-diff --git a/rust/src/engine-core-client/src/tests/python_compat.py b/rust/src/engine-core-client/src/tests/python_compat.py
-index d3705cc3918..2a438ca88bd 100755
---- a/rust/src/engine-core-client/src/tests/python_compat.py
-+++ b/rust/src/engine-core-client/src/tests/python_compat.py
-@@ -100,6 +100,9 @@ class EngineCoreOutput(
-     num_nans_in_logits: int = 0
-     mm_cache_miss_hashes: list[str] | None = None
-     new_sampling_mask: object | None = None
-+    spec_decode_metrics: object | None = None
-+    remote_kv_wait_time: float | None = None
-+    kv_transfer_metrics: dict[str, float] | None = None
- 
- 
- class EngineCoreOutputs(
-diff --git a/tests/entrypoints/scale_out/token_in_token_out/test_generate_stream.py b/tests/entrypoints/scale_out/token_in_token_out/test_generate_stream.py
-index 99cf457935f..59453b0b0ac 100644
---- a/tests/entrypoints/scale_out/token_in_token_out/test_generate_stream.py
-+++ b/tests/entrypoints/scale_out/token_in_token_out/test_generate_stream.py
-@@ -23,6 +23,7 @@ from vllm.renderers import renderer_from_config
- from vllm.renderers.online_renderer import OnlineRenderer
- from vllm.sampling_params import SamplingParams
- from vllm.v1.engine.async_llm import AsyncLLM
-+from vllm.v1.metrics.stats import RequestStateStats
- 
- MODEL_NAME = "openai-community/gpt2"
- BASE_MODEL_PATHS = [
-@@ -125,6 +126,7 @@ def _make_request_output(
-     logprobs: list[dict[int, Any] | None] | None = None,
-     num_cached_tokens: int | None = None,
-     index: int = 0,
-+    metrics: RequestStateStats | None = None,
- ) -> RequestOutput:
-     return RequestOutput(
-         request_id=request_id,
-@@ -142,7 +144,7 @@ def _make_request_output(
-             )
-         ],
-         finished=finished,
--        metrics=None,
-+        metrics=metrics,
-         lora_request=None,
-         encoder_prompt=None,
-         encoder_prompt_token_ids=None,
-@@ -152,6 +154,7 @@ def _make_request_output(
- 
- def _mock_engine() -> MagicMock:
-     engine = MagicMock(spec=AsyncLLM)
-+    engine.get_weight_version = AsyncMock(return_value=None)
-     engine.errored = False
-     engine.model_config = MockModelConfig()
-     engine.vllm_config = MockVllmConfig(
-@@ -197,12 +200,85 @@ async def test_serve_tokens_skips_mm_cache_for_remote_engine_execution():
-     response = await serving.serve_tokens(request)
- 
-     assert isinstance(response, GenerateResponse)
-+    assert response.request_metrics is None
-     assert (
-         serving.online_renderer.preprocess_completion.call_args.kwargs["skip_mm_cache"]
-         is True
-     )
- 
- 
-+@pytest.mark.asyncio
-+@pytest.mark.parametrize("stream", [False, True])
-+async def test_serve_tokens_returns_enabled_request_metrics(stream):
-+    engine = _mock_engine()
-+    engine.get_weight_version = AsyncMock(return_value="v1")
-+    metrics = RequestStateStats(
-+        queued_ts=1.0,
-+        scheduled_ts=2.0,
-+        first_token_ts=5.0,
-+        last_token_ts=9.0,
-+        first_token_latency=6.0,
-+        remote_kv_wait_time=0.75,
-+        kv_transfer_metrics={
-+            "kv_initial_queue_wait_time_ms": 7.0,
-+            "kv_post_receive_queue_wait_time_ms": 2.0,
-+            "kv_transfer_worker_time_ms": 10.0,
-+            "kv_transfer_bytes": 1024,
-+        },
-+    )
-+
-+    async def mock_generate(*args, **kwargs):
-+        yield _make_request_output(
-+            "req-1",
-+            token_ids=[10],
-+            finish_reason="stop",
-+            finished=True,
-+            metrics=metrics,
-+        )
-+
-+    engine.generate = MagicMock(side_effect=mock_generate)
-+    serving = _build_serving_tokens(engine, enable_per_request_metrics=True)
-+    request = GenerateRequest(
-+        token_ids=[1, 2, 3],
-+        sampling_params=SamplingParams(max_tokens=1),
-+        model=MODEL_NAME,
-+        stream=stream,
-+        kv_transfer_params={
-+            "prefill_metrics": {
-+                "queue_time_ms": 12.0,
-+                "time_to_first_token_ms": 25.0,
-+                "kv_allocation_wait_time_ms": 3.0,
-+                "kv_initial_queue_wait_time_ms": 4.0,
-+            }
-+        },
-+    )
-+
-+    response = await serving.serve_tokens(request)
-+
-+    if stream:
-+        chunks = _parse_sse_chunks([chunk async for chunk in response])
-+        result = next(
-+            chunk["request_metrics"]
-+            for chunk in chunks
-+            if chunk != "[DONE]" and chunk.get("request_metrics")
-+        )
-+    else:
-+        assert isinstance(response, GenerateResponse)
-+        result = response.request_metrics.model_dump()
-+    assert result["queue_time_ms"] == 1000.0
-+    assert result["time_to_first_token_ms"] == 3000.0
-+    assert result["generation_time_ms"] == 4000.0
-+    assert result["remote_kv_wait_time_ms"] == 750.0
-+    assert result["kv_transfer_worker_time_ms"] == 10.0
-+    assert result["kv_transfer_bytes"] == 1024
-+    assert result["prefill_queue_time_ms"] == 12.0
-+    assert result["prefill_time_to_first_token_ms"] == 25.0
-+    assert result["prefill_kv_allocation_wait_time_ms"] == 3.0
-+    assert result["prefill_kv_initial_queue_wait_time_ms"] == 4.0
-+    assert result["kv_initial_queue_wait_time_ms"] == 7.0
-+    assert result["kv_post_receive_queue_wait_time_ms"] == 2.0
-+
-+
- @pytest.mark.asyncio
- async def test_serve_tokens_threads_session_id_header_to_engine():
-     engine = _mock_engine()
-@@ -359,15 +435,19 @@ async def test_stream_error_with_empty_delta():
- 
- 
- @pytest.mark.asyncio
--async def test_stream_skips_empty_token_output():
--    """Outputs with empty token_ids are skipped (no chunk emitted)."""
-+@pytest.mark.parametrize("terminal_empty", [False, True])
-+async def test_stream_skips_empty_token_output(terminal_empty):
-+    """Skip empty nonterminal outputs, but retain the terminal finish reason."""
-     engine = _mock_engine()
- 
-     async def mock_generate(*args, **kwargs):
-         yield _make_request_output("req-1", token_ids=[10])
-         yield _make_request_output("req-1", token_ids=[])
-         yield _make_request_output(
--            "req-1", token_ids=[20], finish_reason="stop", finished=True
-+            "req-1",
-+            token_ids=[] if terminal_empty else [20],
-+            finish_reason="stop",
-+            finished=True,
-         )
- 
-     engine.generate = MagicMock(side_effect=mock_generate)
-@@ -392,7 +472,8 @@ async def test_stream_skips_empty_token_output():
-     # Only 2 data chunks — the empty one is skipped
-     assert len(data_chunks) == 2
-     assert data_chunks[0]["choices"][0]["token_ids"] == [10]
--    assert data_chunks[1]["choices"][0]["token_ids"] == [20]
-+    assert data_chunks[1]["choices"][0]["token_ids"] == ([] if terminal_empty else [20])
-+    assert data_chunks[1]["choices"][0]["finish_reason"] == "stop"
- 
- 
- @pytest.mark.asyncio
-@@ -602,3 +683,47 @@ async def test_stream_prompt_tokens_details_zero_cached():
-     # Zero cached tokens must be present, not omitted
-     assert usage_chunk["usage"]["prompt_tokens_details"] is not None
-     assert usage_chunk["usage"]["prompt_tokens_details"]["cached_tokens"] == 0
-+
-+
-+@pytest.mark.asyncio
-+@pytest.mark.parametrize("with_mask", [False, True])
-+async def test_stream_sampling_mask_matches_each_token_chunk(with_mask):
-+    from vllm.outputs import SamplingMask
-+
-+    engine = _mock_engine()
-+    engine.get_weight_version = AsyncMock(return_value=None)
-+
-+    async def generate(*args, **kwargs):
-+        for position, tokens in enumerate(([10], [20, 30])):
-+            result = _make_request_output(
-+                "req-mask",
-+                token_ids=list(tokens),
-+                finish_reason="length" if position else None,
-+                finished=bool(position),
-+            )
-+            if with_mask:
-+                result.outputs[0].sampling_mask = SamplingMask(
-+                    [[token, token + 1] for token in tokens]
-+                )
-+            yield result
-+
-+    engine.generate = MagicMock(side_effect=generate)
-+    serving = _build_serving_tokens(engine)
-+    response = await serving.serve_tokens(
-+        GenerateRequest(
-+            model=MODEL_NAME, token_ids=[1, 2, 3], sampling_params={}, stream=True
-+        )
-+    )
-+    chunks = _parse_sse_chunks([chunk async for chunk in response])
-+    choices = [
-+        choice
-+        for chunk in chunks
-+        if isinstance(chunk, dict)
-+        for choice in chunk.get("choices", [])
-+    ]
-+    assert [choice["token_ids"] for choice in choices] == [[10], [20, 30]]
-+    for choice in choices:
-+        expected = (
-+            [[token, token + 1] for token in choice["token_ids"]] if with_mask else None
-+        )
-+        assert choice["sampling_mask"] == expected
-diff --git a/tests/v1/core/test_scheduler.py b/tests/v1/core/test_scheduler.py
-index 2192401163d..241acb1fc62 100644
---- a/tests/v1/core/test_scheduler.py
-+++ b/tests/v1/core/test_scheduler.py
-@@ -2000,6 +2000,50 @@ def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
-     return initial_ecos
- 
- 
-+@pytest.mark.parametrize("remote_load", [False, True])
-+def test_kv_allocation_wait_includes_capacity_retry(monkeypatch, tmp_path, remote_load):
-+    (tmp_path / "config.json").write_text(
-+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
-+    )
-+    scheduler = create_scheduler(
-+        model=str(tmp_path),
-+        skip_tokenizer_init=True,
-+        use_kv_connector=mock_kv(
-+            matched_tokens=16 if remote_load else 0, is_async=remote_load
-+        ),
-+        block_size=16,
-+    )
-+    request = create_requests(num_requests=1, num_tokens=32, block_size=16)[0]
-+    scheduler.add_request(request)
-+    request.kv_queue_started_at["initial"] -= 1
-+    with monkeypatch.context() as context:
-+        context.setattr(
-+            scheduler.kv_cache_manager, "allocate_slots", Mock(return_value=None)
-+        )
-+        scheduler.schedule()
-+    assert request.kv_allocation_started_at is not None
-+    assert request.kv_transfer_metrics["kv_initial_queue_wait_time_ms"] >= 1000
-+    assert not request.kv_queue_started_at
-+    assert request.remote_kv_wait_started_at is None
-+    assert "kv_allocation_wait_time_ms" not in request.kv_transfer_metrics
-+    request.kv_allocation_started_at -= 1
-+    scheduler.schedule()
-+    assert request.kv_allocation_started_at is None
-+    assert request.kv_transfer_metrics["kv_allocation_wait_time_ms"] >= 1000
-+    if remote_load:
-+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-+        assert request.remote_kv_wait_started_at is not None
-+        scheduler.finished_recving_kv_req_ids.add(request.request_id)
-+        assert scheduler._try_promote_blocked_waiting_request(request)
-+        request.kv_queue_started_at["post_receive"] -= 1
-+        scheduler.schedule()
-+        assert request.kv_transfer_metrics["kv_post_receive_queue_wait_time_ms"] >= 1000
-+        assert not request.kv_queue_started_at
-+    else:
-+        assert request.status == RequestStatus.RUNNING
-+        assert request.remote_kv_wait_started_at is None
-+
-+
- @pytest.mark.parametrize("is_async", [False, True])
- def test_kv_connector_basic(is_async: bool):
-     """
-@@ -2051,6 +2095,12 @@ def test_kv_connector_basic(is_async: bool):
- 
-     # Ensure ScheduleOutput is correct.
-     output = scheduler.schedule()
-+    for request in requests:
-+        if is_async:
-+            assert request.remote_kv_wait_time > 0
-+            assert request.remote_kv_wait_started_at is None
-+        else:
-+            assert request.remote_kv_wait_time == 0
-     _assert_right_scheduler_output(
-         output=output,
-         num_requests=NUM_REQUESTS,
-diff --git a/tests/v1/engine/test_output_processor.py b/tests/v1/engine/test_output_processor.py
-index f578aae7f01..218e1ae81ce 100644
---- a/tests/v1/engine/test_output_processor.py
-+++ b/tests/v1/engine/test_output_processor.py
-@@ -23,6 +23,7 @@ from vllm.tokenizers import TokenizerLike
- from vllm.v1.engine import (
-     EngineCoreEvent,
-     EngineCoreEventType,
-+    EngineCoreOutput,
-     EngineCoreOutputs,
-     EngineCoreRequest,
-     FinishReason,
-@@ -32,7 +33,33 @@ from vllm.v1.engine.output_processor import (
-     RequestOutputCollector,
-     RequestState,
- )
--from vllm.v1.metrics.stats import IterationStats, SchedulerStats
-+from vllm.v1.metrics.stats import IterationStats, RequestStateStats, SchedulerStats
-+
-+
-+def test_remote_kv_wait_time_is_added_to_request_stats():
-+    output_processor = object.__new__(OutputProcessor)
-+    request_stats = RequestStateStats()
-+    request_state = MagicMock(
-+        stats=request_stats,
-+        routed_experts_chunks=[],
-+        is_prefilling=False,
-+    )
-+    request_state.make_request_output.return_value = None
-+    output_processor.request_states = {"request": request_state}
-+    output_processor._update_stats_from_output = MagicMock()
-+
-+    output_processor.process_outputs(
-+        [
-+            EngineCoreOutput(
-+                request_id="request",
-+                new_token_ids=[],
-+                pooling_output=MagicMock(),
-+                remote_kv_wait_time=0.75,
-+            )
-+        ]
-+    )
-+
-+    assert request_stats.remote_kv_wait_time == 0.75
- 
- 
- @pytest.mark.parametrize("flat_logprobs", [False, True])
-@@ -1448,3 +1475,99 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
-             output_processor.abort_requests([request.request_id], internal=True)
-         else:
-             output_processor.abort_requests([request.external_req_id], internal=False)
-+
-+
-+@pytest.mark.parametrize("output_kind", list(RequestOutputKind))
-+@pytest.mark.parametrize("coalesce", [False, True])
-+@pytest.mark.parametrize("stream_interval", [1, 2])
-+def test_sampling_masks_follow_output_token_boundaries(
-+    output_kind, coalesce, stream_interval
-+):
-+    import numpy as np
-+
-+    from vllm.v1.outputs import SamplingMaskLists
-+
-+    state = RequestState.__new__(RequestState)
-+    state.detokenizer = MagicMock()
-+    state.detokenizer.get_next_output_text.return_value = ""
-+    state.detokenizer.output_token_ids = []
-+    state.detokenizer.num_output_tokens.side_effect = lambda: len(
-+        state.detokenizer.output_token_ids
-+    )
-+    state.stream_interval = stream_interval
-+    state.sent_tokens_offset = 0
-+    state.external_req_id = "request"
-+    state.parent_req = None
-+    state.prompt = None
-+    state.prompt_token_ids = [1]
-+    state.lora_request = None
-+    state.num_cached_tokens = 0
-+    state.num_cache_creation_tokens = 0
-+    state.stats = None
-+    state.logprobs_processor = MagicMock()
-+    state.logprobs_processor.logprobs = None
-+    state.logprobs_processor.cumulative_logprob = None
-+    state.output_kind = output_kind
-+    state.request_index = 0
-+    state.sampling_mask_chunks = []
-+    state.routed_experts_chunks = []
-+    state.spec_decode_metrics = None
-+    collector = RequestOutputCollector(output_kind, "request")
-+
-+    expected = [[10, 11], [20], [30, 31]]
-+    received = []
-+    for position, support in enumerate(expected):
-+        state.detokenizer.output_token_ids.append(support[0])
-+        state.sampling_mask_chunks.append(
-+            SamplingMaskLists(np.asarray(support), np.asarray([0, len(support)]))
-+        )
-+        finished = position == len(expected) - 1
-+        result = state.make_request_output(
-+            [support[0]], None, FinishReason.LENGTH if finished else None, None
-+        )
-+        if result is None:
-+            continue
-+        collector.put(result)
-+        if not coalesce:
-+            received.append(collector.get_nowait())
-+    if coalesce:
-+        received.append(collector.get_nowait())
-+
-+    if output_kind == RequestOutputKind.DELTA:
-+        masks = [
-+            support
-+            for result in received
-+            for support in result.outputs[0].sampling_mask.token_ids
-+        ]
-+        assert masks == expected
-+        for result in received:
-+            completion = result.outputs[0]
-+            assert len(completion.sampling_mask.token_ids) == len(completion.token_ids)
-+        assert state.sampling_mask_chunks == []
-+    else:
-+        assert received[-1].outputs[0].sampling_mask.token_ids == expected
-+
-+
-+def test_sampling_mask_multi_token_delta_and_empty_finish():
-+    import numpy as np
-+
-+    from vllm.v1.outputs import SamplingMaskLists
-+
-+    state = RequestState.__new__(RequestState)
-+    state.detokenizer = MagicMock()
-+    state.detokenizer.get_next_output_text.return_value = ""
-+    state.logprobs_processor = MagicMock()
-+    state.logprobs_processor.logprobs = None
-+    state.logprobs_processor.cumulative_logprob = None
-+    state.output_kind = RequestOutputKind.DELTA
-+    state.request_index = 0
-+    state.routed_experts_chunks = []
-+    state.spec_decode_metrics = None
-+    state.sampling_mask_chunks = [
-+        SamplingMaskLists(np.asarray([10, 11, 20]), np.asarray([0, 2, 3]))
-+    ]
-+
-+    completion = state._new_completion_output([10, 20], None, None)
-+    assert completion.sampling_mask.token_ids == [[10, 11], [20]]
-+    terminal = state._new_completion_output([], FinishReason.LENGTH, None)
-+    assert terminal.sampling_mask is None
-diff --git a/tests/v1/kv_connector/unit/test_nixl_connector.py b/tests/v1/kv_connector/unit/test_nixl_connector.py
-index d4064d6f6fe..a9bfd08ba85 100644
---- a/tests/v1/kv_connector/unit/test_nixl_connector.py
-+++ b/tests/v1/kv_connector/unit/test_nixl_connector.py
-@@ -4,11 +4,13 @@
- import contextlib
- import inspect
- import os
-+import queue
- import tempfile
- import textwrap
- import time
- import uuid
- from collections import defaultdict
-+from concurrent.futures import Future
- from types import SimpleNamespace
- from typing import Any, cast
- from unittest.mock import MagicMock, patch
-@@ -44,6 +46,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
-     NixlKVConnectorStats,
- )
- from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
-+    NixlRequestMetrics,
-     compute_nixl_compatibility_hash,
- )
- from vllm.distributed.kv_transfer.kv_transfer_state import (
-@@ -77,6 +80,41 @@ from .utils import (
- )
- 
- 
-+def test_request_transfer_metrics_aggregate():
-+    first = NixlRequestMetrics(
-+        {"req": {"kv_transfer_bytes": 128, "kv_transfer_worker_time_ms": 3}}
-+    )
-+    second = NixlRequestMetrics(
-+        {"req": {"kv_transfer_bytes": 256, "kv_transfer_worker_time_ms": 2}}
-+    )
-+    merged = first.aggregate(second).get_request_metrics()
-+    assert merged == {
-+        "req": {"kv_transfer_bytes": 384, "kv_transfer_worker_time_ms": 5}
-+    }
-+
-+
-+def test_request_handshake_timing_precedes_ready_publication():
-+    worker = object.__new__(NixlConnectorWorker)
-+    future: Future[None] = Future()
-+    worker._ensure_handshake = MagicMock(return_value=future)
-+    worker._ready_requests = queue.Queue()
-+    meta = SimpleNamespace(
-+        remote=SimpleNamespace(host="localhost", port=1234),
-+        tp_size=1,
-+        handshake_wait_time=0.0,
-+    )
-+    with patch(
-+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.time.perf_counter",
-+        side_effect=[10.0, 12.5],
-+    ):
-+        worker._background_nixl_handshake("req", "engine", meta)
-+        assert worker._ready_requests.empty()
-+        future.set_result(None)
-+    request_id, ready_meta = worker._ready_requests.get_nowait()
-+    assert request_id == "req"
-+    assert ready_meta.handshake_wait_time == 2.5
-+
-+
- @pytest.fixture(scope="module", autouse=True)
- def clear_kv_transfer():
-     """
-diff --git a/tests/v1/test_request.py b/tests/v1/test_request.py
-index be417b9b2ff..3b2d33e09db 100644
---- a/tests/v1/test_request.py
-+++ b/tests/v1/test_request.py
-@@ -40,3 +40,28 @@ def test_request_copies_session_id_from_engine_core_request():
-     request = Request.from_engine_core_request(engine_request, block_hasher=None)
- 
-     assert request.session_id == "session-1"
-+
-+
-+def test_request_accumulates_remote_kv_waits(monkeypatch):
-+    engine_request = EngineCoreRequest(
-+        request_id="request-1",
-+        prompt_token_ids=[1, 2, 3],
-+        mm_features=None,
-+        sampling_params=SamplingParams(max_tokens=1),
-+        pooling_params=None,
-+        arrival_time=0.0,
-+        lora_request=None,
-+        cache_salt=None,
-+        data_parallel_rank=None,
-+    )
-+    request = Request.from_engine_core_request(engine_request, block_hasher=None)
-+    timestamps = iter([1.0, 3.0, 5.0, 9.0])
-+    monkeypatch.setattr("vllm.v1.request.time.monotonic", lambda: next(timestamps))
-+
-+    request.start_remote_kv_wait()
-+    request.stop_remote_kv_wait()
-+    request.start_remote_kv_wait()
-+    request.stop_remote_kv_wait()
-+
-+    assert request.remote_kv_wait_time == 6.0
-+    assert request.remote_kv_wait_started_at is None
 diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/base.py b/vllm/distributed/kv_transfer/kv_connector/v1/base.py
-index b0d7cf23883..d03cba83bee 100644
+index 072018c039..f2feef64cb 100644
 --- a/vllm/distributed/kv_transfer/kv_connector/v1/base.py
 +++ b/vllm/distributed/kv_transfer/kv_connector/v1/base.py
-@@ -158,6 +158,9 @@ class KVConnectorWorkerMetadata(ABC):
+@@ -167,6 +167,9 @@ class KVConnectorWorkerMetadata(ABC):
      being passed to the Scheduler KVConnector.
      """
  
@@ -584,10 +13,10 @@ index b0d7cf23883..d03cba83bee 100644
      def aggregate(
          self, other: "KVConnectorWorkerMetadata"
 diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py
-index c8166b2e6ae..bb0f534fe79 100644
+index 0f13a265df..9b34d898ea 100644
 --- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py
 +++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py
-@@ -37,6 +37,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+@@ -43,6 +43,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
      NixlAgentMetadata,
      NixlConnectorMetadata,
      NixlHandshakePayload,
@@ -595,16 +24,16 @@ index c8166b2e6ae..bb0f534fe79 100644
      ReqId,
      ReqMeta,
      TransferHandle,
-@@ -547,6 +548,8 @@ class NixlBaseConnectorWorker:
-         # finish reading before safely freeing the blocks.
+@@ -868,6 +869,8 @@ class NixlBaseConnectorWorker:
          self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
+         self.expected_consumer_notifications_by_req: dict[ReqId, int] = {}
          self.xfer_stats = NixlKVConnectorStats()
 +        self.request_metrics = NixlRequestMetrics()
 +        self.pending_request_metrics: dict[str, dict[str, float]] = {}
  
          self._physical_blocks_per_logical_kv_block = 1
          self._sync_block_size_with_kernel()
-@@ -955,6 +958,7 @@ class NixlBaseConnectorWorker:
+@@ -1318,6 +1321,7 @@ class NixlBaseConnectorWorker:
      ):
          # Do NIXL handshake in background and add to _ready_requests when done.
          assert meta.remote is not None
@@ -612,7 +41,7 @@ index c8166b2e6ae..bb0f534fe79 100644
          fut = self._ensure_handshake(
              remote_engine_id,
              meta.remote.host,
-@@ -970,6 +974,7 @@ class NixlBaseConnectorWorker:
+@@ -1335,6 +1339,7 @@ class NixlBaseConnectorWorker:
          def request_ready(f: Future[Any], entry=(req_id, meta)):
              try:
                  f.result()
@@ -620,8 +49,8 @@ index c8166b2e6ae..bb0f534fe79 100644
                  self._ready_requests.put(entry)
              except Exception as e:
                  self._log_failure(
-@@ -2207,6 +2212,13 @@ class NixlBaseConnectorWorker:
-                         # Get telemetry from NIXL
+@@ -3033,6 +3038,13 @@ class NixlBaseConnectorWorker:
+                     if xfer_state == "DONE":
                          res = self.nixl_wrapper.get_xfer_telemetry(handle)
                          self.xfer_stats.record_transfer(res)
 +                        metrics = self.pending_request_metrics.setdefault(req_id, {})
@@ -634,30 +63,29 @@ index c8166b2e6ae..bb0f534fe79 100644
                          self.nixl_wrapper.release_xfer_handle(handle)
                      elif xfer_state == "PROC":
                          in_progress.append(handle)
-@@ -2229,6 +2241,9 @@ class NixlBaseConnectorWorker:
-                     self._handle_failed_transfer(req_id, handle)
+@@ -3056,6 +3068,10 @@ class NixlBaseConnectorWorker:
+                         in_progress.append(handle)
  
              if not in_progress:
 +                completed_metrics = self.pending_request_metrics.pop(req_id, None)
 +                if completed_metrics is not None:
 +                    self.request_metrics.requests[req_id] = completed_metrics
-                 # Only report request as completed when all transfers are done.
++                # Only report request as completed when all transfers are done.
                  done_req_ids.add(req_id)
                  del transfers[req_id]
-@@ -2573,6 +2588,8 @@ class NixlBaseConnectorWorker:
+             else:
+@@ -3612,4 +3628,6 @@ class NixlBaseConnectorWorker:
              for handle in handles:
                  self.nixl_wrapper.release_xfer_handle(handle)
          self._recving_transfers.clear()
 +        self.pending_request_metrics.clear()
 +        self.request_metrics.requests.clear()
-         for handle in self.src_xfer_handles_by_block_size.values():
-             self.nixl_wrapper.release_dlist_handle(handle)
-         self.src_xfer_handles_by_block_size.clear()
+         self._finish_shutdown()
 diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py
-index fa5537c3259..3e2a067e7f2 100644
+index ac929f7fcd..dc5e847fdf 100644
 --- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py
 +++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py
-@@ -36,6 +36,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+@@ -37,6 +37,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
  )
  from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
      NixlConnectorMetadata,
@@ -665,7 +93,7 @@ index fa5537c3259..3e2a067e7f2 100644
  )
  from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
      NixlPullConnectorScheduler,
-@@ -254,6 +255,12 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
+@@ -258,6 +259,12 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
          assert self.connector_worker is not None
          return self.connector_worker.get_block_ids_with_load_errors()
  
@@ -679,18 +107,9 @@ index fa5537c3259..3e2a067e7f2 100644
          if self.connector_worker is None:
              return None
 diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/metadata.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/metadata.py
-index 0fca03c93b0..bf983a85f02 100644
+index ca6f30d0cf..914bd79489 100644
 --- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/metadata.py
 +++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/metadata.py
-@@ -2,7 +2,7 @@
- # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
- """Metadata dataclasses and helpers for the NIXL connector."""
- 
--from dataclasses import dataclass
-+from dataclasses import dataclass, field
- from typing import Any
- 
- from vllm.config import VllmConfig
 @@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
  from vllm.distributed.kv_transfer.kv_connector.v1.base import (
      KVConnectorHandshakeMetadata,
@@ -722,19 +141,19 @@ index 0fca03c93b0..bf983a85f02 100644
  GET_META_MSG = b"get_meta_msg"
  
  # Push-mode (WRITE-based) registration notification.
-@@ -233,6 +250,7 @@ class ReqMeta:
-     remote_block_size: int | None = None
-     # Remote producer pipeline-parallel size (push mode, D side).
-     pp_size: int = 1
+@@ -255,6 +272,7 @@ class ReqMeta:
+     # Worker-only, per-region physical pages to zero after a successful pull.
+     # None selects group-based completion; empty lists mean no zeroing.
+     region_blocks_to_zero: BlockIds | None = None
 +    handshake_wait_time: float = 0.0
  
  
  class NixlConnectorMetadata(KVConnectorMetadata):
 diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_worker.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_worker.py
-index a09fd684e3b..717e0a135f0 100644
+index 6539b7e57e..887912f94b 100644
 --- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_worker.py
 +++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_worker.py
-@@ -128,6 +128,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
+@@ -143,6 +143,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
  
      def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
          assert meta.remote is not None and self.transfer_topo is not None
@@ -744,53 +163,11 @@ index a09fd684e3b..717e0a135f0 100644
          engine_id = meta.remote.engine_id
          # Update last activity from this remote. Mind that cleanup is done on main
          # thread (this one), so we don't race on this structure.
-diff --git a/vllm/entrypoints/generate/base/serving.py b/vllm/entrypoints/generate/base/serving.py
-index d6ae0a20906..807117196ea 100644
---- a/vllm/entrypoints/generate/base/serving.py
-+++ b/vllm/entrypoints/generate/base/serving.py
-@@ -52,6 +52,7 @@ PRIORITY_HEADER = "X-Vllm-Priority"
- def build_per_request_timing_metrics(
-     metrics: RequestStateStats | None,
-     num_generation_tokens: int,
-+    kv_transfer_params: dict | None = None,
- ) -> PerRequestMetrics:
-     """Build per-request timing metrics from ``RequestStateStats``.
- 
-@@ -96,11 +97,29 @@ def build_per_request_timing_metrics(
-             tokens_per_second = num_generation_tokens / inference_time_ms * 1000
- 
-     return PerRequestMetrics(
-+        prefill_queue_time_ms=(kv_transfer_params or {})
-+        .get("prefill_metrics", {})
-+        .get("queue_time_ms"),
-+        prefill_time_to_first_token_ms=(kv_transfer_params or {})
-+        .get("prefill_metrics", {})
-+        .get("time_to_first_token_ms"),
-+        prefill_kv_allocation_wait_time_ms=(kv_transfer_params or {})
-+        .get("prefill_metrics", {})
-+        .get("kv_allocation_wait_time_ms"),
-+        prefill_kv_initial_queue_wait_time_ms=(kv_transfer_params or {})
-+        .get("prefill_metrics", {})
-+        .get("kv_initial_queue_wait_time_ms"),
-         time_to_first_token_ms=time_to_first_token_ms,
-         generation_time_ms=generation_time_ms,
-         queue_time_ms=queue_time_ms,
-         mean_itl_ms=mean_itl_ms,
-         tokens_per_second=tokens_per_second,
-+        **(metrics.kv_transfer_metrics or {}),
-+        remote_kv_wait_time_ms=(
-+            metrics.remote_kv_wait_time * 1000
-+            if metrics.remote_kv_wait_time is not None
-+            else None
-+        ),
-     )
- 
- 
-diff --git a/vllm/entrypoints/openai/engine/protocol.py b/vllm/entrypoints/openai/engine/protocol.py
-index 9635ece46b0..fd606a314d6 100644
---- a/vllm/entrypoints/openai/engine/protocol.py
-+++ b/vllm/entrypoints/openai/engine/protocol.py
-@@ -159,6 +159,52 @@ class PerRequestMetrics(OpenAIBaseModel):
+diff --git a/vllm/entrypoints/generate/base/protocol.py b/vllm/entrypoints/generate/base/protocol.py
+index 91d2e30a47..cbd34e8298 100644
+--- a/vllm/entrypoints/generate/base/protocol.py
++++ b/vllm/entrypoints/generate/base/protocol.py
+@@ -79,6 +79,52 @@ class PerRequestMetrics(OpenAIBaseModel):
      tokens_per_second: float | None = None
      # Experimental, subject to change.
      speculative_decoding: SpeculativeDecodingMetrics | None = None
@@ -843,11 +220,53 @@ index 9635ece46b0..fd606a314d6 100644
  
  
  class RequestResponseMetadata(BaseModel):
+diff --git a/vllm/entrypoints/generate/base/serving.py b/vllm/entrypoints/generate/base/serving.py
+index 5142346df6..213962bd55 100644
+--- a/vllm/entrypoints/generate/base/serving.py
++++ b/vllm/entrypoints/generate/base/serving.py
+@@ -50,6 +50,7 @@ PRIORITY_HEADER = "X-Vllm-Priority"
+ def build_per_request_timing_metrics(
+     metrics: RequestStateStats | None,
+     num_generation_tokens: int,
++    kv_transfer_params: dict | None = None,
+ ) -> PerRequestMetrics:
+     """Build per-request timing metrics from ``RequestStateStats``.
+ 
+@@ -94,11 +95,29 @@ def build_per_request_timing_metrics(
+             tokens_per_second = num_generation_tokens / inference_time_ms * 1000
+ 
+     return PerRequestMetrics(
++        prefill_queue_time_ms=(kv_transfer_params or {})
++        .get("prefill_metrics", {})
++        .get("queue_time_ms"),
++        prefill_time_to_first_token_ms=(kv_transfer_params or {})
++        .get("prefill_metrics", {})
++        .get("time_to_first_token_ms"),
++        prefill_kv_allocation_wait_time_ms=(kv_transfer_params or {})
++        .get("prefill_metrics", {})
++        .get("kv_allocation_wait_time_ms"),
++        prefill_kv_initial_queue_wait_time_ms=(kv_transfer_params or {})
++        .get("prefill_metrics", {})
++        .get("kv_initial_queue_wait_time_ms"),
+         time_to_first_token_ms=time_to_first_token_ms,
+         generation_time_ms=generation_time_ms,
+         queue_time_ms=queue_time_ms,
+         mean_itl_ms=mean_itl_ms,
+         tokens_per_second=tokens_per_second,
++        **(metrics.kv_transfer_metrics or {}),
++        remote_kv_wait_time_ms=(
++            metrics.remote_kv_wait_time * 1000
++            if metrics.remote_kv_wait_time is not None
++            else None
++        ),
+     )
+ 
+ 
 diff --git a/vllm/entrypoints/scale_out/factories.py b/vllm/entrypoints/scale_out/factories.py
-index 341dad13a86..dc31e1536fc 100644
+index bd48c709dd..dfe4d09911 100644
 --- a/vllm/entrypoints/scale_out/factories.py
 +++ b/vllm/entrypoints/scale_out/factories.py
-@@ -53,6 +53,7 @@ def init_scale_out_state(
+@@ -57,6 +57,7 @@ def init_scale_out_state(
          request_logger=request_logger,
          return_tokens_as_token_ids=args.return_tokens_as_token_ids,
          enable_prompt_tokens_details=args.enable_prompt_tokens_details,
@@ -856,54 +275,31 @@ index 341dad13a86..dc31e1536fc 100644
          force_no_detokenize=args.tokens_only,
      )
 diff --git a/vllm/entrypoints/scale_out/token_in_token_out/protocol.py b/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
-index 71a17e9363d..88740e37f31 100644
+index eb4000c7e2..50d376f747 100644
 --- a/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
 +++ b/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
-@@ -20,7 +20,11 @@ from vllm.entrypoints.openai.completion.protocol import (
-     CompletionRequest,
-     CompletionStreamResponse,
- )
--from vllm.entrypoints.openai.engine.protocol import StreamOptions, UsageInfo
-+from vllm.entrypoints.openai.engine.protocol import (
-+    PerRequestMetrics,
-+    StreamOptions,
-+    UsageInfo,
-+)
- from vllm.logprobs import Logprob
- from vllm.renderers import TokenizeParams
- from vllm.sampling_params import SamplingParams
-@@ -230,6 +234,7 @@ class GenerateResponseStreamChoice(BaseModel):
- 
- 
- class GenerateStreamResponse(BaseModel):
-+    request_metrics: PerRequestMetrics | None = None
-     request_id: str = Field(
-         default_factory=lambda: f"{random_uuid()}",
-         description=(
-@@ -271,6 +276,10 @@ class GenerateResponse(BaseModel):
+@@ -397,8 +397,6 @@ class GenerateResponse(BaseModel):
              "ECTransfer parameters used for encoder-cache disaggregated serving."
          ),
      )
-+    request_metrics: PerRequestMetrics | None = Field(
-+        default=None,
-+        description="Per-request generation and remote KV wait timings.",
-+    )
- 
- 
+-
+-
  class DerenderChatRequest(BaseModel):
+     """Request for the /v1/chat/completions/derender endpoint (non-streaming).
+ 
 diff --git a/vllm/entrypoints/scale_out/token_in_token_out/serving.py b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
-index f24c306f9ec..dc02efe1d94 100644
+index 6e86ac8341..5c38c0f672 100644
 --- a/vllm/entrypoints/scale_out/token_in_token_out/serving.py
 +++ b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
-@@ -14,6 +14,7 @@ from vllm.engine.protocol import EngineClient
- from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
+@@ -19,6 +19,7 @@ from vllm.entrypoints.generate.base.protocol import (
  from vllm.entrypoints.generate.base.serving import (
      GenerateBaseServing,
-+    build_per_request_timing_metrics,
      build_spec_decoding_metrics,
++    build_per_request_timing_metrics,
      clamp_prompt_logprobs,
  )
-@@ -71,6 +72,7 @@ class ServingTokens(GenerateBaseServing):
+ from vllm.entrypoints.openai.chat_completion.protocol import (
+@@ -76,6 +77,7 @@ class ServingTokens(GenerateBaseServing):
          force_no_detokenize: bool = False,
          return_tokens_as_token_ids: bool = False,
          enable_prompt_tokens_details: bool = False,
@@ -911,7 +307,7 @@ index f24c306f9ec..dc02efe1d94 100644
          enable_log_outputs: bool = False,
      ):
          super().__init__(
-@@ -81,6 +83,7 @@ class ServingTokens(GenerateBaseServing):
+@@ -86,6 +88,7 @@ class ServingTokens(GenerateBaseServing):
          )
          self.online_renderer = online_renderer
          self.enable_prompt_tokens_details = enable_prompt_tokens_details
@@ -919,11 +315,12 @@ index f24c306f9ec..dc02efe1d94 100644
          self.enable_log_outputs = enable_log_outputs
          self.force_no_detokenize = force_no_detokenize
          if force_no_detokenize:
-@@ -371,6 +374,16 @@ class ServingTokens(GenerateBaseServing):
+@@ -385,11 +388,20 @@ class ServingTokens(GenerateBaseServing):
  
          request_metadata.final_usage_info = usage
  
-+        request_metrics = (
+-        per_request_metrics = None
++        per_request_metrics = (
 +            build_per_request_timing_metrics(
 +                final_res.metrics,
 +                num_generated_tokens,
@@ -932,56 +329,67 @@ index f24c306f9ec..dc02efe1d94 100644
 +            if self.enable_per_request_metrics
 +            else None
 +        )
-+
+         if request.sampling_params.n == 1:
+             spec_stats = build_spec_decoding_metrics(final_res)
+             if spec_stats is not None:
+-                per_request_metrics = PerRequestMetrics(speculative_decoding=spec_stats)
++                per_request_metrics = per_request_metrics or PerRequestMetrics()
++                per_request_metrics.speculative_decoding = spec_stats
          response = GenerateResponse(
              request_id=request_id,
              created=created_time,
-@@ -382,8 +395,21 @@ class ServingTokens(GenerateBaseServing):
-             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
-             kv_transfer_params=final_res.kv_transfer_params,
+@@ -407,6 +419,18 @@ class ServingTokens(GenerateBaseServing):
              ec_transfer_params=final_res.ec_transfer_params,
-+            request_metrics=request_metrics,
          )
  
-+        if request_metrics is not None and response.kv_transfer_params is not None:
++        if per_request_metrics is not None and response.kv_transfer_params is not None:
 +            response.kv_transfer_params["prefill_metrics"] = {
-+                "queue_time_ms": request_metrics.queue_time_ms,
-+                "time_to_first_token_ms": request_metrics.time_to_first_token_ms,
++                "queue_time_ms": per_request_metrics.queue_time_ms,
++                "time_to_first_token_ms": per_request_metrics.time_to_first_token_ms,
 +                "kv_allocation_wait_time_ms": (
-+                    request_metrics.kv_allocation_wait_time_ms
++                    per_request_metrics.kv_allocation_wait_time_ms
 +                ),
 +                "kv_initial_queue_wait_time_ms": (
-+                    request_metrics.kv_initial_queue_wait_time_ms
++                    per_request_metrics.kv_initial_queue_wait_time_ms
 +                ),
 +            }
 +
          # Log complete response if output logging is enabled
          if self.enable_log_outputs and self.request_logger:
              for choice in choices:
-@@ -468,6 +494,15 @@ class ServingTokens(GenerateBaseServing):
-                     )
+@@ -545,13 +569,20 @@ class ServingTokens(GenerateBaseServing):
+                 )
  
-                     chunk = GenerateStreamResponse(
-+                        request_metrics=(
-+                            build_per_request_timing_metrics(
-+                                res.metrics,
-+                                sum(num_generated_tokens),
-+                                request.kv_transfer_params,
-+                            )
-+                            if self.enable_per_request_metrics and res.finished
-+                            else None
-+                        ),
-                         request_id=request_id,
-                         weight_version=weight_version,
-                         request_spec_decode_stats=request_spec_decode_stats,
+             if include_usage:
+-                per_request_metrics = None
++                per_request_metrics = (
++                    build_per_request_timing_metrics(
++                        last_res.metrics if last_res is not None else None,
++                        total_completion_tokens,
++                        request.kv_transfer_params,
++                    )
++                    if self.enable_per_request_metrics
++                    else None
++                )
+                 if sampling_params.n == 1:
+                     spec_stats = build_spec_decoding_metrics(last_res)
+                     if spec_stats is not None:
+-                        per_request_metrics = PerRequestMetrics(
+-                            speculative_decoding=spec_stats
+-                        )
++                        per_request_metrics = per_request_metrics or PerRequestMetrics()
++                        per_request_metrics.speculative_decoding = spec_stats
+                 final_chunk = GenerateStreamResponse(
+                     request_id=request_id,
+                     weight_version=weight_version,
 diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
-index 88c2ce289c4..f4ee2f16ce2 100644
+index 18bbc10283..3996a257e7 100644
 --- a/vllm/v1/core/sched/scheduler.py
 +++ b/vllm/v1/core/sched/scheduler.py
-@@ -1059,6 +1059,18 @@ class Scheduler(SchedulerInterface):
-                     # avoid deadlock and predictable preemptions.
-                     reserved_blocks = self._inflight_prefill_reserved_blocks()
- 
+@@ -1198,6 +1198,18 @@ class Scheduler(SchedulerInterface):
+                 # Replayed tokens are already counted in the adopted hit; a
+                 # chunk that ends inside the replayed range needs no new slots.
+                 num_tokens_past_hit = max(num_new_tokens - num_replay_tokens, 0)
 +                for phase, started_at in request.kv_queue_started_at.items():
 +                    key = f"kv_{phase}_queue_wait_time_ms"
 +                    request.kv_transfer_metrics[key] = (
@@ -996,8 +404,8 @@ index 88c2ce289c4..f4ee2f16ce2 100644
 +                    request.kv_allocation_started_at = time.monotonic()
                  new_blocks = self.kv_cache_manager.allocate_slots(
                      request,
-                     num_new_tokens,
-@@ -1082,6 +1094,13 @@ class Scheduler(SchedulerInterface):
+                     num_tokens_past_hit,
+@@ -1221,6 +1233,13 @@ class Scheduler(SchedulerInterface):
                          self.encoder_cache_manager.free(request)
                      break
  
@@ -1011,7 +419,7 @@ index 88c2ce289c4..f4ee2f16ce2 100644
                  # KVTransfer: the connector uses this info to determine
                  # if a load is needed. Note that
                  # This information is used to determine if a load is
-@@ -1112,6 +1131,7 @@ class Scheduler(SchedulerInterface):
+@@ -1251,6 +1270,7 @@ class Scheduler(SchedulerInterface):
                  if load_kv_async:
                      # If loading async, allocate memory and put request
                      # into the WAITING_FOR_REMOTE_KV state.
@@ -1019,24 +427,24 @@ index 88c2ce289c4..f4ee2f16ce2 100644
                      request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                      step_skipped_waiting.prepend_request(request)
                      # Set num_computed_tokens even though KVs are not yet loaded.
-@@ -1913,6 +1933,7 @@ class Scheduler(SchedulerInterface):
+@@ -2036,6 +2056,7 @@ class Scheduler(SchedulerInterface):
              pooler_output = pooler_outputs[req_index] if pooler_outputs else None
              kv_transfer_params = None
              ec_transfer_params = None
 +            remote_kv_wait_time = None
              prefill_stats = None
              status_before_stop = request.status
-             num_output_tokens_before = len(request._output_token_ids)
-@@ -2024,6 +2045,8 @@ class Scheduler(SchedulerInterface):
-                 finished = self._handle_stopped_request(request)
-                 if finished:
-                     kv_transfer_params, ec_transfer_params = self._free_request(request)
+ 
+@@ -2107,6 +2128,8 @@ class Scheduler(SchedulerInterface):
+                         kv_transfer_params["remote_prefill_cached_tokens"] = (
+                             prefill_stats.num_cached_tokens
+                         )
 +                    if request.remote_kv_wait_time:
 +                        remote_kv_wait_time = request.remote_kv_wait_time
  
                  if status_before_stop == RequestStatus.RUNNING:
                      stopped_running_reqs.add(request)
-@@ -2071,6 +2094,8 @@ class Scheduler(SchedulerInterface):
+@@ -2154,6 +2177,8 @@ class Scheduler(SchedulerInterface):
                          ),
                          kv_transfer_params=kv_transfer_params,
                          ec_transfer_params=ec_transfer_params,
@@ -1045,7 +453,7 @@ index 88c2ce289c4..f4ee2f16ce2 100644
                          trace_headers=request.trace_headers,
                          routed_experts=routed_experts,
                          num_nans_in_logits=request.num_nans_in_logits,
-@@ -2409,6 +2434,7 @@ class Scheduler(SchedulerInterface):
+@@ -2494,6 +2519,7 @@ class Scheduler(SchedulerInterface):
                      self.num_spec_tokens
                  )
              if self.connector is not None:
@@ -1053,16 +461,16 @@ index 88c2ce289c4..f4ee2f16ce2 100644
                  self.connector.on_new_request(request)
              if self.log_stats:
                  request.record_event(EngineCoreEventType.QUEUED)
-@@ -2481,6 +2507,8 @@ class Scheduler(SchedulerInterface):
+@@ -2567,6 +2593,8 @@ class Scheduler(SchedulerInterface):
      ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
          assert request.is_finished()
  
 +        request.stop_remote_kv_wait()
 +
+         if self.aux_output_connector is not None:
+             self.aux_output_connector.request_finished(request)
          self._inflight_prefills.discard(request)
-         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
- 
-@@ -2866,6 +2894,8 @@ class Scheduler(SchedulerInterface):
+@@ -3022,6 +3050,8 @@ class Scheduler(SchedulerInterface):
              if request.request_id not in self.finished_recving_kv_req_ids:
                  return False
              self._update_waiting_for_remote_kv(request)
@@ -1071,7 +479,7 @@ index 88c2ce289c4..f4ee2f16ce2 100644
              if request.num_preemptions:
                  request.status = RequestStatus.PREEMPTED
              else:
-@@ -2905,6 +2935,16 @@ class Scheduler(SchedulerInterface):
+@@ -3059,6 +3089,16 @@ class Scheduler(SchedulerInterface):
          if self.connector is not None:
              self.connector.update_connector_output(kv_connector_output)
  
@@ -1089,28 +497,23 @@ index 88c2ce289c4..f4ee2f16ce2 100644
          for req_id in kv_connector_output.finished_recving or ():
              logger.debug("Finished recving KV transfer for request %s", req_id)
 diff --git a/vllm/v1/engine/__init__.py b/vllm/v1/engine/__init__.py
-index 5ae9ee0cac8..a31ad48de46 100644
+index e5bbb96a9c..516918aa9b 100644
 --- a/vllm/v1/engine/__init__.py
 +++ b/vllm/v1/engine/__init__.py
-@@ -230,9 +230,12 @@ class EngineCoreOutput(
+@@ -231,6 +231,8 @@ class EngineCoreOutput(
+     mm_cache_miss_hashes: list[str] | None = None
+ 
      new_sampling_mask: SamplingMaskLists | None = None
- 
-     # Per-request spec-decode acceptance; attached only on the final output.
--    # Appended last so `array_like` positional serialization stays compatible.
-     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
- 
-+    # Appended last so `array_like` positional serialization stays compatible.
 +    remote_kv_wait_time: float | None = None
 +    kv_transfer_metrics: dict[str, float] | None = None
-+
-     @property
-     def finished(self) -> bool:
-         return self.finish_reason is not None
+ 
+     # Per-request spec-decode acceptance; attached only on the final output.
+     # Appended last so `array_like` positional serialization stays compatible.
 diff --git a/vllm/v1/engine/output_processor.py b/vllm/v1/engine/output_processor.py
-index 8260c3d326e..136cb0bdc93 100644
+index e739e83b1c..465c7f3e8f 100644
 --- a/vllm/v1/engine/output_processor.py
 +++ b/vllm/v1/engine/output_processor.py
-@@ -654,6 +654,17 @@ class OutputProcessor:
+@@ -690,6 +690,17 @@ class OutputProcessor:
              stop_reason = engine_core_output.stop_reason
              kv_transfer_params = engine_core_output.kv_transfer_params
              ec_transfer_params = engine_core_output.ec_transfer_params
@@ -1129,10 +532,10 @@ index 8260c3d326e..136cb0bdc93 100644
                  req_state.routed_experts_chunks.append(
                      engine_core_output.routed_experts
 diff --git a/vllm/v1/metrics/stats.py b/vllm/v1/metrics/stats.py
-index 3dbc5206ca9..3aafee6935f 100644
+index 66088c7954..45afed4ff1 100644
 --- a/vllm/v1/metrics/stats.py
 +++ b/vllm/v1/metrics/stats.py
-@@ -232,6 +232,9 @@ class RequestStateStats:
+@@ -234,6 +234,9 @@ class RequestStateStats:
      # first token latency
      first_token_latency: float = 0.0
  
@@ -1143,10 +546,10 @@ index 3dbc5206ca9..3aafee6935f 100644
      is_corrupted: bool = False
  
 diff --git a/vllm/v1/request.py b/vllm/v1/request.py
-index 8b453a09069..c50850887b2 100644
+index 4b1b9ecc2e..4dcf2c5ae9 100644
 --- a/vllm/v1/request.py
 +++ b/vllm/v1/request.py
-@@ -101,6 +101,11 @@ class Request:
+@@ -103,6 +103,11 @@ class Request:
  
          # P/D: Connector-specific KV transfer parameters.
          self.kv_transfer_params: dict[str, Any] | None = None
@@ -1158,7 +561,7 @@ index 8b453a09069..c50850887b2 100644
          # E/P/D: Connector-specific encoder-cache transfer parameters.
          self.ec_transfer_params: dict[str, Any] | None = None
  
-@@ -334,6 +339,16 @@ class Request:
+@@ -341,6 +346,16 @@ class Request:
      ) -> None:
          self.events.append(EngineCoreEvent.new_event(event_type, timestamp))
  

@@ -53,6 +53,8 @@ The vLLM community horizontally supports many LLM post-training frameworks, incl
 - **rollout (vLLM + router)**: Launches vLLM inference engines and routes generation requests; custom generate functions can wrap generation with multi-turn loops, tool calls, environment/sandbox interaction, and verifier-based rewards.
 - **data buffer**: A bridge module that manages prompt initialization, custom data, and rollout generation methods, including agentic workflows that produce samples through the same interface.
 
+The default payload transport is Ray `object-store`. `--rollout-data-transport straw` persists prompt tasks, rollout continuations, and training batches on shared storage. See the [straw architecture and recovery guide](docs/en/advanced/straw.md).
+
 ## Quick Start
 
 For a comprehensive quick start guide covering environment setup, data preparation, training startup, and key code analysis, please refer to:

@@ -145,7 +145,9 @@ def test_launch_config_single_node(vllm_args):
     vllm_args.num_gpus_per_node = 8
     vllm_args.rollout_num_gpus_per_engine = 4
     vllm_args.vllm_pipeline_parallel_size = 1
-    sa, _ = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
+    sa, external_check_fields = mod._compute_server_args(
+        vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000
+    )
     assert sa["nnodes"] == 1
     assert sa["node_rank"] == 0
     assert sa["_tp_size"] == 4
@@ -153,6 +155,8 @@ def test_launch_config_single_node(vllm_args):
     assert sa["_pcp_size"] == 1
     assert sa["_dp_size"] == 1
     assert sa["enable_per_request_metrics"] is True
+    assert sa["enable_scale_out"] is True
+    assert "enable_scale_out" not in external_check_fields
 
 
 @pytest.mark.unit
@@ -280,6 +284,15 @@ def test_compute_server_args_applies_rollout_and_dtype_flags(vllm_args):
     assert sa["per_request_spec_decode_metrics"] == "summary"
     assert sa["return_sampling_mask"] is True
     assert sa["dtype"] == "float16"
+
+
+@pytest.mark.unit
+def test_compute_server_args_enables_sampling_mask_logprobs_for_score_centering(vllm_args):
+    vllm_args.rollout_top_p = 0.9
+    vllm_args.use_score_centering = True
+    sa, _ = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
+    assert sa["return_sampling_mask"] is True
+    assert sa["return_sampling_mask_logprobs"] is True
 
 
 @pytest.mark.unit
@@ -739,25 +752,21 @@ def test_resume_memory_occupation_returns_none_for_unsupported_tags(vllm_engine,
 
 
 @pytest.mark.unit
-def test_release_memory_occupation_flushes_then_posts_sleep(vllm_engine, monkeypatch):
+def test_release_memory_occupation_keeps_requests_during_sleep(vllm_engine, monkeypatch):
     calls: list[str] = []
-
-    def fake_flush_cache():
-        calls.append("flush_cache")
 
     def fake_post(url, *, params=None, timeout=30, json=None):
         calls.append(url)
-        assert params == {"level": 2}
+        assert params == {"level": 2, "mode": "keep"}
         assert timeout == 30
         assert json is None
         return _MockResponse(json_data={"ok": True, "sleep_mode": True})
 
     vllm_engine.args.vllm_enable_sleep_mode = False
-    monkeypatch.setattr(vllm_engine, "flush_cache", fake_flush_cache)
     monkeypatch.setattr(mod.requests, "post", fake_post)
 
     assert vllm_engine.release_memory_occupation(level=2) == {"ok": True, "sleep_mode": True}
-    assert calls == ["flush_cache", "http://127.0.0.1:8765/sleep"]
+    assert calls == ["http://127.0.0.1:8765/sleep"]
 
 
 @pytest.mark.unit

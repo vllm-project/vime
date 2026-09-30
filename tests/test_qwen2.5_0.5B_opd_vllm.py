@@ -52,6 +52,7 @@ def _launch_teacher_server(teacher_gpu: str):
             "--gpu-memory-utilization",
             "0.6",
             "--trust-remote-code",
+            "--enable-scale-out",
         ],
         env=env,
         stdout=log_file,

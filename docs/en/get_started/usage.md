@@ -151,6 +151,8 @@ For details on some of vLLM's customizations and the principles behind how vime 
 
 ### Data Format
 
+Raw data is managed by the DataSource. The built-in DataSource loads `--prompt-data` when provided; use `--data-source-path` for custom data management.
+
 vime supports `.jsonl` and `.parquet` files; reading Parquet requires `pyarrow`. Each record in either format should contain the fields selected by `--input-key` and `--label-key`. An expanded JSONL record looks like this:
 
 ```json
@@ -203,6 +205,7 @@ The recommended contract is to put the source identifier in `metadata["source_na
   Note: On-policy distillation (OPD) is now orthogonal to the advantage estimator. Use `--use-opd` and `--opd-kl-coef` to enable OPD on top of any estimator.
 - `--calculate-per-token-loss`: By default, vime calculates loss on a per-sample basis, i.e., `mean(sum(sample_i) / len(sample_i))`. Enable this flag to calculate loss on a per-token basis, i.e., `sum(sum(sample_i)) / sum(len(sample_i))`.
 - `--use-tis`: Enable this setting to use TIS (Truncated Importance Sampling) (https://fengyao.notion.site/off-policy-rl).
+- `--use-score-centering`: Enable [Score Centering](https://arxiv.org/abs/2609.20807), optionally combined with TIS. See [Score Centering](#score-centering) below.
 
 #### GRPO Algorithm
 
@@ -251,6 +254,40 @@ PPO-related parameters:
 - `--eps-clip`: PPO clip range.
 - `--value-clip`: Clip range for value loss.
 - `--kl-coef`: KL penalty coefficient for reward shaping.
+
+#### Score Centering
+
+[Score Centering Stabilizes Off-policy Reinforcement Learning](https://arxiv.org/abs/2609.20807) introduces an additive correction to reduce drift caused by training-inference mismatch. It can also be combined with importance sampling. In vime, score centering (SC) is supported by the Megatron backend with non-streaming vLLM rollouts.
+
+Add the following options to an existing RL launch:
+
+```bash
+--use-score-centering \
+--score-centering-top-k 128 \
+--pg-loss-type reinforce \
+--advantage-estimator grpo \
+--disable-grpo-std-normalization \
+--calculate-per-token-loss \
+--rollout-temperature 1.0 \
+--rollout-top-p 1.0 \
+--rollout-top-k -1 \
+--entropy-coef 0 \
+--kl-coef 0
+```
+
+- `--use-score-centering`: Enable the REINFORCE score-centering objective. If `--pg-loss-type` is omitted, SC selects `reinforce` automatically. Without SC, the existing PPO/CISPO default is preserved. SC cannot be combined with `--pg-loss-type ppo` or the GSPO/CISPO advantage estimators; PPO clipping parameters do not affect the REINFORCE objective.
+- `--score-centering-top-k`: Applies only when `--rollout-top-p 1`. Number of sampler top-k token IDs and logprobs retained for each response token; defaults to 128 and must fit the model vocabulary. The head retains its full-vocabulary probability mass. The remaining sampler mass is modeled as proportional to the current trainer's tail mass.
+- `--use-tis`: Optional and independent of SC. Combine the two to center the weighted scores using `--tis-clip-low` and `--tis-clip`. The built-in `vime.backends.megatron_utils.loss.icepop_function` is also supported through `--custom-tis-function-path`; arbitrary custom TIS callbacks are not supported with SC. REINFORCE uses detached current-trainer/sampler weights, while PPO preserves its old-trainer/sampler weights.
+
+**Sampling requirements:** Use a positive temperature, `0 < top_p <= 1`, `top_k=-1`, `min_p=0`, and no repetition/frequency/presence penalties or constrained decoding. Keep `VLLM_RETURN_ORIGINAL_LOGPROB` unset or false on all sampler workers when temperature differs from one or top_p is below one. Per-request temperature or top_p changes and streaming SC are unsupported. Evaluation does not request SC data and may use its own sampling settings.
+
+**Combining with top-p replay:** Change `--rollout-top-p 1.0` above to, for example, `--rollout-top-p 0.9`. SC automatically sums over the complete replay support and ignores `--score-centering-top-k`. Rollout returns all support IDs and their post-truncation, normalized sampler logprobs. The trainer normalizes on the same support and computes the correction `sum(stop_gradient(q * weight) * log p)`. This uses no tail approximation and excludes tokens outside the support. Full trainer logits cannot reconstruct the sampler probabilities, so the original probabilities must still be stored. Payload size varies with the support and can greatly exceed fixed top-k heads when top-p approaches one. Exactness is relative to the recorded replay support, including replay's existing rule for retaining sampled boundary tokens.
+
+**vLLM support:** For `top_p=1`, Vime requests `k+1` native vLLM top logprobs and retains the highest-probability `k`. For `top_p<1`, it requests all logprobs, intersects them with vLLM's sampling mask, and normalizes the recorded support. Custom generators should call `score_centering_request` from `vime.utils.score_centering` and pass equivalent metadata to `Sample.append_response_tokens`.
+
+Top-p probabilities stay on CPU with replay IDs/offsets and support partial rollouts, masked tool tokens, DP, TP, and both CP layouts. Exact top-p SC has a larger response payload because vLLM currently returns the full logprob vector before Vime selects the replay support.
+
+Sampler heads survive partial-rollout continuation, masked tool tokens, DP partitioning, microbatch selection, TP and both CP layouts. With the R3 spill hook, they share its file lifetime. Logged metrics include `sc_correction`, `sc_sampler_head_mass`, `sc_train_head_mass` and `sc_importance_weight`.
 
 ### Advanced Megatron Configuration (--megatron-config-path)
 
@@ -351,6 +388,49 @@ vime supports customizing data generation (rollout) to various degrees.
     For a more complete version, please refer to [vime/rollout/vllm_rollout.py](https://github.com/vllm-project/vime/blob/main/vime/rollout/vllm_rollout.py).
 
   - Sometimes, you may also need to support a custom reward model. This can be configured by setting `--custom-rm-path`.
+
+### Persistent rollout queue and distributed fully async
+
+The default rollout transport is Ray `object-store`, which does not require a
+shared directory. `--rollout-data-transport nixl` selects Ray's NIXL tensor transport.
+For persistent queues and packed tensor storage across machines, use
+[straw](../advanced/straw.md) with a shared JuiceFS directory.
+
+To enable distributed fully async rollout with straw, add:
+
+```bash
+--rollout-function-path vime.rollout.fully_async_rollout.generate_rollout_fully_async \
+--rollout-data-transport straw \
+--rollout-data-dir /shared/run/rollout_data
+```
+
+All nodes must mount the directory at the same absolute path and install `straw-queue>=0.1.2`.
+
+With straw transport, `--use-rollout-routing-replay` stores completed samples' R3 routes in straw with their owning sample group. SC tensors are also stored in the same publication when `--use-score-centering` is enabled, including SC without R3. The default object-store transport keeps these tensors in memory unless the existing disk-spill hook is configured; that hook remains available for object-store rollouts. User sample hooks run first; R3, SC and sample metadata are published together into shared pack files. Later queue publications reuse their references. Large group bundles are split by the native record-count limit. Aborted prefixes are persisted by the queue continuation path. `--rollout-queue-online-gc` is a separate opt-in: after training acknowledges completion, straw can reclaim sealed packs whose owners have all released them. It is disabled by default.
+
+One job-owned, non-restarting Ray actor coordinates task leases and a serialized dataset producer. Dataset cursor advancement and task submission are committed together. Workers receive small task references and read prompt groups directly from shared storage. This replaces the former in-memory distributed index allocator; no per-reader index ranges are abandoned on failure. Seeded shuffle and sample/group identities remain those of the existing data source.
+
+`get_samples(n)` and `add_samples(groups)` retain their interfaces. Custom producers can pass `source.reader_config("unique_reader_id")` to a remote process and call `config.open()` there. IDs must be unique; `owner` is reserved. Returned partial groups are persisted and become available to every reader; there is no reader-local sample buffer. Readers renew leases; a stopped reader returns unfinished tasks, while lost workers' tasks become available after lease expiry. Newly generated retries have new attempts. Recovery uses the normal `--load`/`--save` checkpoint flow, with optional `--ckpt-step`; the selected checkpoint restores the queue branch and dataset cursor, so no separate queue-resume flag is needed.
+
+Fully async starts one generation process per Ray node with CPU resources. Each reserves one CPU and receives a share of the configured concurrency in complete prompt groups. Faster workers may fill a global batch without waiting for slower ones. Local generation queues and collector prefetch remain bounded. Complete groups pass through the existing dynamic filter before publication; rejected groups contribute filter metrics. Distributed fully async still rejects `--rollout-all-samples-process-path`. The synchronous all-samples hook retains its existing Samples and calling order.
+
+The default logical result is a complete filtered group; physical segment boundaries do not define training groups. Workers encode Samples explicitly and store large tensors as typed dependencies. The format uses immutable committed extents in append-only `.pack` files, relative references and checksums, with no pickle payload protocol. Unsupported custom field types fail explicitly. See the [straw architecture, deployment and recovery guide](../advanced/straw.md).
+
+Built-in producers return a collection manifest. Legacy custom rollouts can still return Sample lists; Manager publishes and accepts one compatibility collection. New producers may return an accepted `RawRolloutRef`; Manager validates its receipt and passes it to the same BatchBuilder without rewriting its payload. BatchBuilder preserves reward/conversion hooks and DP scheduling, records the selection plan, and publishes all rank shards before exposing `TrainBatchRef`s. All rank references identify the same batch and plan.
+
+The vime adapter currently binds the shared root at the same absolute path on all nodes and checks visibility in both directions. The underlying store's references are relocatable. r3/sc dependencies are adopted into queue storage before references escape the producer; old rollout spill cleanup cannot remove them. Queue files are retained by default. Offline inspection/cleanup requires stopped writers, coordinator and readers; ordinary reads or batch-ready events never delete data. Debug archives can reuse immutable Straw records; `.pt` exports remain available. Evaluation follows the existing path.
+
+Straw checkpoints commit model, optimizer/RNG, queue, builder and dataset-cursor state together. `--load` restores the latest valid joint checkpoint by default; `--ckpt-step` selects a step in the active branch history. Restore creates an isolated branch from that snapshot, leaving the source run unchanged and excluding later-produced samples. Repeated rollback follows the active branch and cannot cross a fork point. If a model checkpoint predates a straw queue snapshot, recovery starts with an empty queue and restores the saved dataset cursor when available; a damaged or incomplete joint snapshot fails rather than silently falling back. This is durable queue/data state; it does not restore GPU KV cache or generation RNG.
+
+R3 training reads only the CP/TP rows assigned to the current rank. Batched continuation publication, loading and state persistence reuse authenticated indices within a bounded read session; receipt lookups use batch RPCs. These optimizations preserve checksums, WAL durability and GC ownership. Read sessions do not replace ownership pins.
+
+Distributed fully async producers stop admitting new groups while weights synchronize, then resume if another training rollout remains. In-flight results still finish and persist.
+
+Joint checkpoint restore defers background GC until the saved training consumer state and its restored storage ownership are durable. Unavailable checkpoint data fails restoration before GC starts.
+
+Restored reader buffers keep an explicit storage reference independent of filter decisions. A later data-source checkpoint moves that reference only after all active and not-yet-started consumers are captured in a complete, retained, durable snapshot. Retiring an older checkpoint can then release its obsolete tensors without losing resumable prefixes. A failed save keeps the previous reference; checkpoint retirement remains the caller's responsibility.
+
+The manager still materializes the selected batch for conversion, so manager memory and shared-storage bandwidth remain limits. `--rollout-io-concurrency` bounds publication I/O submissions. straw's storage, journal and GC implementation is Rust; vime retains Python sample conversion and training integration. Measure throughput for the intended model, concurrency and shared filesystem before changing deployment defaults.
 
 ## How to Use vLLM
 

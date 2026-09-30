@@ -153,15 +153,18 @@ RUN cd Megatron-LM && \
 # so apply the independently maintained patches in their validated order.
 COPY docker/patch/${PATCH_VERSION}/vllm-pull_weights.patch /tmp/vllm-pull_weights.patch
 COPY docker/patch/${PATCH_VERSION}/vllm.patch /tmp/vllm.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-score-centering.patch /tmp/vllm-score-centering.patch
 COPY docker/patch/${PATCH_VERSION}/vllm-pd-request-metrics.patch /tmp/vllm-pd-request-metrics.patch
 COPY docker/patch/${PATCH_VERSION}/vllm-inflight-queue-diagnostics.patch /tmp/vllm-inflight-queue-diagnostics.patch
 RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirname(vllm.__file__)))')" && \
     cd "$VLLM_SITE" && \
     git apply -v /tmp/vllm-pull_weights.patch && \
     git apply -v --allow-empty /tmp/vllm.patch && \
+    git apply -v /tmp/vllm-score-centering.patch && \
     git apply -v /tmp/vllm-pd-request-metrics.patch && \
     git apply -v /tmp/vllm-inflight-queue-diagnostics.patch && \
     rm /tmp/vllm-pull_weights.patch /tmp/vllm.patch \
+       /tmp/vllm-score-centering.patch \
        /tmp/vllm-pd-request-metrics.patch \
        /tmp/vllm-inflight-queue-diagnostics.patch
 

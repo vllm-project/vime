@@ -53,6 +53,8 @@ vLLM 社区横向支持许多 LLM post-training 框架，包括（按字母顺�
 - **rollout (vLLM + router)**：启动 vLLM 推理引擎并路由生成请求；自定义生成函数可以在其上封装多轮循环、工具调用、环境/沙盒交互和基于 verifier 的奖励；
 - **data buffer**：桥梁模块，管理 prompt 初始化、自定义数据与 rollout 生成方法，包括通过同一接口产出样本的 agent 工作流。
 
+默认载荷传输为 Ray `object-store`。`--rollout-data-transport straw` 可在共享存储上持久化 prompt 任务、rollout continuation 和训练 batch。详见 [straw 架构与恢复指南](docs/zh/advanced/straw.md)。
+
 ## 快速开始
 
 有关环境配置、数据准备、训练启动和关键代码分析的完整快速开始指南，请参考：

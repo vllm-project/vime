@@ -95,7 +95,6 @@ def execute_train(
     train_args: str,
     num_gpus_per_node: int,
     megatron_model_type: str | None,
-    train_script: str = "train.py",
     before_ray_job_submit=None,
     extra_env_vars=None,
     config: ExecuteTrainConfig | None = None,
@@ -189,7 +188,7 @@ def execute_train(
             exec_command(
                 f"export {amd_exports} && "
                 f"{cmd_megatron_model_source}"
-                f"python3 {train_script} {model_args} {train_args}"
+                f"python3 train.py {model_args} {train_args}"
             )
         else:
             exec_command(
@@ -197,7 +196,7 @@ def execute_train(
                 f"{cmd_megatron_model_source}"
                 f'ray job submit --address="http://127.0.0.1:8265" '
                 f"--runtime-env-json='{runtime_env_json}' "
-                f"-- python3 {train_script} "
+                f"-- python3 train.py "
                 f"{model_args} "
                 f"{train_args}"
             )

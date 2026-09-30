@@ -154,6 +154,8 @@ vLLM 的加载非常简单，只需要：
 
 ### 数据格式
 
+原始数据统一由 DataSource 管理。有 `--prompt-data` 时内置 DataSource 会加载数据；需要自行管理数据时可通过 `--data-source-path` 提供自定义实现。
+
 vime 支持加载 `.jsonl` 和 `.parquet` 格式文件；读取 Parquet 需要安装 `pyarrow`。两种格式中的每条记录都应包含 `--input-key` 和 `--label-key` 指定的字段。下面是一条 JSONL 数据展开后的示例：
 
 ```json
@@ -206,6 +208,7 @@ vime 支持加载 `.jsonl` 和 `.parquet` 格式文件；读取 Parquet 需要�
   注意：在策略蒸馏 (OPD) 现在与 advantage estimator 正交，使用 `--use-opd` 和 `--opd-kl-coef` 可以在任意 estimator 之上启用 OPD。
 - `--calculate-per-token-loss`：vime 中默认的方案是 per sample loss，即 `mean(sum(sample_i) / len(sample_i))`，如果需要计算 per token loss，即 `sum(sum(sample_i)) / sum(len(sample_i))`，可以开启 `--calculate-per-token-loss`；
 - `--use-tis`：如果需要开启 tis（https://fengyao.notion.site/off-policy-rl），可以开启这一设置；
+- `--use-score-centering`：启用 [Score Centering](https://arxiv.org/abs/2609.20807)，可与 TIS 组合使用，详见下方的 [Score Centering](#score-centering)。
 
 #### GRPO 算法
 
@@ -254,6 +257,40 @@ PPO 相关参数：
 - `--eps-clip`：PPO clip 范围；
 - `--value-clip`：value loss 的 clip 范围；
 - `--kl-coef`：KL penalty 系数，用于 reward shaping。
+
+#### Score Centering
+
+[Score Centering Stabilizes Off-policy Reinforcement Learning](https://arxiv.org/abs/2609.20807) 提出了一种加性修正，用于减轻训练与推理不一致引起的梯度漂移，也可以与重要性采样组合使用。vime 的 score centering（SC）目前支持 Megatron backend 和非流式 vLLM rollout。
+
+在已有的 RL 启动命令中加入以下配置：
+
+```bash
+--use-score-centering \
+--score-centering-top-k 128 \
+--pg-loss-type reinforce \
+--advantage-estimator grpo \
+--disable-grpo-std-normalization \
+--calculate-per-token-loss \
+--rollout-temperature 1.0 \
+--rollout-top-p 1.0 \
+--rollout-top-k -1 \
+--entropy-coef 0 \
+--kl-coef 0
+```
+
+- `--use-score-centering`：启用 REINFORCE score-centering 目标。省略 `--pg-loss-type` 时，SC 会自动选择 `reinforce`；未开启 SC 时保留原有的 PPO/CISPO 默认行为。SC 不能与 `--pg-loss-type ppo` 或 GSPO/CISPO advantage estimator 组合，PPO clipping 参数不影响 REINFORCE 目标。
+- `--score-centering-top-k`：仅在 `--rollout-top-p 1` 时生效。每个 response token 保存的 sampler top-k token ID 和 logprob 数量，默认为 128，不能超过模型词表大小。top-k 概率保留其在完整词表上的概率质量；剩余的 sampler 概率质量按当前 trainer 的尾部概率分布估计。
+- `--use-tis`：可选，与 SC 独立开关。组合开启时，使用 `--tis-clip-low` 和 `--tis-clip` 对加权后的 score 做 centering。也支持通过 `--custom-tis-function-path` 选择内置的 `vime.backends.megatron_utils.loss.icepop_function`，但不支持与任意自定义 TIS 回调组合。REINFORCE 使用 detached 的当前 trainer/sampler 权重，PPO 保留原有的旧 trainer/sampler 权重。
+
+**采样要求：** temperature 必须为正，使用 `0 < top_p <= 1`、`top_k=-1`、`min_p=0`，不启用 repetition/frequency/presence penalty 或约束解码。temperature 不为 1 或 top_p 小于 1 时，所有 sampler worker 上的 `VLLM_RETURN_ORIGINAL_LOGPROB` 必须未设置或为 false。目前不支持逐请求修改 temperature 或 top_p，也不支持流式 SC。评估不会请求 SC 数据，可以使用独立的采样配置。
+
+**与 top-p replay 组合：** 将上面的 `--rollout-top-p 1.0` 改为例如 `--rollout-top-p 0.9`，SC 会自动改用精确支持集求和，`--score-centering-top-k` 不再生效。rollout 返回每个 token 完整的 replay 支持集及其截断、归一化后的 sampler logprobs；trainer 在同一份支持集上归一化，并计算 `sum(stop_gradient(q * weight) * log p)` 的校正项。不使用论文的长尾近似，也不把支持集外的 token 纳入求和。训练端的完整 logits 本身无法恢复 sampler 概率，因此仍需要保存原始采样概率。传输量随每步支持集大小变化，top-p 接近 1 时可能明显大于固定的 top-k。精确性针对保存的 replay 支持集；沿用 replay 对边界 sampled token 的保留规则。
+
+**vLLM 支持：** `top_p=1` 时，Vime 请求 vLLM 原生的 `k+1` 个 top logprobs，再保留概率最高的 `k` 个；`top_p<1` 时请求全部 logprobs，与 vLLM sampling mask 取交集，并对记录的支持集归一化。自定义 generator 应调用 `vime.utils.score_centering` 中的 `score_centering_request`，并将等价 metadata 传给 `Sample.append_response_tokens`。
+
+top-p 概率与 replay ID/offset 一起驻留在 CPU，支持 partial rollout、masked tool token、DP、TP 和两种 CP 布局。由于 vLLM 当前会先返回完整 logprob 向量，再由 Vime 选择 replay support，因此精确 top-p SC 的响应载荷更大。
+
+sampler top-k 数据支持 partial rollout 续接、masked tool token、DP 划分、microbatch 选择、TP 及两种 CP 布局；使用 R3 spill hook 时共享其文件生命周期。相关日志指标包括 `sc_correction`、`sc_sampler_head_mass`、`sc_train_head_mass` 和 `sc_importance_weight`。
 
 ### 高级 Megatron 配置（--megatron-config-path）
 
@@ -352,6 +389,46 @@ vime 支持不同程度的自定义数据生成（rollout）。
    更完备的版本请查看 [vime/rollout/vllm_rollout.py](https://github.com/vllm-project/vime/blob/main/vime/rollout/vllm_rollout.py)。
 
 - 有的时候，我们还需要支持自定义的 reward model，可以通过配置 `--custom-rm-path` 来进行配置。
+
+### 持久化 rollout 队列和分布式 fully async
+
+默认 rollout 传输为 Ray `object-store`，不需要共享目录。`--rollout-data-transport nixl` 选择 Ray 的 NIXL 张量传输。需要跨机持久化队列和打包张量存储时，使用 [straw](../advanced/straw.md) 和共享 JuiceFS 目录。
+
+启用使用 straw 的分布式 fully async rollout：
+
+```bash
+--rollout-function-path vime.rollout.fully_async_rollout.generate_rollout_fully_async \
+--rollout-data-transport straw \
+--rollout-data-dir /shared/run/rollout_data
+```
+
+所有节点必须以相同绝对路径挂载该目录，并安装 `straw-queue>=0.1.2`。
+
+straw 传输下，开启 `--use-rollout-routing-replay` 后会将已完成 sample 的 R3 routes 随所属 group 一起写入 straw；开启 `--use-score-centering` 时也会在同一次发布中保存 SC 张量，包括只使用 SC 的情况。默认 object-store 传输将这些张量保存在内存中，但仍保留原有的可选磁盘 spill hook。自定义 sample hook 先执行，R3、SC 与 sample 元数据一起发布到共享 pack，后续队列发布复用引用。大批 group 按 native record 数量上限拆分。Aborted prefix 由队列 continuation 路径持久化。`--rollout-queue-online-gc` 是独立开关，默认关闭：训练确认使用完成后，straw 可回收所有 owner 都已释放的 sealed pack。
+
+作业内一个禁止自动重启的 Ray actor 管理任务 lease 和串行 dataset producer。Dataset 游标与任务提交在同一日志事务中保存，worker 通过小引用直接读取共享存储中的 prompt group，替代原来的内存索引分配器。Shuffle、group/sample 编号沿用原有数据源逻辑，故障不会丢弃 reader 预留的索引区间。
+
+保留 `get_samples(n)`、`add_samples(groups)` 接口。Custom producer 可以传递 `source.reader_config("unique_reader_id")`，在远端调用 `config.open()`。Reader ID 必须唯一，`owner` 为保留名称。归还的 partial group 持久化后可由任意 reader 领取，不再保留 reader 本地 sample buffer。Reader 定期续租，正常关闭归还未完成任务，故障 worker 的任务在 lease 到期后重试。恢复使用常规的 `--load`/`--save` checkpoint 流程，并可用 `--ckpt-step` 选择步骤；队列分支和 dataset 游标从所选 checkpoint 恢复，不再需要单独的 queue-resume 参数。
+
+Fully async 在每个有 CPU 资源的 Ray 节点启动一个常驻生成进程，每个占用一个 CPU，并按完整 prompt group 分配总并发。快速 worker 可以独立补足全局 batch，保留原有有界生成队列和 collector 预取。完整 group 通过现有 dynamic filter 后才提交；丢弃结果计入过滤指标。分布式 fully async 仍不支持 `--rollout-all-samples-process-path`；同步入口保留其 Samples 和调用顺序。
+
+逻辑提交单位是过滤后的完整 group，物理 segment 不决定训练分组。Sample 使用显式编码，大张量成为 typed blob 依赖；采用`.pack` 追加文件中的不可变已提交区间、相对引用和校验和，不以 pickle 作为 payload 协议。不支持的自定义字段类型会报错。参阅 [straw 架构、部署与恢复指南](../advanced/straw.md)。
+
+内置 producer 返回 collection manifest。旧 custom rollout 仍可返回 Sample 列表，由 Manager 兜底持久化并接受一个兼容 collection；新 producer 可以直接返回关联有效 receipt 的 `RawRolloutRef`。两者进入同一个 BatchBuilder，保留 reward/conversion hook 和 DP 调度。Builder 先保存选择计划，全部 rank shard 持久化后才返回同一 batch ID/plan 的 `TrainBatchRef`。
+
+Vime adapter 当前要求各节点使用同一个绝对挂载路径，并双向检查可见性；底层引用支持重新绑定 root。r3/sc 的临时文件依赖会先复制进队列，旧 spill 清理不会使已提交数据失效。默认保留队列文件；读取、batch-ready 都不删除数据。离线清理要求停止 coordinator、writer 和 reader。Debug 归档可以复用 Straw 的不可变记录，也可导出 `.pt` 文件；evaluation 路径保持原有行为。
+
+Straw checkpoint 会将模型、optimizer/RNG、队列、builder 和 dataset 游标作为一个整体提交。默认 `--load` 恢复最近的有效联合 checkpoint；`--ckpt-step` 可选择当前分支历史中的步骤。恢复会从快照创建隔离分支，不改动源运行，也不会带入快照之后产生的样本。多次回退沿当前分支查找，不能越过分叉点。若模型 checkpoint 没有 straw 队列快照，则从空队列恢复，并在可用时恢复保存的 dataset 游标；联合快照损坏或不完整时直接报错，不会静默降级。这会持久化队列和数据状态，但不会恢复 GPU KV cache 或生成 RNG。
+
+R3 训练只读取当前 CP/TP rank 分配到的行。续跑批量发布、加载和状态保存通过有界读取会话复用已认证索引，结果回执采用批量 RPC 查询。这些优化保留 checksum、WAL 持久化和 GC 所有权约束；读取会话不能替代所有权 pin。
+
+分布式 fully async producer 在权重同步期间停止补发新 group；还有下一次训练 rollout 时，同步后恢复。已开始的请求继续返回并持久化。
+
+从联合 checkpoint 恢复时，先持久化恢复后的训练 consumer 状态及存储引用，再启动后台 GC。所需 checkpoint 数据不可用时，恢复失败且不启动 GC。
+
+恢复的 reader buffer 通过独立于过滤决策的存储引用受到保护。后续数据源 checkpoint 必须完整保存活跃及尚未启动的 consumer，并保留、持久化新快照，才能交接该引用。之后正常退役旧 checkpoint 时，可以回收过期张量，同时保留可续跑前缀。保存失败会保留原引用；checkpoint 退役仍由调用方负责。
+
+Manager 仍会读取选中的 batch 做转换，共享存储带宽和 manager 内存仍可能成为瓶颈。`--rollout-io-concurrency` 限制队列发布的 I/O 待办数量。straw 的存储、日志和 GC 由 Rust 实现，vime 保留 Python sample 转换和训练集成。改变部署默认值前，需针对实际模型、并发和共享文件系统测量吞吐。
 
 ## vLLM 使用方法
 

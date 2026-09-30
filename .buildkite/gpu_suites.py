@@ -23,7 +23,7 @@ import os
 import subprocess
 
 GPU_QUEUE = "mithril-h100-pool"
-CI_IMAGE = "vllm/vime:latest"
+CI_IMAGE = os.environ.get("VIME_CI_IMAGE", "vllm/vime:latest")
 HF_CACHE_HOST_PATH = "/mnt/hf-cache"
 HF_HOME = "/root/.cache/huggingface"
 NODE_INSTANCE_TYPE = "gpu-h100-sxm"
@@ -31,7 +31,6 @@ NODE_INSTANCE_TYPE = "gpu-h100-sxm"
 # (test_file, num_gpus, extra_args, env overrides)
 SUITES = {
     "short": [
-        ("test_qwen3.5_0.8B_gsm8k_async_short.py", 4, "", {}),
         ("test_qwen3.5_0.8B_gsm8k_short.py", 4, "", {}),
         ("test_qwen2.5_0.5B_fully_async_short.py", 4, "", {}),
     ],
@@ -64,8 +63,10 @@ SUITES = {
         ("test_moonlight_16B_A3B_r3.py", 8, "", {"ENABLE_EVAL": "0"}),
         ("test_mimo_7B_mtp_only_grad.py", 8, "", {}),
         ("test_qwen2.5_0.5B_debug_rollout_then_train.py", 8, "", {}),
+        ("test_straw_checkpoint_fork.py", 4, "", {}),
         ("test_qwen2.5_0.5B_opd_vllm.py", 8, "", {}),
         ("test_qwen2.5_0.5B_fanout_short.py", 4, "", {}),
+        ("test_qwen2.5_0.5B_score_centering.py", 2, "", {}),
         ("test_qwen2.5_0.5B_debug_train_dump_e2e.py", 8, "", {}),
         ("test_qwen3_4B_external_pd.py", 6, "", {"VIME_TEST_UPDATE_MODE": "delta"}),
     ],

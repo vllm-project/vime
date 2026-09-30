@@ -353,8 +353,9 @@ class VLLMEngine(RayActor):
         return result
 
     def release_memory_occupation(self, level: int = 2):
-        self.flush_cache()
-        response = requests.post(f"http://{self.server_host}:{self.server_port}/sleep", params={"level": level})
+        response = requests.post(
+            f"http://{self.server_host}:{self.server_port}/sleep", params={"level": level, "mode": "keep"}
+        )
         response.raise_for_status()
         if not response.content or not response.content.strip():
             return {"ok": True}
@@ -644,6 +645,7 @@ def _compute_server_args(
         "tensor_parallel_size": tp,
         "logprobs_mode": "processed_logprobs",
         "enable_prompt_tokens_details": True,
+        "enable_scale_out": True,
         "enable_per_request_metrics": True,
         "enable_server_load_tracking": True,
     }
@@ -686,6 +688,10 @@ def _compute_server_args(
         kwargs["per_request_spec_decode_metrics"] = "summary"
     if getattr(args, "rollout_top_p", 1.0) != 1.0:
         kwargs["return_sampling_mask"] = True
+        if getattr(args, "use_score_centering", False):
+            kwargs["return_sampling_mask_logprobs"] = True
+    if getattr(args, "use_score_centering", False) and getattr(args, "rollout_top_p", 1.0) == 1.0:
+        kwargs["max_logprobs"] = args.score_centering_top_k + 1
     if args.fp16:
         kwargs["dtype"] = "float16"
 
@@ -779,4 +785,5 @@ _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS = [
     "enable_prompt_tokens_details",
     "enable_per_request_metrics",
     "enable_server_load_tracking",
+    "enable_scale_out",
 ]

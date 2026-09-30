@@ -153,6 +153,7 @@ def _launch_vllm_server(
         "processed_logprobs",
         "--enable-prompt-tokens-details",
         "--enable-server-load-tracking",
+        "--enable-scale-out",
         "--kv-transfer-config",
         json.dumps({"kv_connector": "NixlConnector", "kv_role": kv_role}),
         "--weight-transfer-config",

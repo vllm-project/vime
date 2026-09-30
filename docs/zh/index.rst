@@ -21,6 +21,7 @@ vime 构建于 `slime <https://github.com/THUDM/slime>`_ 之上，slime 正是 G
 - 构建 agentic RL workflow：:doc:`get_started/agent`
 - 配置生产级 vLLM rollout topology：:doc:`advanced/vllm-config`
 - 接入 external rollout engines：:doc:`advanced/external-rollout-engines`
+- 使用 straw 持久化分布式 rollout 与共享张量：:doc:`advanced/straw`
 - 以字节级 delta 同步权重：:doc:`advanced/delta-weight-sync`
 - 使用 PD disaggregation：:doc:`advanced/pd-disaggregation`
 - 使用 BF16 训练 + FP8 rollout 或 FP8 KV cache：:doc:`advanced/low-precision`
@@ -63,6 +64,7 @@ vime 构建于 `slime <https://github.com/THUDM/slime>`_ 之上，slime 正是 G
    advanced/low-precision.md
    advanced/reproducibility.md
    advanced/fault-tolerance.md
+   advanced/straw.md
    advanced/observability.md
    advanced/pd-disaggregation.md
    advanced/external-rollout-engines.md

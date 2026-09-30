@@ -21,6 +21,7 @@ Start by Use Case
 - Build agentic RL workflows: :doc:`get_started/agent`
 - Configure production vLLM rollout topology: :doc:`advanced/vllm-config`
 - Connect external rollout engines: :doc:`advanced/external-rollout-engines`
+- Persist distributed rollout and shared tensors with straw: :doc:`advanced/straw`
 - Sync weights as byte-level deltas: :doc:`advanced/delta-weight-sync`
 - Use PD disaggregation: :doc:`advanced/pd-disaggregation`
 - Use BF16 training with FP8 rollout or FP8 KV cache: :doc:`advanced/low-precision`
@@ -63,6 +64,7 @@ Start by Use Case
    advanced/low-precision.md
    advanced/reproducibility.md
    advanced/fault-tolerance.md
+   advanced/straw.md
    advanced/observability.md
    advanced/pd-disaggregation.md
    advanced/external-rollout-engines.md

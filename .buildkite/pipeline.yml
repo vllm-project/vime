@@ -64,9 +64,10 @@ steps:
         python:3.11 bash -c '
           set -euo pipefail
           pip install -q torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle blake3 xxhash zstandard psutil wandb
+          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle blake3 xxhash zstandard psutil wandb "straw-queue>=0.1.2"
           pip install -q -e . --no-deps
           python tests/test_megatron_argument_validation.py
+          python tests/test_optional_straw.py
           python tests/test_value_temperature.py
           python tests/test_docs_consistency.py
           python tests/test_placement_group.py
@@ -140,18 +141,26 @@ steps:
         -e GIT_CONFIG_PARAMETERS="'safe.directory=/workspace'" \
         -e GLOO_SOCKET_IFNAME=lo -e TP_SOCKET_IFNAME=lo \
         -v "$$PWD:/workspace" -w /workspace \
-        vllm/vime:latest bash -lc '
+        "$${VIME_CI_IMAGE:-vllm/vime:latest}" bash -lc '
           set -euo pipefail
+          pip install -q "straw-queue>=0.1.2" --break-system-packages
           pip install -q -e . --no-deps --break-system-packages
           for test_file in \
             tests/test_advantage_whiten_cp.py \
             tests/test_accelerator.py \
             tests/test_block_fp8_zero_block.py \
+            tests/test_cuda_stack_offload.py \
             tests/test_deep_ep_tms_patch.py \
+            tests/test_distributed_rollout.py \
             tests/test_discounted_returns.py \
             tests/test_eval_config.py \
             tests/test_filter_long_prompt.py \
             tests/test_fully_async_rollout.py \
+            tests/test_queue_sample_codec.py \
+            tests/test_rollout_straw_transport.py \
+            tests/test_routed_experts_disk_layout.py \
+            tests/test_straw_fully_async_recovery.py \
+            tests/test_straw_r3.py \
             tests/test_glm52_layerwise_comparison.py \
             tests/test_glm5_indexer_q_norm.py \
             tests/test_glm5_indexer_short_context.py \
@@ -160,11 +169,17 @@ steps:
             tests/test_model_provider_freeze.py \
             tests/test_policy_loss.py \
             tests/test_ppo_kl_metric.py \
+            tests/test_published_payload_retry.py \
+            tests/test_rollout_metadata_index.py \
+            tests/test_score_centering.py \
+            tests/test_score_centering_transport.py \
             tests/test_process_rollout_data.py \
             tests/test_qwen3_5_vl_native.py \
             tests/test_qwen3_linear_attention_cu_seqlens.py \
             tests/test_read_file_slicing.py \
             tests/test_reloadable_process_group_world.py \
+            tests/test_r3_spill.py \
+            tests/test_rollout_buffer_order.py \
             tests/test_rollout_data_utils.py \
             tests/test_rollout_metrics.py \
             tests/test_rollout_sample_hooks.py \
@@ -174,6 +189,7 @@ steps:
             tests/test_tau_bench_token_delta.py \
             tests/test_train_data_utils.py \
             tests/test_update_weight_factory.py \
+            tests/test_vllm_server_control.py \
             tests/observability/test_trace_utils.py; do
             python -m pytest "$$test_file"
           done
@@ -222,7 +238,7 @@ steps:
             value: short
           - label: "run-ci-vllm-config — 8 GPU, 4 tests"
             value: vllm-config
-          - label: "run-ci-megatron — up to 8 GPU, 21 runs"
+          - label: "run-ci-megatron — up to 8 GPU, 23 runs"
             value: megatron
           - label: "run-ci-vime-customized — 1–8 GPU, 5 tests"
             value: vime-customized

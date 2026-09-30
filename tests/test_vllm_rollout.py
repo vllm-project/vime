@@ -25,6 +25,7 @@ _unit_stubs.install_rollout_optional_stubs()
 from vime.rollout import vllm_rollout as mod
 
 NUM_GPUS = 0
+from vime.utils.async_utils import AsyncPacer
 from vime.utils.eval_config import EvalDatasetConfig
 from vime.utils.types import Sample
 
@@ -64,6 +65,7 @@ class _PatchedGenerateState:
         self.tokenizer = _FakeTokenizer()
         self.processor = None
         self.semaphore = _DummySemaphore()
+        self.generation_pacer = AsyncPacer()
         self.aborted = False
         self.remaining_batch_size = 0
         self.pendings: set = set()
@@ -152,12 +154,13 @@ def _generate_response(
     }
     if weight_version is not None:
         response["weight_version"] = weight_version
+    metrics = dict(request_metrics or {})
     if request_spec_decode_stats is not None:
-        response["request_spec_decode_stats"] = request_spec_decode_stats
+        metrics["speculative_decoding"] = request_spec_decode_stats
     if sampling_mask is not None:
         response["choices"][0]["sampling_mask"] = sampling_mask
-    if request_metrics is not None:
-        response["request_metrics"] = request_metrics
+    if metrics:
+        response["metrics"] = metrics
     return response
 
 
@@ -474,10 +477,12 @@ def test_generate_streaming_records_weight_version(patch_generate_state, monkeyp
                 {
                     "request_id": "stream-7",
                     "weight_version": "step-7",
-                    "request_spec_decode_stats": {
-                        "num_accepted_tokens": 6,
-                        "num_draft_tokens": 8,
-                        "num_verify_steps": 2,
+                    "metrics": {
+                        "speculative_decoding": {
+                            "num_accepted_tokens": 6,
+                            "num_draft_tokens": 8,
+                            "num_verify_steps": 2,
+                        }
                     },
                     "choices": [
                         {
@@ -504,7 +509,7 @@ def test_generate_streaming_records_weight_version(patch_generate_state, monkeyp
                     "request_id": "stream-7",
                     "choices": [],
                     "usage": {"prompt_tokens": 3, "completion_tokens": 2},
-                    "request_metrics": {"queue_time_ms": 100},
+                    "metrics": {"queue_time_ms": 100},
                 },
             ]
             if terminal_only:
@@ -733,6 +738,46 @@ def test_generate_applies_routed_experts(patch_generate_state, monkeypatch):
     np.testing.assert_array_equal(sample.rollout_routed_experts, routed_rows)
     assert len(sample.tokens) == 5
     assert sample.rollout_routed_experts.shape[0] == len(sample.tokens) - 1
+
+
+@pytest.mark.unit
+def test_generate_continuation_appends_only_new_routed_experts(patch_generate_state, monkeypatch):
+    prefix = np.array([[[1], [2]]], dtype=np.int32)
+    suffix = np.array([[[3], [4]]], dtype=np.int32)
+    sample = Sample(
+        index=0,
+        prompt="x",
+        tokens=[9, 3],
+        response_length=1,
+        rollout_log_probs=[-0.2],
+        status=Sample.Status.ABORTED,
+    )
+    sample.rollout_routed_experts = prefix.copy()
+    post_mock = AsyncMock(
+        return_value={
+            "choices": [
+                {
+                    "token_ids": [4],
+                    "finish_reason": "stop",
+                    "routed_experts": _encode_routed(suffix),
+                    "logprobs": {"content": [{"logprob": -0.5}]},
+                }
+            ],
+            "usage": {},
+        }
+    )
+    monkeypatch.setattr(mod, "post", post_mock)
+
+    result = asyncio.run(
+        mod.generate(
+            _rollout_args(use_rollout_routing_replay=True, num_layers=2, moe_router_topk=1),
+            sample,
+            _default_sampling_params(),
+        )
+    )
+
+    assert post_mock.await_args.args[1]["sampling_params"]["routed_experts_prompt_start"] == 1
+    np.testing.assert_array_equal(result.materialize_rollout_routed_experts(), np.concatenate((prefix, suffix)))
 
 
 @pytest.mark.unit
@@ -1000,27 +1045,22 @@ def test_eval_rollout_passk_requests_do_not_share_session_ids(patch_generate_sta
 
 @pytest.mark.unit
 def test_abort_deletes_inflight_without_pause_resume(patch_generate_state, monkeypatch):
-    from vime.backends.vllm_utils import server_control
-
     state = _PatchedGenerateState(_rollout_args())
     state.active_server_generations = 1
     monkeypatch.setattr(mod, "GenerateState", lambda args: state)
 
     aborted = asyncio.Event()
-    posted_paths: list[str] = []
+    aborted_urls: list[str] = []
 
     async def fake_get(url):
         return {"workers": [{"url": "http://w0:9000"}]}
 
-    async def fake_post(url, payload, max_retries=60, headers=None):
-        posted_paths.append(url)
-        if url.endswith("/abort_requests"):
-            aborted.set()
-        return {}
+    async def abort_servers(urls):
+        aborted_urls.extend(urls)
+        aborted.set()
 
     monkeypatch.setattr(mod, "get", fake_get)
-    # abort() drives the delete-type sweep through the server_control helper.
-    monkeypatch.setattr(server_control, "post", fake_post)
+    monkeypatch.setattr(mod, "abort_servers_until_idle", abort_servers)
 
     sample = Sample(index=0, prompt="p")
 
@@ -1036,8 +1076,7 @@ def test_abort_deletes_inflight_without_pause_resume(patch_generate_state, monke
 
     aborted_samples = asyncio.run(run_abort())
 
-    # Only /abort_requests is posted -- never /pause or /resume.
-    assert posted_paths and all(u.endswith("/abort_requests") for u in posted_paths)
+    assert aborted_urls == ["http://w0:9000"]
     assert state.pendings == set()
     # partial_rollout is off by default, so drained groups are discarded, not returned.
     assert aborted_samples == []
@@ -1045,8 +1084,6 @@ def test_abort_deletes_inflight_without_pause_resume(patch_generate_state, monke
 
 @pytest.mark.unit
 def test_abort_collects_partial_samples_when_partial_rollout(patch_generate_state, monkeypatch):
-    from vime.backends.vllm_utils import server_control
-
     args = _rollout_args(partial_rollout=True)
     state = _PatchedGenerateState(args)
     state.active_server_generations = 1
@@ -1057,13 +1094,11 @@ def test_abort_collects_partial_samples_when_partial_rollout(patch_generate_stat
     async def fake_get(url):
         return {"workers": [{"url": "http://w0:9000"}]}
 
-    async def fake_post(url, payload, max_retries=60, headers=None):
-        if url.endswith("/abort_requests"):
-            aborted.set()
-        return {}
+    async def abort_servers(urls):
+        aborted.set()
 
     monkeypatch.setattr(mod, "get", fake_get)
-    monkeypatch.setattr(server_control, "post", fake_post)
+    monkeypatch.setattr(mod, "abort_servers_until_idle", abort_servers)
 
     sample = Sample(index=0, prompt="p")
     sample.response = "partial"
@@ -1166,7 +1201,7 @@ def test_stream_cancellation_closes_http_and_preserves_prefix(patch_generate_sta
     monkeypatch.setattr(mod, "generate", server_generate)
     get_mock = AsyncMock(return_value={"workers": [{"url": "http://worker:9000"}]})
     monkeypatch.setattr(mod, "get", get_mock)
-    monkeypatch.setattr(mod, "abort_inflight_requests", abort_servers)
+    monkeypatch.setattr(mod, "abort_servers_until_idle", abort_servers)
     sample = Sample(prompt="abc", generate_function_path="streaming")
 
     async def exercise():

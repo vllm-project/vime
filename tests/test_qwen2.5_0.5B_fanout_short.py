@@ -40,6 +40,7 @@ Test choices
 
 import os
 import tempfile
+from shlex import quote
 
 import vime.utils.external_utils.command_utils as U
 
@@ -87,6 +88,7 @@ def execute():
     # ``list[list[Sample]]`` and crashes ``async_rm``
     # (`'list' object has no attribute 'metadata'`).
     rollout_args = (
+        "--rollout-data-transport straw "
         "--prompt-data /root/datasets/dapo-math-17k/dapo-math-17k.jsonl "
         "--input-key prompt "
         "--label-key label "
@@ -180,18 +182,20 @@ def execute():
         f"{misc_args} "
     )
 
-    U.execute_train(
-        train_args=train_args,
-        num_gpus_per_node=NUM_GPUS,
-        megatron_model_type=MODEL_TYPE,
-        extra_env_vars={
-            # Make the helper importable by both the Ray driver and workers
-            # without installing test modules as part of the vime package.
-            "PYTHONPATH": f"{TESTS_DIR}:{U.repo_base_dir}:/root/Megatron-LM/",
-            # The helper picks up the shared counter path via os.environ.
-            "VIME_FANOUT_TEST_COUNTER_FILE": FANOUT_COUNTER_FILE,
-        },
-    )
+    with tempfile.TemporaryDirectory(prefix="vime_straw_") as rollout_dir:
+        train_args += f"--rollout-data-dir {quote(rollout_dir)} "
+        U.execute_train(
+            train_args=train_args,
+            num_gpus_per_node=NUM_GPUS,
+            megatron_model_type=MODEL_TYPE,
+            extra_env_vars={
+                # Make the helper importable by both the Ray driver and workers
+                # without installing test modules as part of the vime package.
+                "PYTHONPATH": f"{TESTS_DIR}:{U.repo_base_dir}:/root/Megatron-LM/",
+                # The helper picks up the shared counter path via os.environ.
+                "VIME_FANOUT_TEST_COUNTER_FILE": FANOUT_COUNTER_FILE,
+            },
+        )
 
     # Post-train assertion: compact_generate must have been called exactly
     # ``num_rollout * rollout_batch_size`` = 2 * 4 = 8 times. A regression

@@ -43,6 +43,8 @@ if "transformers" not in sys.modules:
 import pytest
 
 import vime.rollout.fully_async_rollout as fa
+from vime.rollout.filter_hub.base_types import DynamicFilterOutput
+from vime.utils.staleness import compute_staleness_metrics, sample_staleness
 from vime.utils.types import Sample
 
 
@@ -79,7 +81,7 @@ def _make_group(index: int) -> list[Sample]:
 
 def _make_worker(monkeypatch, data_buffer=None, concurrency=4) -> fa.AsyncRolloutWorker:
     monkeypatch.setattr(fa, "GenerateState", _FakeGenerateState)
-    args = SimpleNamespace(rollout_global_dataset=True, rollout_batch_size=4)
+    args = SimpleNamespace(rollout_batch_size=4, n_samples_per_prompt=1)
     return fa.AsyncRolloutWorker(args, data_buffer or _FakeDataBuffer([]), concurrency=concurrency)
 
 
@@ -90,7 +92,9 @@ def test_rollout_takes_target_groups_and_leaves_surplus_queued(monkeypatch):
         worker.output_queue.put((gid, _make_group(gid)))
     monkeypatch.setattr(fa, "_get_global_worker", lambda args, data_buffer: worker)
 
-    args = SimpleNamespace(rollout_global_dataset=True, rollout_batch_size=4)
+    args = SimpleNamespace(
+        rollout_batch_size=4, rollout_data_transport="object-store", rollout_sample_filter_path=None
+    )
     out = asyncio.run(fa._generate_rollout_async(args, rollout_id=0, data_buffer=None))
 
     assert len(out) == 4
@@ -110,6 +114,67 @@ def test_get_completed_groups_limit(monkeypatch):
     assert [gid for gid, _ in worker.get_completed_groups(limit=2)] == [0, 1]
     assert [gid for gid, _ in worker.get_completed_groups()] == [2, 3, 4]
     assert worker.get_completed_groups(limit=3) == []
+
+
+@pytest.mark.unit
+def test_concurrency_is_scaled_by_samples_per_prompt(monkeypatch):
+    monkeypatch.setattr(fa, "GenerateState", _FakeGenerateState)
+    args = SimpleNamespace(n_samples_per_prompt=4)
+    assert fa.AsyncRolloutWorker(args, _FakeDataBuffer([]), concurrency=10).concurrency == 2
+    assert fa.AsyncRolloutWorker(args, _FakeDataBuffer([]), concurrency=2).concurrency == 1
+
+
+@pytest.mark.unit
+def test_dynamic_filter_drops_groups_and_refills(monkeypatch):
+    worker = _make_worker(monkeypatch)
+    for gid in range(8):
+        group = _make_group(gid)
+        group[0].reward = float(gid % 2)
+        worker.output_queue.put((gid, group))
+    monkeypatch.setattr(fa, "_get_global_worker", lambda args, data_buffer: worker)
+
+    def keep_odd(args, group):
+        return DynamicFilterOutput(keep=bool(group[0].reward), reason="even")
+
+    monkeypatch.setattr(fa, "load_function", lambda path: keep_odd)
+    args = SimpleNamespace(
+        rollout_batch_size=3,
+        rollout_data_transport="object-store",
+        rollout_sample_filter_path=None,
+        dynamic_sampling_filter_path="test.keep_odd",
+    )
+    result = asyncio.run(fa._generate_rollout_async(args, rollout_id=7, data_buffer=None))
+
+    assert [group[0].index for group in result.samples] == [1, 3, 5]
+    assert "_dropped_samples" not in result.metrics
+    assert result.metrics["rollout/dynamic_filter/dropped_groups"] == 3
+    assert result.metrics["rollout/dynamic_filter/dropped_ratio"] == 0.5
+    assert result.metrics["rollout/dynamic_filter/drop_even"] == 3
+    assert [gid for gid, _ in worker.get_completed_groups()] == [6, 7]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "versions,expected",
+    [(["10"], 0), (["8"], 2), (["3", "10"], 7), ([], None), (["bad"], None), (["11"], None), (["²"], None)],
+)
+def test_sample_staleness_uses_oldest_valid_version(versions, expected):
+    assert sample_staleness(SimpleNamespace(weight_versions=versions), 10) == expected
+
+
+@pytest.mark.unit
+def test_staleness_metrics_use_serving_snapshot():
+    samples = [
+        SimpleNamespace(weight_versions=["2"]),
+        SimpleNamespace(weight_versions=["3"]),
+        SimpleNamespace(weight_versions=[]),
+    ]
+    assert compute_staleness_metrics(samples, 10) == {
+        "staleness/unknown_count": 1,
+        "staleness/mean": 7.5,
+        "staleness/max": 8,
+    }
+    assert compute_staleness_metrics(samples, None) == {}
 
 
 @pytest.mark.unit
