@@ -296,19 +296,19 @@ def test_build_inference_sampling_params_forwards_disabled_top_k():
 
 @pytest.mark.unit
 def test_inference_generate_tokens_and_logprobs_aligns_partial_content():
-    token_ids, log_probs = mod._inference_generate_tokens_and_logprobs(
-        {
-            "token_ids": [11, 12, 13],
-            "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
-        }
-    )
-    assert token_ids == [11, 12, 13]
-    assert log_probs == [-0.1, -0.2, 0.0]
+    with pytest.raises(ValueError, match="token/logprob length mismatch"):
+        mod._inference_generate_tokens_and_logprobs(
+            {
+                "token_ids": [11, 12, 13],
+                "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
+            }
+        )
 
 
 @pytest.mark.unit
 def test_inference_generate_tokens_and_logprobs_rejects_invalid_token_ids():
-    assert mod._inference_generate_tokens_and_logprobs({"token_ids": [1, "2"]}) == ([], [])
+    with pytest.raises(ValueError, match="non-negative integers"):
+        mod._inference_generate_tokens_and_logprobs({"token_ids": [1, "2"]})
 
 
 @pytest.mark.unit
