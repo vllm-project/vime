@@ -15,7 +15,7 @@ import numpy as np
 import vllm_router  # noqa: F401 — ensures vllm-router is importable on startup
 from tqdm import tqdm
 
-from vime.backends.vllm_utils.server_control import abort_inflight_requests
+from vime.backends.vllm_utils.server_control import abort_inflight_requests, verify_server_drain
 from vime.observability.trace_utils import build_vllm_meta_trace_attrs, trace_function, trace_span
 from vime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
 from vime.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter, should_drop_dynamic_filter_output
@@ -43,6 +43,9 @@ _PROCESSOR_PROMPT_KEYS = {"input_ids", "attention_mask"}
 
 # Re-sweep interval while draining; bounds how long a late straggler can run.
 _ABORT_RESWEEP_INTERVAL_S = 3.0
+# Bounded budget for confirming that the engines really went idle after the
+# abort sweeps. Kept short: this only observes, it must not stall a rollout.
+_ABORT_DRAIN_VERIFY_DEADLINE_S = 5.0
 
 
 def _coerce_flat_int_token_ids(ids: Any) -> list[int]:
@@ -676,6 +679,15 @@ async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
                     sample.metadata["start_rollout_id"] = rollout_id
             aborted_samples.append(group)
             count += len(group)
+
+    if server_abort:
+        # Local pending tasks being empty does not prove the engines are idle:
+        # the abort sweep is best-effort and a late request can still be queued
+        # server-side. Report what the engines actually say so the gap is
+        # observable; enforcing it is a separate, deliberate step.
+        report = await verify_server_drain(urls, deadline_s=_ABORT_DRAIN_VERIFY_DEADLINE_S)
+        if not report.drained:
+            logger.warning(f"Rollout engines not confirmed idle after abort: {report.describe()}")
 
     if args.partial_rollout:
         logger.info(f"Collected {count} partial samples into the data buffer")
