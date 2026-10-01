@@ -2,6 +2,7 @@
 
 import os
 from dataclasses import replace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -146,6 +147,35 @@ def test_loss_metrics_and_gradients_match_dense_reference(
 def test_production_vocab_chunk_boundaries(device, dtype, offset):
     outputs = _outputs(device, dtype, vocab_size=dspark_loss._L1_VOCAB_CHUNK_SIZE + offset)
     _assert_matches_reference(outputs, DSparkConfig())
+
+
+@pytest.mark.parametrize(
+    "draft_requires_grad,target_requires_grad", [(False, False), (True, False), (False, True), (True, True)]
+)
+def test_checkpoint_requires_a_trainable_input(draft_requires_grad, target_requires_grad, monkeypatch):
+    monkeypatch.setattr(dspark_loss, "_L1_VOCAB_CHUNK_SIZE", 8)
+    outputs = _outputs()
+    draft = outputs.draft_logits.requires_grad_(draft_requires_grad)
+    target = outputs.aligned_target_logits.requires_grad_(target_requires_grad)
+    reference_draft = draft.detach().clone().requires_grad_(draft_requires_grad)
+    reference_target = target.detach().clone().requires_grad_(target_requires_grad)
+    with torch.enable_grad(), patch.object(
+        dspark_loss.checkpoint, "checkpoint", wraps=dspark_loss.checkpoint.checkpoint
+    ) as checkpoint_spy:
+        actual = dspark_loss._compute_probability_l1(draft_logits=draft, target_logits=target)
+        expected = (reference_draft.softmax(dim=-1) - reference_target.softmax(dim=-1)).abs().sum(dim=-1)
+    needs_grad = draft_requires_grad or target_requires_grad
+    assert checkpoint_spy.call_count == (3 if needs_grad else 0)
+    assert actual.requires_grad == needs_grad
+    torch.testing.assert_close(actual, expected)
+    if needs_grad:
+        actual.sum().backward()
+        expected.sum().backward()
+        for tensor, reference in ((draft, reference_draft), (target, reference_target)):
+            if tensor.requires_grad:
+                torch.testing.assert_close(tensor.grad, reference.grad, rtol=2e-5, atol=2e-7)
+            else:
+                assert tensor.grad is None
 
 
 @pytest.mark.parametrize("target", [False, True])

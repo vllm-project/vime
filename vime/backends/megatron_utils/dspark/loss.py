@@ -110,7 +110,7 @@ def _compute_probability_l1(
         end = min(start + _L1_VOCAB_CHUNK_SIZE, vocab_size)
         a_slice = draft_logits[..., start:end]
         b_slice = target_logits[..., start:end]
-        if torch.is_grad_enabled():
+        if torch.is_grad_enabled() and (draft_logits.requires_grad or target_logits.requires_grad):
             chunk_l1 = checkpoint.checkpoint(
                 _chunk_l1,
                 a_slice,
