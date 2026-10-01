@@ -536,6 +536,126 @@ index d4064d6f6fe..a9bfd08ba85 100644
  @pytest.fixture(scope="module", autouse=True)
  def clear_kv_transfer():
      """
+diff --git a/tests/v1/kv_connector/unit/test_multi_connector_request_metrics.py b/tests/v1/kv_connector/unit/test_multi_connector_request_metrics.py
+new file mode 100644
+index 0000000..483d543
+--- /dev/null
++++ b/tests/v1/kv_connector/unit/test_multi_connector_request_metrics.py
+@@ -0,0 +1,114 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""per-request transfer metrics must survive a MultiConnector wrapper.
++
++``KVConnectorWorkerMetadata.get_request_metrics()`` is consumed by
++``vllm/v1/core/sched/scheduler.py`` to accumulate ``request.kv_transfer_metrics``.
++When a MultiConnector is configured the worker metadata that reaches the
++scheduler is a ``MultiKVConnectorWorkerMetadata``, so the wrapper has to forward
++what its children report; otherwise every metric is dropped silently.
++
++These tests drive the real classes: ``NixlRequestMetrics`` as the child and
++``MultiKVConnectorWorkerMetadata`` as the wrapper.
++"""
++
++from __future__ import annotations
++
++import logging
++
++import pytest
++
++from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
++    MultiKVConnectorWorkerMetadata,
++)
++from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
++    NixlRequestMetrics,
++)
++
++
++def _wrap(*children: NixlRequestMetrics | None) -> MultiKVConnectorWorkerMetadata:
++    return MultiKVConnectorWorkerMetadata(metadata=tuple(children))
++
++
++def test_single_source_is_passed_through_unchanged():
++    wrapper = _wrap(NixlRequestMetrics({"req-a": {"kv_transfer_bytes": 4096.0}}))
++    assert wrapper.get_request_metrics() == {"req-a": {"kv_transfer_bytes": 4096.0}}
++
++
++def test_none_children_are_skipped_without_dropping_the_others():
++    kept = NixlRequestMetrics({"req-a": {"kv_transfer_bytes": 4096.0}})
++    expected = {"req-a": {"kv_transfer_bytes": 4096.0}}
++    assert _wrap(None, kept).get_request_metrics() == expected
++    assert _wrap(kept, None).get_request_metrics() == expected
++
++
++def test_distinct_request_ids_are_merged_not_crossed():
++    wrapper = _wrap(
++        NixlRequestMetrics({"req-a": {"kv_transfer_bytes": 4096.0}}),
++        NixlRequestMetrics({"req-b": {"kv_transfer_bytes": 512.0}}),
++    )
++    assert wrapper.get_request_metrics() == {
++        "req-a": {"kv_transfer_bytes": 4096.0},
++        "req-b": {"kv_transfer_bytes": 512.0},
++    }
++
++
++def test_same_request_different_fields_are_unioned():
++    wrapper = _wrap(
++        NixlRequestMetrics({"req-a": {"kv_transfer_bytes": 4096.0}}),
++        NixlRequestMetrics({"req-a": {"handshake_wait_time": 0.25}}),
++    )
++    assert wrapper.get_request_metrics() == {"req-a": {"kv_transfer_bytes": 4096.0, "handshake_wait_time": 0.25}}
++
++
++def test_colliding_field_is_reported_once_and_not_summed(caplog):
++    """Two connectors claiming one name must not be added together.
++
++    Their transfers are not known to be disjoint, so the first owner is kept and
++    the collision is logged instead of inventing a total.
++    """
++    wrapper = _wrap(
++        NixlRequestMetrics({"req-a": {"kv_transfer_bytes": 4096.0}}),
++        NixlRequestMetrics({"req-a": {"kv_transfer_bytes": 512.0}}),
++    )
++    with caplog.at_level(logging.WARNING):
++        metrics = wrapper.get_request_metrics()
++    assert metrics == {"req-a": {"kv_transfer_bytes": 4096.0}}
++    assert any("more than one connector" in record.getMessage() for record in caplog.records)
++
++
++def test_identical_values_from_two_connectors_are_not_counted_twice():
++    wrapper = _wrap(
++        NixlRequestMetrics({"req-a": {"kv_transfer_bytes": 4096.0}}),
++        NixlRequestMetrics({"req-a": {"kv_transfer_bytes": 4096.0}}),
++    )
++    assert wrapper.get_request_metrics() == {"req-a": {"kv_transfer_bytes": 4096.0}}
++
++
++def test_empty_children_yield_no_metrics():
++    assert _wrap(None, NixlRequestMetrics({})).get_request_metrics() == {}
++
++
++def test_repeated_reads_do_not_accumulate():
++    wrapper = _wrap(NixlRequestMetrics({"req-a": {"kv_transfer_bytes": 4096.0}}))
++    first = wrapper.get_request_metrics()
++    second = wrapper.get_request_metrics()
++    assert first == second == {"req-a": {"kv_transfer_bytes": 4096.0}}
++
++
++def test_reading_does_not_mutate_the_child():
++    child = NixlRequestMetrics({"req-a": {"kv_transfer_bytes": 4096.0}})
++    _wrap(child).get_request_metrics()
++    assert child.get_request_metrics() == {"req-a": {"kv_transfer_bytes": 4096.0}}
++
++
++def test_metrics_missing_for_a_request_are_absent_rather_than_zero():
++    wrapper = _wrap(
++        NixlRequestMetrics({"req-a": {"kv_transfer_bytes": 4096.0}}),
++        NixlRequestMetrics({}),
++    )
++    assert wrapper.get_request_metrics() == {"req-a": {"kv_transfer_bytes": 4096.0}}
++
++
++if __name__ == "__main__":
++    raise SystemExit(pytest.main([__file__]))
 diff --git a/tests/v1/test_request.py b/tests/v1/test_request.py
 index be417b9b2ff..3b2d33e09db 100644
 --- a/tests/v1/test_request.py
@@ -583,6 +703,51 @@ index b0d7cf23883..d03cba83bee 100644
      @abstractmethod
      def aggregate(
          self, other: "KVConnectorWorkerMetadata"
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py b/vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+index 2b567da792d..8be32c6256b 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+@@ -67,6 +67,40 @@ class MultiKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
+ 
+         return MultiKVConnectorWorkerMetadata(metadata=tuple(metadata_list))
+ 
++    def get_request_metrics(self) -> dict[str, dict[str, float]]:
++        """Forward the per-request metrics reported by each child metadata.
++
++        Without this override the wrapper inherits the no-op default from
++        ``KVConnectorWorkerMetadata``, so the scheduler sees no per-request
++        transfer metrics at all whenever a MultiConnector is configured.
++
++        The children are distinct connector types, so a metric name claimed by
++        more than one of them cannot be assumed to describe disjoint transfers.
++        Such a collision is therefore not summed: the first owner wins and the
++        collision is logged, so the combination rule stays visible instead of
++        silently double counting.
++        """
++        merged: dict[str, dict[str, float]] = {}
++        for child in self.metadata:
++            if child is None:
++                continue
++            for request_id, metrics in child.get_request_metrics().items():
++                target = merged.setdefault(request_id, {})
++                for name, value in metrics.items():
++                    if name in target:
++                        if target[name] != value:
++                            logger.warning(
++                                "MultiConnector: request %s reports %s from more than "
++                                "one connector (%s vs %s); keeping the first value",
++                                request_id,
++                                name,
++                                target[name],
++                                value,
++                            )
++                        continue
++                    target[name] = value
++        return merged
++
+ 
+ @dataclass
+ class MultiKVConnectorStats(KVConnectorStats):
 diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py
 index c8166b2e6ae..bb0f534fe79 100644
 --- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py
