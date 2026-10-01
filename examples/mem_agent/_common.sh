@@ -26,8 +26,23 @@ export MEM_MAX_FINAL="${MEM_MAX_FINAL:-256}"
 export MEM_MAX_CHUNKS="${MEM_MAX_CHUNKS:-64}"
 
 mem_agent_detect_nvlink() {
-  local count
-  count=$(nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l)
+  local topo count
+  # Keep the query and the match counting separate. A machine with no NVLink
+  # legitimately matches nothing, while a failing query must not be mistaken for
+  # one: with `set -euo pipefail` (set above) the old single pipeline turned the
+  # zero-match case into an immediate abort of the calling launcher.
+  if ! topo="$(nvidia-smi topo -m)"; then
+    echo "mem_agent_detect_nvlink: 'nvidia-smi topo -m' failed; NVLink topology unknown" >&2
+    return 1
+  fi
+  if [[ -z "${topo//[[:space:]]/}" ]]; then
+    # An empty matrix is not a valid no-NVLink topology; refuse to guess.
+    echo "mem_agent_detect_nvlink: 'nvidia-smi topo -m' produced no output" >&2
+    return 1
+  fi
+  # `grep -o` exits 1 when it matches nothing, so absorb only that status here;
+  # the query itself has already been checked above.
+  count="$(printf '%s\n' "${topo}" | grep -o 'NV[0-9][0-9]*' | wc -l || true)"
   export NCCL_NVLS_ENABLE=$([[ "${count}" -gt 0 ]] && echo 1 || echo 0)
 }
 
