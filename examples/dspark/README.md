@@ -132,6 +132,35 @@ On Qwen3-4B with 8x A800 GPUs and a pre-trained DSpark draft checkpoint:
    input to the draft model. For a 36-layer model, `"1,9,17,25,33"` samples
    every 8th layer. More target layers = richer draft input but higher cost.
 
+## Loss microbenchmark
+
+The L1 loss and confidence target share one checkpointed, vocabulary-chunked
+probability distance. When L1 is disabled, the confidence target is computed
+without gradients; when both consumers are absent, this work is skipped.
+
+To compare a trusted baseline revision against the current checkout on one
+CUDA GPU (PyTorch is sufficient; Megatron and vLLM are not required):
+
+```bash
+git show <baseline-revision>:vime/backends/megatron_utils/dspark/loss.py > /tmp/dspark_baseline_loss.py
+PYTHONPATH=. python tools/benchmark_dspark_loss.py \
+    --baseline-loss /tmp/dspark_baseline_loss.py \
+    --anchors 64 512 --vocab-size 151936 --dtype bfloat16
+```
+
+The script checks loss, metrics and gradients before timing, alternates the
+implementation order across repeats, and prints JSON with synchronized
+forward-plus-backward wall time and peak allocated GPU memory (including the
+input tensors). Use `--modes both l1 confidence ce` to exercise the loss
+combinations, or reduce `--anchors` for smaller GPUs. These measurements cover
+the loss computation only, not a full draft model or RL iteration.
+
+中文说明：L1 损失与 confidence target 复用同一份按词表分块、保留 checkpoint
+重计算的概率距离。以上命令在单张 CUDA GPU 上对比可信基线与当前实现，先检查
+损失、指标及梯度，再交替测量前向加反向耗时和峰值显存。可用
+`--modes both l1 confidence ce` 检查各损失组合；显存较小时减少 `--anchors`。
+这些结果仅反映损失计算，不代表完整 draft 模型或 RL 迭代的加速。
+
 ## References
 
 1. [DSpark Paper](https://arxiv.org/abs/2505.14269) — Semi-autoregressive speculative decoding.

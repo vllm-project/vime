@@ -75,53 +75,19 @@ def _build_loss_weight_mask(
     return loss_weight_mask
 
 
-def _compute_accept_rate_3d(
+def _compute_probability_l1(
     *,
-    outputs: DSparkForwardOutput,
-    aligned_target_logits: torch.Tensor | None,
-) -> torch.Tensor | None:
-    """Compute per-position acceptance rate: 1 - 0.5 * L1(draft_probs, target_probs).
+    draft_logits: torch.Tensor,
+    target_logits: torch.Tensor,
+) -> torch.Tensor:
+    """Compute per-position L1 distance in FP32 with bounded vocab intermediates.
 
-    Computed without gradients (only used as a detached target for the
-    confidence head). Uses chunked logsumexp to avoid materializing the full
-    vocab-dimension softmax or difference tensors.
+    Gradient checkpointing recomputes each chunk during backward. The same
+    distance also supplies the detached confidence target, so normalization
+    and vocab traversal are shared between the two losses.
     """
-    if aligned_target_logits is None:
-        return None
-    with torch.no_grad():
-        draft_logits = outputs.draft_logits.float()
-        target_logits = aligned_target_logits.float()
-        vocab_size = draft_logits.shape[-1]
-        log_Z_draft = torch.logsumexp(draft_logits, dim=-1, keepdim=True)
-        log_Z_target = torch.logsumexp(target_logits, dim=-1, keepdim=True)
-        l1_shape = draft_logits.shape[:-1]
-        l1_dist = torch.zeros(l1_shape, device=draft_logits.device, dtype=torch.float32)
-        for start in range(0, vocab_size, _L1_VOCAB_CHUNK_SIZE):
-            end = min(start + _L1_VOCAB_CHUNK_SIZE, vocab_size)
-            pa = torch.exp(draft_logits[..., start:end] - log_Z_draft)
-            pb = torch.exp(target_logits[..., start:end] - log_Z_target)
-            l1_dist += (pa - pb).abs().sum(dim=-1)
-        accept_rate_3d = (1.0 - 0.5 * l1_dist).clamp_(0.0, 1.0)
-    return accept_rate_3d
-
-
-def _compute_local_l1_term(
-    *,
-    outputs: DSparkForwardOutput,
-    aligned_target_logits: torch.Tensor | None,
-    loss_weight_mask: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute L1/TV loss numerator and denominator.
-
-    Uses logsumexp + chunked exp + gradient checkpointing to avoid OOM.
-    The full softmax tensors are never materialized; each vocab chunk is
-    recomputed during backward via torch.utils.checkpoint.
-    """
-    zero = outputs.draft_logits.new_zeros((), dtype=torch.float32)
-    if aligned_target_logits is None:
-        return zero, zero
-    draft_logits = outputs.draft_logits.float()
-    target_logits = aligned_target_logits.float()
+    draft_logits = draft_logits.float()
+    target_logits = target_logits.float()
     vocab_size = draft_logits.shape[-1]
 
     # Log partition functions (small, no OOM risk)
@@ -144,19 +110,20 @@ def _compute_local_l1_term(
         end = min(start + _L1_VOCAB_CHUNK_SIZE, vocab_size)
         a_slice = draft_logits[..., start:end]
         b_slice = target_logits[..., start:end]
-        chunk_l1 = checkpoint.checkpoint(
-            _chunk_l1,
-            a_slice,
-            b_slice,
-            log_Z_draft,
-            log_Z_target,
-            use_reentrant=False,
-        )
+        if torch.is_grad_enabled() and (draft_logits.requires_grad or target_logits.requires_grad):
+            chunk_l1 = checkpoint.checkpoint(
+                _chunk_l1,
+                a_slice,
+                b_slice,
+                log_Z_draft,
+                log_Z_target,
+                use_reentrant=False,
+            )
+        else:
+            chunk_l1 = _chunk_l1(a_slice, b_slice, log_Z_draft, log_Z_target)
         l1_dist = l1_dist + chunk_l1
 
-    l1_loss_num = (l1_dist * loss_weight_mask).sum()
-    l1_loss_den = loss_weight_mask.sum()
-    return l1_loss_num, l1_loss_den
+    return l1_dist
 
 
 def _collect_local_terms(
@@ -186,31 +153,32 @@ def _collect_local_terms(
     ce_loss_den = flat_weights.sum()
 
     aligned_target_logits = outputs.aligned_target_logits
-    accept_rate_3d = _compute_accept_rate_3d(
-        outputs=outputs,
-        aligned_target_logits=aligned_target_logits,
-    )
+    has_confidence = outputs.confidence_pred is not None
     zero = ce_loss_num.new_zeros(())
 
     assert (
         l1_loss_alpha <= 0 or aligned_target_logits is not None
     ), "aligned_target_logits is required when l1_loss_alpha > 0."
+    l1_dist = None
+    if aligned_target_logits is not None and (l1_loss_alpha > 0 or has_confidence):
+        # Confidence-only targets need no graph; never override an outer no_grad.
+        with torch.set_grad_enabled(torch.is_grad_enabled() and l1_loss_alpha > 0):
+            l1_dist = _compute_probability_l1(
+                draft_logits=draft_logits,
+                target_logits=aligned_target_logits,
+            )
     if l1_loss_alpha > 0:
-        l1_loss_num, l1_loss_den = _compute_local_l1_term(
-            outputs=outputs,
-            aligned_target_logits=aligned_target_logits,
-            loss_weight_mask=loss_weight_mask,
-        )
+        l1_loss_num = (l1_dist * loss_weight_mask).sum()
+        l1_loss_den = loss_weight_mask.sum()
     else:
         l1_loss_num = zero
         l1_loss_den = zero
 
-    has_confidence = outputs.confidence_pred is not None
     confidence_loss_num = zero
     confidence_loss_den = zero
     if has_confidence:
-        assert accept_rate_3d is not None, "aligned_target_logits is required when confidence head is enabled."
-        confidence_targets = accept_rate_3d.detach()
+        assert l1_dist is not None, "aligned_target_logits is required when confidence head is enabled."
+        confidence_targets = (1.0 - 0.5 * l1_dist.detach()).clamp_(0.0, 1.0)
         confidence_errors = (
             F.binary_cross_entropy_with_logits(
                 outputs.confidence_pred.float(),

@@ -87,6 +87,7 @@ steps:
           python tests/test_loss_cp_invariance.py
           python tests/test_sample.py
           python tests/test_cispo_loss.py
+          python tests/test_dspark_loss.py
           python tests/test_logprob_response_spans.py
           python tests/test_empty_colocated_weight_bucket.py
           python tests/test_expert_routing.py
