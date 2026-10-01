@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from argparse import Namespace
 from contextlib import nullcontext
 from datetime import timedelta
@@ -14,6 +15,10 @@ from transformers import AutoConfig, AutoTokenizer
 
 from vime.observability import train_data_utils, train_metric_utils
 from vime.observability.logging_utils import init_tracking
+from vime.observability.offload_spans import emit as emit_offload_spans
+from vime.observability.offload_spans import enabled as offload_spans_enabled
+from vime.observability.offload_spans import reset as reset_offload_spans
+from vime.observability.offload_spans import span as offload_span
 from vime.observability.profile_utils import TrainProfiler
 from vime.observability.timer import Timer, inverse_timer, timer, with_defer
 from vime.ray.train_actor import TrainRayActor
@@ -174,30 +179,48 @@ class MegatronTrainRayActor(TrainRayActor):
     def sleep(self) -> None:
         assert self.args.offload_train
 
-        clear_memory(clear_host_memory=True)
-        print_memory("before offload model")
+        started = time.perf_counter() if offload_spans_enabled() else None
+        if started is not None:
+            reset_offload_spans()
+        with offload_span("sleep.clear_memory"):
+            clear_memory(clear_host_memory=True)
+        with offload_span("sleep.print_memory_before"):
+            print_memory("before offload model")
         if (
             self.role == "actor"
             and self.args.use_critic
             and not self.args.colocate
             and hasattr(self.weight_updater, "disconnect_rollout_engines")
         ):
-            self.weight_updater.disconnect_rollout_engines()
-        destroy_process_groups()
+            with offload_span("sleep.disconnect_engines"):
+                self.weight_updater.disconnect_rollout_engines()
+        with offload_span("sleep.destroy_process_groups"):
+            destroy_process_groups()
 
-        torch_memory_saver.pause()
+        with offload_span("sleep.memory_saver_pause"):
+            torch_memory_saver.pause()
 
-        print_memory("after offload model")
+        with offload_span("sleep.print_memory_after"):
+            print_memory("after offload model")
+        if started is not None:
+            emit_offload_spans("sleep", time.perf_counter() - started, logger)
 
     @timer
     def wake_up(self) -> None:
         assert self.args.offload_train
-        print_memory("before wake_up model")
+        started = time.perf_counter() if offload_spans_enabled() else None
+        if started is not None:
+            reset_offload_spans()
+        with offload_span("wake.print_memory_before"):
+            print_memory("before wake_up model")
 
-        torch_memory_saver.resume()
+        with offload_span("wake.memory_saver_resume"):
+            torch_memory_saver.resume()
 
-        clear_memory()
-        reload_process_groups()
+        with offload_span("wake.clear_memory"):
+            clear_memory()
+        with offload_span("wake.reload_process_groups"):
+            reload_process_groups()
 
         if mpu.get_pipeline_model_parallel_world_size() > 2:
             # Megatron's patched batched pipeline P2P uses the default WORLD
@@ -206,10 +229,15 @@ class MegatronTrainRayActor(TrainRayActor):
             # that is the first NCCL operation on a group.  Prime WORLD here,
             # after the memory saver is resumed, so later stages cannot miss its
             # lazy initialization.  Sleep still destroys it completely.
-            dist.barrier(device_ids=[accelerator.current_device()])
+            with offload_span("wake.world_barrier"):
+                dist.barrier(device_ids=[accelerator.current_device()])
         if self.role == "actor":
-            self._switch_model("actor")
-        print_memory("after wake_up model")
+            with offload_span("wake.switch_model"):
+                self._switch_model("actor")
+        with offload_span("wake.print_memory_after"):
+            print_memory("after wake_up model")
+        if started is not None:
+            emit_offload_spans("wake_up", time.perf_counter() - started, logger)
 
     def _get_rollout_data(self, rollout_data_ref: Box) -> RolloutBatch:
         # Fetch data through ray on CPU, not sure if this will be performance bottleneck.
