@@ -91,6 +91,14 @@ class RayTrainGroup:
 
             env_vars["LD_PRELOAD"] = dynlib_path
             env_vars["TMS_INIT_ENABLE"] = "1"
+            # CPU backup is the fastest of the three modes torch_memory_saver
+            # offers here: disk backup measured ~30x slower on ext4, and without
+            # a backup the state cannot be restored. It is still the dominant
+            # cost of a colocate step -- its copy path runs at ~2.4 GiB/s while a
+            # plain pinned torch copy on the same device does ~24 GiB/s, and it
+            # moves ~18.7 GiB per step, which makes sleep() + wake_up() ~80% of a
+            # small-model step. Tracked upstream:
+            # https://github.com/fzyzcjy/torch_memory_saver/issues/111
             env_vars["TMS_INIT_ENABLE_CPU_BACKUP"] = "1"
 
         # We cannot do routing replay for critic.
