@@ -107,7 +107,8 @@ def _run_vllm_server(kwargs: dict, env: dict) -> None:
 def _wait_server_healthy(base_url, is_process_alive):
     while True:
         try:
-            response = requests.get(f"{base_url}/health")
+            # Bound each probe so an unresponsive server cannot block the liveness check.
+            response = requests.get(f"{base_url}/health", timeout=3)
             if response.status_code == 200:
                 break
         except requests.RequestException:
