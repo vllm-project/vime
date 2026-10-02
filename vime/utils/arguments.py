@@ -32,6 +32,16 @@ def reset_arg(parser, name, **kwargs):
 
 def get_vime_extra_args_provider(add_custom_arguments=None):
     def add_vime_arguments(parser):
+        queue = parser.add_argument_group("Optional same-job TransferQueue")
+        queue.add_argument("--transfer-queue-mode", choices=("off", "simple-storage"), default="off")
+        queue.add_argument("--transfer-queue-job-id")
+        queue.add_argument("--transfer-queue-restart-epoch", type=int, default=0)
+        queue.add_argument("--transfer-queue-max-groups", type=int, default=64)
+        queue.add_argument("--transfer-queue-max-tokens", type=int, default=131072)
+        queue.add_argument("--transfer-queue-max-bytes", type=int, default=256 << 20)
+        queue.add_argument("--transfer-queue-timeout-s", type=float, default=30.0)
+        queue.add_argument("--transfer-queue-lease-s", type=float, default=120.0)
+
         # Ray
         def add_cluster_arguments(parser):
             parser.add_argument("--actor-num-nodes", type=int, default=1, help="Number of nodes for training actor")
@@ -85,7 +95,10 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 action=argparse.BooleanOptionalAction,
                 help=(
                     "Whether to offload the training actor to CPU during training. "
-                    "This will always be true when --colocate is set."
+                    "Defaults to true when --colocate is set, because the training state "
+                    "usually does not fit next to the rollout engines. --no-offload-train "
+                    "is honoured when both do fit, and skips the memory-saver copy that "
+                    "otherwise dominates a colocate step."
                 ),
             )
             parser.add_argument(
@@ -1891,6 +1904,64 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
 
 
 def vime_validate_args(args):
+    if args.transfer_queue_mode != "off":
+        import math
+
+        if (
+            not args.transfer_queue_job_id
+            or "/" in args.transfer_queue_job_id
+            or type(args.transfer_queue_restart_epoch) is not int
+            or args.transfer_queue_restart_epoch < 0
+        ):
+            raise ValueError("queue requires a job id and non-negative restart epoch")
+        if any(
+            type(value) is not int or value <= 0
+            for value in (
+                args.transfer_queue_max_groups,
+                args.transfer_queue_max_tokens,
+                args.transfer_queue_max_bytes,
+            )
+        ):
+            raise ValueError("queue capacities must be positive")
+        if any(
+            not math.isfinite(value) or value <= 0
+            for value in (args.transfer_queue_timeout_s, args.transfer_queue_lease_s)
+        ):
+            raise ValueError("queue timeouts must be finite and positive")
+        if args.rollout_batch_size > args.transfer_queue_max_groups:
+            raise ValueError("a full training round exceeds queue group capacity")
+        if args.rollout_batch_size * args.n_samples_per_prompt > args.transfer_queue_max_tokens:
+            raise ValueError("a full training round exceeds the minimum queue token capacity")
+        if (
+            args.actor_num_nodes,
+            args.actor_num_gpus_per_node,
+            args.tensor_model_parallel_size,
+            args.pipeline_model_parallel_size,
+            args.context_parallel_size,
+        ) != (1, 1, 1, 1, 1):
+            raise ValueError("queue v1 requires TP=PP=CP=DP=1")
+        if args.virtual_pipeline_model_parallel_size not in (None, 1):
+            raise ValueError("queue v1 does not support virtual pipeline parallelism")
+        if (
+            args.use_critic
+            or args.use_fault_tolerance
+            or args.partial_rollout
+            or args.release_train
+            or args.load_debug_rollout_data
+        ):
+            raise ValueError("queue v1 requires one text actor without fault-tolerance, partial or debug replay")
+        if (
+            args.custom_convert_samples_to_train_data_path
+            or args.rollout_sample_filter_path
+            or args.rollout_all_samples_process_path
+            or args.custom_reward_post_process_path
+            or args.rollout_function_path != "vime.rollout.vllm_rollout.generate_rollout"
+        ):
+            raise ValueError("queue v1 requires the standard GRPO rollout and conversion")
+        if args.advantage_estimator != "grpo" or not args.rollout_global_dataset or not args.save:
+            raise ValueError("queue v1 requires GRPO, a resumable data source and checkpoint directory")
+        if args.enable_mtp_training or args.use_rollout_routing_replay or args.use_routing_replay:
+            raise ValueError("queue v1 does not support MTP or MoE replay")
     args.eval_datasets = _resolve_eval_datasets(args)
     args.dspark_enabled = (getattr(args, "vllm_speculative_config", None) or {}).get("method") == "dspark"
 
@@ -2079,6 +2150,12 @@ def vime_validate_args(args):
                 logger.info("Ignoring --no-offload-rollout because colocated --release-train needs rollout offload.")
             args.offload_rollout = True
         elif args.offload_train is None:
+            # A default, not a requirement: an explicit --no-offload-train is kept, and
+            # skips the memory-saver copy when the training state and rollout engines
+            # both fit in device memory. See the colocate section of the usage guide
+            # for the measured costs and configuration trade-offs.
+            # The trade-off is that the rollout engines then have to fit next to the
+            # resident training state instead of into the memory it released.
             args.offload_train = True
         if args.offload_rollout is None:
             args.offload_rollout = True

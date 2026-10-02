@@ -5,17 +5,18 @@ import inspect
 import io
 import json
 import logging
+import math
 import uuid
 from argparse import Namespace
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import vllm_router  # noqa: F401 — ensures vllm-router is importable on startup
 from tqdm import tqdm
 
-from vime.backends.vllm_utils.server_control import abort_inflight_requests
+from vime.backends.vllm_utils.server_control import abort_inflight_requests, verify_server_drain
 from vime.observability.trace_utils import build_vllm_meta_trace_attrs, trace_function, trace_span
 from vime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
 from vime.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter, should_drop_dynamic_filter_output
@@ -35,6 +36,9 @@ from vime.utils.types import Sample
 
 from .rm_hub import async_rm, batched_async_rm
 
+if TYPE_CHECKING:
+    from vime.rollout.data_source import DataSource
+
 __all__ = ["generate_rollout", "get_model_url", "prime_encoder"]
 
 logger = logging.getLogger(__name__)
@@ -43,6 +47,9 @@ _PROCESSOR_PROMPT_KEYS = {"input_ids", "attention_mask"}
 
 # Re-sweep interval while draining; bounds how long a late straggler can run.
 _ABORT_RESWEEP_INTERVAL_S = 3.0
+# Bounded budget for confirming that the engines really went idle after the
+# abort sweeps. Kept short: this only observes, it must not stall a rollout.
+_ABORT_DRAIN_VERIFY_DEADLINE_S = 5.0
 
 
 def _coerce_flat_int_token_ids(ids: Any) -> list[int]:
@@ -241,18 +248,46 @@ def _build_inference_sampling_params(sampling_params: dict[str, Any]) -> dict[st
 
 
 def _inference_generate_tokens_and_logprobs(choice: dict[str, Any]) -> tuple[list[int], list[float]]:
-    """Extract aligned token ids and log probabilities from a vLLM choice."""
+    """Validate a non-streaming trainable choice without inventing log probabilities.
+
+    Empty terminal responses need no probabilities. Nonempty responses must
+    provide one numeric, finite log probability per token, including real zeros
+    and vLLM's finite sentinel values. Tool/environment tokens use
+    ``Sample.append_response_tokens(trainable=False)`` instead of this parser.
+    """
+    if not isinstance(choice, dict):
+        raise ValueError("choice must be an object")
     token_ids = choice.get("token_ids")
-    if not isinstance(token_ids, list) or not all(isinstance(token_id, int) for token_id in token_ids):
-        return [], []
+    if not isinstance(token_ids, list) or any(type(token_id) is not int or token_id < 0 for token_id in token_ids):
+        raise ValueError("token_ids must be a list of non-negative integers")
 
     logprobs = choice.get("logprobs")
-    content = logprobs.get("content") if isinstance(logprobs, dict) else []
-    content = content or []
-    log_probs = [
-        float(content[index].get("logprob", 0.0)) if index < len(content) and isinstance(content[index], dict) else 0.0
-        for index in range(len(token_ids))
-    ]
+    if not token_ids and logprobs is None:
+        return [], []
+    if not isinstance(logprobs, dict):
+        raise ValueError("logprobs must be an object for nonempty trainable token_ids")
+    content = logprobs.get("content")
+    if not token_ids and content is None:
+        return [], []
+    if not isinstance(content, list):
+        raise ValueError("logprobs.content must be a list")
+    if len(content) != len(token_ids):
+        raise ValueError(f"token/logprob length mismatch: {len(token_ids)} tokens, {len(content)} entries")
+
+    log_probs = []
+    for index, entry in enumerate(content):
+        if not isinstance(entry, dict) or "logprob" not in entry:
+            raise ValueError(f"missing logprob at token index {index}")
+        value = entry["logprob"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"non-numeric logprob at token index {index}")
+        try:
+            value = float(value)
+        except OverflowError as exc:
+            raise ValueError(f"non-finite logprob at token index {index}") from exc
+        if not math.isfinite(value):
+            raise ValueError(f"non-finite logprob at token index {index}")
+        log_probs.append(value)
     return token_ids, log_probs
 
 
@@ -356,7 +391,10 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         sample.status == Sample.Status.PENDING or sample.status == Sample.Status.ABORTED
     ), f"Sample status is {sample.status}"
 
-    prompt_ids = _prepare_prompt_ids(sample, state.tokenizer, state.processor)
+    # Prompt preparation may populate multimodal_train_inputs. Keep these
+    # changes local until the response's trainable metadata has been validated.
+    prepared_sample = copy.copy(sample)
+    prompt_ids = _prepare_prompt_ids(prepared_sample, state.tokenizer, state.processor)
 
     sampling_params["max_new_tokens"] -= sample.response_length
 
@@ -364,6 +402,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         sampling_params["max_new_tokens"] >= 0
     ), f"max_new_tokens: {sampling_params['max_new_tokens']} should not be less than 0"
     if sampling_params["max_new_tokens"] == 0:
+        sample.multimodal_train_inputs = prepared_sample.multimodal_train_inputs
         sample.status = Sample.Status.TRUNCATED
         return sample
 
@@ -371,14 +410,12 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
 
     messages = build_multimodal_messages(sample.prompt, sample.multimodal_inputs)
 
-    if not sample.tokens:
-        sample.tokens = prompt_ids
-
+    request_id = str(uuid.uuid4())
     # Use session_id for consistent hashing routing (vLLM router)
-    headers = None
+    headers = {"x-request-id": request_id}
     if sample.session_id:
         if getattr(args, "router_policy", None) == "consistent_hash":
-            headers = {"x-session-id": sample.session_id}
+            headers["x-session-id"] = sample.session_id
 
     if messages:
         render_payload = {
@@ -390,7 +427,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         with trace_span(sample, "vllm_mm_render", attrs={"model": args.hf_checkpoint}):
             render_data = await post(render_url, render_payload, headers=headers)
         generate_body = _mm_render_response_to_generate_body(render_data, args.hf_checkpoint)
-        canonical_token_ids = _coerce_flat_int_token_ids(sample.tokens)
+        canonical_token_ids = _coerce_flat_int_token_ids(sample.tokens) if sample.tokens else prompt_ids
         if canonical_token_ids:
             _align_mm_feature_placeholders_to_tokens(generate_body, canonical_token_ids)
             generate_body["token_ids"] = canonical_token_ids
@@ -411,16 +448,26 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
             if hasattr(span, "update"):
                 span.update(build_vllm_meta_trace_attrs(output))
 
-    choice = output["choices"][0]
-
-    # Parse token_ids and logprobs from vLLM response
-    new_response_tokens, new_response_log_probs = _inference_generate_tokens_and_logprobs(choice)
+    # Never include prompts, token values, or raw response metadata in errors.
+    try:
+        choices = output.get("choices") if isinstance(output, dict) else None
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("response must contain a nonempty choices list")
+        choice = choices[0]
+        new_response_tokens, new_response_log_probs = _inference_generate_tokens_and_logprobs(choice)
+    except ValueError as exc:
+        raise ValueError(f"Invalid vLLM generation metadata (request_id={request_id}): {exc}") from exc
 
     # Decode text from token_ids
     skip_sp = sampling_params.get("skip_special_tokens")
     skip_decode = True if skip_sp is None else bool(skip_sp)
     text = state.tokenizer.decode(new_response_tokens, skip_special_tokens=skip_decode) if new_response_tokens else ""
 
+    # Deferred until the response metadata has been validated, so a rejected
+    # response cannot leave the sample with a half-applied prompt.
+    if not sample.tokens:
+        sample.tokens = prompt_ids
+    sample.multimodal_train_inputs = prepared_sample.multimodal_train_inputs
     sample.append_response_tokens(
         args,
         tokens=new_response_tokens,
@@ -677,6 +724,15 @@ async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
             aborted_samples.append(group)
             count += len(group)
 
+    if server_abort:
+        # Local pending tasks being empty does not prove the engines are idle:
+        # the abort sweep is best-effort and a late request can still be queued
+        # server-side. Report what the engines actually say so the gap is
+        # observable; enforcing it is a separate, deliberate step.
+        report = await verify_server_drain(urls, deadline_s=_ABORT_DRAIN_VERIFY_DEADLINE_S)
+        if not report.drained:
+            logger.warning(f"Rollout engines not confirmed idle after abort: {report.describe()}")
+
     if args.partial_rollout:
         logger.info(f"Collected {count} partial samples into the data buffer")
 
@@ -684,7 +740,10 @@ async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
 
 
 async def generate_rollout_async(
-    args: Namespace, rollout_id: int, data_source: Callable[[int], list[list[Sample]]]
+    args: Namespace,
+    rollout_id: int,
+    data_source: Callable[[int], list[list[Sample]]],
+    group_ready: Callable[[list[Sample]], Awaitable[None]] | None = None,
 ) -> tuple[RolloutFnTrainOutput, list[list[Sample]]]:
     """An example to implement the generate_rollout function for an rule based rm rollout generation.
 
@@ -750,6 +809,8 @@ async def generate_rollout_async(
             # add the samples to the data
             # NOTE: here we have not stored all the unused samples back to the data buffer.
             if len(data) < target_data_size:
+                if group_ready is not None:
+                    await group_ready(group)
                 data.append(group)
                 pbar.update(args.n_samples_per_prompt)
 
@@ -935,8 +996,49 @@ async def eval_rollout_single_dataset(
     }
 
 
+async def _queued_rollout(
+    args: Namespace,
+    rollout_id: int,
+    source: Callable[[int], list[list[Sample]]],
+    group_ready: Callable[[list[Sample]], Awaitable[None]],
+) -> tuple[RolloutFnTrainOutput, list[list[Sample]]]:
+    state = GenerateState(args)
+    completed = False
+    try:
+        output = await asyncio.wait_for(
+            generate_rollout_async(args, rollout_id, source, group_ready), args.transfer_queue_timeout_s
+        )
+        completed = True
+        return output
+    finally:
+        if not completed:
+            state.aborted = True
+            pending = tuple(state.pendings | state.cancellable_tasks)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+
+def generate_queued_rollout(
+    args: Namespace,
+    rollout_id: int,
+    data_source: "DataSource",
+    *,
+    evaluation: bool,
+    group_ready: Callable[[list[Sample]], Awaitable[None]],
+) -> RolloutFnTrainOutput:
+    assert not evaluation and args.rollout_global_dataset
+    output, aborted_samples = run(_queued_rollout(args, rollout_id, data_source.get_samples, group_ready))
+    if aborted_samples:
+        data_source.add_samples(aborted_samples)
+    return output
+
+
 def generate_rollout(
-    args: Namespace, rollout_id: int, data_source: Any, evaluation: bool = False
+    args: Namespace,
+    rollout_id: int,
+    data_source: "DataSource",
+    evaluation: bool = False,
 ) -> RolloutFnTrainOutput | RolloutFnEvalOutput:
     """An example to implement the generate_rollout function for an rule based rm rollout generation.
 

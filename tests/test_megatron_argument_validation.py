@@ -179,6 +179,7 @@ def test_update_weight_disk_dir_required_for_disk_transport(monkeypatch):
 
 def make_vime_validate_args(**overrides):
     values = dict(
+        transfer_queue_mode="off",
         eval_config=None,
         eval_prompt_data=None,
         kl_coef=0,
@@ -364,6 +365,29 @@ def test_vime_validate_args_preserves_zero_rollout_gpus_without_colocate(monkeyp
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("colocate", [False, True])
+@pytest.mark.parametrize("offload_train", [None, False, True])
+@pytest.mark.parametrize("release_train", [False, True])
+@pytest.mark.parametrize("offload_rollout", [None, False])
+def test_colocate_offload_resolution(monkeypatch, colocate, offload_train, release_train, offload_rollout):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(
+        colocate=colocate,
+        offload_train=offload_train,
+        offload_rollout=offload_rollout,
+        release_train=release_train,
+        save="/tmp/checkpoint",
+        update_weight_transport="disk",
+        update_weight_disk_dir="/tmp/weights",
+    )
+    module.vime_validate_args(args)
+    expected_train = False if colocate and release_train else (colocate if offload_train is None else offload_train)
+    expected_rollout = True if colocate and release_train else (colocate if offload_rollout is None else False)
+    assert args.offload_train is expected_train
+    assert args.offload_rollout is expected_rollout
+
+
+@pytest.mark.unit
 def test_update_weight_delta_disk_is_valid(monkeypatch):
     module = load_vime_arguments_module(monkeypatch)
     args = make_vime_validate_args(
@@ -432,3 +456,67 @@ def test_force_fp8_ue8m0_scale_argument(monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
+
+
+def make_queue_args(**overrides):
+    values = dict(
+        transfer_queue_mode="simple-storage",
+        transfer_queue_job_id="job-a",
+        transfer_queue_restart_epoch=0,
+        transfer_queue_max_groups=4,
+        transfer_queue_max_tokens=100,
+        transfer_queue_max_bytes=10000,
+        transfer_queue_timeout_s=30.0,
+        transfer_queue_lease_s=60.0,
+        actor_num_nodes=1,
+        actor_num_gpus_per_node=1,
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        context_parallel_size=1,
+        virtual_pipeline_model_parallel_size=None,
+        use_critic=False,
+        use_fault_tolerance=False,
+        partial_rollout=False,
+        custom_convert_samples_to_train_data_path=None,
+        rollout_sample_filter_path=None,
+        rollout_all_samples_process_path=None,
+        custom_reward_post_process_path=None,
+        rollout_function_path="vime.rollout.vllm_rollout.generate_rollout",
+        rollout_global_dataset=True,
+        save="/tmp/checkpoint",
+    )
+    values.update(overrides)
+    return make_vime_validate_args(**values)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"transfer_queue_max_groups": 0}, "capacities"),
+        ({"transfer_queue_max_groups": True}, "capacities"),
+        ({"transfer_queue_lease_s": float("nan")}, "finite"),
+        ({"transfer_queue_timeout_s": float("inf")}, "finite"),
+        ({"transfer_queue_restart_epoch": -1}, "epoch"),
+        ({"tensor_model_parallel_size": 2}, "TP=PP"),
+        ({"virtual_pipeline_model_parallel_size": 2}, "virtual pipeline"),
+        ({"rollout_batch_size": 5}, "group capacity"),
+        ({"rollout_batch_size": 2, "n_samples_per_prompt": 2, "transfer_queue_max_tokens": 3}, "token capacity"),
+        ({"use_critic": True}, "one text actor"),
+        ({"use_fault_tolerance": True}, "one text actor"),
+        ({"rollout_sample_filter_path": "custom.filter"}, "standard GRPO"),
+        ({"rollout_global_dataset": False}, "resumable"),
+    ],
+)
+def test_queue_rejects_unsupported_configuration_early(monkeypatch, overrides, message):
+    module = load_vime_arguments_module(monkeypatch)
+    with pytest.raises(ValueError, match=message):
+        module.vime_validate_args(make_queue_args(**overrides))
+
+
+@pytest.mark.unit
+def test_queue_accepts_the_supported_configuration(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_queue_args()
+    module.vime_validate_args(args)
+    assert args.start_rollout_id == 0

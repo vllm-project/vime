@@ -77,6 +77,11 @@ class RolloutManager:
             runtime_env={"env_vars": add_default_ray_env_vars()},
         ).remote()
         self.rollout_id = -1
+        self.transfer_queue = None
+        if self.args.transfer_queue_mode == "simple-storage":
+            from vime.rollout.transfer_queue_runtime import TransferQueueRuntime
+
+            self.transfer_queue = TransferQueueRuntime(self.args)
 
         self._health_monitors = []
         if not self.args.debug_train_only and self.args.use_fault_tolerance:
@@ -185,6 +190,8 @@ class RolloutManager:
     def generate(self, rollout_id):
         start_time = time.time()
         self.rollout_id = rollout_id
+        if self.transfer_queue is not None:
+            self.transfer_queue.begin_round(rollout_id)
         set_current_rollout_id(rollout_id)
         self.health_monitoring_resume()
         if self.args.ci_test and self.args.use_fault_tolerance and rollout_id >= 2:
@@ -200,8 +207,33 @@ class RolloutManager:
         if self.args.debug_rollout_only:
             # if debug rollout only, we don't convert samples to train data and directly return
             return
+        if self.transfer_queue is not None:
+            data = self.transfer_queue.roundtrip(data, rollout_id)
         data = self._convert_samples_to_train_data(data)
         return self._split_train_data_by_dp(data)
+
+    def queue_confirm_publication(self):
+        engines, *_ = self.get_updatable_engines_and_lock()
+        return self.transfer_queue.confirm_publication(engines)
+
+    def queue_training_boundary(self):
+        from vime.backends.vllm_utils.server_control import verify_server_drain
+        from vime.utils.async_utils import run
+
+        engines, *_ = self.get_updatable_engines_and_lock()
+        ray.get([engine.pause_generation.remote() for engine in engines], timeout=self.args.transfer_queue_timeout_s)
+        urls = ray.get([engine.get_url.remote() for engine in engines], timeout=self.args.transfer_queue_timeout_s)
+        report = run(verify_server_drain(urls, deadline_s=self.args.transfer_queue_timeout_s))
+        if not report.drained:
+            raise RuntimeError(f"queue training boundary is busy or unknown: {report.describe()}")
+        ray.get(self.transfer_queue.coordinator.start_training.remote(), timeout=self.args.transfer_queue_timeout_s)
+        return self.transfer_queue.coordinator
+
+    def queue_training_complete(self, rollout_id):
+        self.transfer_queue.training_complete(rollout_id)
+
+    def queue_save(self, rollout_id):
+        self.transfer_queue.save(rollout_id)
 
     def eval(self, rollout_id):
         if self.args.debug_train_only:
@@ -282,7 +314,20 @@ class RolloutManager:
             )
             metrics = None
         else:
-            data = call_rollout_fn(self.generate_rollout, self.args, rollout_id, self.data_source, evaluation=False)
+            rollout_fn = self.generate_rollout
+            kwargs = {}
+            if self.transfer_queue is not None:
+                from vime.rollout.vllm_rollout import generate_queued_rollout
+
+                rollout_fn = generate_queued_rollout
+                kwargs["group_ready"] = self.transfer_queue.accept_group
+            completed = False
+            try:
+                data = call_rollout_fn(rollout_fn, self.args, rollout_id, self.data_source, evaluation=False, **kwargs)
+                completed = True
+            finally:
+                if self.transfer_queue is not None and not completed:
+                    self.transfer_queue.paused = True
             metrics = data.metrics
             data = data.samples
             # Enforce the rollout_id contract before flattening: any list[Sample]

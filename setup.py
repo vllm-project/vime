@@ -36,7 +36,7 @@ setup(
     packages=find_packages(include=["vime*", "vime_plugins*"]),
     include_package_data=True,
     install_requires=_fetch_requirements("requirements.txt"),
-    extras_require={},
+    extras_require={"transferqueue": ["TransferQueue==0.1.9"]},
     python_requires=">=3.10",
     classifiers=[
         "Programming Language :: Python :: 3.10",

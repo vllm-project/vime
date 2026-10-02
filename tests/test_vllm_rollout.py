@@ -29,6 +29,26 @@ from vime.utils.eval_config import EvalDatasetConfig
 from vime.utils.types import Sample
 
 
+def test_queue_generation_deadline_cancels_owned_tasks(monkeypatch):
+    state = Namespace(pendings=set(), cancellable_tasks=set(), aborted=False)
+    args = Namespace(transfer_queue_timeout_s=0.01)
+    monkeypatch.setattr(mod, "GenerateState", lambda _args: state)
+
+    async def stalled_rollout(*_args):
+        pending = asyncio.create_task(asyncio.Event().wait())
+        state.pendings.add(pending)
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(mod, "generate_rollout_async", stalled_rollout)
+
+    async def check():
+        with pytest.raises(TimeoutError):
+            await mod._queued_rollout(args, 0, lambda _size: [], AsyncMock())
+        assert state.aborted and all(task.cancelled() for task in state.pendings)
+
+    asyncio.run(check())
+
+
 class _FakeTokenizer:
     def encode(self, prompt: str, add_special_tokens: bool = False) -> list[int]:
         assert add_special_tokens is False
@@ -296,19 +316,19 @@ def test_build_inference_sampling_params_forwards_disabled_top_k():
 
 @pytest.mark.unit
 def test_inference_generate_tokens_and_logprobs_aligns_partial_content():
-    token_ids, log_probs = mod._inference_generate_tokens_and_logprobs(
-        {
-            "token_ids": [11, 12, 13],
-            "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
-        }
-    )
-    assert token_ids == [11, 12, 13]
-    assert log_probs == [-0.1, -0.2, 0.0]
+    with pytest.raises(ValueError, match="token/logprob length mismatch"):
+        mod._inference_generate_tokens_and_logprobs(
+            {
+                "token_ids": [11, 12, 13],
+                "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
+            }
+        )
 
 
 @pytest.mark.unit
 def test_inference_generate_tokens_and_logprobs_rejects_invalid_token_ids():
-    assert mod._inference_generate_tokens_and_logprobs({"token_ids": [1, "2"]}) == ([], [])
+    with pytest.raises(ValueError, match="non-negative integers"):
+        mod._inference_generate_tokens_and_logprobs({"token_ids": [1, "2"]})
 
 
 @pytest.mark.unit
@@ -663,7 +683,8 @@ def test_generate_consistent_hash_header(patch_generate_state, monkeypatch):
     )
 
     headers = post_mock.await_args_list[0].kwargs.get("headers")
-    assert headers == {"x-session-id": "sess-42"}
+    assert headers["x-session-id"] == "sess-42"
+    assert headers["x-request-id"]
 
 
 @pytest.mark.unit
@@ -713,7 +734,7 @@ def test_generate_applies_routed_experts(patch_generate_state, monkeypatch):
                     "token_ids": [50, 51],
                     "finish_reason": "stop",
                     "routed_experts": _encode_routed(routed_rows),
-                    "logprobs": {"content": [{}, {}]},
+                    "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
                 }
             ],
             "usage": {},
@@ -1004,6 +1025,13 @@ def test_abort_deletes_inflight_without_pause_resume(patch_generate_state, monke
 
     state = _PatchedGenerateState(_rollout_args())
     state.active_server_generations = 1
+    monkeypatch.setattr(
+        mod,
+        "verify_server_drain",
+        AsyncMock(
+            return_value=server_control.DrainReport((server_control.EngineDrainState("http://w0:9000", 0),), 0, 5)
+        ),
+    )
     monkeypatch.setattr(mod, "GenerateState", lambda args: state)
 
     aborted = asyncio.Event()
@@ -1328,3 +1356,42 @@ def test_multi_agent_generate_response_preserves_request_metadata(monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", [True, "-1", float("nan"), float("inf"), -float("inf"), 10**1000])
+def test_inference_logprob_rejects_invalid_numbers(value):
+    with pytest.raises(ValueError, match="logprob"):
+        mod._inference_generate_tokens_and_logprobs({"token_ids": [1], "logprobs": {"content": [{"logprob": value}]}})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "choice",
+    [
+        {"token_ids": [True]},
+        {"token_ids": [-1]},
+        {"token_ids": [1]},
+        {"token_ids": [1], "logprobs": {"content": [{}]}},
+        {"token_ids": [1], "logprobs": {}},
+    ],
+)
+def test_bad_metadata_does_not_mutate_training_fields(patch_generate_state, monkeypatch, choice):
+    monkeypatch.setattr(mod, "post", AsyncMock(return_value={"choices": [choice]}))
+    sample = Sample(index=4, prompt="abc", tokens=[3, 2, 1])
+    before = sample.to_dict()
+    with pytest.raises(ValueError, match="request_id="):
+        asyncio.run(mod.generate(_rollout_args(), sample, _default_sampling_params()))
+    assert {key: sample.to_dict()[key] for key in before} == before
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "choice,expected",
+    [
+        ({"token_ids": []}, ([], [])),
+        ({"token_ids": [1, 2], "logprobs": {"content": [{"logprob": 0}, {"logprob": -1e30}]}}, ([1, 2], [0.0, -1e30])),
+    ],
+)
+def test_inference_logprob_accepts_terminal_zero_and_finite_sentinel(choice, expected):
+    assert mod._inference_generate_tokens_and_logprobs(choice) == expected
