@@ -85,7 +85,10 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 action=argparse.BooleanOptionalAction,
                 help=(
                     "Whether to offload the training actor to CPU during training. "
-                    "This will always be true when --colocate is set."
+                    "Defaults to true when --colocate is set, because the training state "
+                    "usually does not fit next to the rollout engines. --no-offload-train "
+                    "is honoured when both do fit, and skips the memory-saver copy that "
+                    "otherwise dominates a colocate step."
                 ),
             )
             parser.add_argument(
@@ -2079,6 +2082,12 @@ def vime_validate_args(args):
                 logger.info("Ignoring --no-offload-rollout because colocated --release-train needs rollout offload.")
             args.offload_rollout = True
         elif args.offload_train is None:
+            # A default, not a requirement: an explicit --no-offload-train is kept, and
+            # skips the memory-saver copy when the training state and rollout engines
+            # both fit in device memory. See the colocate section of the usage guide
+            # for the measured costs and configuration trade-offs.
+            # The trade-off is that the rollout engines then have to fit next to the
+            # resident training state instead of into the memory it released.
             args.offload_train = True
         if args.offload_rollout is None:
             args.offload_rollout = True

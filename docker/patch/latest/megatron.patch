@@ -639,10 +639,22 @@ index 5b31ddedf..ead60f2dd 100644
                  )
                  if self.fuse_linear_cross_entropy:
 diff --git a/megatron/core/optimizer/distrib_optimizer.py b/megatron/core/optimizer/distrib_optimizer.py
-index a4364f5e9..c76f6daac 100644
 --- a/megatron/core/optimizer/distrib_optimizer.py
 +++ b/megatron/core/optimizer/distrib_optimizer.py
-@@ -686,6 +686,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+@@ -645,8 +645,10 @@
+         # Extract 'step', for non-Apex/TE support.
+         if not HAVE_APEX_OR_TE:
+             steps = list(set([s["step"].item() for s in inner_state_dict["state"].values()]))
+-            assert len(steps) == 1
+-            step = steps[0]
++            # A fresh Torch optimizer has no per-parameter state yet. The
++            # checkpoint loader queries this template before allocating state.
++            assert len(steps) <= 1, f"steps: {steps}"
++            step = steps[0] if steps else 0
+         elif isinstance(self.optimizer, HybridDeviceOptimizer):
+             step = None
+             for optimizer in self.optimizer.sub_optimizers:
+@@ -686,6 +688,8 @@
                  # TE FusedAdam will not accumulate step for empty param groups, so we need to
                  # align the step across param groups.
                  param_group["step"] = int(step)
@@ -651,8 +663,31 @@ index a4364f5e9..c76f6daac 100644
 
          # Grad scaler state.
          if self.grad_scaler:
-@@ -969,7 +971,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
-                 for bucket_idx, gbuf_range_map in enumerate(gbuf_range_map_for_all_buckets):
+@@ -828,7 +832,12 @@
+
+             for s in state_dict_state.values():
+                 # Native PyTorch state dict requires step (i.e., iteration).
+-                s["step"] = step
++                # Torch Adam increments each parameter's step in-place. A
++                # shared scalar would advance once per parameter, not per update.
++                s["step"] = step.detach().clone()
++            for group in state_dict_param_groups:
++                # This group field is checkpoint metadata, not Torch Adam state.
++                group.pop("step", None)
+         elif isinstance(self.optimizer, HybridDeviceOptimizer):
+             # Handle Torch AdamW special case, which, unlike FusedAdam, Torch AdamW
+             # has an extra optimizer state "step".
+@@ -943,6 +952,9 @@
+             optim_state = self.optimizer.state[main_param]
+             dst_tensors = {"param": main_param, **optim_state}
+             for key in dst_tensors:
++                if key == "step":
++                    # Restored from common optimizer state, not parameter shards.
++                    continue
+                 dst_tensors[key].copy_(tensors[key])
+
+     def get_parameter_state_dp_reshardable(self):
+@@ -968,6 +980,11 @@
                      bucket_state = []
                      for model_param, param_range_map in gbuf_range_map["param_map"].items():
                          tensors = self._get_main_param_and_optimizer_states(model_param)
@@ -664,7 +699,7 @@ index a4364f5e9..c76f6daac 100644
                          tensors.update(
                              {
                                  "gbuf_local_start": param_range_map["gbuf_local"].start,
-@@ -1667,6 +1669,11 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+@@ -1667,6 +1684,11 @@
                              if key == 'padding':
                                  tensors[key] = LocalNonpersistentObject(tensors[key])
                                  continue
@@ -676,7 +711,7 @@ index a4364f5e9..c76f6daac 100644
                              assert tensors[key].shape == (gbuf_local_end - gbuf_local_start,), (
                                  tensors[key].shape,
                                  gbuf_local_start,
-@@ -1808,6 +1815,11 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+@@ -1801,6 +1823,11 @@
                      for src_tensors, (model_param, param_range_map) in zip(
                          bucket_state, gbuf_range_map["param_map"].items()
                      ):

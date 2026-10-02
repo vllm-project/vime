@@ -157,10 +157,10 @@ COPY docker/patch/${PATCH_VERSION}/vllm-pd-request-metrics.patch /tmp/vllm-pd-re
 COPY docker/patch/${PATCH_VERSION}/vllm-inflight-queue-diagnostics.patch /tmp/vllm-inflight-queue-diagnostics.patch
 RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirname(vllm.__file__)))')" && \
     cd "$VLLM_SITE" && \
-    git apply -v /tmp/vllm-pull_weights.patch && \
-    git apply -v --allow-empty /tmp/vllm.patch && \
-    git apply -v /tmp/vllm-pd-request-metrics.patch && \
-    git apply -v /tmp/vllm-inflight-queue-diagnostics.patch && \
+    git apply -v --include='vllm/**' /tmp/vllm-pull_weights.patch && \
+    git apply -v --allow-empty --include='vllm/**' /tmp/vllm.patch && \
+    git apply -v --include='vllm/**' /tmp/vllm-pd-request-metrics.patch && \
+    git apply -v --include='vllm/**' /tmp/vllm-inflight-queue-diagnostics.patch && \
     rm /tmp/vllm-pull_weights.patch /tmp/vllm.patch \
        /tmp/vllm-pd-request-metrics.patch \
        /tmp/vllm-inflight-queue-diagnostics.patch
