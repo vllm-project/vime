@@ -83,6 +83,10 @@ class OuroMegatronModel(MegatronModule):
         if any(value is not None for value in input_tensor):
             raise ValueError("Ouro does not accept pipeline input")
 
+    @property
+    def output_layer(self) -> torch.nn.Module:
+        return self.lm_head
+
     def set_loop_budget(self, loops: int) -> None:
         if type(loops) is not int or not 1 <= loops <= self.ouro_config.total_ut_steps:
             raise ValueError("Loop budget exceeds the checkpoint's supported depth")

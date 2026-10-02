@@ -390,6 +390,7 @@ def test_loader_scope_stays_explicit():
         "llama",
         "mimo",
         "minimax_m2",
+        "ouro",
         "qwen2",
         "qwen2_moe",
         "qwen3",

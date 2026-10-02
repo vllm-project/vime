@@ -259,6 +259,13 @@ def make_vime_validate_args(**overrides):
         update_weight_local_checkpoint_dir=None,
         update_weight_mode="full",
         rollout_temperature=1.0,
+        draft_feature_mode="off",
+        micro_batch_size=1,
+        draft_feature_output_dir=None,
+        draft_feature_run_id=None,
+        draft_feature_max_tokens=128,
+        draft_feature_max_batches=8,
+        draft_feature_max_bytes=1 << 30,
     )
     values.update(overrides)
     return types.SimpleNamespace(**values)
@@ -364,6 +371,29 @@ def test_vime_validate_args_preserves_zero_rollout_gpus_without_colocate(monkeyp
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("colocate", [False, True])
+@pytest.mark.parametrize("offload_train", [None, False, True])
+@pytest.mark.parametrize("release_train", [False, True])
+@pytest.mark.parametrize("offload_rollout", [None, False])
+def test_colocate_offload_resolution(monkeypatch, colocate, offload_train, release_train, offload_rollout):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(
+        colocate=colocate,
+        offload_train=offload_train,
+        offload_rollout=offload_rollout,
+        release_train=release_train,
+        save="/tmp/checkpoint",
+        update_weight_transport="disk",
+        update_weight_disk_dir="/tmp/weights",
+    )
+    module.vime_validate_args(args)
+    expected_train = False if colocate and release_train else (colocate if offload_train is None else offload_train)
+    expected_rollout = True if colocate and release_train else (colocate if offload_rollout is None else False)
+    assert args.offload_train is expected_train
+    assert args.offload_rollout is expected_rollout
+
+
+@pytest.mark.unit
 def test_update_weight_delta_disk_is_valid(monkeypatch):
     module = load_vime_arguments_module(monkeypatch)
     args = make_vime_validate_args(
@@ -432,3 +462,54 @@ def test_force_fp8_ue8m0_scale_argument(monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
+
+
+def collect_args(**overrides):
+    values = dict(
+        draft_feature_mode="collect-only",
+        draft_feature_output_dir="/tmp/unique-draft",
+        draft_feature_run_id="run",
+        actor_num_nodes=1,
+        actor_num_gpus_per_node=1,
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        context_parallel_size=1,
+        num_layers_per_virtual_pipeline_stage=None,
+        num_virtual_stages_per_pipeline_rank=None,
+        pipeline_model_parallel_layout=None,
+        compute_advantages_and_returns=True,
+        update_weights_interval=1,
+    )
+    values.update(overrides)
+    return make_vime_validate_args(**values)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "override,message",
+    [
+        ({"micro_batch_size": 2}, "micro_batch_size=1"),
+        ({"tensor_model_parallel_size": 2}, "TP=PP=CP=DP=1"),
+        ({"actor_num_gpus_per_node": 2}, "TP=PP=CP=DP=1"),
+        ({"pipeline_model_parallel_layout": "Et*3"}, "TP=PP=CP=DP=1"),
+        ({"draft_feature_output_dir": None}, "output dir and run id"),
+        ({"draft_feature_run_id": ""}, "output dir and run id"),
+        ({"draft_feature_max_tokens": 0}, "budgets must be positive"),
+        ({"draft_feature_max_batches": -1}, "budgets must be positive"),
+        ({"draft_feature_max_bytes": 0}, "budgets must be positive"),
+        ({"keep_old_actor": True}, "actor log-prob forward"),
+        ({"use_rollout_logprobs": True}, "actor log-prob forward"),
+        ({"compute_advantages_and_returns": False}, "actor log-prob forward"),
+        ({"update_weights_interval": 2}, "publication after every actor update"),
+    ],
+)
+def test_collect_only_rejects_before_side_effects(monkeypatch, tmp_path, override, message):
+    module = load_vime_arguments_module(monkeypatch)
+    with pytest.raises(ValueError, match=message):
+        module.vime_validate_args(collect_args(**override))
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.unit
+def test_collect_only_supported_arguments(monkeypatch):
+    load_vime_arguments_module(monkeypatch).vime_validate_args(collect_args())

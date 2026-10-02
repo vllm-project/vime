@@ -9,6 +9,7 @@ import ray
 import torch
 import torch.distributed as dist
 from megatron.core import mpu
+from megatron.core.utils import unwrap_model
 from torch_memory_saver import torch_memory_saver
 from transformers import AutoConfig, AutoTokenizer
 
@@ -326,6 +327,7 @@ class MegatronTrainRayActor(TrainRayActor):
         data_iterator: list[DataIterator],
         num_microbatches: list[int],
         store_prefix: str = "",
+        draft_feature_collector=None,
     ) -> dict[str, list[torch.Tensor]]:
         with timer(f"{store_prefix}log_probs"):
             return forward_only(
@@ -336,6 +338,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 num_microbatches,
                 store_prefix=store_prefix,
                 use_rollout_top_p_replay=True,
+                draft_feature_collector=draft_feature_collector,
             )
 
     def train(self, rollout_id: int, rollout_data_ref: Box, external_data=None):
@@ -394,11 +397,28 @@ class MegatronTrainRayActor(TrainRayActor):
         num_microbatches = rollout_data["num_microbatches"]
         global_batch_sizes = rollout_data["global_batch_sizes"]
 
+        if self.args.draft_feature_mode == "collect-only" and not self.args.compute_advantages_and_returns:
+            raise ValueError("collect-only draft features require the existing target log-prob forward")
+
         if self.args.use_rollout_routing_replay:
             self.fill_routing_replay(data_iterator, num_microbatches, rollout_data)
 
         with inverse_timer("train_wait"), timer("train"):
             if self.args.compute_advantages_and_returns:
+                can_reuse_log_probs_in_loss = (
+                    len(num_microbatches) == 1
+                    and self.args.loss_type == "policy_loss"
+                    and self.args.kl_coef == 0
+                    and not self.args.use_rollout_logprobs
+                    and not self.args.get_mismatch_metrics
+                    and not self.args.use_critic
+                    and not self.args.keep_old_actor
+                    and not self.args.use_opd
+                    and (not self.args.use_routing_replay or self.args.use_rollout_routing_replay)
+                    and self.args.advantage_estimator != "gspo"
+                )
+                if self.args.draft_feature_mode == "collect-only" and can_reuse_log_probs_in_loss:
+                    raise ValueError("collect-only draft features cannot reuse training log-probs")
                 if "ref" in self.weights_backuper.backup_tags:
                     if self.args.use_routing_replay:
                         os.environ["ROUTING_REPLAY_STAGE"] = "fallthrough"
@@ -425,18 +445,13 @@ class MegatronTrainRayActor(TrainRayActor):
                     )
 
                 self._switch_model("old_actor" if self.args.keep_old_actor else "actor")
-                can_reuse_log_probs_in_loss = (
-                    len(num_microbatches) == 1
-                    and self.args.loss_type == "policy_loss"
-                    and self.args.kl_coef == 0
-                    and not self.args.use_rollout_logprobs
-                    and not self.args.get_mismatch_metrics
-                    and not self.args.use_critic
-                    and not self.args.keep_old_actor
-                    and not self.args.use_opd
-                    and (not self.args.use_routing_replay or self.args.use_rollout_routing_replay)
-                    and self.args.advantage_estimator != "gspo"
-                )
+                draft_feature_collector = None
+                if self.args.draft_feature_mode == "collect-only":
+                    from .draft_feature_collector import DraftFeatureCollector
+
+                    draft_feature_collector = DraftFeatureCollector(
+                        self.args, unwrap_model(self.model[0]), rollout_id, str(self.weight_updater.weight_version)
+                    )
                 if (
                     not self.args.use_rollout_logprobs or self.args.get_mismatch_metrics
                 ) and not can_reuse_log_probs_in_loss:
@@ -450,8 +465,11 @@ class MegatronTrainRayActor(TrainRayActor):
                             data_iterator,
                             num_microbatches,
                             store_prefix="",
+                            draft_feature_collector=draft_feature_collector,
                         )
                     )
+                    if draft_feature_collector is not None:
+                        draft_feature_collector.finish()
                     if self.args.use_rollout_routing_replay:
                         RoutingReplay.clear_all_forward()
 

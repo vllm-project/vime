@@ -150,6 +150,9 @@ steps:
             tests/test_deep_ep_tms_patch.py \
             tests/test_discounted_returns.py \
             tests/test_eval_config.py \
+            tests/test_draft_feature_contract.py \
+            tests/test_draft_feature_collector.py \
+            tests/test_draft_feature_metadata.py \
             tests/test_filter_long_prompt.py \
             tests/test_fully_async_rollout.py \
             tests/test_glm52_layerwise_comparison.py \
@@ -169,6 +172,8 @@ steps:
             tests/test_rollout_metrics.py \
             tests/test_rollout_sample_hooks.py \
             tests/test_vllm_rollout.py \
+            tests/test_mem_agent_nvlink_detect.py \
+            tests/test_server_idle_contract.py \
             tests/test_agent/test_sandbox_exec_and_wait.py \
             tests/test_stateless_adam.py \
             tests/test_tau_bench_token_delta.py \

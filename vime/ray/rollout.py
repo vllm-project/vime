@@ -340,6 +340,11 @@ class RolloutManager:
             "sample_indices": [sample.index for sample in samples],
             "rollout_ids": rollout_ids,
         }
+        if self.args.draft_feature_mode == "collect-only":
+            from vime.utils.draft_feature_contract import normalize_weight_versions
+
+            train_data["group_indices"] = [sample.group_index for sample in samples]
+            train_data["weight_versions"] = [normalize_weight_versions(sample.weight_versions) for sample in samples]
 
         # loss mask
         # TODO: compress the loss mask
@@ -467,7 +472,9 @@ class RolloutManager:
                 "loss_masks",
                 "round_number",
                 "sample_indices",
+                "group_indices",
                 "rollout_ids",
+                "weight_versions",
                 "rollout_mask_sums",
                 "rollout_log_probs",
                 "rollout_top_p_token_ids",

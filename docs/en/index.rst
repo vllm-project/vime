@@ -60,6 +60,7 @@ Start by Use Case
 
    advanced/on-policy-distillation.md
    advanced/speculative-decoding.md
+   advanced/draft-feature-collection.md
    advanced/low-precision.md
    advanced/reproducibility.md
    advanced/fault-tolerance.md

@@ -435,3 +435,30 @@ if __name__ == "__main__":
 - `--custom-megatron-init-path`：会增加一些 init 的调用；
 - `--custom-megatron-before-log-prob-hook-path`：会在计算 log prob 之前调用；
 - `--custom-megatron-before-train-step-hook-path`：会在每个训练步之前调用。可以考虑用这种方式混入特殊的训练 loss 之类的。
+
+### 训推一体的内存与 offload
+
+训练端保留参数和梯度 buffer 的 CPU 副本，用于权重发布和模型切换。
+Memory-saver offload 是另一项操作：训练端休眠时复制训练 storage，唤醒时恢复。
+关闭 offload 会让训练 storage 常驻，因此训练模型与 rollout 模型必须同时放得下。
+
+无 critic 的 GRPO 参数解析结果如下：
+
+| Colocate | Release train | 请求的训练 offload | 解析后的训练 offload | rollout offload 未设置 / 显式 false |
+| --- | --- | --- | --- | --- |
+| 关闭 | 关闭/开启 | 未设置 | false | false / false |
+| 关闭 | 关闭/开启 | true/false | 保留请求值 | false / false |
+| 开启 | 关闭 | 未设置 | true | true / false |
+| 开启 | 关闭 | true/false | 保留请求值 | true / false |
+| 开启 | 开启 | 任意 | false | true / true |
+
+`--offload` 会在上述解析前显式开启两侧 offload。训推一体的 `--release-train`
+会释放训练 actor，并强制 rollout offload，即使显式指定 false。PPO 另外强制训练
+侧 offload。使用 `--no-offload-train` 时需要给 rollout 权重和 KV cache 留足显存；
+必要时减小 `--vllm-gpu-memory-utilization`。
+
+[#445](https://github.com/vllm-project/vime/pull/445) 的历史单卡 Qwen3-0.6B
+实验记录了跳过 memory-saver 复制后 colocate 单步 18.85 s → 3.32 s。
+该数字对应原实验的依赖环境与单步测量范围，不代表本 maintenance 引入的提速，
+也不能预测其他模型的结果。选择常驻配置前，应在目标机器比较相同设置下的完整单步、
+生成 token 数及内存占用。
