@@ -17,6 +17,9 @@ from vime.observability.rollout_data_utils import (
     validate_rollout_routed_experts_for_replay,
 )
 from vime.observability.rollout_metrics import log_eval_rollout_data, log_rollout_data
+from vime.observability.rollout_spans import emit as emit_rollout_spans
+from vime.observability.rollout_spans import reset as reset_rollout_spans
+from vime.observability.rollout_spans import span as rollout_span
 from vime.rollout.base_types import call_rollout_fn
 from vime.rollout.sample_hooks import set_current_rollout_id
 from vime.utils.data import get_source
@@ -183,25 +186,34 @@ class RolloutManager:
         return len(self.data_source) // self.args.rollout_batch_size
 
     def generate(self, rollout_id):
+        reset_rollout_spans()
+        manager_start = time.perf_counter()
         start_time = time.time()
         self.rollout_id = rollout_id
         set_current_rollout_id(rollout_id)
         self.health_monitoring_resume()
         if self.args.ci_test and self.args.use_fault_tolerance and rollout_id >= 2:
             self._try_ci_fault_injection()
-        data, metrics = self._get_rollout_data(rollout_id=rollout_id)
-        save_debug_rollout_data(
-            self.args.save_debug_rollout_data,
-            data,
-            rollout_id=rollout_id,
-            evaluation=False,
-        )
-        log_rollout_data(rollout_id, self.args, data, metrics, time.time() - start_time)
+        with rollout_span("manager.rollout_fn"):
+            data, metrics = self._get_rollout_data(rollout_id=rollout_id)
+        with rollout_span("manager.save_debug"):
+            save_debug_rollout_data(
+                self.args.save_debug_rollout_data,
+                data,
+                rollout_id=rollout_id,
+                evaluation=False,
+            )
+        with rollout_span("manager.log_rollout_data"):
+            log_rollout_data(rollout_id, self.args, data, metrics, time.time() - start_time)
         if self.args.debug_rollout_only:
             # if debug rollout only, we don't convert samples to train data and directly return
             return
-        data = self._convert_samples_to_train_data(data)
-        return self._split_train_data_by_dp(data)
+        with rollout_span("manager.convert_samples"):
+            data = self._convert_samples_to_train_data(data)
+        with rollout_span("manager.split_by_dp"):
+            result = self._split_train_data_by_dp(data)
+        emit_rollout_spans(rollout_id, time.perf_counter() - manager_start, logger)
+        return result
 
     def eval(self, rollout_id):
         if self.args.debug_train_only:
@@ -314,7 +326,8 @@ class RolloutManager:
         if self.custom_convert_samples_to_train_data_func is not None:
             return self.custom_convert_samples_to_train_data_func(self.args, samples)
 
-        raw_rewards, rewards = self._post_process_rewards(samples)
+        with rollout_span("convert.reward_postprocess"):
+            raw_rewards, rewards = self._post_process_rewards(samples)
 
         assert len(raw_rewards) == len(samples)
         assert len(rewards) == len(samples)
@@ -344,18 +357,19 @@ class RolloutManager:
         # loss mask
         # TODO: compress the loss mask
         loss_masks = []
-        for sample in samples:
-            # always instantiate loss_mask if not provided
-            if sample.loss_mask is None:
-                sample.loss_mask = [1] * sample.response_length
+        with rollout_span("convert.loss_masks"):
+            for sample in samples:
+                # always instantiate loss_mask if not provided
+                if sample.loss_mask is None:
+                    sample.loss_mask = [1] * sample.response_length
 
-            assert (
-                len(sample.loss_mask) == sample.response_length
-            ), f"loss mask length {len(sample.loss_mask)} != response length {sample.response_length}"
-            if sample.remove_sample:
-                sample.loss_mask = [0] * sample.response_length
-            loss_masks.append(sample.loss_mask)
-        train_data["loss_masks"] = loss_masks
+                assert (
+                    len(sample.loss_mask) == sample.response_length
+                ), f"loss mask length {len(sample.loss_mask)} != response length {sample.response_length}"
+                if sample.remove_sample:
+                    sample.loss_mask = [0] * sample.response_length
+                loss_masks.append(sample.loss_mask)
+            train_data["loss_masks"] = loss_masks
 
         # Per-rollout aggregate, precomputed at the step level (where we can
         # see every sample of every rollout) and broadcast per-sample so the
@@ -368,11 +382,12 @@ class RolloutManager:
         #   so summing partial contributions across mbs yields one
         #   token-weighted mean per rollout.
         rollout_id_list = train_data["rollout_ids"]
-        mask_sums_per_sample = [sum(m) for m in loss_masks]
-        rollout_total_mask: dict[int, int] = {}
-        for rid, ms in zip(rollout_id_list, mask_sums_per_sample, strict=True):
-            rollout_total_mask[rid] = rollout_total_mask.get(rid, 0) + ms
-        train_data["rollout_mask_sums"] = [rollout_total_mask[rid] for rid in rollout_id_list]
+        with rollout_span("convert.rollout_mask_sums"):
+            mask_sums_per_sample = [sum(m) for m in loss_masks]
+            rollout_total_mask: dict[int, int] = {}
+            for rid, ms in zip(rollout_id_list, mask_sums_per_sample, strict=True):
+                rollout_total_mask[rid] = rollout_total_mask.get(rid, 0) + ms
+            train_data["rollout_mask_sums"] = [rollout_total_mask[rid] for rid in rollout_id_list]
 
         # Overwrite raw_reward when available. Mixed-source batches may only
         # populate this field for a subset of samples (e.g. SWE but not code).
@@ -445,55 +460,59 @@ class RolloutManager:
         total_lengths = [len(t) for t in data["tokens"]]
         data["total_lengths"] = total_lengths
 
-        partitions, micro_batch_indices, num_microbatches, global_batch_sizes = build_dp_schedule(
-            self.args,
-            self.train_parallel_config,
-            total_lengths,
-            global_batch_size=self.args.global_batch_size,
-            rollout_indices=data["rollout_ids"],
-        )
+        with rollout_span("split.build_dp_schedule"):
+            partitions, micro_batch_indices, num_microbatches, global_batch_sizes = build_dp_schedule(
+                self.args,
+                self.train_parallel_config,
+                total_lengths,
+                global_batch_size=self.args.global_batch_size,
+                rollout_indices=data["rollout_ids"],
+            )
 
         # Package per-rank rollout_data
         rollout_data_refs = []
-        for r in range(dp_size):
-            partition = partitions[r]
-            rollout_data = {"partition": partition}
-            for key in [
-                "tokens",
-                "multimodal_train_inputs",
-                "response_lengths",
-                "rewards",
-                "truncated",
-                "loss_masks",
-                "round_number",
-                "sample_indices",
-                "rollout_ids",
-                "rollout_mask_sums",
-                "rollout_log_probs",
-                "rollout_top_p_token_ids",
-                "rollout_top_p_token_offsets",
-                "rollout_routed_experts",
-                "source_names",
-                "prompt",
-                "teacher_log_probs",
-            ]:
-                if key not in data:
-                    continue
-                rollout_data[key] = [data[key][j] for j in partition]
-            # keys that need to be splited at train side
-            for key in ["raw_reward", "total_lengths"]:
-                if key not in data:
-                    continue
-                rollout_data[key] = data[key]
-            rollout_data["global_batch_sizes"] = global_batch_sizes
-            rollout_data["num_microbatches"] = num_microbatches
-            rollout_data["micro_batch_indices"] = micro_batch_indices[r]
-            tensorize_rollout_data_for_training(rollout_data)
-            transport = getattr(self.args, "rollout_data_transport", "object-store")
-            if transport == "nixl":
-                rollout_data_refs.append(Box(ray.put(rollout_data, _tensor_transport="nixl")))
-            elif transport == "object-store":
-                rollout_data_refs.append(Box(ray.put(rollout_data)))
-            else:
-                raise ValueError(f"Unsupported rollout data transport: {transport!r}")
+        with rollout_span("split.package_ranks"):
+            for r in range(dp_size):
+                partition = partitions[r]
+                rollout_data = {"partition": partition}
+                for key in [
+                    "tokens",
+                    "multimodal_train_inputs",
+                    "response_lengths",
+                    "rewards",
+                    "truncated",
+                    "loss_masks",
+                    "round_number",
+                    "sample_indices",
+                    "rollout_ids",
+                    "rollout_mask_sums",
+                    "rollout_log_probs",
+                    "rollout_top_p_token_ids",
+                    "rollout_top_p_token_offsets",
+                    "rollout_routed_experts",
+                    "source_names",
+                    "prompt",
+                    "teacher_log_probs",
+                ]:
+                    if key not in data:
+                        continue
+                    rollout_data[key] = [data[key][j] for j in partition]
+                # keys that need to be splited at train side
+                for key in ["raw_reward", "total_lengths"]:
+                    if key not in data:
+                        continue
+                    rollout_data[key] = data[key]
+                rollout_data["global_batch_sizes"] = global_batch_sizes
+                rollout_data["num_microbatches"] = num_microbatches
+                rollout_data["micro_batch_indices"] = micro_batch_indices[r]
+                with rollout_span("split.tensorize"):
+                    tensorize_rollout_data_for_training(rollout_data)
+                transport = getattr(self.args, "rollout_data_transport", "object-store")
+                with rollout_span("split.ray_put"):
+                    if transport == "nixl":
+                        rollout_data_refs.append(Box(ray.put(rollout_data, _tensor_transport="nixl")))
+                    elif transport == "object-store":
+                        rollout_data_refs.append(Box(ray.put(rollout_data)))
+                    else:
+                        raise ValueError(f"Unsupported rollout data transport: {transport!r}")
         return rollout_data_refs
