@@ -191,6 +191,12 @@ def named_params_and_buffers(args: Namespace, model: Sequence[torch.nn.Module]) 
 
         # treat expert bias as normal parameters
         for name, buffer in model_module.named_buffers():
+            if (
+                args.custom_model_provider_path == "vime_plugins.huginn.model.model_provider"
+                and name.split(".")[-1] == "freqs_cis"
+            ):
+                yield "module." + name if not name.startswith("module.module.") else name, buffer
+                continue
             # TODO shall we handle (almost) all buffers
             if "expert_bias" not in name:
                 continue

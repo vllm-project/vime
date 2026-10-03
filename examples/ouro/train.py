@@ -24,7 +24,7 @@ from vllm_rlt.pd.engine import PDEngine
 
 from vime.backends.megatron_utils.checkpoint import load_checkpoint
 from vime.backends.megatron_utils.data import get_data_iterator
-from vime.backends.megatron_utils.hf_checkpoint_saver import save_hf_model_direct_to_path
+from vime.backends.megatron_utils.hf_checkpoint_saver import save_hf_model_to_path
 from vime.backends.megatron_utils.initialize import init
 from vime.backends.megatron_utils.loss import compute_advantages_and_returns
 from vime.backends.megatron_utils.model import save, setup_model_and_optimizer, train
@@ -166,7 +166,7 @@ def main():
         )
         if manifest["contract"] != contract:
             raise ValueError("Checkpoint budget schedule differs from requested schedule")
-        iteration, _ = load_checkpoint(chunks, optimizer, scheduler, {}, False)
+        iteration, _ = load_checkpoint(chunks, optimizer, scheduler, {})
         start = iteration + 1
         if manifest["next_update"] != start:
             raise ValueError("Checkpoint and budget/data cursor disagree")
@@ -351,7 +351,7 @@ def main():
     # Retain the newest checkpoint only after its distributed save completes.
     save(args.num_rollout - 1, chunks, optimizer, scheduler)
     if args.ouro_export_hf is not None:
-        save_hf_model_direct_to_path(args, args.ouro_export_hf, chunks, model_name="ouro")
+        save_hf_model_to_path(args, args.ouro_export_hf, chunks, model_name="ouro")
     dist.barrier()
     if args.rank == 0:
         (Path(args.save) / "ouro-plan.json").write_text(

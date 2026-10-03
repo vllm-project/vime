@@ -434,3 +434,33 @@ In some customized Megatron implementations, special operations need to be perfo
   - `--custom-megatron-init-path`: Adds some initialization calls.
   - `--custom-megatron-before-log-prob-hook-path`: Is called before calculating the log probability.
   - `--custom-megatron-before-train-step-hook-path`: Is called before each training step. You could use this to mix in special training losses, for example.
+
+### Colocate memory and offload
+
+Training keeps CPU copies of parameters and gradient buffers for weight publication
+and model switching. Memory-saver offload is separate: it copies training storage
+when the trainer sleeps and restores it when training resumes. Disabling offload
+keeps that storage resident, so the trainer and rollout model must fit together.
+
+For GRPO without a critic, the resolved flags are:
+
+| Colocate | Release train | Train offload requested | Train offload resolved | Rollout offload unset / explicit false |
+| --- | --- | --- | --- | --- |
+| off | off/on | unset | false | false / false |
+| off | off/on | true/false | requested value | false / false |
+| on | off | unset | true | true / false |
+| on | off | true/false | requested value | true / false |
+| on | on | any | false | true / true |
+
+`--offload` explicitly enables both flags before this resolution. With colocated
+`--release-train`, rollout offload is required and an explicit false is overridden;
+training actors are released instead of offloaded. PPO separately forces training
+offload. `--no-offload-train` is useful only when sufficient device memory remains
+for rollout weights and KV cache; reduce `--vllm-gpu-memory-utilization` as needed.
+
+The historical single-GPU Qwen3-0.6B measurement in [#445](https://github.com/vllm-project/vime/pull/445)
+reported 18.85 s → 3.32 s per colocate step when skipping the memory-saver copy.
+This describes that experiment's step timing and dependency environment; it is not
+a speedup introduced by these maintenance changes or a prediction for other models.
+Measure complete matched steps, generated token counts and memory on the target
+machine before choosing the resident configuration.

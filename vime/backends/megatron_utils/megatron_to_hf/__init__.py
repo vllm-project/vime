@@ -32,7 +32,7 @@ def convert_to_hf(args, model_name, name, param, quantization_config=None, trans
 # TODO optimize code details
 def _convert_to_hf_core(args, model_name, name, param):
     model_name = model_name.lower().replace("_", "").replace("-", "")
-    if "ouro" in model_name:
+    if "ouro" in model_name or "nanbeige" in model_name:
         return [(strip_param_name_prefix(name).removeprefix("language_model."), param)]
     if "minimaxm2" in model_name:
         converted_named_tensors = convert_minimax_m2_to_hf(args, name, param)
