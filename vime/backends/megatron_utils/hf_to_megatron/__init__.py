@@ -23,6 +23,8 @@ _LOADERS = {
     "mimo": mimo_hf_tensor,
     "minimax_m2": minimax_m2_hf_tensor,
     "ouro": ouro_hf_tensor,
+    "nanbeige": ouro_hf_tensor,
+    "huginn_raven": ouro_hf_tensor,
     "qwen2": qwen_hf_tensor,
     "qwen2_moe": qwen_moe_hf_tensor,
     "qwen3": qwen_hf_tensor,

@@ -6,7 +6,7 @@ from typing import Any
 import ray
 import torch
 
-from vime.backends.vllm_utils.deployment import start_rollout_servers
+from vime.backends.rollout_backend import start_rollout_servers
 from vime.observability import logging_utils
 from vime.observability.logging_utils import configure_logger, init_tracking
 from vime.observability.rollout_data_utils import (
@@ -48,7 +48,7 @@ class RolloutManager:
         if self.args.debug_train_only:
             self.servers: dict[str, Any] = {}
         else:
-            init_http_client(args)
+            init_http_client(args, backend=args.rollout_backend)
             self.servers, rollout_init_handles = start_rollout_servers(args, pg)
 
         data_source_cls = load_function(self.args.data_source_path)
@@ -137,8 +137,16 @@ class RolloutManager:
             monitor.stop()
         engines = [engine for server in self.servers.values() for engine in server.all_engines if engine is not None]
         if engines:
-            ray.get([engine.shutdown.remote() for engine in engines])
+            if self.args.rollout_backend == "vllm-rlt":
+                ray.get([engine.close.remote() for engine in engines])
+                for engine in engines:
+                    engine.shutdown.remote()
+            else:
+                ray.get([engine.shutdown.remote() for engine in engines])
         logging_utils.finish_tracking(self.args)
+
+    def shutdown(self):
+        ray.actor.exit_actor()
 
     @property
     def server(self) -> Any | None:
@@ -390,6 +398,11 @@ class RolloutManager:
         if samples[0].rollout_log_probs is not None:
             train_data["rollout_log_probs"] = [sample.rollout_log_probs for sample in samples]
 
+        if any(sample.recurrent_trace is not None for sample in samples):
+            if any(sample.recurrent_trace is None for sample in samples):
+                raise ValueError("A native rollout batch must contain one complete recurrent cohort")
+            train_data["recurrent_inputs"] = [sample.recurrent_trace for sample in samples]
+
         if getattr(self.args, "rollout_top_p", 1.0) != 1.0:
             for sample in samples:
                 assert sample.rollout_top_p_token_ids is not None
@@ -461,6 +474,7 @@ class RolloutManager:
             for key in [
                 "tokens",
                 "multimodal_train_inputs",
+                "recurrent_inputs",
                 "response_lengths",
                 "rewards",
                 "truncated",

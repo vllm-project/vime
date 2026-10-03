@@ -480,13 +480,13 @@ index a3b00aaad2..2b05c5e2f5 100644
 @@ -471,6 +471,24 @@ class Worker(WorkerBase):
          with set_current_vllm_config(self.vllm_config):
              self.model_runner.reload_weights(*args, **kwargs)
- 
+
 +    def pull_weights(
 +        self,
 +        local_checkpoint_dir: str,
 +        source_dir: str,
 +        target_version: int,
-+    ) -> dict[str, Any]:
++    ) -> dict[str, bool | str]:
 +        from vllm.utils.local_checkpoint import pull_checkpoint
 +
 +        pull_checkpoint(
@@ -518,14 +518,10 @@ diff --git a/vllm/config/model.py b/vllm/config/model.py
 diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
 --- a/vllm/engine/arg_utils.py
 +++ b/vllm/engine/arg_utils.py
-@@ -705,6 +705,7 @@
-     reasoning_config: ReasoningConfig = get_field(VllmConfig, "reasoning_config")
-
+@@ -705,2 +705,3 @@
      generation_config: str = ModelConfig.generation_config
 +    custom_pull_weights_pre_read_hook: str | None = ModelConfig.custom_pull_weights_pre_read_hook
      enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
-     enable_cumem_allocator: bool = ModelConfig.enable_cumem_allocator
-     override_generation_config: dict[str, Any] = get_field(
 @@ -922,6 +923,10 @@
          )
          model_group.add_argument(
@@ -537,11 +533,9 @@ diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
          )
          model_group.add_argument(
              "--enable-sleep-mode", **model_kwargs["enable_sleep_mode"]
-@@ -1811,6 +1816,7 @@
+@@ -1811,4 +1816,5 @@
              pooler_config=self.pooler_config,
              generation_config=self.generation_config,
              override_generation_config=self.override_generation_config,
 +            custom_pull_weights_pre_read_hook=self.custom_pull_weights_pre_read_hook,
              enable_sleep_mode=self.enable_sleep_mode,
-             enable_cumem_allocator=self.enable_cumem_allocator,
-             model_impl=self.model_impl,

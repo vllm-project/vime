@@ -205,4 +205,8 @@ def megatron_parse_args(extra_args_provider, skip_hf_validate=False):
     args.rank = 0
     args.world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
     args = _set_default_megatron_args(args)
+    if args.recurrent_fp32:
+        if args.fp16:
+            raise ValueError("--recurrent-fp32 and --fp16 are mutually exclusive")
+        args.bf16 = False
     return args

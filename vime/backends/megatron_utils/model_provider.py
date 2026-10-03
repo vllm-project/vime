@@ -15,7 +15,6 @@ from megatron.core.models.gpt.gpt_layer_specs import (
 )
 from megatron.core.transformer.spec_utils import import_module
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.training.arguments import core_transformer_config_from_args
 
 from vime.utils.misc import load_function
 
@@ -100,6 +99,10 @@ def _get_model_provider_func(
             pre_process: bool = True, post_process: bool = True, vp_stage: int | None = None
         ) -> GPTModel:
             custom_model_provider = load_function(args.custom_model_provider_path)
+            if "role" in inspect.signature(custom_model_provider).parameters:
+                return custom_model_provider(
+                    pre_process=pre_process, post_process=post_process, vp_stage=vp_stage, role=role
+                )
             # Check if the custom provider supports vp_stage parameter
             has_vp_stage = "vp_stage" in inspect.signature(custom_model_provider).parameters
             if has_vp_stage:
@@ -131,6 +134,8 @@ def _get_model_provider_func(
         use_te = args.transformer_impl == "transformer_engine"
 
         # Experimental loading arguments from yaml
+        from megatron.training.arguments import core_transformer_config_from_args
+
         config: TransformerConfig = core_transformer_config_from_args(args)
         # Older GLM Megatron forks consumed this flag from TransformerConfig.
         # Preserve that contract for custom specs, while freeze_model_params()

@@ -162,6 +162,7 @@ def log_rollout_data(
         ignored_keys = {
             "tokens",
             "multimodal_train_inputs",
+            "recurrent_inputs",
             "loss_masks",
             "sample_indices",
             "rollout_ids",

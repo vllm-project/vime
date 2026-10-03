@@ -200,6 +200,7 @@ def make_vime_validate_args(**overrides):
         save=None,
         kl_loss_coef=0,
         advantage_estimator="grpo",
+        flow_dppo_divergence_budget=None,
         normalize_advantages=False,
         use_rollout_logprobs=False,
         use_tis=False,
@@ -361,6 +362,29 @@ def test_vime_validate_args_preserves_zero_rollout_gpus_without_colocate(monkeyp
     assert args.actor_num_nodes == 1
     assert args.offload_train is False
     assert args.offload_rollout is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("colocate", [False, True])
+@pytest.mark.parametrize("offload_train", [None, False, True])
+@pytest.mark.parametrize("release_train", [False, True])
+@pytest.mark.parametrize("offload_rollout", [None, False])
+def test_colocate_offload_resolution(monkeypatch, colocate, offload_train, release_train, offload_rollout):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(
+        colocate=colocate,
+        offload_train=offload_train,
+        offload_rollout=offload_rollout,
+        release_train=release_train,
+        save="/tmp/checkpoint",
+        update_weight_transport="disk",
+        update_weight_disk_dir="/tmp/weights",
+    )
+    module.vime_validate_args(args)
+    expected_train = False if colocate and release_train else (colocate if offload_train is None else offload_train)
+    expected_rollout = True if colocate and release_train else (colocate if offload_rollout is None else False)
+    assert args.offload_train is expected_train
+    assert args.offload_rollout is expected_rollout
 
 
 @pytest.mark.unit

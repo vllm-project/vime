@@ -5,6 +5,7 @@ Training uses differentiable SDPA, not the serving KV writes or a HF model wrapp
 """
 
 from functools import partial
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
@@ -12,7 +13,10 @@ from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
 from torch.utils.checkpoint import checkpoint
+from vllm_rlt.models.nanbeige import NanbeigeForCausalLM
 from vllm_rlt.models.ouro import OuroDecoderLayer, OuroForCausalLM
+
+from vime.utils.types import RecurrentTrace
 
 
 def decoder_forward(
@@ -56,7 +60,15 @@ def decoder_forward(
 
 
 class OuroMegatronModel(MegatronModule):
-    def __init__(self, config: TransformerConfig, native: OuroForCausalLM, *, recompute: bool = False):
+    def __init__(
+        self,
+        config: TransformerConfig,
+        native: OuroForCausalLM | NanbeigeForCausalLM,
+        *,
+        recompute: bool = False,
+        role: Literal["actor", "critic"] = "actor",
+        freeze_exit_gate: bool = True,
+    ):
         super().__init__(config)
         if (config.tensor_model_parallel_size, config.pipeline_model_parallel_size, config.context_parallel_size) != (
             1,
@@ -68,9 +80,16 @@ class OuroMegatronModel(MegatronModule):
             raise ValueError("Ouro SDPA provider requires sequence parallel and grad fusion disabled")
         self.ouro_config = native.config
         self.model = native.model
-        self.lm_head = native.lm_head
+        self.role = role
+        if role == "critic":
+            from vime.backends.megatron_utils.model_provider import LinearForLastLayer
+
+            self.output_layer = LinearForLastLayer(config.hidden_size, 1, config=config, bias=False)
+        else:
+            self.lm_head = native.lm_head
         self.requires_grad_(True)
-        self.model.early_exit_gate.requires_grad_(False)
+        if freeze_exit_gate:
+            self.model.early_exit_gate.requires_grad_(False)
         self.pre_process = self.post_process = True
         self.share_embeddings_and_output_weights = False
         self.vp_stage = None
@@ -125,7 +144,10 @@ class OuroMegatronModel(MegatronModule):
                 )
                 previous[index] = (k, v)
             hidden = hidden.index_copy(0, positions, self.model.norm(active))
-        return self.lm_head(hidden)
+        return self._readout(hidden)
+
+    def _readout(self, hidden: torch.Tensor) -> torch.Tensor:
+        return self.output_layer(hidden)[0] if self.role == "critic" else self.lm_head(hidden)
 
     def _sequence(self, tokens: torch.Tensor) -> torch.Tensor:
         hidden = self.model.embed_tokens(tokens)
@@ -139,7 +161,7 @@ class OuroMegatronModel(MegatronModule):
                 else:
                     hidden = self._layer(layer, hidden, cos, sin)
             hidden = self.model.norm(hidden)
-        return self.lm_head(hidden)
+        return self._readout(hidden)
 
     def forward(
         self,
@@ -150,11 +172,17 @@ class OuroMegatronModel(MegatronModule):
         packed_seq_params: PackedSeqParams | None = None,
         loss_mask=None,
         execution_depths: torch.Tensor | None = None,
+        recurrent_inputs: list[RecurrentTrace] | None = None,
     ) -> torch.Tensor:
         if labels is not None or attention_mask is not None or position_ids is not None:
             raise ValueError("Use VIME's masked RL loss and unmodified per-sequence positions")
         if input_ids.ndim != 2 or input_ids.shape[0] != 1:
             raise ValueError("Ouro expects one packed token stream")
+        if recurrent_inputs is not None and any(
+            trace.prefill_depth != self.loop_budget or any(depth != self.loop_budget for depth in trace.decode_depths)
+            for trace in recurrent_inputs
+        ):
+            raise ValueError("Native training requires the rollout's fixed full depth")
         if execution_depths is not None:
             if (
                 execution_depths.ndim != 1
@@ -186,7 +214,10 @@ class OuroMegatronModel(MegatronModule):
 
 
 def model_provider(
-    pre_process: bool = True, post_process: bool = True, vp_stage: int | None = None
+    pre_process: bool = True,
+    post_process: bool = True,
+    vp_stage: int | None = None,
+    role: Literal["actor", "critic"] = "actor",
 ) -> OuroMegatronModel:
     from megatron.training import get_args
     from megatron.training.arguments import core_transformer_config_from_args
@@ -196,4 +227,4 @@ def model_provider(
     args = get_args()
     config = core_transformer_config_from_args(args)
     native = OuroForCausalLM.from_pretrained(args.hf_checkpoint, dtype=config.params_dtype)
-    return OuroMegatronModel(config, native, recompute=args.recompute_granularity is not None)
+    return OuroMegatronModel(config, native, recompute=args.recompute_granularity is not None, role=role)

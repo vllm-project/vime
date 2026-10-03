@@ -52,6 +52,8 @@ class RayTrainGroup:
         self._with_opd_teacher = with_opd_teacher
         self._rollout_manager = None
         self._disk_weight_version = getattr(args, "update_weight_start_version", 0)
+        if args.rollout_backend == "vllm-rlt":
+            self._disk_weight_version = args.rlt_start_version
         self._actor_handlers = []
 
     def _allocate_gpus_for_actor(self, pg, num_gpus_per_actor):
@@ -91,6 +93,14 @@ class RayTrainGroup:
 
             env_vars["LD_PRELOAD"] = dynlib_path
             env_vars["TMS_INIT_ENABLE"] = "1"
+            # CPU backup is the fastest of the three modes torch_memory_saver
+            # offers here: disk backup measured ~30x slower on ext4, and without
+            # a backup the state cannot be restored. It is still the dominant
+            # cost of a colocate step -- its copy path runs at ~2.4 GiB/s while a
+            # plain pinned torch copy on the same device does ~24 GiB/s, and it
+            # moves ~18.7 GiB per step, which makes sleep() + wake_up() ~80% of a
+            # small-model step. Tracked upstream:
+            # https://github.com/fzyzcjy/torch_memory_saver/issues/111
             env_vars["TMS_INIT_ENABLE_CPU_BACKUP"] = "1"
 
         # We cannot do routing replay for critic.
@@ -210,6 +220,12 @@ class RayTrainGroup:
     def clear_memory(self):
         return ray.get([actor.clear_memory.remote() for actor in self._actor_handlers])
 
+    def close(self):
+        ray.get([actor.close.remote() for actor in self._actor_handlers])
+        for actor in self._actor_handlers:
+            actor.shutdown.remote()
+        self._actor_handlers = []
+
     def set_rollout_manager(self, rollout_manager):
         self._rollout_manager = rollout_manager
         return ray.get([actor.set_rollout_manager.remote(rollout_manager) for actor in self._actor_handlers])
@@ -252,7 +268,7 @@ class RayTrainGroup:
                 for engine in engines
             ]
         )
-        if self.args.ci_test:
+        if self.args.ci_test or self.args.rollout_backend == "vllm-rlt":
             engine_versions = ray.get([engine.get_weight_version.remote() for engine in engines])
             mismatches = [
                 f"engine {idx}: {engine_version}"
