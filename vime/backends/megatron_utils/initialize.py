@@ -76,10 +76,14 @@ def init(args):
     )
     _build_tokenizer(args)
     # We won't use this. initialize to pass some validation in megatron.
+    calculator_batch_size = args.global_batch_size
+    mb_per_dp = args.micro_batch_size * args.data_parallel_size
+    if getattr(args, "variable_global_batch_size", False) and calculator_batch_size % mb_per_dp:
+        calculator_batch_size = mb_per_dp
     init_num_microbatches_calculator(
         args.rank,
         args.rampup_batch_size,
-        args.global_batch_size,
+        calculator_batch_size,
         args.micro_batch_size,
         args.data_parallel_size,
         args.decrease_batch_size_if_needed,

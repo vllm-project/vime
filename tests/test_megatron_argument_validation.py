@@ -236,6 +236,8 @@ def make_vime_validate_args(**overrides):
         rollout_batch_size=1,
         n_samples_per_prompt=1,
         global_batch_size=None,
+        global_batch_size_schedule=None,
+        variable_global_batch_size=False,
         grpo_std_normalization=True,
         over_sampling_batch_size=None,
         num_epoch=None,
@@ -262,6 +264,322 @@ def make_vime_validate_args(**overrides):
     )
     values.update(overrides)
     return types.SimpleNamespace(**values)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("schedule_yaml", ["'3,5'", "[3, 5]"])
+def test_custom_config_normalizes_global_batch_schedule(monkeypatch, tmp_path, schedule_yaml):
+    module = load_vime_arguments_module(monkeypatch)
+    config = tmp_path / "custom.yaml"
+    config.write_text(f"global_batch_size_schedule: {schedule_yaml}\n")
+    args = make_vime_validate_args(custom_config_path=str(config), rollout_batch_size=8)
+
+    module.vime_validate_args(args)
+
+    assert args.global_batch_size_schedule == [3, 5]
+    assert args.global_batch_size == 3
+    assert args.variable_global_batch_size is True
+
+
+@pytest.mark.unit
+def test_custom_config_rejects_invalid_global_batch_schedule(monkeypatch, tmp_path):
+    module = load_vime_arguments_module(monkeypatch)
+    config = tmp_path / "custom.yaml"
+    config.write_text("global_batch_size_schedule: '3,0,5'\n")
+    args = make_vime_validate_args(custom_config_path=str(config), rollout_batch_size=8)
+
+    with pytest.raises(AssertionError, match="must contain positive integers"):
+        module.vime_validate_args(args)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("schedule", ["[3.9, 4.1]", "[true, 7]", "'3,,5'", "'3,5,'", "'{3: left, 5: right}'"])
+def test_global_batch_schedule_rejects_non_integers(monkeypatch, tmp_path, schedule):
+    module = load_vime_arguments_module(monkeypatch)
+    config = tmp_path / "custom.yaml"
+    config.write_text(f"global_batch_size_schedule: {schedule}\n")
+    args = make_vime_validate_args(custom_config_path=str(config))
+
+    with pytest.raises(ValueError, match="positive integers"):
+        module.vime_validate_args(args)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "overrides, error",
+    [
+        ({}, None),
+        ({"ckpt_format": "torch"}, "torch_dist"),
+        ({"reset_optimizer_states": True}, "reset-optimizer-states"),
+    ],
+)
+def test_custom_config_streaming_is_validated(monkeypatch, tmp_path, overrides, error):
+    module = load_vime_arguments_module(monkeypatch)
+    config = tmp_path / "custom.yaml"
+    config.write_text("stream_optimizer_state_to_disk: true\n")
+    args = make_vime_validate_args(custom_config_path=str(config), bf16=True, offload_train_disk_dir=None, **overrides)
+    monkeypatch.setenv("SCRATCH", "/scratch")
+    monkeypatch.setenv("VIME_RUN_ID", "yaml-test")
+
+    if error:
+        with pytest.raises((ValueError, AssertionError), match=error):
+            module.vime_validate_args(args)
+    else:
+        module.vime_validate_args(args)
+        assert args.offload_train_disk_dir == "/scratch/vime_train_offload_yaml-test"
+
+
+@pytest.mark.unit
+def test_custom_config_disables_streaming_before_validation(monkeypatch, tmp_path):
+    module = load_vime_arguments_module(monkeypatch)
+    config = tmp_path / "custom.yaml"
+    config.write_text("stream_optimizer_state_to_disk: false\n")
+    args = make_vime_validate_args(custom_config_path=str(config), stream_optimizer_state_to_disk=True, bf16=False)
+
+    module.vime_validate_args(args)
+
+    assert args.stream_optimizer_state_to_disk is False
+
+
+@pytest.mark.unit
+def test_custom_config_batch_settings_are_derived_after_overrides(monkeypatch, tmp_path):
+    module = load_vime_arguments_module(monkeypatch)
+    config = tmp_path / "custom.yaml"
+    config.write_text("rollout_batch_size: 5\nvariable_global_batch_size: true\n")
+    args = make_vime_validate_args(custom_config_path=str(config), rollout_batch_size=8, num_steps_per_rollout=2)
+
+    module.vime_validate_args(args)
+
+    assert args.global_batch_size == 3
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("samples, steps, batch_size", [(5, 2, 3), (5, 3, 2), (8, 2, 4)])
+def test_num_steps_with_variable_batches(monkeypatch, samples, steps, batch_size):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(
+        rollout_batch_size=samples, num_steps_per_rollout=steps, variable_global_batch_size=True
+    )
+
+    module.vime_validate_args(args)
+
+    assert args.global_batch_size == batch_size
+    assert (samples + batch_size - 1) // batch_size == steps
+
+
+@pytest.mark.unit
+def test_num_steps_with_variable_batches_requires_explicit_schedule_when_needed(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(rollout_batch_size=6, num_steps_per_rollout=4, variable_global_batch_size=True)
+
+    with pytest.raises(ValueError, match="global-batch-size-schedule"):
+        module.vime_validate_args(args)
+
+
+@pytest.mark.unit
+def test_num_steps_with_fixed_batches_rejects_extra_steps(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(rollout_batch_size=8, num_steps_per_rollout=3)
+
+    with pytest.raises(ValueError, match="global-batch-size-schedule"):
+        module.vime_validate_args(args)
+
+
+@pytest.mark.unit
+def test_num_steps_with_fixed_batches_keeps_dropped_tail(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(rollout_batch_size=5, num_steps_per_rollout=2)
+
+    module.vime_validate_args(args)
+
+    assert args.global_batch_size == 2
+
+
+@pytest.mark.unit
+def test_explicit_schedule_matches_requested_steps(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(rollout_batch_size=5, num_steps_per_rollout=2, global_batch_size_schedule=[3, 2])
+
+    module.vime_validate_args(args)
+
+    assert args.global_batch_size == 3
+    assert args.global_batch_size_schedule == [3, 2]
+
+
+@pytest.mark.unit
+def test_explicit_schedule_rejects_mismatched_requested_steps(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(rollout_batch_size=5, num_steps_per_rollout=2, global_batch_size_schedule=[2, 2, 1])
+
+    with pytest.raises(ValueError, match="schedule length"):
+        module.vime_validate_args(args)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("schedule", [[2, 2], [2, 4]])
+@pytest.mark.parametrize("num_steps", [None, 2])
+def test_explicit_schedule_must_cover_rollout_groups(monkeypatch, schedule, num_steps):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(
+        rollout_batch_size=5,
+        num_steps_per_rollout=num_steps,
+        global_batch_size_schedule=schedule,
+        rollout_function_path="vime.rollout.vllm_rollout.generate_rollout",
+    )
+
+    with pytest.raises(ValueError, match="cover all rollout groups"):
+        module.vime_validate_args(args)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"rollout_function_path": "custom.rollout"},
+        {
+            "rollout_function_path": "vime.rollout.vllm_rollout.generate_rollout",
+            "custom_generate_function_path": "custom.generate",
+        },
+    ],
+)
+def test_custom_rollout_schedule_uses_actual_groups(monkeypatch, overrides):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(
+        rollout_batch_size=2, n_samples_per_prompt=2, global_batch_size_schedule=[2], **overrides
+    )
+
+    module.vime_validate_args(args)
+
+    assert args.global_batch_size_schedule == [2]
+
+
+@pytest.mark.unit
+def test_custom_rollout_steps_follow_explicit_schedule(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(
+        rollout_batch_size=2,
+        num_steps_per_rollout=3,
+        global_batch_size_schedule=[1, 1, 1],
+    )
+
+    module.vime_validate_args(args)
+
+    assert args.global_batch_size_schedule == [1, 1, 1]
+
+
+@pytest.mark.unit
+def test_nominal_steps_without_schedule_cannot_exceed_nominal_groups(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(rollout_batch_size=2, num_steps_per_rollout=3)
+
+    with pytest.raises(ValueError, match="nominal rollout groups"):
+        module.vime_validate_args(args)
+
+
+@pytest.mark.unit
+def test_explicit_schedule_counts_samples_per_prompt(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(
+        rollout_batch_size=3, n_samples_per_prompt=2, num_steps_per_rollout=2, global_batch_size_schedule="2,4"
+    )
+
+    module.vime_validate_args(args)
+
+    assert args.global_batch_size_schedule == [2, 4]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("schedule", [{3: "left", 5: "right"}, {3, 5}, iter([3, 5])])
+def test_explicit_schedule_rejects_non_sequences(monkeypatch, schedule):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(rollout_batch_size=8, global_batch_size_schedule=schedule)
+
+    with pytest.raises(ValueError, match="sequence of positive integers"):
+        module.vime_validate_args(args)
+
+
+@pytest.mark.unit
+def test_critic_streaming_override_fills_default_directory(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = types.SimpleNamespace(
+        kl_coef=0.1,
+        use_opd=True,
+        custom_advantage_function_path="custom.adv",
+        untie_embeddings_and_output_weights=False,
+        disable_param_buffers_cpu_backup=True,
+        stream_optimizer_state_to_disk=False,
+        bf16=True,
+        fp16=False,
+        ckpt_format="torch_dist",
+        optimizer="adam",
+        use_distributed_optimizer=True,
+        optimizer_cpu_offload=False,
+        offload_optimizer_states=False,
+        async_save=False,
+        reset_optimizer_states=False,
+        load_main_params_from_ckpt=False,
+        offload_train_disk_chunk_mb=64,
+        offload_train_disk_dir=None,
+        stream_optimizer_state_moment_dtype="bf16",
+    )
+    monkeypatch.setenv("SCRATCH", "/scratch")
+    monkeypatch.setenv("VIME_RUN_ID", "role-test")
+
+    critic_args = module._apply_megatron_role_overrides(args, {"stream_optimizer_state_to_disk": True}, role="critic")
+
+    assert critic_args.stream_optimizer_state_to_disk is True
+    assert critic_args.offload_train_disk_dir == "/scratch/vime_train_offload_role-test"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "bf16",
+        "fp16",
+        "fp32",
+        "torch",
+        "torch_dcp",
+        "fsdp_dtensor",
+        "reset_optimizer_states",
+        "load_main_params_from_ckpt",
+    ],
+)
+def test_nvme_streaming_supported_configurations(monkeypatch, mode):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(
+        stream_optimizer_state_to_disk=True,
+        bf16=mode not in ("fp16", "fp32"),
+        fp16=mode == "fp16",
+        ckpt_format=mode if mode in ("torch", "torch_dcp", "fsdp_dtensor") else "torch_dist",
+        offload_train_disk_chunk_mb=64,
+        offload_train_disk_dir="/tmp/nvme-test",
+        stream_optimizer_state_moment_dtype="fp32",
+        reset_optimizer_states=mode == "reset_optimizer_states",
+        load_main_params_from_ckpt=mode == "load_main_params_from_ckpt",
+        no_load_optim=mode == "load_main_params_from_ckpt",
+    )
+    if mode == "bf16":
+        module.vime_validate_args(args)
+    elif mode in ("reset_optimizer_states", "load_main_params_from_ckpt"):
+        with pytest.raises(AssertionError, match=mode.replace("_", "-")):
+            module.vime_validate_args(args)
+    else:
+        message = "BF16" if mode in ("fp16", "fp32") else "torch_dist"
+        with pytest.raises(ValueError, match=message):
+            module.vime_validate_args(args)
+
+
+@pytest.mark.unit
+def test_vime_validate_args_accepts_programmatic_global_batch_schedule(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(rollout_batch_size=6, global_batch_size_schedule=[2, 4])
+
+    module.vime_validate_args(args)
+
+    assert args.global_batch_size_schedule == [2, 4]
+    assert args.global_batch_size == 2
+    assert args.variable_global_batch_size is True
 
 
 @pytest.mark.unit

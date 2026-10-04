@@ -119,5 +119,12 @@ def has_repetition(text: str):
 
 def compute_rollout_step(args, rollout_id):
     if args.wandb_always_use_train_step:
-        return rollout_id * args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size
+        schedule = getattr(args, "global_batch_size_schedule", None)
+        if schedule is not None:
+            groups_per_rollout = sum(schedule)
+        else:
+            groups_per_rollout = args.rollout_batch_size * args.n_samples_per_prompt
+            if not getattr(args, "variable_global_batch_size", False):
+                groups_per_rollout = groups_per_rollout // args.global_batch_size * args.global_batch_size
+        return rollout_id * groups_per_rollout
     return rollout_id

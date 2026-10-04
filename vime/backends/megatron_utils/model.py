@@ -37,6 +37,19 @@ from .loss import ROLLOUT_TOP_P_TOKEN_KEYS, get_rollout_top_p_logprob_kwargs, lo
 from .model_provider import get_model_provider_func
 from .stateless_adam import StatelessAdam
 
+
+def _stream_optimizer_state_if_requested(args, optimizer, role):
+    if not getattr(args, "stream_optimizer_state_to_disk", False):
+        return
+    if getattr(args, "use_stateless_adam", False):
+        raise ValueError("--stream-optimizer-state-to-disk is incompatible with --use-stateless-adam")
+    from vime_plugins.optimizers.nvme_stream import setup_optimizer_state_streaming
+
+    # Actor and critic can coexist on one node; keep their rank namespaces separate.
+    args._vime_nvme_role = role
+    setup_optimizer_state_streaming(args, optimizer)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -200,18 +213,44 @@ def get_optimizer_param_scheduler(args: Namespace, optimizer: MegatronOptimizer)
     # resume), so the worst case is the cosine/linear schedule reaches its
     # plateau slightly early or late. Pass ``--lr-decay-iters`` explicitly if you
     # need exact decay control.
-    args.train_iters = args.num_rollout * args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size
+    samples_per_rollout = args.rollout_batch_size * args.n_samples_per_prompt
+    explicit_schedule = getattr(args, "global_batch_size_schedule", None)
+    if explicit_schedule is not None:
+        # Entries count generated rollouts (sample.index), so they already
+        # include n_samples_per_prompt. The schedule repeats each rollout batch.
+        step_sizes = explicit_schedule
+        args.train_iters = args.num_rollout * len(explicit_schedule)
+    elif getattr(args, "variable_global_batch_size", False):
+        # Keep a trailing partial step instead of rounding it away. Megatron
+        # rejects a zero decay budget during scheduler construction.
+        full_steps, remainder = divmod(samples_per_rollout, args.global_batch_size)
+        step_sizes = [args.global_batch_size] * full_steps
+        if remainder:
+            step_sizes.append(remainder)
+        args.train_iters = args.num_rollout * len(step_sizes)
+    else:
+        step_sizes = [args.global_batch_size]
+        args.train_iters = args.num_rollout * (samples_per_rollout // args.global_batch_size)
+
+    samples_per_cycle = sum(step_sizes)
+
+    def samples_for_iters(iters):
+        cycles, remaining = divmod(iters, len(step_sizes))
+        return cycles * samples_per_cycle + sum(step_sizes[:remaining])
+
+    scheduled_samples = samples_for_iters(args.train_iters)
     if args.lr_decay_iters is None:
         args.lr_decay_iters = args.train_iters
-    lr_decay_steps = args.lr_decay_iters * args.global_batch_size
-    wd_incr_steps = args.train_iters * args.global_batch_size
+    lr_decay_steps = samples_for_iters(args.lr_decay_iters)
+    wd_incr_steps = scheduled_samples
     wsd_decay_steps = None
     if args.lr_wsd_decay_iters is not None:
-        wsd_decay_steps = args.lr_wsd_decay_iters * args.global_batch_size
+        wsd_start_iter = max(0, args.lr_decay_iters - args.lr_wsd_decay_iters)
+        wsd_decay_steps = lr_decay_steps - samples_for_iters(wsd_start_iter)
     if args.lr_warmup_fraction is not None:
         lr_warmup_steps = args.lr_warmup_fraction * lr_decay_steps
     else:
-        lr_warmup_steps = args.lr_warmup_iters * args.global_batch_size
+        lr_warmup_steps = samples_for_iters(args.lr_warmup_iters)
 
     opt_param_scheduler = OptimizerParamScheduler(
         optimizer,
@@ -302,6 +341,16 @@ def setup_model_and_optimizer(
         if hasattr(args, f.name):
             kwargs[f.name] = getattr(args, f.name)
     config = OptimizerConfig(**kwargs)
+    # Megatron PR86: keep stable FP32 main-param handles but defer their CUDA
+    # storage so the NVMe store can materialize one bucket at a time.
+    if getattr(args, "stream_optimizer_state_to_disk", False):
+        if str(config.optimizer).lower() != "adam":
+            raise ValueError("--stream-optimizer-state-to-disk currently supports only --optimizer adam")
+        if not hasattr(config, "defer_main_param_initialization"):
+            raise RuntimeError(
+                "NVMe optimizer streaming requires Megatron PR86 " "(OptimizerConfig.defer_main_param_initialization)"
+            )
+        config.defer_main_param_initialization = True
     config.timers = None
 
     if args.use_stateless_adam:
@@ -317,6 +366,7 @@ def setup_model_and_optimizer(
         )
     if args.use_stateless_adam:
         _disable_distributed_optimizer_state_initialization(optimizer)
+    _stream_optimizer_state_if_requested(args, optimizer, role)
     opt_param_scheduler = get_optimizer_param_scheduler(args, optimizer)
     return model, optimizer, opt_param_scheduler
 
@@ -864,6 +914,9 @@ def train(
 
     # Run training iterations till done.
     for step_id in range(num_steps_per_rollout):
+        # Use persisted scheduler progress as the logging axis. Read it before
+        # the step so skipped optimizer updates cannot make the axis go backward.
+        accumulated_step_id = opt_param_scheduler.num_steps
 
         # Run training step.
         loss_dict, grad_norm = train_one_step(
@@ -915,7 +968,6 @@ def train(
             and mpu.get_tensor_model_parallel_rank() == 0
             and mpu.get_pipeline_model_parallel_rank() == mpu.get_pipeline_model_parallel_world_size() - 1
         ):
-            accumulated_step_id = rollout_id * num_steps_per_rollout + step_id
             role = getattr(model[0], "role", "actor")
             role_tag = "" if role == "actor" else f"{role}-"
             log_dict = {

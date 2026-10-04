@@ -1005,3 +1005,38 @@ index e9736ac08..6567ed426 100644
                  )
                  for (model_chunk_idx, model_chunk) in enumerate(model)
              ]
+
+diff --git a/megatron/core/optimizer/distrib_optimizer.py b/megatron/core/optimizer/distrib_optimizer.py
+index a4364f5e9..a404ac248 100644
+--- a/megatron/core/optimizer/distrib_optimizer.py
++++ b/megatron/core/optimizer/distrib_optimizer.py
+@@ -396,6 +396,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+                                 shard_main_param = model_param.float().view(-1)[
+                                     param_range.start : param_range.end
+                                 ]
++                        elif config.defer_main_param_initialization:
++                            shard_main_param = torch.empty_like(
++                                shard_model_param, dtype=torch.float32
++                            )
++                            # Preserve tensor identity and metadata for the external backend.
++                            shard_main_param.untyped_storage().resize_(0)
+                         else:
+                             shard_main_param = shard_model_param.clone().float()
+
+diff --git a/megatron/core/optimizer/optimizer_config.py b/megatron/core/optimizer/optimizer_config.py
+index 94163102e..4730eb85a 100644
+--- a/megatron/core/optimizer/optimizer_config.py
++++ b/megatron/core/optimizer/optimizer_config.py
+@@ -330,6 +330,12 @@ class OptimizerConfig:
+     reload them before the next optimizer step.
+     """
+
++    defer_main_param_initialization: bool = False
++    """Release each mixed-precision main shard's storage during construction.
++
++    An external backend must initialize the shards before use.
++    """
++
+     ################
+     # Miscellaneous
+     ################
