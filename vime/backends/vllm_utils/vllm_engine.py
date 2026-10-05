@@ -646,6 +646,10 @@ def _compute_server_args(
         "enable_prompt_tokens_details": True,
         "enable_per_request_metrics": True,
         "enable_server_load_tracking": True,
+        # vLLM gates the scale-out routes (/inference/v1/generate and friends)
+        # behind this flag. It replaced the VLLM_ENABLE_SCALE_OUT_ENDPOINTS env
+        # var, so without it every rollout request 404s.
+        "enable_scale_out": True,
     }
 
     if pp > 1:
@@ -779,4 +783,5 @@ _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS = [
     "enable_prompt_tokens_details",
     "enable_per_request_metrics",
     "enable_server_load_tracking",
+    "enable_scale_out",
 ]

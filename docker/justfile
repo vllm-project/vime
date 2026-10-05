@@ -79,3 +79,24 @@ build-test:
 
     docker tag "{{ IMAGE }}:test-${VERSION}" "{{ IMAGE }}:test-latest"
     docker push "{{ IMAGE }}:test-latest"
+
+# ---- ROCm (AMD) image ----
+# Single-arch amd64 on `vllm/vllm-openai-rocm:nightly`, so no manifest step.
+# Targets gfx950 (MI350X/MI355X); override with VIME_GPU_ARCH.
+
+ROCM_IMAGE := "vllm/vime-rocm"
+GPU_ARCH := env("VIME_GPU_ARCH", "gfx950")
+TE_MAX_JOBS := env("VIME_TE_MAX_JOBS", "64")
+
+build-rocm:
+    #!/bin/bash
+    set -euxo pipefail
+    cd ..
+
+    VERSION="$(cat docker/version.txt | tr -d '\n')"
+    DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm . \
+      --build-arg HTTP_PROXY="${http_proxy:-}" --build-arg HTTPS_PROXY="${https_proxy:-}" --build-arg NO_PROXY="localhost,127.0.0.1" \
+      --build-arg GPU_ARCH={{ GPU_ARCH }} \
+      --build-arg TE_MAX_JOBS={{ TE_MAX_JOBS }} \
+      -t "{{ ROCM_IMAGE }}:rocm-${VERSION}" \
+      -t "{{ ROCM_IMAGE }}:latest"

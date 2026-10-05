@@ -1,38 +1,28 @@
 diff --git a/vllm/entrypoints/scale_out/token_in_token_out/protocol.py b/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
-index f304bf677ba..71a17e9363d 100644
 --- a/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
 +++ b/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
-@@ -240,6 +240,8 @@ class GenerateStreamResponse(BaseModel):
-     )
-     choices: list[GenerateResponseStreamChoice]
-     usage: UsageInfo | None = Field(default=None)
+@@ -416,6 +416,8 @@
+     prompt_token_ids: list[NonNegativeInt] | None = None
+     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+     metrics: PerRequestMetrics | None = None
 +    weight_version: str | None = None
 +    request_spec_decode_stats: dict[str, Any] | None = Field(default=None)
  
  
- class GenerateResponse(BaseModel):
-@@ -255,6 +257,8 @@ class GenerateResponse(BaseModel):
-     created: int | None = None
-     choices: list[GenerateResponseChoice]
-     usage: UsageInfo | None = Field(default=None)
+ class GenerateTokensStreamResponse(GenerateStreamResponseBase):
+@@ -445,6 +447,8 @@
+     prompt_token_ids: list[NonNegativeInt] | None = None
+     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+     metrics: PerRequestMetrics | None = None
 +    weight_version: str | None = None
 +    request_spec_decode_stats: dict[str, Any] | None = Field(default=None)
-     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
  
      kv_transfer_params: dict[str, Any] | None = Field(
+         default=None,
 diff --git a/vllm/entrypoints/scale_out/token_in_token_out/serving.py b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
-index bbbd85137ce..2edec47e1b1 100644
 --- a/vllm/entrypoints/scale_out/token_in_token_out/serving.py
 +++ b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
-@@ -14,6 +14,7 @@ from vllm.engine.protocol import EngineClient
- from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
- from vllm.entrypoints.generate.base.serving import (
-     GenerateBaseServing,
-+    build_spec_decoding_metrics,
-     clamp_prompt_logprobs,
- )
- from vllm.entrypoints.openai.chat_completion.protocol import (
-@@ -261,6 +262,7 @@ class ServingTokens(GenerateBaseServing):
+@@ -352,6 +352,7 @@
          )
  
          assert result_generator is not None
@@ -40,7 +30,7 @@ index bbbd85137ce..2edec47e1b1 100644
  
          if request.stream:
              return self.serve_tokens_stream_generator(
-@@ -269,10 +271,16 @@ class ServingTokens(GenerateBaseServing):
+@@ -360,10 +361,16 @@
                  request_id,
                  model_name,
                  request_metadata,
@@ -58,7 +48,7 @@ index bbbd85137ce..2edec47e1b1 100644
          )
  
      async def serve_tokens_full_generator(
-@@ -282,6 +290,7 @@ class ServingTokens(GenerateBaseServing):
+@@ -373,6 +380,7 @@
          request_id: str,
          model_name: str,
          request_metadata: RequestResponseMetadata,
@@ -66,93 +56,74 @@ index bbbd85137ce..2edec47e1b1 100644
      ) -> ErrorResponse | GenerateResponse:
          created_time = int(time.time())
          final_res: RequestOutput | None = None
-@@ -355,6 +364,11 @@ class ServingTokens(GenerateBaseServing):
-                 cached_tokens=final_res.num_cached_tokens
-             )
- 
-+        spec_decode_metrics = build_spec_decoding_metrics(final_res)
-+        request_spec_decode_stats = (
-+            spec_decode_metrics.model_dump() if spec_decode_metrics else None
-+        )
-+
+@@ -457,15 +465,24 @@
          request_metadata.final_usage_info = usage
  
-         response = GenerateResponse(
-@@ -363,6 +377,8 @@ class ServingTokens(GenerateBaseServing):
+         per_request_metrics = None
++        spec_decode_metrics = None
+         if request.sampling_params.n == 1:
+             spec_stats = build_spec_decoding_metrics(final_res)
+             if spec_stats is not None:
++                spec_decode_metrics = spec_stats
+                 per_request_metrics = PerRequestMetrics(speculative_decoding=spec_stats)
++        # vime reads request_spec_decode_stats off the response (see
++        # vime/rollout/vllm_rollout.py) to report spec_accept_token_num.
++        request_spec_decode_stats = (
++            spec_decode_metrics.model_dump() if spec_decode_metrics is not None else None
++        )
+         response_fields: dict[str, Any] = dict(
+             request_id=request_id,
+             created=created_time,
              model=model_name,
-             choices=choices,
              usage=usage,
 +            weight_version=weight_version,
 +            request_spec_decode_stats=request_spec_decode_stats,
              prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
-             kv_transfer_params=final_res.kv_transfer_params,
-             ec_transfer_params=final_res.ec_transfer_params,
-@@ -396,11 +412,13 @@ class ServingTokens(GenerateBaseServing):
+             prompt_token_id_logprobs=(
+                 numpy2base64(final_res.prompt_token_id_logprobs)
+@@ -514,11 +531,13 @@
          request_id: str,
          model_name: str,
          request_metadata: RequestResponseMetadata,
 +        weight_version: str | None,
      ) -> AsyncGenerator[str, None]:
          num_prompt_tokens = 0
-         num_generated_tokens: list[int] = []
          first_iteration = True
+         prompt_token_ids: list[int] | None = None
          num_cached_tokens = None
 +        request_spec_decode_stats: dict[str, object] | None = None
          sampling_params: SamplingParams = request.sampling_params
- 
-         include_usage, include_continuous_usage = should_include_usage(
-@@ -409,6 +427,9 @@ class ServingTokens(GenerateBaseServing):
- 
+         # With n > 1, the first output may not include every choice yet.
+         num_generated_tokens = [0] * sampling_params.n
+@@ -533,6 +552,9 @@
          try:
              async for res in result_generator:
+                 last_res = res
 +                spec_decode_metrics = build_spec_decoding_metrics(res)
 +                if spec_decode_metrics is not None:
 +                    request_spec_decode_stats = spec_decode_metrics.model_dump()
                  if first_iteration:
                      if res.prompt_token_ids is not None:
                          num_prompt_tokens = len(res.prompt_token_ids)
-@@ -427,9 +448,9 @@ class ServingTokens(GenerateBaseServing):
-                     self._raise_if_error(finish_reason, request_id)
+@@ -607,6 +629,9 @@
+                             choices=[GenerateTokensStreamChoice(**choice_fields)],
+                         )
  
--                    if not delta_token_ids:
-+                    if not delta_token_ids and finish_reason is None:
-                         continue
- 
--                    if sampling_params.logprobs is not None:
-+                    if sampling_params.logprobs is not None and delta_token_ids:
-                         out_logprobs = output.logprobs
-                         assert out_logprobs is not None, "Did not output logprobs"
-                         logprobs = self._create_tokens_logprobs(
-@@ -448,6 +469,8 @@ class ServingTokens(GenerateBaseServing):
- 
-                     chunk = GenerateStreamResponse(
-                         request_id=request_id,
-+                        weight_version=weight_version,
-+                        request_spec_decode_stats=request_spec_decode_stats,
-                         choices=[
-                             GenerateResponseStreamChoice(
-                                 index=i,
-@@ -455,6 +478,11 @@ class ServingTokens(GenerateBaseServing):
-                                 finish_reason=finish_reason,
-                                 token_ids=as_list(delta_token_ids),
-                                 routed_experts=routed_experts_b64,
-+                                sampling_mask=(
-+                                    output.sampling_mask.token_ids
-+                                    if output.sampling_mask is not None
-+                                    else None
-+                                ),
-                             )
-                         ],
++                    chunk.weight_version = weight_version
++                    chunk.request_spec_decode_stats = request_spec_decode_stats
++
+                     if prompt_token_ids is not None:
+                         chunk.prompt_token_ids = prompt_token_ids
+                         chunk.mm_placeholders = request._response_mm_placeholders
+@@ -661,6 +686,8 @@
+                         usage=final_usage_info,
+                         metrics=per_request_metrics,
                      )
-@@ -482,6 +510,8 @@ class ServingTokens(GenerateBaseServing):
-             if include_usage:
-                 final_chunk = GenerateStreamResponse(
-                     request_id=request_id,
-+                    weight_version=weight_version,
-+                    request_spec_decode_stats=request_spec_decode_stats,
-                     choices=[],
-                     usage=final_usage_info,
-                 )
++                final_chunk.weight_version = weight_version
++                final_chunk.request_spec_decode_stats = request_spec_decode_stats
+                 yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
+ 
+             request_metadata.final_usage_info = final_usage_info
 diff --git a/vllm/model_executor/models/qwen3_omni_moe_thinker.py b/vllm/model_executor/models/qwen3_omni_moe_thinker.py
 --- a/vllm/model_executor/models/qwen3_omni_moe_thinker.py
 +++ b/vllm/model_executor/models/qwen3_omni_moe_thinker.py
@@ -190,24 +161,6 @@ diff --git a/vllm/model_executor/models/qwen3_omni_moe_thinker.py b/vllm/model_e
          )
  
          self.attn = MMEncoderAttention(
-diff --git a/vllm/outputs.py b/vllm/outputs.py
-index 84b9fccdc88..5f1685bef83 100644
---- a/vllm/outputs.py
-+++ b/vllm/outputs.py
-@@ -189,6 +189,13 @@ class RequestOutput:
-                         if next_completion.logprobs:
-                             assert completion.logprobs is not None
-                             completion.logprobs.extend(next_completion.logprobs)  # type: ignore[arg-type]
-+                        if next_completion.sampling_mask is not None:
-+                            if completion.sampling_mask is None:
-+                                completion.sampling_mask = next_completion.sampling_mask
-+                            else:
-+                                completion.sampling_mask.token_ids.extend(
-+                                    next_completion.sampling_mask.token_ids
-+                                )
-                         completion.cumulative_logprob = (
-                             next_completion.cumulative_logprob
-                         )
 diff --git a/vllm/v1/engine/output_processor.py b/vllm/v1/engine/output_processor.py
 index 6238fbc8175..8260c3d326e 100644
 --- a/vllm/v1/engine/output_processor.py
@@ -227,13 +180,12 @@ index 6238fbc8175..8260c3d326e 100644
          # Concatenate routed experts on finish
          routed_experts = None
 diff --git a/vllm/v1/engine/input_processor.py b/vllm/v1/engine/input_processor.py
-index 4cc433cbfe3..4281a707af8 100644
 --- a/vllm/v1/engine/input_processor.py
 +++ b/vllm/v1/engine/input_processor.py
-@@ -101,17 +101,10 @@ class InputProcessor:
-                 self.tokenizer,
-             )
-
+@@ -160,17 +160,10 @@
+                     vocab_size=self.model_config.get_vocab_size(),
+                 )
+ 
 -            if self.model_config.return_sampling_mask:
 -                if params.temperature <= 0:
 -                    raise ValueError(
