@@ -46,7 +46,10 @@ def train(args):
                 critic_model.clear_memory()
 
     # train loop.
-    for rollout_id in range(args.start_rollout_id, args.num_rollout):
+    rollout_end = (
+        args.num_rollout if args.stop_after_rollout is None else min(args.num_rollout, args.stop_after_rollout)
+    )
+    for rollout_id in range(args.start_rollout_id, rollout_end):
         if args.eval_interval is not None and rollout_id == 0 and not args.skip_eval_before_train:
             ray.get(rollout_manager.eval.remote(rollout_id))
 
@@ -69,9 +72,9 @@ def train(args):
             ray.get(actor_model.async_train(rollout_id, rollout_data_ref))
 
         if release_train or should_run_periodic_action(
-            rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout
+            rollout_id, args.save_interval, num_rollout_per_epoch, rollout_end
         ):
-            force_sync = release_train or rollout_id == args.num_rollout - 1
+            force_sync = release_train or rollout_id == rollout_end - 1
             if actor_trains:
                 actor_model.save_model(rollout_id, force_sync=force_sync)
             if args.use_critic:
@@ -91,6 +94,11 @@ def train(args):
             ray.get(rollout_manager.eval.remote(rollout_id))
 
     ray.get(rollout_manager.dispose.remote())
+    if args.rollout_backend == "vllm-rlt":
+        actor_model.close()
+        if critic_model is not None:
+            critic_model.close()
+        rollout_manager.shutdown.remote()
     finish_tracking(args)
 
 

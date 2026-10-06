@@ -17,6 +17,9 @@ class InfoActor:
     def get_ip_and_gpu_id(self):
         return ray.util.get_node_ip_address(), ray.get_gpu_ids()[0]
 
+    def close(self):
+        ray.actor.exit_actor()
+
 
 def sort_key(x):
     index, node_identifier, gpu_id = x
@@ -79,7 +82,7 @@ def _create_placement_group(num_gpus):
         )
     gpu_ids = ray.get([actor.get_ip_and_gpu_id.remote() for actor in info_actors])
     for actor in info_actors:
-        ray.kill(actor)
+        actor.close.remote()
 
     bundle_infos = [(i, gpu_ids[i][0], gpu_ids[i][1]) for i in range(num_bundles)]
     sorted_bundle_infos = sorted(bundle_infos, key=sort_key)

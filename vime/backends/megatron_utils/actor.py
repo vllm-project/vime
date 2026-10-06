@@ -3,6 +3,7 @@ import os
 from argparse import Namespace
 from contextlib import nullcontext
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
 
 import ray
@@ -331,7 +332,10 @@ class MegatronTrainRayActor(TrainRayActor):
     ) -> dict[str, list[torch.Tensor]]:
         with timer(f"{store_prefix}log_probs"):
             return forward_only(
-                get_log_probs_and_entropy,
+                partial(
+                    get_log_probs_and_entropy,
+                    with_full_distribution=self.args.flow_dppo_divergence_budget is not None and store_prefix == "",
+                ),
                 self.args,
                 self.model,
                 data_iterator,
@@ -453,7 +457,9 @@ class MegatronTrainRayActor(TrainRayActor):
                         self.args, unwrap_model(self.model[0]), rollout_id, str(self.weight_updater.weight_version)
                     )
                 if (
-                    not self.args.use_rollout_logprobs or self.args.get_mismatch_metrics
+                    not self.args.use_rollout_logprobs
+                    or self.args.get_mismatch_metrics
+                    or self.args.flow_dppo_divergence_budget is not None
                 ) and not can_reuse_log_probs_in_loss:
                     if self.args.use_routing_replay:
                         if self.args.use_rollout_routing_replay:
@@ -596,7 +602,11 @@ class MegatronTrainRayActor(TrainRayActor):
             engine_parallel_configs,
         ) = ray.get(self.rollout_manager.get_updatable_engines_and_lock.remote())
 
-        reconnect_rollout_engines = self.args.offload_train and self.args.use_critic and not self.args.colocate
+        reconnect_rollout_engines = (
+            self.args.offload_train
+            and not self.args.colocate
+            and (self.args.use_critic or self.args.rollout_backend == "vllm-rlt")
+        )
 
         if not rollout_engines and not reconnect_rollout_engines:
             if dist.get_rank() == 0:

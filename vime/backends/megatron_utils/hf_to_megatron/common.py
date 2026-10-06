@@ -164,4 +164,4 @@ def load_model_hf_weights(
                     f"Shape mismatch loading {name}: HuggingFace {tuple(tensor.shape)}, "
                     f"Megatron {tuple(parameter.shape)}"
                 )
-            parameter.copy_(tensor.to(device=parameter.device, dtype=parameter.dtype))
+            parameter.copy_(tensor)

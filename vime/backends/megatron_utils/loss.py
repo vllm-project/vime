@@ -519,6 +519,7 @@ def get_log_probs_and_entropy(
     response_lengths: list[int],
     with_entropy: bool = False,
     non_loss_data: bool = True,
+    with_full_distribution: bool = False,
     top_p_token_ids: list[list[int]] | None = None,
     top_p_token_offsets: list[list[int]] | None = None,
 ) -> dict[str, list[torch.Tensor]]:
@@ -591,6 +592,19 @@ def get_log_probs_and_entropy(
     res = {"log_probs": log_probs_list}
     if with_entropy:
         res["entropy"] = entropy_list
+
+    if with_full_distribution:
+        res["old_policy_log_probs"] = [
+            F.log_softmax(response, dim=-1).detach().cpu()
+            for response, _ in get_responses(
+                logits.unsqueeze(0),
+                args=args,
+                unconcat_tokens=unconcat_tokens,
+                total_lengths=total_lengths,
+                response_lengths=response_lengths,
+                apply_temperature=False,
+            )
+        ]
 
     # we need to turn the all gather kv into zigzag ring attn kv
     if args.allgather_cp:
@@ -1031,7 +1045,26 @@ def policy_loss_function(
         log_probs = torch.cat(log_probs, dim=0)
         ppo_kl = old_log_probs - log_probs
 
-    if args.advantage_estimator == "cispo":
+    if args.flow_dppo_divergence_budget is not None:
+        from vime_plugins.flow_dppo.loss import categorical_flow_dppo
+
+        parts = [
+            categorical_flow_dppo(response, old, actions, advantage, args.flow_dppo_divergence_budget)
+            for (response, actions), old, advantage in zip(
+                get_responses(
+                    logits,
+                    args=args,
+                    unconcat_tokens=batch["unconcat_tokens"],
+                    total_lengths=total_lengths,
+                    response_lengths=response_lengths,
+                ),
+                batch["old_policy_log_probs"],
+                batch["advantages"],
+                strict=True,
+            )
+        ]
+        pg_loss, pg_clipfrac, categorical_kl = (torch.cat(values) for values in zip(*parts, strict=True))
+    elif args.advantage_estimator == "cispo":
         pg_loss, pg_clipfrac = compute_cispo_loss(ppo_kl, log_probs, advantages, args.eps_clip, args.eps_clip_high)
     else:
         pg_loss, pg_clipfrac = compute_policy_loss(
@@ -1145,6 +1178,8 @@ def policy_loss_function(
         "pg_clipfrac": pg_clipfrac.clone().detach(),
         "ppo_kl": ppo_kl.clone().detach(),
     }
+    if args.flow_dppo_divergence_budget is not None:
+        reported_loss["categorical_kl"] = sum_of_sample_mean(categorical_kl)
 
     if train_rollout_logprob_abs_diff is not None:
         reported_loss["train_rollout_logprob_abs_diff"] = train_rollout_logprob_abs_diff.clone().detach()

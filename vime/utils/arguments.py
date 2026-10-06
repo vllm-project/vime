@@ -2,6 +2,7 @@ import argparse
 import copy
 import json
 import logging
+import math
 import os
 from typing import Any
 
@@ -32,6 +33,10 @@ def reset_arg(parser, name, **kwargs):
 
 def get_vime_extra_args_provider(add_custom_arguments=None):
     def add_vime_arguments(parser):
+        parser.add_argument(
+            "--recurrent-fp32", action="store_true", help="Use FP32 parameters and activations for recurrent training"
+        )
+
         # Ray
         def add_cluster_arguments(parser):
             parser.add_argument("--actor-num-nodes", type=int, default=1, help="Number of nodes for training actor")
@@ -106,6 +111,12 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
             return parser
 
         def add_train_arguments(parser):
+            parser.add_argument(
+                "--stop-after-rollout",
+                type=int,
+                default=None,
+                help="Finish at this rollout boundary while retaining the full training schedule",
+            )
             # --train-backend is parsed early in _pre_parse_mode() and merged later.
             parser.add_argument(
                 "--qwen-gdn-backend",
@@ -926,6 +937,12 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
             )
             parser.add_argument("--value-clip", type=float, default=0.2, help="the clip for value loss")
             parser.add_argument(
+                "--flow-dppo-divergence-budget",
+                type=float,
+                default=None,
+                help="Enable the categorical Flow-DPPO extension with full-vocabulary KL gating (TP=CP=1)",
+            )
+            parser.add_argument(
                 "--kl-coef",
                 type=float,
                 default=0.00,
@@ -1721,6 +1738,7 @@ def _pre_parse_mode():
     """
     temp_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     temp_parser.add_argument("--train-backend", type=str, choices=["megatron"], default="megatron")
+    temp_parser.add_argument("--rollout-backend", choices=["vllm", "vllm-rlt"], default="vllm")
     temp_parser.add_argument("--debug-rollout-only", action="store_true", default=False)
     temp_parser.add_argument("--debug-train-only", action="store_true", default=False)
     temp_parser.add_argument("--load-debug-rollout-data", type=str, default=None)
@@ -1732,10 +1750,18 @@ def parse_args(add_custom_arguments=None):
     # Users may call `parse_args` very early, thus we ensure logger is configured here
     configure_logger()
 
-    add_vime_arguments = get_vime_extra_args_provider(add_custom_arguments)
-
     pre = _pre_parse_mode()
-    skip_vllm = pre.debug_train_only or pre.load_debug_rollout_data is not None
+    if pre.rollout_backend == "vllm-rlt":
+        from vime.backends.vllm_rlt_utils.arguments import add_arguments as add_rlt_arguments
+
+        custom_arguments = add_custom_arguments
+
+        def add_custom_arguments(parser):
+            parser = add_rlt_arguments(parser)
+            return custom_arguments(parser) if custom_arguments is not None else parser
+
+    add_vime_arguments = get_vime_extra_args_provider(add_custom_arguments)
+    skip_vllm = pre.debug_train_only or pre.load_debug_rollout_data is not None or pre.rollout_backend == "vllm-rlt"
 
     # Phase 1: Parse vllm args independently (separate parser, parse_known_args).
     # Skipped when vllm servers are not needed.
@@ -1770,7 +1796,11 @@ def parse_args(add_custom_arguments=None):
     if not args.debug_rollout_only:
         megatron_validate_args(args)
 
-    if not args.debug_train_only:
+    if args.rollout_backend == "vllm-rlt":
+        from vime.backends.vllm_rlt_utils.arguments import validate_args as rlt_validate_args
+
+        rlt_validate_args(args)
+    elif not args.debug_train_only:
         from vime.backends.vllm_utils.arguments import validate_args as vllm_validate_args
 
         vllm_validate_args(args)
@@ -2070,6 +2100,15 @@ def vime_validate_args(args):
         apply_external_engine_info_to_args(args, logger=logger)
 
     args.use_critic = args.advantage_estimator == "ppo"
+    if args.flow_dppo_divergence_budget is not None:
+        if not math.isfinite(args.flow_dppo_divergence_budget) or args.flow_dppo_divergence_budget <= 0:
+            raise ValueError("Flow-DPPO's divergence budget must be finite and positive")
+        if args.advantage_estimator != "ppo" or args.loss_type != "policy_loss":
+            raise ValueError("The categorical Flow-DPPO extension uses PPO's critic and policy loss entry")
+        if args.tensor_model_parallel_size != 1 or args.context_parallel_size != 1 or args.rollout_top_p != 1:
+            raise ValueError("Full-vocabulary categorical KL requires TP=CP=1 and untruncated sampling")
+        if args.rollout_top_k != -1 or args.keep_old_actor or args.use_tis or args.use_opsm or args.use_opd:
+            raise ValueError("Categorical Flow-DPPO requires the current full-vocabulary policy without other masks")
     # Critic always uses the same GPU count as actor.
     args.critic_num_gpus_per_node = args.actor_num_gpus_per_node
     args.critic_num_nodes = args.actor_num_nodes
