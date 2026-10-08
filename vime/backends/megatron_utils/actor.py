@@ -3,6 +3,7 @@ import os
 from argparse import Namespace
 from contextlib import nullcontext
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
 
 import ray
@@ -10,7 +11,6 @@ import torch
 import torch.distributed as dist
 from megatron.core import mpu
 from megatron.core.utils import unwrap_model
-from torch_memory_saver import torch_memory_saver
 from transformers import AutoConfig, AutoTokenizer
 
 from vime.observability import train_data_utils, train_metric_utils
@@ -174,6 +174,7 @@ class MegatronTrainRayActor(TrainRayActor):
     @timer
     def sleep(self) -> None:
         assert self.args.offload_train
+        from torch_memory_saver import torch_memory_saver
 
         clear_memory(clear_host_memory=True)
         print_memory("before offload model")
@@ -193,6 +194,8 @@ class MegatronTrainRayActor(TrainRayActor):
     @timer
     def wake_up(self) -> None:
         assert self.args.offload_train
+        from torch_memory_saver import torch_memory_saver
+
         print_memory("before wake_up model")
 
         torch_memory_saver.resume()
@@ -331,7 +334,10 @@ class MegatronTrainRayActor(TrainRayActor):
     ) -> dict[str, list[torch.Tensor]]:
         with timer(f"{store_prefix}log_probs"):
             return forward_only(
-                get_log_probs_and_entropy,
+                partial(
+                    get_log_probs_and_entropy,
+                    with_full_distribution=self.args.flow_dppo_divergence_budget is not None and store_prefix == "",
+                ),
                 self.args,
                 self.model,
                 data_iterator,
@@ -453,7 +459,9 @@ class MegatronTrainRayActor(TrainRayActor):
                         self.args, unwrap_model(self.model[0]), rollout_id, str(self.weight_updater.weight_version)
                     )
                 if (
-                    not self.args.use_rollout_logprobs or self.args.get_mismatch_metrics
+                    not self.args.use_rollout_logprobs
+                    or self.args.get_mismatch_metrics
+                    or self.args.flow_dppo_divergence_budget is not None
                 ) and not can_reuse_log_probs_in_loss:
                     if self.args.use_routing_replay:
                         if self.args.use_rollout_routing_replay:
@@ -596,7 +604,11 @@ class MegatronTrainRayActor(TrainRayActor):
             engine_parallel_configs,
         ) = ray.get(self.rollout_manager.get_updatable_engines_and_lock.remote())
 
-        reconnect_rollout_engines = self.args.offload_train and self.args.use_critic and not self.args.colocate
+        reconnect_rollout_engines = (
+            self.args.offload_train
+            and not self.args.colocate
+            and (self.args.use_critic or self.args.rollout_backend == "vllm-rlt")
+        )
 
         if not rollout_engines and not reconnect_rollout_engines:
             if dist.get_rank() == 0:
@@ -619,6 +631,9 @@ class MegatronTrainRayActor(TrainRayActor):
             dist.barrier(group=get_gloo_group())
             if dist.get_rank() == 0:
                 ray.get(self.rollout_manager.clear_updatable_num_new_engines.remote())
+
+        if self.args.offload_train:
+            from torch_memory_saver import torch_memory_saver
 
         with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
             if self.args.dspark_enabled and self.args.offload_train:

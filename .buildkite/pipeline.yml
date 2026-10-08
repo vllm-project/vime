@@ -67,6 +67,7 @@ steps:
           pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle blake3 xxhash zstandard psutil wandb
           pip install -q -e . --no-deps
           python tests/test_megatron_argument_validation.py
+          python -m pytest tests/test_looped_grpo_recipe.py
           python tests/test_value_temperature.py
           python tests/test_docs_consistency.py
           python tests/test_placement_group.py
@@ -162,6 +163,8 @@ steps:
             tests/test_layerwise_alignment.py \
             tests/test_model_provider_freeze.py \
             tests/test_policy_loss.py \
+            tests/plugins/test_looped_dppo.py \
+            tests/plugins/test_flow_dppo.py \
             tests/test_ppo_kl_metric.py \
             tests/test_process_rollout_data.py \
             tests/test_qwen3_5_vl_native.py \

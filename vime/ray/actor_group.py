@@ -52,6 +52,8 @@ class RayTrainGroup:
         self._with_opd_teacher = with_opd_teacher
         self._rollout_manager = None
         self._disk_weight_version = getattr(args, "update_weight_start_version", 0)
+        if args.rollout_backend == "vllm-rlt":
+            self._disk_weight_version = args.rlt_start_version
         self._actor_handlers = []
 
     def _allocate_gpus_for_actor(self, pg, num_gpus_per_actor):
@@ -218,6 +220,12 @@ class RayTrainGroup:
     def clear_memory(self):
         return ray.get([actor.clear_memory.remote() for actor in self._actor_handlers])
 
+    def close(self):
+        ray.get([actor.close.remote() for actor in self._actor_handlers])
+        for actor in self._actor_handlers:
+            actor.shutdown.remote()
+        self._actor_handlers = []
+
     def set_rollout_manager(self, rollout_manager):
         self._rollout_manager = rollout_manager
         return ray.get([actor.set_rollout_manager.remote(rollout_manager) for actor in self._actor_handlers])
@@ -260,7 +268,7 @@ class RayTrainGroup:
                 for engine in engines
             ]
         )
-        if self.args.ci_test:
+        if self.args.ci_test or self.args.rollout_backend == "vllm-rlt":
             engine_versions = ray.get([engine.get_weight_version.remote() for engine in engines])
             mismatches = [
                 f"engine {idx}: {engine_version}"

@@ -1,0 +1,24 @@
+{
+  "tested_runtime_head": "0ca616352e1aa6166217b21a068ba545f52bb4c7",
+  "cpu_result": {
+    "tests": 101,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "actual_cpu_exit": 0,
+  "tms_is_absent": true,
+  "cuda_initialized": false,
+  "formatter_pins": {
+    "ruff": "0.14.7",
+    "black": "24.3.0",
+    "isort": "5.13.2"
+  },
+  "formatter_results": "PASS",
+  "official_weight_gpu_e2e": "PENDING",
+  "reward_convergence": "NOT_MEASURED",
+  "matched_speed_improvement": "NOT_MEASURED",
+  "actual_actor_module_import_exit": 0,
+  "actor_module_import_scope": "Module import only; no actor initialization, offload or training execution",
+  "published_recipe_requires_native_tms": true
+}

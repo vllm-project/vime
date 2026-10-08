@@ -1,0 +1,25 @@
+{
+  "scope": "Public summaries derived from retained private raw evidence; no GPU e2e or convergence claim",
+  "files": [
+    {
+      "file": "cpu-validation.json",
+      "bytes": 693,
+      "sha256": "f5427cfd94ed76052f977e28d4e7423c12f57322d2069de69b57e834652a4a7d"
+    },
+    {
+      "file": "native-dependency-validation.json",
+      "bytes": 711,
+      "sha256": "a4da6b6d0f70c2ff5c5585ddfb4341c74bc98254af7b3ba23e7ae59e64ee9b00"
+    },
+    {
+      "file": "official-config-layout.json",
+      "bytes": 801,
+      "sha256": "a69cbec3690233a62ae68f12dc30b8a10c82d3665dee4f6195f5221ed278af54"
+    },
+    {
+      "file": "recipe-argument-validation.json",
+      "bytes": 1439,
+      "sha256": "e6b67c7c8bcb87a0ed00b7b4ba02e91557507b744304751ba34629e7bf3ee9ed"
+    }
+  ]
+}

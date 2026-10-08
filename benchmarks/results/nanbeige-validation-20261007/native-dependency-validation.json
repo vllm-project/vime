@@ -1,0 +1,23 @@
+{
+  "source_archive_sha256": "c2c762d77e512b7c21344f4214263499c3057e2efd65e1b7625c4f7b12c1491a",
+  "source_changes": 0,
+  "build_exit": 0,
+  "compiler_parallelism": 1,
+  "gpu_started": false,
+  "actor_import_exit": 0,
+  "architecture": "aarch64",
+  "cuda_version": "13.2",
+  "cuda_offload_hooks_tested": false,
+  "core_extensions": [
+    {
+      "name": "torch_memory_saver_hook_mode_preload_cu13.abi3.so",
+      "bytes": 1384376,
+      "sha256": "8e71e44def766eedb9fc283420af2f8b29518ff6fbe30cf435ff0d225eefa47a"
+    },
+    {
+      "name": "torch_memory_saver_hook_mode_torch_cu13.abi3.so",
+      "bytes": 1385216,
+      "sha256": "f8ff147ab4d3e9e06f3d27d55d6f9a5ff774cb459c50acce1a6c1deb41b77460"
+    }
+  ]
+}

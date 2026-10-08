@@ -192,14 +192,15 @@ def get_rollout_num_engines(args) -> int:
     return max(1, rollout_num_gpus // rollout_num_gpus_per_engine)
 
 
-def init_http_client(args):
+def init_http_client(args, *, backend: str = "vllm"):
     """Initialize HTTP client and optionally enable distributed POST via Ray."""
     global _http_client, _client_concurrency, _distributed_post_enabled
     num_engines = get_rollout_num_engines(args)
     if num_engines <= 0:
         return
 
-    _client_concurrency = args.vllm_server_concurrency * num_engines
+    server_concurrency = args.rlt_max_num_seqs if backend == "vllm-rlt" else args.vllm_server_concurrency
+    _client_concurrency = server_concurrency * num_engines
     if _http_client is None:
         _http_client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=_client_concurrency),

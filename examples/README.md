@@ -10,6 +10,7 @@ These examples provide concrete examples to leverage vime in your own RL workflo
 - **[geo3k_vlm](./geo3k_vlm)**: Training VLMs on a single-turn reasoning task using GRPO on the GEO3K dataset.
 - **[geo3k_vlm_multi_turn](./geo3k_vlm_multi_turn)**: VLM multi-turn training on Geo3k dataset.
 - **[low_precision](../scripts/low_precision/)**: Launch recipes for FP8/INT4 training and inference.
+- **[looped_grpo](./looped_grpo)**: Actor-only Nanbeige and Huginn GRPO with grouped rewards and native recurrent rollout.
 - **[mem_agent](./mem_agent)**: MemAgent long-context RL — chunk-wise memory update, HotpotQA GRPO training, and RULER-HQA evaluation.
 - **[multi_agent](./multi_agent)**: Example of running multi-agent RL with `vime`.
 - **[on_policy_distillation](./on_policy_distillation)**: On-policy distillation (OPD) with an external vLLM teacher or a Megatron-loaded teacher.
@@ -18,3 +19,5 @@ These examples provide concrete examples to leverage vime in your own RL workflo
 - **[reproducibility](../docs/en/advanced/reproducibility.md)**: Guide to bitwise experiment reproduction using deterministic modes.
 - **[tau-bench](./tau-bench)**: Multi-turn tool-use agent training in tau-bench environments.
 - **[train_infer_mismatch_helper](./train_infer_mismatch_helper)**: Algorithmic methods for rollout correction (e.g., TIS, MIS).
+
+- [Nanbeige policy training](nanbeige): PPO, GRPO, Decoupled PPO and categorical Flow-DPPO.

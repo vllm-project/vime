@@ -200,6 +200,7 @@ def make_vime_validate_args(**overrides):
         save=None,
         kl_loss_coef=0,
         advantage_estimator="grpo",
+        flow_dppo_divergence_budget=None,
         normalize_advantages=False,
         use_rollout_logprobs=False,
         use_tis=False,

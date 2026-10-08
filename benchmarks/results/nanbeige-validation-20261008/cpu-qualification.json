@@ -1,0 +1,60 @@
+{
+  "scope": "Original CPU qualification; official-model GPU training not executed",
+  "runtime_commit": "0ca616352e1aa6166217b21a068ba545f52bb4c7",
+  "platform": {
+    "os": "Linux",
+    "architecture": "x86_64",
+    "python": "3.12",
+    "torch": "2.12.1+cu130",
+    "triton": "3.7.1",
+    "transformers": "4.54.1",
+    "setuptools": "79.0.1",
+    "dependency_versions_verified": 137
+  },
+  "source_pins": {
+    "rlt": "d2a358933393f25d74dd2bdd1068a741cd5d9226",
+    "megatron_core": "1dcf0dafa884ad52ffb243625717a3471643e087",
+    "torch_memory_saver": "8d30c59ca12a68d9deccbc9c6599076a1218cbc5",
+    "rlt_source_files_verified": 52,
+    "patched_megatron_source_files_verified": 474
+  },
+  "stage_exit_codes": {
+    "dependency-check": 0,
+    "dependency-lock": 0,
+    "native-import": 0,
+    "native-source-pins": 0,
+    "cpu-tests": 0
+  },
+  "cpu_tests": {
+    "tests": 101,
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0
+  },
+  "previous_same_suite": {
+    "passed": 94,
+    "failures": 7,
+    "errors": 0,
+    "skipped": 0,
+    "failure": "Inductor ImportError: libimf.so missing"
+  },
+  "change": "Command-scoped GNU compilers and fresh private JIT caches; source, test math and dependency pins unchanged",
+  "independent_evidence_review": {
+    "files_size_and_sha256_verified": 202,
+    "raw_xml_verified": true,
+    "generated_x86_64_elf_libraries_verified": 9,
+    "generated_libraries_requiring_libimf": 0,
+    "complete_compiler_argv": "NOT_TRACED"
+  },
+  "cuda_initialized": false,
+  "official_weight_gpu_e2e": "NOT_RUN",
+  "native_cuda_allocation_offload_recovery": "NOT_TESTED",
+  "official_model_accuracy": "NOT_MEASURED",
+  "reward_convergence": "NOT_MEASURED",
+  "matched_rl_speed_or_memory_improvement": "NOT_MEASURED",
+  "acceptance": {
+    "physical_gpus_required": 2,
+    "precision": "FP32",
+    "selected_logprob_error_bound": 0.03
+  }
+}
