@@ -10,7 +10,7 @@ trip, ``test_cp_utils.py`` for the per-rollout-mean reducer). But until
 this test, **no e2e training run had ever exercised the full chain**:
 
   custom_generate returns list[Sample] sharing rollout_id
-    → _validate_rollout_id_annotated at depth ≥ 2 passes
+    → validate_rollout_id_annotated at depth ≥ 2 passes
     → _split_train_data_by_dp groups by rollout_id and trims to N steps
        using ``rollout_batch_size * n_samples_per_prompt / global_batch_size``
        (NOT total sample count, which would inflate steps once N>1)
@@ -20,10 +20,9 @@ this test, **no e2e training run had ever exercised the full chain**:
        num_rollouts (not num_samples), keeping grad magnitude stable
        independent of fan-out
 
-The fan-out function itself lives in
-``vime/rollout/_fanout_test_helpers.py`` — it has to be at a dot-free
-module path so ``importlib.import_module`` can resolve the string
-``--custom-generate-function-path`` flag (this filename has dots).
+The fan-out functions live in ``tests/fanout_test_helpers.py``. The
+dedicated helper module gives ``importlib.import_module`` a valid module
+path even though this E2E test's filename itself contains dots.
 
 Test choices
 ------------
@@ -48,6 +47,7 @@ import vime.utils.external_utils.command_utils as U
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
 NUM_GPUS = 4
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Counter file used by the compact_generate helper. We pass its path
 # through to the Ray-submitted job via an env var so all worker
@@ -100,7 +100,7 @@ def execute():
         "--rollout-temperature 0.8 "
         "--global-batch-size 4 "
         "--balance-data "
-        "--custom-generate-function-path vime.rollout._fanout_test_helpers.compact_generate "
+        "--custom-generate-function-path fanout_test_helpers.compact_generate "
         # GRPO normalization needs per-prompt grouping. The default
         # ``_post_process_rewards`` (vime/ray/rollout.py) reshapes
         # by ``n_samples_per_prompt`` and falls back to "one big group"
@@ -110,7 +110,7 @@ def execute():
         # compact_generate preserves it across siblings) so each prompt's
         # siblings normalize against each other, matching the GRPO
         # semantics the default targets in the uniform case.
-        "--custom-reward-post-process-path vime.rollout._fanout_test_helpers.grpo_normalize_by_group_index "
+        "--custom-reward-post-process-path fanout_test_helpers.grpo_normalize_by_group_index "
     )
 
     perf_args = (
@@ -165,7 +165,6 @@ def execute():
         "--actor-num-nodes 1 "
         "--actor-num-gpus-per-node 4 "
         "--colocate "
-        "--megatron-to-hf-mode bridge "
     )
 
     train_args = (
@@ -185,9 +184,13 @@ def execute():
         train_args=train_args,
         num_gpus_per_node=NUM_GPUS,
         megatron_model_type=MODEL_TYPE,
-        # Make the counter path visible inside the Ray-submitted job
-        # (helper picks it up via os.environ).
-        extra_env_vars={"VIME_FANOUT_TEST_COUNTER_FILE": FANOUT_COUNTER_FILE},
+        extra_env_vars={
+            # Make the helper importable by both the Ray driver and workers
+            # without installing test modules as part of the vime package.
+            "PYTHONPATH": f"{TESTS_DIR}:{U.repo_base_dir}:/root/Megatron-LM/",
+            # The helper picks up the shared counter path via os.environ.
+            "VIME_FANOUT_TEST_COUNTER_FILE": FANOUT_COUNTER_FILE,
+        },
     )
 
     # Post-train assertion: compact_generate must have been called exactly
@@ -214,8 +217,6 @@ def execute():
 
 if __name__ == "__main__":
     prepare()
-    os.environ.pop("http_proxy")
-    os.environ.pop("https_proxy")
-    os.environ.pop("HTTP_PROXY")
-    os.environ.pop("HTTPS_PROXY")
+    for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+        os.environ.pop(proxy_var, None)
     execute()

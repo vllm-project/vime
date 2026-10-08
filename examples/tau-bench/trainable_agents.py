@@ -15,6 +15,7 @@ from openai_tool_adapter import create_openai_adapter
 from tau_bench.agents.tool_calling_agent import RESPOND_ACTION_NAME
 from tau_bench.envs import get_env
 from tau_bench.types import Action, RunConfig
+from token_delta import get_token_delta
 
 from vime.rollout.vllm_rollout import (
     GenerateState,
@@ -406,7 +407,6 @@ class TrainableTauBenchAgent:
             return params
 
         try:
-            pending_obs_offset: int | None = None
             rendered_body = await safe_render()
             if rendered_body is None:
                 return _mark_truncated()
@@ -426,18 +426,6 @@ class TrainableTauBenchAgent:
                 return _mark_truncated()
 
             for turn_idx in range(args.max_turns):
-                input_ids = _coerce_flat_int_token_ids(rendered_body.get("token_ids"))
-
-                if pending_obs_offset is not None:
-                    obs_tokens = input_ids[pending_obs_offset:]
-                    remaining = remaining_budget()
-                    if remaining is not None and len(obs_tokens) > remaining:
-                        append_response_window(obs_tokens[: max(remaining, 0)], [0] * max(remaining, 0))
-                        sample.status = Sample.Status.TRUNCATED
-                        break
-                    append_response_window(obs_tokens, [0] * len(obs_tokens))
-                    pending_obs_offset = None
-
                 current_sampling_params = sampling_params_for_turn()
                 if current_sampling_params is None:
                     sample.status = Sample.Status.TRUNCATED
@@ -506,11 +494,24 @@ class TrainableTauBenchAgent:
                         train_logprobs.append(0.0)
                         train_loss_mask.append(0)
 
+                has_previous_response = bool(response_tokens)
                 response_tokens.extend(new_tokens)
+                messages.append({"role": "assistant", "content": response_text})
+                assistant_delta_ids, assistant_delta_mask = get_token_delta(
+                    state.tokenizer,
+                    messages,
+                    include_generation_prompt=has_previous_response,
+                )
+                generation_prompt_length = next(
+                    (index for index, mask in enumerate(assistant_delta_mask) if mask),
+                    len(assistant_delta_mask),
+                )
+                append_response_window(
+                    assistant_delta_ids[:generation_prompt_length],
+                    assistant_delta_mask[:generation_prompt_length],
+                )
                 append_response_window(train_tokens, train_loss_mask, train_logprobs)
                 _maybe_apply_routed_experts(args, sample, choice)
-
-                messages.append({"role": "assistant", "content": response_text})
 
                 if finish_reason == "length":
                     sample.status = Sample.Status.TRUNCATED
@@ -527,15 +528,25 @@ class TrainableTauBenchAgent:
                     sample.status = Sample.Status.COMPLETED
                     break
 
+                render_prefix_len = len(sample.tokens)
                 next_user_message = env.format_observation(observation)
                 messages.append(next_user_message)
+                obs_tokens, obs_loss_mask = get_token_delta(state.tokenizer, messages)
+                remaining = remaining_budget()
+                if remaining is not None and len(obs_tokens) > remaining:
+                    append_response_window(
+                        obs_tokens[: max(remaining, 0)],
+                        obs_loss_mask[: max(remaining, 0)],
+                    )
+                    sample.status = Sample.Status.TRUNCATED
+                    break
+                append_response_window(obs_tokens, obs_loss_mask)
 
                 if turn_idx + 1 >= args.max_turns:
                     sample.reward = compute_process_reward(env, 0.0)
                     sample.status = Sample.Status.TRUNCATED
                     break
 
-                pending_obs_offset = len(input_ids) + len(train_tokens)
                 max_ctx = args.rollout_max_context_len or 8192
                 if len(sample.tokens) >= max_ctx - 64:
                     logger.info(
@@ -548,10 +559,10 @@ class TrainableTauBenchAgent:
                 if rendered_body is None:
                     return _mark_truncated()
                 rendered_ids = _coerce_flat_int_token_ids(rendered_body.get("token_ids"))
-                is_prefix_stable = rendered_ids[:pending_obs_offset] == sample.tokens[:pending_obs_offset]
+                is_prefix_stable = rendered_ids[:render_prefix_len] == sample.tokens[:render_prefix_len]
                 sample.metadata["multiturn_render"] = {
                     "prefix_stable": is_prefix_stable,
-                    "prefix_len": pending_obs_offset,
+                    "prefix_len": render_prefix_len,
                     "sample_len": len(sample.tokens),
                     "rendered_len": len(rendered_ids),
                     "turn": turn_idx + 1,

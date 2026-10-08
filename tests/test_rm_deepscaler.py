@@ -36,6 +36,34 @@ def test_response_split_on_response_marker_grades_tail():
 
 
 @pytest.mark.unit
+def test_backspace_boxed_marker_is_repaired():
+    """A non-raw ``\\boxed`` literal stores a backspace. Repair it before grading."""
+    response = "</think>" + chr(8) + "oxed{42}"
+    assert get_deepscaler_rule_based_reward(response, "42") == 1
+
+
+@pytest.mark.unit
+def test_im_end_without_think_grades_the_solution():
+    """``enable_thinking=false`` closes the turn with ``<|im_end|>`` and no ``</think>``."""
+    response = "\n\nAnswer: \\boxed{42}<|im_end|>"
+    assert get_deepscaler_rule_based_reward(response, "42") == 1
+
+
+@pytest.mark.unit
+def test_im_end_keeps_boxed_answer_before_a_later_explanation():
+    """A blank line after the answer must not discard the boxed solution."""
+    response = "###Response\\boxed{42}\n\nExplanation.<|im_end|>"
+    assert get_deepscaler_rule_based_reward(response, "42") == 1
+
+
+@pytest.mark.unit
+def test_think_marker_is_used_when_im_end_is_also_present():
+    """A thinking reply contains both markers. Grade the tail after ``</think>``."""
+    response = "draft \\boxed{1}</think>\n\\boxed{42}<|im_end|>"
+    assert get_deepscaler_rule_based_reward(response, "42") == 1
+
+
+@pytest.mark.unit
 def test_response_without_any_marker_returns_zero():
     """No ``</think>`` AND no ``###Response`` → fall through to 0
     immediately (deepscaler.py:9-10). This is the silent-failure pole —

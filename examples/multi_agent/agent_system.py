@@ -5,26 +5,11 @@ import traceback
 from copy import deepcopy
 
 from vime.rollout.rm_hub import batched_async_rm
-from vime.rollout.vllm_rollout import _build_inference_sampling_params
+from vime.rollout.vllm_rollout import _build_inference_sampling_params, _inference_generate_tokens_and_logprobs
 from vime.utils.http_utils import post
 from vime.utils.types import Sample
 
 from .prompts import SOLVER_PROMPT_TEMPLATE, generate_rewriter_template, generate_select_template
-
-
-def _inference_generate_tokens_and_logprobs(choice):
-    """Compatibility helper for current VIME vLLM rollout responses."""
-    new_response_tokens = choice.get("token_ids") or []
-    new_response_log_probs = []
-    lp = choice.get("logprobs")
-    if isinstance(lp, dict):
-        content_items = lp.get("content") or []
-        new_response_log_probs = [
-            float(item.get("logprob", 0.0)) if isinstance(item, dict) else 0.0 for item in content_items
-        ]
-    if not new_response_log_probs:
-        new_response_log_probs = [0.0] * len(new_response_tokens)
-    return new_response_tokens, new_response_log_probs
 
 
 async def generate_response(args, prompt, key, worker_id: int | None = None):
@@ -66,12 +51,12 @@ async def generate_response(args, prompt, key, worker_id: int | None = None):
         new_response_tokens, new_response_log_probs = _inference_generate_tokens_and_logprobs(choice)
         response_text = tokenizer.decode(new_response_tokens, skip_special_tokens=False) if new_response_tokens else ""
 
-        # Update sample with tokens directly - avoiding re-tokenization
-        sample.tokens = sample.tokens + new_response_tokens
-        sample.response_length += len(new_response_tokens)
-        if sample.rollout_log_probs is None:
-            sample.rollout_log_probs = []
-        sample.rollout_log_probs += new_response_log_probs
+        sample.append_response_tokens(
+            args,
+            tokens=new_response_tokens,
+            log_probs=new_response_log_probs,
+            trainable=True,
+        )
         assert len(sample.rollout_log_probs) == sample.response_length, (
             f"rollout logprob length mismatch: {len(sample.rollout_log_probs)} logprobs "
             f"vs {sample.response_length} response tokens"

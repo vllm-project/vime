@@ -4,7 +4,7 @@
 # ============================================================
 
 # for rerun the task
-pkill -9 -f "vllm serve"
+pkill -9 -f '[v]llm serve|VLL[M]::'
 sleep 3
 ray stop --force
 pkill -9 ray
@@ -37,7 +37,6 @@ CKPT_ARGS=(
    --load ${BASE_DIR}/MiniMax-M2.5_vime/
    --save ${BASE_DIR}/MiniMax-M2.5_vime/
    --save-interval 20
-   --megatron-to-hf-mode raw
    --model-name minimax_m2
 )
 

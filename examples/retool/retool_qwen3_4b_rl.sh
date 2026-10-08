@@ -34,7 +34,7 @@ VIME_DIR="/root/vime"
 source /usr/local/Ascend/driver/bin/setenv.bash
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
-export PYTHONPATH="${VIME_DIR}:${VIME_DIR}/examples/retool:/root/Megatron-LM:/root/vllm:/root/vllm-ascend:/root/Megatron-Bridge:/root/mbridge:/root/MegatronAdaptor:/root/TransformerEngineNPU:/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:/usr/local/Ascend/ascend-toolkit/latest/tools/ms_fmk_transplt/torch_npu_bridge:${PYTHONPATH}"
+export PYTHONPATH="${VIME_DIR}:${VIME_DIR}/examples/retool:/root/Megatron-LM:/root/vllm:/root/vllm-ascend:/root/MegatronAdaptor:/root/TransformerEngineNPU:/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:/usr/local/Ascend/ascend-toolkit/latest/tools/ms_fmk_transplt/torch_npu_bridge:${PYTHONPATH}"
 export PYTHONUNBUFFERED=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:False
 export CUDA_DEVICE_MAX_CONNECTIONS=1
@@ -65,7 +65,6 @@ CKPT_ARGS=(
    --save /path/to/Qwen3-4B_vime_npu/
    --save-interval 20
    --no-load-optim
-   --megatron-to-hf-mode bridge
 )
 
 ROLLOUT_ARGS=(
@@ -131,10 +130,10 @@ OPTIMIZER_ARGS=(
 )
 
 VLLM_ARGS=(
+   --vllm-additional-config '{"weight_nz_mode":0}'
    --rollout-num-gpus-per-engine 4
    --vllm-gpu-memory-utilization 0.7
    --vllm-enable-sleep-mode
-   --vllm-weight-sync-mode native
    --vllm-max-model-len 16384
 )
 
@@ -166,10 +165,10 @@ ray start --head \
 	--dashboard-host=0.0.0.0
 
 # Build the runtime environment JSON with proper variable substitution
-RUNTIME_ENV_JSON=$(cat << 'EOF'
+RUNTIME_ENV_JSON=$(cat << EOF
 {
   "env_vars": {
-    "PYTHONPATH": "${VIME_DIR}:${VIME_DIR}/examples/retool:/root/Megatron-LM:/root/vllm:/root/vllm-ascend:/root/Megatron-Bridge:/root/mbridge:/root/MegatronAdaptor:/root/TransformerEngineNPU:/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:/usr/local/Ascend/ascend-toolkit/latest/tools/ms_fmk_transplt/torch_npu_bridge",
+    "PYTHONPATH": "${VIME_DIR}:${VIME_DIR}/examples/retool:/root/Megatron-LM:/root/vllm:/root/vllm-ascend:/root/MegatronAdaptor:/root/TransformerEngineNPU:/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:/usr/local/Ascend/ascend-toolkit/latest/tools/ms_fmk_transplt/torch_npu_bridge",
     "CUDA_DEVICE_MAX_CONNECTIONS": "1",
     "HCCL_HOST_SOCKET_PORT_RANGE": "60000-60050",
     "HCCL_NPU_SOCKET_PORT_RANGE": "61000-61050",

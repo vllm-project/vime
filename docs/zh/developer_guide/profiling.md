@@ -9,7 +9,7 @@
 - 从日志确认router/worker地址
 - start_profile
 - 发送少量推理请求
--（可选）stop_profile；或达到max_iterations后自动落盘
+-（可选）stop_profile；或达到max_iterations后自动写入 trace
 - 在torch_profiler_dir查看trace文件
 
 
@@ -44,21 +44,19 @@ vLLM只有在启动时配置了`--profiler-config`，才会注册`/start_profile
 |------|------|
 | `profiler` | `"torch"` 或 `"cuda"` |
 | `torch_profiler_dir` | trace输出目录（绝对路径） |
-| `max_iterations` | worker记录超过N步后自动stop并落盘（条件为`> N`） |
+| `max_iterations` | worker记录超过N步后自动stop并写入 trace（条件为`> N`） |
 | `ignore_frontend` | 建议`true`，仅profile worker，降低前端开销 |
 
-**防止`stop_profile`时RPC超时：** vLLM APIServer与EngineCore/worker之间通过内部RPC通信。手动调用`stop_profile`触发trace落盘可能耗时数分钟，而默认`VLLM_RPC_TIMEOUT`仅**10秒**（10000 ms），容易导致flush中断或trace不完整。Profiling时建议设为**30分钟**（1800000 ms）。
+`/stop_profile` 会等待 EngineCore 和全部 worker 完成 trace 写盘，因此较大的
+profile 可能需要数分钟；trace 文件写完前不要中断该请求。
 
-该变量须在**启动train、拉起vLLM之前**传入Ray worker环境（仅在本机shell `export`不一定会进入Ray job）。在`ray job submit`的`runtime-env-json`中写入，例如：
+常规 worker 环境仍通过 `ray job submit` 的 `runtime-env-json` 传入，例如：
 
 ```bash
-export VLLM_RPC_TIMEOUT="${VLLM_RPC_TIMEOUT:-1800000}"
-
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
     \"PYTHONPATH\": \"/root/Megatron-LM\",
-    \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
-    \"VLLM_RPC_TIMEOUT\": \"${VLLM_RPC_TIMEOUT}\"
+    \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\"
   }
 }"
 
@@ -111,7 +109,7 @@ python tools/profile_rollout.py \
 
 ### 停止Profiling（可选）
 
-若在`--vllm-profiler-config`中设置了`max_iterations`，worker在记录足够步数后会**自动stop并落盘**，实践中发完推理后常可直接在`torch_profiler_dir`看到trace，**不必**再手动`stop_profile`。需要提前结束采集时再执行：
+若在`--vllm-profiler-config`中设置了`max_iterations`，worker在记录足够步数后会**自动stop并写入 trace**，实践中发完推理后常可直接在`torch_profiler_dir`看到trace，**不必**再手动`stop_profile`。需要提前结束采集时再执行：
 
 ```bash
 python tools/profile_rollout.py \
@@ -124,8 +122,8 @@ python tools/profile_rollout.py \
 在sleep_rollout等待期间，执行步骤如下：
 
 1. `profile_rollout.py --action start`
-2. 向router或**直连worker**发送少量completion请求（2～4条即可，trace会很大）
-3. （可选）`profile_rollout.py --action stop`；或等待`max_iterations`触发自动落盘
+2. 向router或**直连worker**发送少量completion请求（通常2～4条即可，trace会很大）
+3. 如果依赖自动写入 trace，要注意 `max_iterations` 的停止条件是 `> N`。例如 `max_iterations=3` 时，需要发 4 条请求；否则请手动执行 `profile_rollout.py --action stop`
 4. 在`torch_profiler_dir`查看trace
 
 请求示例（`model`使用HF checkpoint路径）：
@@ -162,9 +160,9 @@ python tools/analyze_profile.py --profile-dir /root/logs/vllm_profile --all-rank
 | 现象 | 处理 |
 |------|------|
 | `POST /start_profile` 404 | 用JSON传`--vllm-profiler-config`；重启job |
-| start成功但目录为空 | 确认curl打到worker且返回200；适当增大`max_iterations`或补发推理 |
+| start成功但目录为空 | 确认curl打到worker且返回200；若 `max_iterations=3`，请发 4 条请求，或手动执行 `stop_profile` |
 | router 503 | 确认当前job的router端口；改直连worker |
-| stop很慢或超时 | 增大`VLLM_RPC_TIMEOUT`；减少请求条数 |
+| stop 很慢 | 等待 trace 写盘完成；减少请求条数 |
 
 ## 8. 完整可运行示例
 
@@ -212,13 +210,10 @@ launch_train_for_profiling() {
 
   source "${VIME_ROOT}/scripts/models/qwen3-4B.sh"
 
-  export VLLM_RPC_TIMEOUT="${VLLM_RPC_TIMEOUT:-1800000}"
-
   RUNTIME_ENV_JSON="{
     \"env_vars\": {
       \"PYTHONPATH\": \"/root/Megatron-LM\",
-      \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
-      \"VLLM_RPC_TIMEOUT\": \"${VLLM_RPC_TIMEOUT}\"
+      \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\"
     }
   }"
 
@@ -290,16 +285,15 @@ run_profiling_session() {
   echo "=== 1/3 start_profile (all workers via router) ==="
   python tools/profile_rollout.py --router-url "${router_url}" --action start
 
-  echo "=== 2/3 send completions (direct to worker; 3 requests) ==="
-  for i in 1 2 3; do
-    curl -sS -X POST "${worker_url}/v1/completions" \
+  echo "=== 2/3 send completions (direct to worker; 4 requests so max_iterations=3 can auto-flush) ==="
+  for i in 1 2 3 4; do
+    response="$(curl -sS -X POST "${worker_url}/v1/completions" \
       -H "Content-Type: application/json" \
-      -d "{\"model\":\"${model}\",\"prompt\":\"Hello ${i}\",\"max_tokens\":32}" \
-      | head -c 400
-    echo
+      -d "{\"model\":\"${model}\",\"prompt\":\"Hello ${i}\",\"max_tokens\":32}")"
+    printf '%s\n' "${response:0:400}"
   done
 
-  echo "=== 3/3 list trace files (max_iterations=3 auto-stop; add --action stop if needed) ==="
+  echo "=== 3/3 list trace files (max_iterations=3 auto-stop uses > N; add --action stop if needed) ==="
   sleep 2
   find "${PROFILE_DIR}" -type f \( -name '*.json*' -o -name 'profiler_out_*' \) | sort
   echo "Open *.trace.json.gz in https://ui.perfetto.dev/ or run:"

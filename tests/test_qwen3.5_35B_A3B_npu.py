@@ -1,57 +1,94 @@
 import os
 import shlex
+import sys
+import tempfile
+from pathlib import Path
 
 import vime.utils.external_utils.command_utils as U
 
 
 TEST_ROOT = os.environ.get("HF_HOME") or "/root"
-MODEL_DIR = f"{TEST_ROOT}/models/Qwen3.5-35B-A3B"
+MODEL_NAME = "Qwen3.5-35B-A3B"
+MODEL_DIR = f"{TEST_ROOT}/models/{MODEL_NAME}"
 DATASET_DIR = f"{TEST_ROOT}/datasets/dapo-math-17k"
 
 
-def prepare():
+def prepare(torch_dist_ref_load=True):
     models_dir = shlex.quote(f"{TEST_ROOT}/models")
     datasets_dir = shlex.quote(f"{TEST_ROOT}/datasets")
     model_dir = shlex.quote(MODEL_DIR)
     dataset_dir = shlex.quote(DATASET_DIR)
 
+    # The published NPU image does not install flash-linear-attention. Qwen3.5
+    # GDN layers instantiate fla.ShortConvolution while the checkpoint is built.
+    # Pin the version used by the verified NPU run, and skip extras so pip does
+    # not replace the image's torch / torch_npu.
+    U.exec_command(
+        f"{shlex.quote(sys.executable)} -m pip install --disable-pip-version-check --no-deps "
+        "einops 'fla-core==0.5.2' 'flash-linear-attention==0.5.2'"
+    )
     U.exec_command(f"mkdir -p {models_dir} {datasets_dir}")
-    U.exec_command(f"hf download Qwen/Qwen3.5-35B-A3B --local-dir {model_dir}")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {model_dir}")
     U.exec_command("hf download --repo-type dataset zhuzilin/dapo-math-17k " f"--local-dir {dataset_dir}")
+    if not torch_dist_ref_load:
+        return None
+
+    checkpoint_path = Path(tempfile.mkdtemp(prefix=f"{MODEL_NAME}_torch_dist_", dir=f"{TEST_ROOT}/models"))
+    checkpoint_dir = shlex.quote(str(checkpoint_path))
+    # Keep tensor parallel at 1. The converter then pipeline-splits the 40 layers
+    # across the 8 NPUs. TP 2 with PP 1 builds every layer on each device.
+    U.exec_command(
+        "source scripts/models/qwen3.5-35B-A3B.sh && "
+        "TRANSFORMERS_VERBOSITY=error "
+        f"VIME_PLATFORM=npu PYTHONPATH={shlex.quote(str(U.repo_base_dir))}:/root/Megatron-LM:${{PYTHONPATH:-}} "
+        f"{shlex.quote(sys.executable)} -m torch.distributed.run --nproc-per-node 8 "
+        "tools/convert_hf_to_torch_dist.py "
+        "${MODEL_ARGS[@]} "
+        f"--hf-checkpoint {model_dir} --save {checkpoint_dir}"
+    )
+
+    tracker = checkpoint_path / "latest_checkpointed_iteration.txt"
+    assert tracker.read_text().strip() == "release"
+    weight_files = [
+        path
+        for path in checkpoint_path.rglob("*")
+        if path.is_file() and path.name != "latest_checkpointed_iteration.txt"
+    ]
+    assert weight_files, f"No checkpoint weights found under {checkpoint_path}"
+    return str(checkpoint_path)
 
 
-def execute():
+def execute(torch_dist_checkpoint=None):
     model_dir = shlex.quote(MODEL_DIR)
     prompt_data = shlex.quote(f"{DATASET_DIR}/dapo-math-17k.jsonl")
 
-    # NPU skips torch_dist conversion; HF weights load directly via bridge mode.
-    checkpoint_args = (
-        f"--hf-checkpoint {model_dir} "
-        f"--load {model_dir} "
-        f"--ref-load {model_dir} "
-        "--megatron-to-hf-mode bridge "
-        "--no-load-optim "
-    )
+    checkpoint_args = f"--hf-checkpoint {model_dir} --load {model_dir} --ref-load {model_dir} --no-load-optim "
+    if torch_dist_checkpoint is not None:
+        checkpoint_args = (
+            f"--hf-checkpoint {model_dir} --ref-load {shlex.quote(torch_dist_checkpoint)} --no-load-optim "
+        )
 
-    # Smoke-scaled rollout (num-rollout/batch/n-samples trimmed like test_qwen3_30B_A3B_npu).
+    # The verified 1024-token control used enable_thinking=false. The chat
+    # template otherwise opens a <think> block, and --ci-test rejects a mean
+    # logprob at or below -1 and an entropy outside (0, 1). Responses also
+    # stay within 1024 tokens: past that point serving diverges from Megatron.
     rollout_args = (
         f"--prompt-data {prompt_data} "
         "--input-key prompt "
         "--label-key label "
         "--apply-chat-template "
+        "--apply-chat-template-kwargs '{\"enable_thinking\": false}' "
         "--rollout-shuffle "
         "--rm-type deepscaler "
         "--num-rollout 2 "
         "--rollout-batch-size 4 "
         "--n-samples-per-prompt 4 "
-        "--rollout-max-response-len 2048 "
+        "--rollout-max-response-len 1024 "
         "--rollout-temperature 1 "
         "--global-batch-size 16 "
         "--balance-data "
     )
 
-    # TP=2/EP=8 mirrors scripts/run-qwen3.5-35B-A3B-npu.sh; --qkv-format bshd is
-    # qwen3.5-specific (not part of MODEL_ARGS, so passed explicitly here).
     parallel_args = (
         "--tensor-model-parallel-size 2 "
         "--sequence-parallel "
@@ -59,19 +96,19 @@ def execute():
         "--context-parallel-size 1 "
         "--expert-model-parallel-size 8 "
         "--expert-tensor-parallel-size 1 "
+        "--moe-token-dispatcher-type alltoall "
         "--recompute-granularity full "
         "--recompute-method uniform "
         "--recompute-num-layers 1 "
+        "--max-tokens-per-gpu 6144 "
         "--micro-batch-size 1 "
-        "--qkv-format bshd "
-        "--max-tokens-per-gpu 9216 "
     )
 
     grpo_args = (
         "--advantage-estimator grpo "
+        "--use-kl-loss "
         "--kl-loss-coef 0.00 "
         "--kl-loss-type low_var_kl "
-        "--kl-coef 0.00 "
         "--entropy-coef 0.00 "
         "--eps-clip 0.2 "
         "--eps-clip-high 0.28 "
@@ -89,12 +126,13 @@ def execute():
         "--use-precision-aware-optimizer "
     )
 
+    # Match the running non-colocate job: rollout is TP 2 only. Enabling vLLM
+    # expert parallel puts 128 local experts on each engine and the MoE dispatch
+    # window exceeds the default 200MB HCCL buffer, so the engine never starts.
     vllm_args = (
+        "--vllm-additional-config '{\"weight_nz_mode\":0}' "
         "--rollout-num-gpus-per-engine 2 "
         "--vllm-gpu-memory-utilization 0.7 "
-        "--vllm-enable-sleep-mode "
-        "--vllm-weight-sync-mode native "
-        "--vllm-enforce-eager "
     )
 
     model_args = (
@@ -103,7 +141,9 @@ def execute():
         "--accumulate-allreduce-grads-in-fp32 "
         "--attention-softmax-in-fp32 "
         "--attention-backend flash "
+        "--loss-mask-type qwen3_5 "
         "--use-flash-attn "
+        "--no-gradient-accumulation-fusion "
     )
 
     runtime_args = (
@@ -124,9 +164,6 @@ def execute():
         + model_args
         + runtime_args
     )
-    # Model architecture (--spec, --attention-output-gate, --moe-shared-expert-gate,
-    # num-experts, moe-* ...) is injected by sourcing scripts/models/qwen3.5-35B-A3B.sh
-    # via ${MODEL_ARGS[@]}, so only runtime/training args are passed here.
     U.execute_train(
         train_args=train_args,
         num_gpus_per_node=16,
@@ -134,16 +171,15 @@ def execute():
         extra_env_vars={
             "DISABLE_L2_CACHE": "1",
             "VLLM_USE_AOT_COMPILE": "0",
-            "ASCEND_CUSTOM_OPP_PATH": "/vllm-workspace/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer:/usr/local/Ascend/cann-9.0.0/opp/vendors/fla_npu_transformer",
         },
     )
 
 
 def main():
-    prepare()
+    checkpoint = prepare(torch_dist_ref_load=os.environ.get("VIME_TEST_TORCH_DIST_REF_LOAD", "1") == "1")
     for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         os.environ.pop(proxy_var, None)
-    execute()
+    execute(checkpoint)
 
 
 if __name__ == "__main__":

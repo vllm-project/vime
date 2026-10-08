@@ -1,41 +1,79 @@
 import dataclasses
 from argparse import Namespace
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import torch
 import torch.distributed as dist
 from megatron.core import mpu
 from tqdm import tqdm
 
+from vime.utils import accelerator
 from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.types import ParamInfo
 
 from ..megatron_to_hf import convert_to_hf
 from .common import all_gather_params_async, named_params_and_buffers
-from .hf_weight_iterator_base import HfWeightIteratorBase
 
 
-class HfWeightIteratorDirect(HfWeightIteratorBase):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class HfWeightIteratorDirect:
+    def __init__(self, args, model, model_name, quantization_config, transform_ue8m0=False):
+        self.args = args
+        self.model = model
+        self.model_name = model_name
+        self.quantization_config = quantization_config
+        self.transform_ue8m0 = transform_ue8m0
         self.megatron_local_param_info_buckets = _get_megatron_local_param_info_buckets(self.args, self.model)
+        self.ep_broadcast_src_rank_map = _get_ep_broadcast_src_rank_map()
 
-    def get_hf_weight_chunks(self, megatron_local_weights, progress_desc: str = "Update weights"):
+    def get_hf_weight_chunks(
+        self,
+        megatron_local_weights,
+        progress_desc: str = "Update weights",
+        should_convert_chunk: Callable[[int], bool] | None = None,
+        param_info_buckets: Sequence[Sequence[ParamInfo]] | None = None,
+    ):
         rank = dist.get_rank()
+        param_info_buckets = (
+            self.megatron_local_param_info_buckets if param_info_buckets is None else param_info_buckets
+        )
 
-        for megatron_local_param_infos in tqdm(
-            self.megatron_local_param_info_buckets, disable=rank != 0, desc=progress_desc
+        for chunk_idx, megatron_local_param_infos in enumerate(
+            tqdm(param_info_buckets, disable=rank != 0, desc=progress_desc)
         ):
-            megatron_full_params = _get_megatron_full_params(megatron_local_param_infos, megatron_local_weights)
-            hf_named_tensors = self._convert_to_hf_named_tensors(megatron_full_params, megatron_local_param_infos)
-            yield hf_named_tensors
-            del megatron_full_params
+            megatron_full_params = _get_megatron_full_params(
+                megatron_local_param_infos,
+                megatron_local_weights,
+                self.args.update_weight_buffer_size,
+                self.ep_broadcast_src_rank_map,
+            )
+            if should_convert_chunk is None or should_convert_chunk(chunk_idx):
+                hf_named_tensors = self._convert_to_hf_named_tensors(
+                    megatron_full_params,
+                    megatron_local_param_infos,
+                )
+            else:
+                hf_named_tensors = []
+            try:
+                yield hf_named_tensors
+            finally:
+                del hf_named_tensors, megatron_full_params
 
-    def _convert_to_hf_named_tensors(self, megatron_full_params: Sequence[torch.Tensor], param_infos: list[ParamInfo]):
+    def _convert_to_hf_named_tensors(
+        self,
+        megatron_full_params: Sequence[torch.Tensor],
+        param_infos: Sequence[ParamInfo],
+    ):
         hf_named_tensors = []
         for info, param in zip(param_infos, megatron_full_params, strict=False):
             hf_named_tensors.extend(
-                convert_to_hf(self.args, self.model_name, info.name, param, self.quantization_config)
+                convert_to_hf(
+                    self.args,
+                    self.model_name,
+                    info.name,
+                    param,
+                    self.quantization_config,
+                    transform_ue8m0=self.transform_ue8m0,
+                )
             )
         return hf_named_tensors
 
@@ -43,24 +81,24 @@ class HfWeightIteratorDirect(HfWeightIteratorBase):
 def _get_megatron_full_params(
     megatron_local_param_infos: Sequence[ParamInfo],
     megatron_local_weights,
+    broadcast_buffer_size: int,
+    ep_broadcast_src_rank_map: dict[int, int],
 ) -> Sequence[torch.Tensor]:
     pp_size = mpu.get_pipeline_model_parallel_world_size()
     ep_size = mpu.get_expert_model_parallel_world_size()
-    rank = dist.get_rank()
     # init params:
     params = []
     for info in megatron_local_param_infos:
         if dist.get_rank() == info.src_rank:
             params.append(
                 torch.nn.Parameter(
-                    megatron_local_weights[info.name].to(device=torch.cuda.current_device(), non_blocking=True),
+                    megatron_local_weights[info.name].to(device=accelerator.current_device(), non_blocking=True),
                     requires_grad=False,
                 )
             )
         else:
-            params.append(torch.empty(info.shape, dtype=info.dtype, device=torch.cuda.current_device()))
-    torch.cuda.synchronize()
-
+            params.append(torch.empty(info.shape, dtype=info.dtype, device=accelerator.current_device()))
+    accelerator.synchronize()
     # broadcast params across pp ranks
     if pp_size > 1:
         handles = []
@@ -76,21 +114,7 @@ def _get_megatron_full_params(
 
     # broadcast params across ep ranks
     if ep_size > 1:
-        handles = []
-        for info, param in zip(megatron_local_param_infos, params, strict=False):
-            if ".experts." in info.name:
-                src_rank = (
-                    info.src_rank
-                    if info.src_rank in dist.get_process_group_ranks(mpu.get_expert_model_parallel_group())
-                    else rank
-                )
-                handles.append(
-                    torch.distributed.broadcast(
-                        param, src=src_rank, group=mpu.get_expert_model_parallel_group(), async_op=True
-                    )
-                )
-        for handle in handles:
-            handle.wait()
+        _broadcast_expert_params(megatron_local_param_infos, params, broadcast_buffer_size, ep_broadcast_src_rank_map)
 
     # Set tp attrs for all params
     for info, param in zip(megatron_local_param_infos, params, strict=False):
@@ -103,11 +127,53 @@ def _get_megatron_full_params(
     return gathered_params
 
 
+def _broadcast_expert_params(
+    param_infos: Sequence[ParamInfo],
+    params: Sequence[torch.Tensor],
+    buffer_size: int,
+    src_rank_map: dict[int, int],
+) -> None:
+    ep_group = mpu.get_expert_model_parallel_group()
+    params_by_src: dict[int, list[torch.Tensor]] = {}
+    for info, param in zip(param_infos, params, strict=False):
+        if ".experts." not in info.name:
+            continue
+        params_by_src.setdefault(src_rank_map[info.src_rank], []).append(param)
+
+    for src_rank, expert_params in params_by_src.items():
+        dist._broadcast_coalesced(ep_group, expert_params, buffer_size, src=src_rank)
+
+
+def _get_ep_broadcast_src_rank_map() -> dict[int, int]:
+    ep_group = mpu.get_expert_model_parallel_group()
+    ep_size = mpu.get_expert_model_parallel_world_size()
+    if ep_size == 1:
+        return {dist.get_rank(): 0}
+
+    pp_group_ranks = dist.get_process_group_ranks(mpu.get_pipeline_model_parallel_group())
+    pp_groups: list[list[int] | None] = [None] * ep_size
+    dist.all_gather_object(pp_groups, pp_group_ranks, group=ep_group)
+
+    src_rank_map = {}
+    for ep_rank, pp_group in enumerate(pp_groups):
+        assert pp_group is not None
+        for global_rank in pp_group:
+            src_rank_map[global_rank] = ep_rank
+    return src_rank_map
+
+
 def _get_megatron_local_param_info_buckets(args: Namespace, model: Sequence[torch.nn.Module]) -> list[list[ParamInfo]]:
     """
     Partition params into buckets ≤ update_weight_buffer_size (with TP replication).
     """
     param_infos = _get_megatron_local_param_infos(args, model)
+    return pack_param_info_buckets(param_infos, args.update_weight_buffer_size)
+
+
+def pack_param_info_buckets(
+    param_infos: Sequence[ParamInfo],
+    update_weight_buffer_size: int,
+) -> list[list[ParamInfo]]:
     param_info_buckets = [[]]  # Start with one empty bucket
     buffer_size = 0  # Track current bucket size in bytes
 
@@ -122,7 +188,7 @@ def _get_megatron_local_param_info_buckets(args: Namespace, model: Sequence[torc
         param_size = info.size * tp_size
 
         # If adding this param exceeds limit AND current bucket has params: start new bucket
-        if buffer_size + param_size > args.update_weight_buffer_size and len(param_info_buckets[-1]) > 0:
+        if buffer_size + param_size > update_weight_buffer_size and len(param_info_buckets[-1]) > 0:
             param_info_buckets.append([])
             buffer_size = 0
 
@@ -144,6 +210,9 @@ def _get_megatron_local_param_infos(args: Namespace, model: Sequence[torch.nn.Mo
     param_infos = {}
     rank = dist.get_rank()
     for name, param in named_params_and_buffers(args, model):
+        # DSpark draft params are sent through the draft weight source.
+        if ".draft_model." in name:
+            continue
         param_infos[name] = ParamInfo(
             name=name,
             dtype=param.dtype,
