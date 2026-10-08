@@ -40,6 +40,7 @@ def execute():
         "--n-samples-per-prompt 4 "
         "--rollout-max-response-len 8192 "
         "--rollout-temperature 1 "
+        "--rollout-data-transport nixl "
         "--global-batch-size 16 "
         "--balance-data "
     )
@@ -68,9 +69,6 @@ def execute():
 
     grpo_args = (
         "--advantage-estimator gspo "
-        "--use-kl-loss "
-        "--kl-loss-coef 0.00 "
-        "--kl-loss-type low_var_kl "
         "--kl-coef 0.00 "
         "--entropy-coef 0.00 "
         "--eps-clip 4e-4 "
@@ -94,7 +92,7 @@ def execute():
         "--rollout-num-gpus-per-engine 8 "
         "--vllm-gpu-memory-utilization 0.8 "
         "--vllm-max-num-seqs 512 "
-        "--vllm-max-cudagraph-capture-size 16 "
+        "--vllm-max-cudagraph-capture-size 32 "
     )
 
     if USE_DEEPEP:

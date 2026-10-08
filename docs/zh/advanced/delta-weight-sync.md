@@ -17,11 +17,23 @@ Sparse HCCL：
 --update-weight-delta-verify-every 0
 ```
 
-该路径要求非 colocate、rollout PP=1 和未量化 rollout 权重。`batch-gather` 只按全局
+该路径要求非 colocate 和未量化 rollout 权重；TP2/PP2/EP2 需要匹配的 vLLM-Ascend sparse 接收端。`batch-gather` 只按全局
 参数目录的行数触发，保证所有 Megatron rank 的 collective 顺序一致。可将
-`verify-every` 设置为正整数 K，每 K 次稳态同步追加一次 dense 幂等性验证。
+`verify-every` 设置为正整数 K，每 K 次稳态同步校验本 rank 写入的 sparse 元素。
 
-磁盘传输：
+并行 rollout：
+
+NPU 镜像补丁包含 `sparse_hccl` 接收端注册和模块。接收端先过滤 PP stage 所属层，
+通过 Ascend EP map 将全局 expert ID 映射到本地 slot，再按 TP load plan 写入本地参数。
+未知或不支持直接写入的布局走 loader 回退路径。当前 payload 仍采用广播；
+PP/EP 所属关系过滤不等于按 rank 定向传输。
+
+Qwen3-30B-A3B 训练和 rollout 均为 TP2/PP2/EP2 时，可使用
+`scripts/run-qwen3-30B-A3B-sparse-hccl-tp2-pp2-ep2.sh`。按环境设置 `MODEL_PATH`、
+`PROMPT_DATA_PATH` 及依赖的 `PYTHONPATH`。脚本使用四张训练卡和四张 rollout 卡，
+每次稳态更新均开启稀疏写入校验。
+
+磁盘传输配置：
 
 ```bash
 --update-weight-mode delta
@@ -47,7 +59,7 @@ delta 始终用 zstd（level 1）压缩；profiling 显示对这类数据它在 
 
 ### Sparse HCCL
 
-1. 首次同步通过 VIME 现有 Megatron→HF 全量导出流发送 values-only dense seed，完成后才保存各 rank 的本地 Megatron shard CPU snapshot。
+1. 首次同步通过 VIME 现有 Megatron→HF 全量导出流发送 values-only dense seed，完成后才保存各 rank 的本地 Megatron shard snapshot。设置 `VIME_SPARSE_HCCL_SNAPSHOT_DEVICE=cpu` 将 snapshot 保存在主机内存。
 2. 后续同步在每个 rank 上对当前 shard 和 snapshot 做整数视图的 bit-exact diff，并立即推进 snapshot。
 3. NaN probe 把本地变化映射成最终 HF 参数名和全局 flat index。PP 非 owner、DP/CP 重复副本和无变化 rank 仍发送 count=0 的目录行。
 4. TP、EP/ETP、PP/VPP 按统一目录执行 batched variable-length gather；wire master 将结果组装成 verl 兼容的 `DeltaParam`/`DeltaFlush` manifest。

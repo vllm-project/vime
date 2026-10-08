@@ -78,7 +78,6 @@ steps:
         --local context=. \
         --local dockerfile=./docker \
         --opt filename=Dockerfile.npu \
-        --opt build-arg:BASE_IMAGE=swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/vllm-ascend \
         --opt build-arg:APTMIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081 \
         --opt build-arg:PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple \
         --secret id=dockerconfig,src=/home/user/.docker/config.json \

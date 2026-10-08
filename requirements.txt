@@ -1,5 +1,6 @@
 accelerate
 anthropic
+blake3
 blobfile
 cloudpickle
 datasets
@@ -16,9 +17,10 @@ pylatexenc
 pyyaml
 qwen_vl_utils # for VLM
 ray[default]
-ring_flash_attn
 safetensors
 tensorboard
 transformers
-vllm-router>=0.1.14
+vllm-router>=0.1.15
 wandb
+xxhash  # disk delta weight sync checksum
+zstandard

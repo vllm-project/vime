@@ -2,6 +2,7 @@
 
 [English](./README.md) · [代码仓库](https://github.com/vllm-project/vime)
 
+[![文档](https://img.shields.io/badge/docs-latest-brightgreen.svg?style=flat)](https://docs.vllm.ai/projects/vime/zh-cn/latest/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/vllm-project/vime)
 
 **Vime** 是基于 [slime](https://github.com/THUDM/slime) 的 RL scaling 用 LLM post-training 框架。在保留 slime 训练栈与数据生成设计的同时，默认以 [**vLLM**](https://github.com/vllm-project/vllm)（配合 [vllm-router](https://github.com/vllm-project/router)）作为 rollout 后端。Vime 提供两大核心能力：
@@ -31,7 +32,9 @@ vLLM 社区横向支持许多 LLM post-training 框架，包括（按字母顺�
   - [目录](#目录)
   - [架构总览](#架构总览)
   - [快速开始](#快速开始)
+    - [Agentic RL 示例](#agentic-rl-示例)
   - [参数说明](#参数说明)
+  - [代码阅读路径](#代码阅读路径)
   - [开发指南](#开发指南)
   - [slime doc](#slime-doc)
   - [FAQ](#faq)
@@ -45,8 +48,8 @@ vLLM 社区横向支持许多 LLM post-training 框架，包括（按字母顺�
 **模块说明**：
 
 - **training (Megatron)**：负责主训练流程，从 Data Buffer 读取数据，训练完后将参数同步至 rollout 模块；
-- **rollout (vLLM + router)**：启动 vLLM 推理引擎并路由生成请求，产出新数据（含 reward/verifier），存储至 Data Buffer；
-- **data buffer**：桥梁模块，管理 prompt 初始化、自定义数据与 rollout 生成方法。
+- **rollout (vLLM + router)**：启动 vLLM 推理引擎并路由生成请求；自定义生成函数可以在其上封装多轮循环、工具调用、环境/沙盒交互和基于 verifier 的奖励；
+- **data buffer**：桥梁模块，管理 prompt 初始化、自定义数据与 rollout 生成方法，包括通过同一接口产出样本的 agent 工作流。
 
 ## 快速开始
 
@@ -56,17 +59,44 @@ vLLM 社区横向支持许多 LLM post-training 框架，包括（按字母顺�
 
 我们还提供了一些未在快速开始中覆盖的使用示例，请查看 [examples](examples/)。
 
+### Agentic RL 示例
+
+Agent 工作负载通过 Vime 的定制接口接入标准 rollout / Data Buffer 循环，并不是独立框架：
+
+- [`examples/multi_agent`](examples/multi_agent/README.md)：通过 `--custom-generate-function-path` 实现多 agent 生成；
+- [`examples/fully_async`](examples/fully_async/README.md)：面向长尾 agent 生成的全异步 rollout；
+- [`examples/coding_agent_rl`](examples/coding_agent_rl/README.md)：使用 Claude Code 或 Codex、沙盒工具、测试奖励和 token 精确轨迹片段的端到端 coding-agent RL；
+
+请参阅 [Agentic RL 训练路线图](docs/zh/get_started/agent.md)和[定制化指南](docs/zh/get_started/customization.md)。Coding-agent 示例内置 E2B 兼容后端；共享的 `vime.agent.sandbox.Sandbox` 协议也可以由 Docker、Modal 或本地虚拟机实现。
+
 ## 参数说明
 
 Vime 的参数分为三类：
 
 1. **Megatron 参数**：Vime 会读取 Megatron 中的全部参数，可通过传入如 `--tensor-model-parallel-size 2` 的方式配置 Megatron；
-2. **vLLM 参数**：vLLM server 与 engine 相关选项以 `--vllm-` 为前缀（例如 `--vllm-gpu-memory-utilization`）。路由相关选项分两类前缀：vllm-router 自身的选项以 `--router-` 传入（例如 `--router-policy round_robin`、`--router-request-timeout-secs`），Vime 侧用于告诉 Vime *router 在哪里* 的编排参数则以 `--vllm-router-` 为前缀（`--vllm-router-ip`、`--vllm-router-port`）。完整参数见 [vime/backends/vllm_utils/arguments.py](vime/backends/vllm_utils/arguments.py)。
+2. **vLLM 参数**：vLLM server 与 engine 相关选项以 `--vllm-` 为前缀（例如 `--vllm-gpu-memory-utilization`）。vllm-router 自身的选项以 `--router-` 传入（例如 `--router-policy round_robin`）；Vime 侧的 router 编排参数使用 `--vllm-router-` 前缀，包括 `--vllm-router-ip`、`--vllm-router-port` 和实际生效的 `--vllm-router-request-timeout-secs`。完整参数见 [vime/backends/vllm_utils/arguments.py](vime/backends/vllm_utils/arguments.py)。
 3. **框架参数**：与 Vime 编排相关的开关（rollout GPU、数据路径、RL 算法等），见 [vime/utils/arguments.py](vime/utils/arguments.py)。
 
 `--rollout-num-gpus-per-engine` 对应每个 vLLM engine 的 tensor parallel size。默认 rollout 入口为 `vime.rollout.vllm_rollout.generate_rollout`。
 
 完整使用说明请查阅 [使用文档](docs/zh/get_started/usage.md)。
+
+## 代码阅读路径
+
+建议从训练主循环开始，只在需要时继续深入：
+
+```text
+train.py: train
+├─ vime/ray/placement_group.py       Ray 资源与 worker 初始化
+├─ vime/ray/rollout.py              RolloutManager.generate：rollout 编排
+│  └─ vime/rollout/vllm_rollout.py  样本生成与奖励计算
+└─ vime/ray/actor_group.py          RayTrainGroup.async_train：训练调度
+   └─ vime/backends/megatron_utils/actor.py
+      ├─ model.py                    Megatron 模型执行
+      └─ loss.py                     RL loss 与 advantage
+```
+
+第一次阅读时，可以把 `vime/utils/arguments.py` 当作配置入口。只有需要修改相关区域时，再深入 `vime/backends/vllm_utils/` 的部署细节和 `vime/backends/megatron_utils/update_weight/` 下的权重同步实现。
 
 ## 开发指南
 

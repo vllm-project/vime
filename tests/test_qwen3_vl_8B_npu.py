@@ -5,7 +5,7 @@ import vime.utils.external_utils.command_utils as U
 
 
 # Single-turn Qwen3-VL GRPO on geo3k (mirrors examples/geo3k_vlm/run_geo3k_vlm_npu.sh).
-# Qwen3-VL-8B maps to the qwen3-8B megatron config; the vision tower is handled by bridge.
+# Qwen3-VL-8B uses the qwen3-8B language config and the native VL provider.
 MODEL_NAME = "Qwen3-VL-8B-Instruct"
 MODEL_TYPE = "qwen3-8B"
 TEST_ROOT = os.environ.get("HF_HOME") or "/root"
@@ -28,9 +28,7 @@ def execute():
     model_dir = shlex.quote(MODEL_DIR)
     prompt_data = shlex.quote(f"{DATASET_DIR}/train.parquet")
 
-    checkpoint_args = (
-        f"--hf-checkpoint {model_dir} " f"--load {model_dir} " "--megatron-to-hf-mode bridge " "--no-load-optim "
-    )
+    checkpoint_args = f"--hf-checkpoint {model_dir} --load {model_dir} --no-load-optim "
 
     rollout_args = (
         f"--prompt-data {prompt_data} "
@@ -82,14 +80,16 @@ def execute():
     )
 
     vllm_args = (
+        "--vllm-additional-config '{\"weight_nz_mode\":0}' "
         "--rollout-num-gpus-per-engine 1 "
-        "--vllm-gpu-memory-utilization 0.8 "
+        "--vllm-gpu-memory-utilization 0.7 "
         "--vllm-max-model-len 16384 "
         "--vllm-generation-config auto "
         "--vllm-logprobs-mode processed_logprobs "
     )
 
     model_args = (
+        "--spec vime_plugins.models.qwen3_vl get_qwen3_vl_model_provider "
         "--attention-dropout 0.0 "
         "--hidden-dropout 0.0 "
         "--accumulate-allreduce-grads-in-fp32 "

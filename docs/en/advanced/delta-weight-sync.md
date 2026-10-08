@@ -21,12 +21,24 @@ Sparse HCCL:
 --update-weight-delta-verify-every 0
 ```
 
-This path requires non-colocated execution, rollout PP=1, and unquantized rollout weights.
+This path requires non-colocated execution and unquantized rollout weights; TP2/PP2/EP2 requires the matching vLLM-Ascend sparse receiver.
 The gather trigger is based only on globally ordered parameter-row counts, keeping collective
-order identical on every Megatron rank. Set `verify-every` to a positive K to append a dense
-idempotence verification sweep every K steady updates.
+order identical on every Megatron rank. Set `verify-every` to a positive K to verify the locally applied sparse elements every K steady updates.
 
-Disk transport:
+Parallel rollout:
+
+The NPU image patch includes the `sparse_hccl` receiver registration and modules.
+The receiver filters PP-owned layers, maps global expert IDs through the Ascend EP map,
+and then applies the TP load plan before writing local parameter elements. Unknown or
+unsupported direct layouts use the loader fallback. Payloads are still broadcast;
+PP/EP ownership filtering does not imply rank-targeted network traffic.
+
+For Qwen3-30B-A3B with training and rollout TP2/PP2/EP2, use
+`scripts/run-qwen3-30B-A3B-sparse-hccl-tp2-pp2-ep2.sh`. Set `MODEL_PATH`,
+`PROMPT_DATA_PATH`, and the dependency `PYTHONPATH` for your environment. The script
+uses four training and four rollout devices and enables sparse verification every update.
+
+Disk transport configuration:
 
 ```bash
 --update-weight-mode delta
@@ -52,7 +64,7 @@ Deltas are always zstd-compressed (level 1); profiling showed it dominates lz4 /
 
 ### Sparse HCCL
 
-1. The first sync streams VIME's existing full Megatron-to-HF export as a values-only dense seed. Each rank captures its local Megatron shard CPU snapshot only after that seed completes.
+1. The first sync streams VIME's existing full Megatron-to-HF export as a values-only dense seed. Each rank captures its local Megatron shard snapshot only after that seed completes. Set `VIME_SPARSE_HCCL_SNAPSHOT_DEVICE=cpu` to keep snapshots in host memory.
 2. Later syncs bit-diff each current shard against its snapshot through an integer view, then advance the snapshot immediately.
 3. A NaN probe maps local changes to final HF names and global flat indices. PP non-owners, DP/CP replicas, and unchanged ranks retain zero-count lockstep directory rows.
 4. TP, EP/ETP, and PP/VPP ranks execute batched variable-length gathers over one common directory; the wire master assembles verl-compatible `DeltaParam`/`DeltaFlush` manifests.

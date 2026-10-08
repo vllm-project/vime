@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 _MISSING = object()
@@ -33,6 +33,26 @@ DATASET_RUNTIME_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
         "default_keys": ("max_response_len",),
         "arg_attrs": ("eval_max_response_len", "rollout_max_response_len"),
     },
+    "min_eval_samples": {
+        "dataset_keys": ("min_eval_samples",),
+        "default_keys": ("min_eval_samples",),
+        "arg_attrs": (),
+    },
+    "stop": {
+        "dataset_keys": ("stop",),
+        "default_keys": ("stop",),
+        "arg_attrs": ("rollout_stop",),
+    },
+    "stop_token_ids": {
+        "dataset_keys": ("stop_token_ids",),
+        "default_keys": ("stop_token_ids",),
+        "arg_attrs": ("rollout_stop_token_ids",),
+    },
+    "min_new_tokens": {
+        "dataset_keys": ("min_new_tokens",),
+        "default_keys": ("min_new_tokens",),
+        "arg_attrs": ("eval_min_new_tokens",),
+    },
 }
 
 DATASET_SAMPLE_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
@@ -55,6 +75,26 @@ DATASET_SAMPLE_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
         "dataset_keys": ("metadata_key",),
         "default_keys": ("metadata_key",),
         "arg_attrs": ("metadata_key",),
+    },
+    "multimodal_keys": {
+        "dataset_keys": ("multimodal_keys",),
+        "default_keys": ("multimodal_keys",),
+        "arg_attrs": ("multimodal_keys",),
+    },
+    "apply_chat_template": {
+        "dataset_keys": ("apply_chat_template",),
+        "default_keys": ("apply_chat_template",),
+        "arg_attrs": ("apply_chat_template",),
+    },
+    "apply_chat_template_kwargs": {
+        "dataset_keys": ("apply_chat_template_kwargs",),
+        "default_keys": ("apply_chat_template_kwargs",),
+        "arg_attrs": ("apply_chat_template_kwargs",),
+    },
+    "custom_rm_path": {
+        "dataset_keys": ("custom_rm_path",),
+        "default_keys": ("custom_rm_path",),
+        "arg_attrs": ("eval_custom_rm_path", "custom_rm_path"),
     },
 }
 
@@ -98,12 +138,16 @@ class EvalDatasetConfig:
     name: str
     path: str
     rm_type: str | None = None
+    custom_rm_path: str | None = None
 
     # Dataset-specific overrides
     input_key: str | None = None
     label_key: str | None = None
     tool_key: str | None = None
     metadata_key: str | None = None
+    multimodal_keys: dict[str, str] | None = None
+    apply_chat_template: bool | None = None
+    apply_chat_template_kwargs: dict[str, Any] | None = None
 
     n_samples_per_eval_prompt: int | None = None
 
@@ -114,6 +158,9 @@ class EvalDatasetConfig:
     stop: list[str] | None = None
     stop_token_ids: list[int] | None = None
     min_new_tokens: int | None = None
+    repetition_penalty: float | None = None
+    skip_special_tokens: bool | None = None
+    no_stop_trim: bool | None = None
 
     # per-dataset custom generate function (e.g., for tool calling)
     custom_generate_function_path: str | None = None
@@ -123,11 +170,28 @@ class EvalDatasetConfig:
     app_service: str | None = None
 
     eval_task_timeout: int | None = None
+    min_eval_samples: int | None = None
+
+    # Early stop: terminate eval when remaining samples < eval_early_stop_remaining
+    # AND no new result has been received for eval_early_stop_idle_timeout seconds.
+    # Both must be set (non-None) for early stop to take effect.
+    eval_early_stop_remaining: int | None = None
+    eval_early_stop_idle_timeout: float | None = None
+
+    # Inline source config (mirrors the per-source fields in the train data JSON).
+    # When any of these is set, eval will treat this dataset as its own "source"
+    # and build a Dataset-level source_config keyed by `name`. No need to set
+    # --source-key or have a `source` field in the eval jsonl.
+    message_processor: dict[str, Any] | None = None
+    reward_model: dict[str, Any] | None = None
+    remote_environment: dict[str, Any] | None = None
 
     metadata_overrides: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.metadata_overrides = _ensure_metadata_overrides(self.metadata_overrides)
+        if self.min_eval_samples is not None and self.min_eval_samples <= 0:
+            raise ValueError("min_eval_samples must be positive when set.")
 
     @property
     def cache_key(self) -> tuple[Any, ...]:
@@ -204,11 +268,29 @@ def build_eval_dataset_configs(
     defaults: dict[str, Any],
 ) -> list[EvalDatasetConfig]:
     defaults = defaults or {}
+    combined_specs = {**DATASET_RUNTIME_SPECS, **DATASET_SAMPLE_SPECS}
+
+    # A key that is neither a spec name nor an EvalDatasetConfig field would be
+    # silently ignored below — the same typo inside a dataset entry raises from
+    # the dataclass constructor, so hold `defaults` to the same standard.
+    valid_default_keys = {f.name for f in fields(EvalDatasetConfig)} | {
+        key for spec in combined_specs.values() for key in spec["default_keys"]
+    }
+    unknown_keys = set(defaults) - valid_default_keys
+    if unknown_keys:
+        raise ValueError(
+            f"Unknown key(s) in eval.defaults: {sorted(unknown_keys)}. " f"Valid keys: {sorted(valid_default_keys)}."
+        )
+
     datasets: list[EvalDatasetConfig] = []
     for cfg in raw_config:
         cfg_dict = dict(cfg or {})
-        combined_specs = {**DATASET_RUNTIME_SPECS, **DATASET_SAMPLE_SPECS}
         _apply_dataset_field_overrides(args, cfg_dict, defaults, combined_specs)
+        # Fields without a spec entry (rm_type, repetition_penalty, app_service,
+        # ...) still honor eval.defaults: dataset entry wins, default fills in.
+        for key, value in defaults.items():
+            if key not in combined_specs:
+                cfg_dict.setdefault(key, value)
         dataset = EvalDatasetConfig(**cfg_dict)
         datasets.append(dataset)
     return datasets

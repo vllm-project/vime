@@ -8,11 +8,7 @@ from megatron.training.checkpointing import load_checkpoint as _load_checkpoint_
 from megatron.training.checkpointing import save_checkpoint
 from megatron.training.global_vars import get_args
 
-from vime.utils import megatron_bridge_utils
-from vime.utils.common import is_npu
-
-logger = logging.getLogger(__name__)
-
+from vime.platforms import current_platform
 
 try:
     # Here we patch out the `validate_non_overlapping_shards_metadata` in both functions
@@ -91,22 +87,17 @@ try:
 
     ShardedTensor._init_from_local_shards_and_global_metadata = _init_from_local_shards_and_global_metadata
 
-    if is_npu() and hasattr(default_planner, "_validate_global_plan"):
-
-        def patched_validate_global_plan(global_plan, metadata):
-            logger.info("[Patch] Skipping validate_access_integrity")
-            return True
-
-        default_planner._validate_global_plan = patched_validate_global_plan
+    current_platform().checkpoint.patch_default_planner(default_planner)
 
 except ImportError:
     pass
 
+logger = logging.getLogger(__name__)
 
 __all__ = ["save_checkpoint"]
 
 
-def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_context, skip_load_to_model_and_opt):
+def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_context):
     # ref: how megatron `load_checkpoint` gets directory
     args = get_args()
     load_path = args.load
@@ -121,7 +112,7 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_con
             optimizer=optimizer,
             opt_param_scheduler=opt_param_scheduler,
             checkpointing_context=checkpointing_context,
-            skip_load_to_model_and_opt=skip_load_to_model_and_opt,
+            skip_load_to_model_and_opt=False,
         )
     else:
         return _load_checkpoint_hf(
@@ -139,18 +130,10 @@ def _is_megatron_checkpoint(path: str | Path) -> bool:
 
 
 def _load_checkpoint_hf(ddp_model, optimizer, args, load_path: str):
-    assert args.megatron_to_hf_mode == "bridge", "Only bridge mode is supported for loading HF checkpoint"
-    from megatron.bridge import AutoBridge
-
-    import vime_plugins.megatron_bridge  # noqa: F401
-
     logger.info(f"Load checkpoint from HuggingFace model into Megatron (path={load_path})")
+    from vime.backends.megatron_utils.hf_to_megatron import load_hf_weights
 
-    with megatron_bridge_utils.patch_megatron_model(ddp_model):
-        bridge = megatron_bridge_utils.patch_auto_bridge_hf_config(
-            AutoBridge.from_hf_pretrained(load_path, trust_remote_code=True)
-        )
-        bridge.load_hf_weights(ddp_model)
+    load_hf_weights(args, ddp_model, load_path)
 
     # Copied from Megatron-core :: load_checkpoint (with simplifications)
     if (args.fp16 or args.bf16) and optimizer is not None:

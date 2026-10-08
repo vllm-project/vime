@@ -31,11 +31,11 @@ vllm:
   - name: <model_name>              # Required. Unique identifier for this model.
     model_path: <path>              # Optional. HF checkpoint path. Defaults to --hf-checkpoint.
     update_weights: <bool>          # Optional. Whether to sync weights from training. Auto-inferred.
-    num_gpus_per_engine: <int>      # Optional. Default TP size for all groups in this model.
+    num_gpus_per_engine: <int>      # Optional. Default worker GPU count per engine.
     server_groups:                  # Required. List of server group configurations.
       - worker_type: <type>         # Required. One of: regular, prefill, decode, placeholder.
         num_gpus: <int>             # Required. Total GPUs allocated to this group.
-        num_gpus_per_engine: <int>  # Optional. TP size override for this group.
+        num_gpus_per_engine: <int>  # Optional. Worker GPU count override for this group.
         overrides: <dict>           # Optional. vLLM EngineArgs field overrides.
 ```
 
@@ -48,7 +48,7 @@ vllm:
 | `name` | `str` | **Required** | Unique name for this model (e.g., `"actor"`, `"ref"`, `"reward"`). Used as the key in `args.vllm_model_routers`. |
 | `model_path` | `str` | `args.hf_checkpoint` | HuggingFace checkpoint path. All server groups within a model must use the same model path. |
 | `update_weights` | `bool` | Auto | Whether this model receives weight updates from training. When not set, automatically inferred: `true` if `model_path` matches `--hf-checkpoint`, `false` otherwise. |
-| `num_gpus_per_engine` | `int` | `args.rollout_num_gpus_per_engine` | Default TP size for server groups in this model. Individual groups can override. |
+| `num_gpus_per_engine` | `int` | `args.rollout_num_gpus_per_engine` | Default total worker GPU count per engine. Individual groups can override. |
 | `server_groups` | `list` | **Required** | List of `ServerGroupConfig` entries defining the engine topology. (`engine_groups` is accepted as a backward-compatible alias.) |
 
 #### Server Group Fields
@@ -57,7 +57,7 @@ vllm:
 |-------|------|---------|-------------|
 | `worker_type` | `str` | **Required** | Engine type: `regular` (standard), `prefill` (PD prefill worker), `decode` (PD decode worker), or `placeholder` (reserve GPU slots without launching engines). |
 | `num_gpus` | `int` | **Required** | Total number of GPUs for this group. Must be > 0. |
-| `num_gpus_per_engine` | `int` | Model's `num_gpus_per_engine` | TP size override. Number of GPUs per engine instance. |
+| `num_gpus_per_engine` | `int` | Model's `num_gpus_per_engine` | Total worker GPU count per engine instance. This equals TP only when DP and PP are both 1. |
 | `overrides` | `dict` | `{}` | vLLM `EngineArgs` field overrides. Applied on top of `--vllm-*` CLI args with highest priority. |
 
 ### Worker Types
@@ -107,10 +107,10 @@ vllm:
     server_groups:
       - worker_type: prefill
         num_gpus: 4
-        num_gpus_per_engine: 2    # 2 prefill engines, TP=2
+        num_gpus_per_engine: 2    # 2 prefill engines, TP=2 with default DP/PP
       - worker_type: decode
         num_gpus: 12
-        num_gpus_per_engine: 4    # 3 decode engines, TP=4
+        num_gpus_per_engine: 4    # 3 decode engines, TP=4 with default DP/PP
 ```
 
 ```bash
@@ -174,18 +174,25 @@ from vime.rollout.vllm_rollout import get_model_url
 from vime.utils.http_utils import post
 
 async def my_generate(args, sample, sampling_params):
-    # Route to the actor model (default)
-    actor_url = get_model_url(args, "actor", "/generate")
-    output = await post(actor_url, {"text": sample.prompt, "sampling_params": sampling_params})
-    
+    # Route to the actor model (default endpoint is /inference/v1/generate)
+    actor_url = get_model_url(args, "actor")
+    output = await post(actor_url, {
+        "token_ids": sample.tokens,
+        "sampling_params": {"max_tokens": 1024, "temperature": 1.0, "top_p": 1.0, "logprobs": 1},
+    })
+    # output["choices"][0] carries token_ids, logprobs.content[i].logprob, and finish_reason
+
     # Route to the reference model
-    ref_url = get_model_url(args, "ref", "/generate")
-    ref_output = await post(ref_url, {"text": sample.prompt, "sampling_params": sampling_params})
-    
+    ref_url = get_model_url(args, "ref")
+    ref_output = await post(ref_url, {
+        "token_ids": sample.tokens,
+        "sampling_params": {"max_tokens": 1024, "temperature": 1.0, "top_p": 1.0, "logprobs": 1},
+    })
+
     # Route to the reward model (e.g., OpenAI-compatible API)
     reward_url = get_model_url(args, "reward", "/v1/chat/completions")
     reward_output = await post(reward_url, {...})
-    
+
     ...
 ```
 
@@ -232,9 +239,9 @@ vllm:
         num_gpus: 2                   # reserve 2 GPUs (no engines created)
 ```
 
-### 6. Per-Group ServerArgs Overrides
+### 6. Per-Group EngineArgs Overrides
 
-Use `overrides` to apply vLLM `ServerArgs` fields to specific server groups without affecting others:
+Use `overrides` to apply vLLM `EngineArgs` fields to specific server groups without affecting others:
 
 ```yaml
 vllm:
@@ -244,10 +251,12 @@ vllm:
         num_gpus: 8
         num_gpus_per_engine: 4
         overrides:
-          mem_fraction_static: 0.85
-          context_length: 32768
-          chunked_prefill_size: 4096
-          enable_torch_compile: true
+          gpu_memory_utilization: 0.85
+          max_model_len: 32768
+          enable_chunked_prefill: true
+          max_num_batched_tokens: 4096
+          compilation_config:
+            mode: 3
 ```
 
 Overrides take **highest priority**, overriding both the base `--vllm-*` CLI args and model-level defaults. This is especially useful for:
@@ -257,7 +266,7 @@ Overrides take **highest priority**, overriding both the base `--vllm-*` CLI arg
 
 ### 7. Standalone vLLM Launcher
 
-While `--vllm-config` is designed for vime's training pipeline, it also works as a powerful launcher for pure inference scenarios using the `--rollout-external` pattern or by configuring vime to focus solely on serving.
+While `--vllm-config` is designed for vime's training pipeline, it also works as a powerful launcher for pure inference scenarios using external engine addresses or by configuring vime to focus solely on serving.
 
 **Using external engines with a pre-launched topology:**
 
@@ -265,17 +274,24 @@ For complex production deployments, you may want to pre-launch vLLM engines inde
 
 ```bash
 # Step 1: Launch vLLM engines externally
-vllm serve /path/to/model --port 10090 ...
-vllm serve /path/to/model --port 10091 ...
+VLLM_SERVER_DEV_MODE=1 vllm serve /path/to/model --port 10090 ...
+VLLM_SERVER_DEV_MODE=1 vllm serve /path/to/model --port 10091 ...
 
 # Step 2: Connect vime to external engines
 python train.py \
-  --rollout-external \
   --rollout-external-engine-addrs host1:10090 host2:10091 \
   ...
 ```
 
-> **Note:** `--vllm-config` and `--rollout-external` are mutually exclusive. Use `--vllm-config` when you want vime to manage the full engine lifecycle; use `--rollout-external` when engines are pre-deployed.
+vime queries each external engine's `/server_info` endpoint to infer
+`rollout_num_gpus`, per-engine GPU counts, vLLM parallel sizes, and
+prefill/decode worker types. If no `--vllm-router-ip/--vllm-router-port`
+is provided, vime launches its own router and registers the external engines
+to it.
+
+> **Note:** `--vllm-config` and `--rollout-external-engine-addrs` are mutually exclusive. Use `--vllm-config` when you want vime to manage the full engine lifecycle; use `--rollout-external-engine-addrs` when engines are pre-deployed.
+
+For external-engine selection, update from disk, and delta disk transport, see [External Rollout Engines Roadmap](external-rollout-engines.md).
 
 ---
 
@@ -332,7 +348,7 @@ When the config is loaded, vime applies the following resolution cascade:
 | Flag | Conflict Reason |
 |------|----------------|
 | `--prefill-num-servers` | PD disaggregation is configured via `server_groups` in the YAML |
-| `--rollout-external` | External engines have their own topology; config manages the lifecycle internally |
+| `--rollout-external-engine-addrs` | External engines have their own topology; config manages the lifecycle internally |
 
 ---
 
@@ -351,12 +367,13 @@ vllm:
         num_gpus: 4
         num_gpus_per_engine: 2
         overrides:
-          chunked_prefill_size: 8192
+          enable_chunked_prefill: true
+          max_num_batched_tokens: 8192
       - worker_type: decode
         num_gpus: 12
         num_gpus_per_engine: 4
         overrides:
-          mem_fraction_static: 0.88
+          gpu_memory_utilization: 0.88
 
   - name: ref
     model_path: /data/models/Qwen3-32B
@@ -392,33 +409,42 @@ python train.py \
 **Custom rollout function (`my_agent/rollout.py`):**
 
 ```python
+from transformers import AutoTokenizer
+
 from vime.rollout.vllm_rollout import get_model_url
 from vime.utils.http_utils import post
 
 async def generate_with_models(args, sample, sampling_params):
     """Generate using actor, score with reward model, compare with reference."""
     
-    # Generate from actor
-    actor_url = get_model_url(args, "actor", "/generate")
+    # Generate from actor (default endpoint is /inference/v1/generate)
+    actor_url = get_model_url(args, "actor")
     actor_output = await post(actor_url, {
-        "text": sample.prompt,
-        "sampling_params": sampling_params,
-        "return_logprob": True,
+        "token_ids": sample.tokens,
+        "sampling_params": {"max_tokens": 1024, "temperature": 1.0, "top_p": 1.0, "logprobs": 1},
     })
-    
-    # Get reference logprobs for KL penalty
-    ref_url = get_model_url(args, "ref", "/generate")
+    response_ids = actor_output["choices"][0]["token_ids"]
+
+    # Get reference logprobs over the prompt+response. max_tokens=1 + prompt_logprobs scores
+    # the submitted token_ids; read them from the top-level "prompt_logprobs" field.
+    ref_url = get_model_url(args, "ref")
     ref_output = await post(ref_url, {
-        "text": sample.prompt + actor_output["text"],
-        "sampling_params": {"max_new_tokens": 0, "temperature": 0},
-        "return_logprob": True,
+        "token_ids": sample.tokens + response_ids,
+        "sampling_params": {"max_tokens": 1, "temperature": 0.0, "prompt_logprobs": 1},
     })
-    
-    # Score with reward model
+
+    # Score the actor response with the reward model (OpenAI-compatible)
+    tokenizer = AutoTokenizer.from_pretrained(args.hf_checkpoint, trust_remote_code=True)
+    response_text = tokenizer.decode(response_ids, skip_special_tokens=True)
+    prompt_messages = (
+        sample.prompt
+        if isinstance(sample.prompt, list)
+        else [{"role": "user", "content": sample.prompt}]
+    )
     reward_url = get_model_url(args, "reward", "/v1/chat/completions")
     reward_output = await post(reward_url, {
         "model": "reward",
-        "messages": [{"role": "user", "content": sample.prompt + actor_output["text"]}],
+        "messages": [*prompt_messages, {"role": "assistant", "content": response_text}],
     })
     
     # ... process outputs and return Sample
@@ -446,7 +472,7 @@ Use `get_model_url(args, "model_name", "/endpoint")` from `vime.rollout.vllm_rol
 
 ### Q: Can I use `--vllm-config` without training (inference only)?
 
-While `--vllm-config` is designed for vime's training loop, you can effectively use it for inference-only scenarios by configuring a rollout-only run. For fully standalone vLLM serving, consider using vLLM's native `vllm serve` directly or the `--rollout-external` mode for connecting to pre-deployed engines.
+While `--vllm-config` is designed for vime's training loop, you can effectively use it for inference-only scenarios by configuring a rollout-only run. For fully standalone vLLM serving, use the public `vllm serve` command directly or `--rollout-external-engine-addrs` to connect to pre-deployed engines.
 
 ### Q: What is the relationship between `--vllm-config` and `--prefill-num-servers`?
 

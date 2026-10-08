@@ -54,7 +54,7 @@ import copy
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -186,17 +186,17 @@ class McoreParamExport:
     rank ships a zero-count lockstep row for it (probe/module unused)."""
 
     megatron_name: str
-    param: Optional[torch.Tensor]
+    param: torch.Tensor | None
     spec: ShardSpec
     probe: Any
     module: Any  # module handle megatron_to_hf reads config from
     # GLOBAL slot table for this directory row (set by the index-build
     # exchange): identical on every rank of the row's merge group.
-    slots: Optional[list] = None
-    hf_vocab_size: Optional[int] = None
+    slots: list | None = None
+    hf_vocab_size: int | None = None
 
 
-def trim_hf_vocab_padding(name: str, tensor: torch.Tensor, vocab_size: Optional[int]):
+def trim_hf_vocab_padding(name: str, tensor: torch.Tensor, vocab_size: int | None):
     """Remove Megatron's TP vocabulary padding at the HF wire boundary."""
     if (
         vocab_size is not None
@@ -378,7 +378,86 @@ def _exchange_slot_tables(index: list[McoreParamExport], slot_cache: dict) -> No
         rec.slots = [(n, tuple(shape)) for (n, shape) in union.keys()] if union else None
 
 
-def mcore_hf_delta_entry(rec: McoreParamExport, _place, lidx: torch.Tensor, lval: torch.Tensor, slot_cache: dict):
+def _direct_hf_delta_entry(rec, lidx, lval, *, sorted_indices=False, midpoint=None):
+    """Sparse equivalents of exact Bridge mappings; unknown transforms use the probe.
+
+    Use Bridge's resolved names and TP/ETP properties, never model-name guesses.
+    Subclasses may implement arithmetic transforms and deliberately do not match.
+    """
+    from megatron.bridge.models.conversion.param_mapping import (
+        AutoMapping, ColumnParallelMapping, GatedMLPMapping,
+        ReplicatedMapping, RowParallelMapping,
+    )
+
+    mapping = rec.probe
+    if type(mapping) is AutoMapping:
+        if mapping.permute_dims is not None:
+            return None
+        mapping = mapping._mapping
+    if type(mapping) not in (ColumnParallelMapping, RowParallelMapping, ReplicatedMapping, GatedMLPMapping):
+        return None
+    if type(rec.param) not in (torch.Tensor, torch.nn.Parameter) or rec.param.ndim not in (1, 2):
+        return None
+    shape = tuple(rec.param.shape)
+    size, rank = mapping.tp_size, mapping.tp_rank
+    pieces = {}
+    if type(mapping) is GatedMLPMapping:
+        if shape[0] % 2:
+            return None
+        half = rec.param.numel() // 2
+        out_shape = (shape[0] // 2 * size, *shape[1:])
+        if sorted_indices:
+            # nonzero emits ascending shard positions. One scalar read replaces
+            # four dynamic boolean selections; generic callers retain fallback.
+            split = int(torch.searchsorted(lidx, half)) if midpoint is None else midpoint
+        for part, key in enumerate(("gate", "up")):
+            selected = (slice(0, split) if part == 0 else slice(split, None)) if sorted_indices else (
+                (lidx >= part * half) & (lidx < (part + 1) * half))
+            pieces[str(mapping.hf_param[key])] = (
+                out_shape, lidx[selected] - part * half + rank * half, lval[selected],
+            )
+    else:
+        out_shape = list(shape)
+        indices = lidx
+        if type(mapping) is ColumnParallelMapping:
+            out_shape[0] *= size
+            indices = lidx + rank * rec.param.numel()
+        elif type(mapping) is RowParallelMapping and len(shape) == 2:
+            out_shape[1] *= size
+            indices = (lidx // shape[1]) * out_shape[1] + lidx % shape[1] + rank * shape[1]
+        pieces[str(mapping.hf_param)] = (tuple(out_shape), indices, lval)
+    slot_shapes = dict(rec.slots)
+    for name, (shape, _, _) in pieces.items():
+        if name not in slot_shapes:
+            return None
+        expected = tuple(slot_shapes[name])
+        vocab_trim = rec.hf_vocab_size is not None and (
+            name.endswith("embed_tokens.weight") or name.endswith("lm_head.weight")
+        )
+        if shape != expected and not (
+            vocab_trim and expected == (rec.hf_vocab_size, *shape[1:]) and shape[0] >= expected[0]
+        ):
+            return None
+    counts = torch.zeros(len(rec.slots), dtype=torch.int64)
+    index_parts, value_parts = [], []
+    for slot, (name, shape) in enumerate(rec.slots):
+        if name not in pieces:
+            continue
+        _, indices, values = pieces[name]
+        if tuple(shape) != pieces[name][0]:
+            limit = 1
+            for dim in shape:
+                limit *= dim
+            selected = indices < limit
+            indices, values = indices[selected], values[selected]
+        counts[slot] = indices.numel()
+        index_parts.append(indices.to(torch.int32))
+        value_parts.append(values)
+    return (rec.slots, str(lval.dtype).replace("torch.", ""), counts,
+            torch.cat(index_parts), torch.cat(value_parts))
+
+
+def mcore_hf_delta_entry(rec: McoreParamExport, _place, lidx: torch.Tensor, lval: torch.Tensor, slot_cache: dict, *, force_probe=False, sorted_indices=False, midpoint=None):
     """Probe one mcore param's shard-local delta into its final HF-coordinate
     entry ``(slots, dtype_str, counts, hf_idx, hf_val)``.
 
@@ -412,6 +491,11 @@ def mcore_hf_delta_entry(rec: McoreParamExport, _place, lidx: torch.Tensor, lval
             torch.empty(0, dtype=torch.int32, device=lval.device),
             torch.empty(0, dtype=lval.dtype, device=lval.device),
         )
+
+    if not force_probe and rec.slots is not None:
+        direct = _direct_hf_delta_entry(rec, lidx, lval, sorted_indices=sorted_indices, midpoint=midpoint)
+        if direct is not None:
+            return direct
 
     buf = torch.full(tuple(rec.param.shape), float("nan"), dtype=lval.dtype, device=lval.device)
     if lidx.numel():
@@ -470,7 +554,7 @@ def _device_shard(record: McoreParamExport) -> torch.Tensor:
 def prime_delta_snapshots(index, snapshots, *, pin=False):
     snapshot_device = os.getenv("VIME_SPARSE_HCCL_SNAPSHOT_DEVICE", "device")
     for record in index:
-        if record.param is None:
+        if record.param is None or not record.spec.contributes:
             continue
         local = _device_shard(record)
         if snapshot_device == "cpu":
@@ -486,8 +570,54 @@ def prime_delta_snapshots(index, snapshots, *, pin=False):
         snapshots[record.megatron_name] = snapshot
 
 
-def iter_delta_entries(index, snapshots):
+class _SnapshotRefreshQueue:
+    """Bound sparse baseline refreshes by bytes and row count.
+
+    Two blocking packed copies per batch establish host visibility before
+    index_copy_. This avoids two device synchronizations for every parameter.
+    The queue is drained before the generator completes and the next version.
+    """
+
+    def __init__(self, max_bytes=32 << 20, max_rows=32):
+        self.max_bytes, self.max_rows = max_bytes, max_rows
+        self.rows = []
+        self.nbytes = 0
+
+    def add(self, snapshot, indices, values):
+        if not indices.numel():
+            return
+        size = indices.numel() * (indices.element_size() + values.element_size())
+        if self.rows and (self.nbytes + size > self.max_bytes or self.rows[0][2].dtype != values.dtype):
+            self.flush()
+        self.rows.append((snapshot, indices, values))
+        self.nbytes += size
+        if self.nbytes >= self.max_bytes or len(self.rows) >= self.max_rows:
+            self.flush()
+
+    def flush(self):
+        if not self.rows:
+            return
+        indices = torch.cat([row[1] for row in self.rows]).to("cpu", non_blocking=False)
+        values = torch.cat([row[2] for row in self.rows]).to("cpu", non_blocking=False)
+        offset = 0
+        for snapshot, local_indices, _ in self.rows:
+            end = offset + local_indices.numel()
+            snapshot.index_copy_(0, indices[offset:end], values[offset:end])
+            offset = end
+        self.rows.clear()
+        self.nbytes = 0
+
+
+def _iter_delta_entries_unbatched(index, snapshots):
     """The verl hf_delta_export contract, with explicit Megatron placement."""
+    # CPU snapshots are required when a large training shard cannot retain a
+    # second model-sized copy on the accelerator.  Reuse one accelerator
+    # staging allocation per dtype/device instead of allocating a new Tensor
+    # for every parameter via snapshot.to(device).  Pinned snapshots make the
+    # copy asynchronous; current-stream ordering keeps it complete before the
+    # NPU comparison below and before the buffer is reused by the next row.
+    staging: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
+    refresh = _SnapshotRefreshQueue()
     for record in index:
         if record.param is None:
             device = torch.accelerator.current_device_index()
@@ -495,18 +625,96 @@ def iter_delta_entries(index, snapshots):
             local_values = torch.empty(0, dtype=torch.bfloat16, device=device)
         else:
             local = _device_shard(record)
-            snapshot = snapshots.get(record.megatron_name)
-            if snapshot is None or snapshot.shape != local.shape or snapshot.dtype != local.dtype:
-                raise RuntimeError(f"{record.megatron_name}: no matching seed snapshot for this shard")
             if record.spec.contributes:
-                base = (
-                    snapshot
-                    if snapshot.device == local.device
-                    else snapshot.to(local.device, non_blocking=True)
-                )
+                snapshot = snapshots.get(record.megatron_name)
+                if snapshot is None or snapshot.shape != local.shape or snapshot.dtype != local.dtype:
+                    raise RuntimeError(f"{record.megatron_name}: no matching seed snapshot for this shard")
+                if snapshot.device == local.device:
+                    base = snapshot
+                else:
+                    key = (local.device, local.dtype)
+                    buffer = staging.get(key)
+                    if buffer is None or buffer.numel() < local.numel():
+                        buffer = torch.empty_like(local)
+                        staging[key] = buffer
+                    base = buffer[: local.numel()]
+                    base.copy_(snapshot, non_blocking=True)
                 local_indices, local_values = shard_delta_indices(local, base, 0)
+                if snapshot.device == local.device:
+                    snapshot.copy_(local, non_blocking=True)
+                elif local_indices.numel():
+                    # Preserve the next baseline from the sparse result itself.
+                    # Copying only changed positions avoids a full model-shard
+                    # D2H transfer after every steady-state diff.
+                    refresh.add(snapshot, local_indices, local_values)
             else:
                 local_indices = torch.empty(0, dtype=torch.int64, device=local.device)
                 local_values = torch.empty(0, dtype=local.dtype, device=local.device)
-            snapshot.copy_(local, non_blocking=True)
-        yield (*mcore_hf_delta_entry(record, 0, local_indices, local_values, {}), record.spec.gather_group)
+        yield (*mcore_hf_delta_entry(record, 0, local_indices, local_values, {}, sorted_indices=True), record.spec.gather_group)
+    refresh.flush()
+
+
+def iter_delta_entries(index, snapshots, *, batch_size=32):
+    """Batch dynamic diff extraction, preserving verl's record/slot ordering."""
+    if batch_size <= 1:
+        yield from _iter_delta_entries_unbatched(index, snapshots)
+        return
+    from .delta_sync.sparse_gather import compact_shard_masks, shard_delta_mask
+
+    max_mask_bytes = 32 << 20
+    pending, masks, locals_ = [], [], []
+    staging = {}
+    refresh = _SnapshotRefreshQueue()
+    mask_bytes = 0
+    batch_key = None
+
+    def flush():
+        deltas = iter(compact_shard_masks(locals_, masks, with_midpoints=True))
+        for record, local, snapshot in pending:
+            midpoint = None
+            if snapshot is not None:
+                indices, values, midpoint = next(deltas)
+                if snapshot.device == local.device:
+                    snapshot.copy_(local, non_blocking=True)
+                elif indices.numel():
+                    refresh.add(snapshot, indices, values)
+            else:
+                device = local.device if local is not None else torch.accelerator.current_device_index()
+                dtype = local.dtype if local is not None else torch.bfloat16
+                indices = torch.empty(0, dtype=torch.int64, device=device)
+                values = torch.empty(0, dtype=dtype, device=device)
+            yield (*mcore_hf_delta_entry(record, 0, indices, values, {}, sorted_indices=True, midpoint=midpoint), record.spec.gather_group)
+        pending.clear()
+        masks.clear()
+        locals_.clear()
+
+    for record in index:
+        local = _device_shard(record) if record.param is not None else None
+        active = local is not None and record.spec.contributes
+        key = (local.device, local.dtype) if active else batch_key
+        size = local.numel() if active else 0
+        if pending and (key != batch_key or mask_bytes + size > max_mask_bytes
+                        or len(pending) >= batch_size):
+            yield from flush()
+            mask_bytes = 0
+        batch_key = key
+        snapshot = None
+        if active:
+            snapshot = snapshots.get(record.megatron_name)
+            if snapshot is None or snapshot.shape != local.shape or snapshot.dtype != local.dtype:
+                raise RuntimeError(f"{record.megatron_name}: no matching seed snapshot for this shard")
+            base = snapshot
+            if snapshot.device != local.device:
+                buffer = staging.get(key)
+                if buffer is None or buffer.numel() < local.numel():
+                    buffer = torch.empty_like(local)
+                    staging[key] = buffer
+                base = buffer[:local.numel()]
+                base.copy_(snapshot, non_blocking=True)
+            masks.append(shard_delta_mask(local, base))
+            locals_.append(local)
+            mask_bytes += size
+        pending.append((record, local, snapshot))
+    if pending:
+        yield from flush()
+    refresh.flush()

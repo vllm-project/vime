@@ -12,8 +12,8 @@ Enable fault tolerance with:
 
 vime currently provides rollout-engine fault tolerance:
 
-- health checks for vLLM rollout engines;
-- timeout-based rollout engine restart;
+- health checks for vLLM rollout servers;
+- timeout-based rollout server restart;
 - correct parameter update after restart;
 - debug rollout dumps for replaying training-side issues without rerunning rollout;
 - trace/profiling hooks for inspecting long-tail rollout behavior.
@@ -22,7 +22,7 @@ Cluster-level preemption, trainer-rank failure, and full-job resume should still
 
 ## Rollout Health Checks
 
-During rollout, vime periodically sends heartbeat requests (`/health`) to all vLLM engines. If a heartbeat times out, the unhealthy vLLM engine is stopped. After the current rollout round completes, vime restarts the engine and updates it with the correct parameters before it serves future rollout requests.
+During rollout, vime periodically sends heartbeat requests (`/health`) to all vLLM servers. If a heartbeat times out, the unhealthy vLLM server is stopped. After the current rollout round completes, vime restarts the server and updates it with the correct parameters before it serves future rollout requests.
 
 The main arguments are:
 
@@ -65,7 +65,7 @@ For long-running jobs:
 
 - If startup health checks fail on large MoE models, increase `--rollout-health-check-first-wait`.
 - If transient load spikes cause false positives, increase `--rollout-health-check-timeout`.
-- If an engine repeatedly restarts after weight sync, inspect the vLLM logs and the latest rollout debug dump.
+- If a server repeatedly restarts after weight sync, inspect the vLLM logs and the latest rollout debug dump.
 - If the trainer fails rather than rollout, resume from checkpoint and use debug replay to isolate whether the saved rollout batch is valid.
 
 ## Related Docs

@@ -1,9 +1,7 @@
 """Stream the same real Bridge mappings used by the sparse delta probe.
 
-Ascend-branch note: the name is ``HfWeightIteratorSparseBridge`` (not
-``HfWeightIteratorBridge``) because this branch already ships a
-``HfWeightIteratorBridge`` for the ``HfWeightIteratorBase`` registry; the
-sparse delta exporter uses this standalone Bridge streaming iterator instead.
+The sparse exporter keeps a standalone Bridge iterator; ordinary full and
+disk transfers retain the upstream direct iterator and weight source.
 """
 
 from contextlib import contextmanager

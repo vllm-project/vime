@@ -25,14 +25,15 @@ IMAGE_NAME = "vime-ci-npu"
 VIME_IMAGE_TAG = os.environ.get("BUILDKITE_COMMIT", "latest")
 BUILDKITE_SOURCE = os.environ.get("BUILDKITE_SOURCE", "")
 
-# (test_name, resource_class, extra_args, env_overrides)
+# (test_name, resource_class, extra_args, env_overrides[, timeout_in_minutes])
 SUITES = {
     "smk": [
         ("test_qwen3_4B_npu.py", "npu-8", "", {}),
         ("test_qwen3_30B_A3B_npu.py", "npu-16", "", {}),
         ("test_qwen3_vl_8B_npu.py", "npu-8", "", {}),
-        ("test_qwen3.5_35B_A3B_npu.py", "npu-16", "", {}),
         ("test_glm4.7_30B_A3B_npu.py", "npu-16", "", {}),
+        # 35B convert plus the first rollout does not fit in the default 180 minutes.
+        ("test_qwen3.5_35B_A3B_npu.py", "npu-16", "", {}, 360),
     ],
     "nightly": [],
 }
@@ -71,7 +72,14 @@ def selected_suites() -> list:
     return [s for s in SUITES if s in values]
 
 
-def npu_step(suite: str, test_name: str, resource_class: str, extra_args: str, env: dict) -> dict:
+def npu_step(
+    suite: str,
+    test_name: str,
+    resource_class: str,
+    extra_args: str,
+    env: dict,
+    timeout_in_minutes: int = 180,
+) -> dict:
     step_env = {
         "VIME_TEST_ENABLE_INFINITE_RUN": "false",
         "BUILDKITE_PULL_REQUEST": os.environ.get("BUILDKITE_PULL_REQUEST", "false"),
@@ -107,7 +115,7 @@ def npu_step(suite: str, test_name: str, resource_class: str, extra_args: str, e
             "queue": NPU_QUEUE,
             "resource_class": resource_class,
         },
-        "timeout_in_minutes": 180,
+        "timeout_in_minutes": timeout_in_minutes,
         "image": _ci_image(),
         "plugins": [
             {

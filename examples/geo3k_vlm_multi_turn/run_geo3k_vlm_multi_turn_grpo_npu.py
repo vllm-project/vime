@@ -89,6 +89,7 @@ def execute():
     )
 
     vllm_args = (
+        "--vllm-additional-config '{\"weight_nz_mode\":0}' "
         "--rollout-num-gpus-per-engine 1 "
         "--vllm-gpu-memory-utilization 0.6 "
         "--vllm-max-model-len 16384 "
@@ -117,7 +118,7 @@ def execute():
         "--accumulate-allreduce-grads-in-fp32 "
         "--attention-softmax-in-fp32 "
         "--attention-backend flash "
-        "--megatron-to-hf-mode bridge "
+        "--spec vime_plugins.models.qwen3_vl get_qwen3_vl_model_provider "
     )
 
     misc_args = (

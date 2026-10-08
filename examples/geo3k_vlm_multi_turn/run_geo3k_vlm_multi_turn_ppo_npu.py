@@ -14,7 +14,7 @@ assert MODEL_NAME in {
 }
 
 EXTERNAL_RAY = int(os.environ.get("VIME_SCRIPT_EXTERNAL_RAY", "0"))
-TRAIN_BACKEND = os.environ.get("VIME_SCRIPT_TRAIN_BACKEND", "fsdp").lower()
+TRAIN_BACKEND = os.environ.get("VIME_SCRIPT_TRAIN_BACKEND", "megatron").lower()
 assert TRAIN_BACKEND in {"fsdp", "megatron"}
 
 DATASET_NAME = "VeraIsHere/geo3k_imgurl_processed"
@@ -95,7 +95,11 @@ megatron:
         "--use-precision-aware-optimizer "
     )
 
-    vllm_args = "--rollout-num-gpus-per-engine 1 " "--vllm-gpu-memory-utilization 0.6 "
+    vllm_args = (
+        "--vllm-additional-config '{\"weight_nz_mode\":0}' "
+        "--rollout-num-gpus-per-engine 1 "
+        "--vllm-gpu-memory-utilization 0.6 "
+    )
 
     megatron_args = (
         "--train-backend megatron "
@@ -118,7 +122,7 @@ megatron:
         "--accumulate-allreduce-grads-in-fp32 "
         "--attention-softmax-in-fp32 "
         "--attention-backend flash "
-        "--megatron-to-hf-mode bridge "
+        "--spec vime_plugins.models.qwen3_vl get_qwen3_vl_model_provider "
     )
 
     misc_args = (
