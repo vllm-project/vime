@@ -575,8 +575,7 @@ index b7df4df22..b8b9cfbb1 100644
 @@ -1287,5 +1287,24 @@ class NPUWorker(WorkerBase):
      def reload_weights(self, *args, **kwargs) -> None:
          self.model_runner.reload_weights(*args, **kwargs)
--
-+
+
 +    def pull_weights(
 +        self,
 +        local_checkpoint_dir: str,
