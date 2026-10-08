@@ -38,7 +38,10 @@ import sys
 import torch
 import torch.distributed as dist
 
-import vime.backends.megatron_utils  # Bootstrap NPU before importing Megatron.
+# torchrun executes this file with tests/ as sys.path[0]. Prefer the checkout
+# being validated over an editable installation of another Vime revision.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+import vime.backends.megatron_utils  # noqa: F401 - Bootstrap NPU before importing Megatron.
 
 MODEL_KIND = os.environ.get("MODEL_KIND", "qwen2")
 TP = int(os.environ.get("TP_SIZE", "2"))
@@ -245,7 +248,7 @@ def _pp_differential(bridge, model, rank: int, world: int) -> None:
     # 3. independent reference: the bridge's own full export (PP broadcasts
     # inside; full tensors on every rank).
     exported = bridge.export_hf_weights(model, cpu=True, show_progress=False)
-    ref = {name: t.detach().to(torch.bfloat16).cpu() for name, t in exported}
+    ref = {entry[0]: entry[1].detach().to(torch.bfloat16).cpu() for entry in exported}
 
     all_pieces: list = [None] * world
     dist.all_gather_object(all_pieces, mine)
@@ -324,7 +327,7 @@ def _delta_entry_differential(model, cfg_dir, rank):
                         record.param.view(-1)[step::97] += 0.25
         expected = export()
         updates = [0]
-        def consume(name, dtype, shape, positions, values):
+        def consume(name, dtype, shape, positions, values, updates=updates):
             assert tuple(accumulated[name].shape) == tuple(shape)
             accumulated[name].view(-1).index_copy_(0, positions.cpu().long(), values.cpu())
             updates[0] += values.numel()

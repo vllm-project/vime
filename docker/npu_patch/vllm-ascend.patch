@@ -1779,3 +1779,787 @@ new file mode 100644
 +        yield
 +    finally:
 +        torch.Tensor.copy_ = original_copy
+diff --git a/tests/ut/distributed/weight_transfer/test_sparse_weight_patch.py b/tests/ut/distributed/weight_transfer/test_sparse_weight_patch.py
+new file mode 100644
+--- /dev/null
++++ b/tests/ut/distributed/weight_transfer/test_sparse_weight_patch.py
+@@ -0,0 +1,508 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++
++import pytest
++import torch
++
++from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import (
++    SparseWeightPatch,
++    apply_sparse_hf_patch,
++    apply_sparse_hf_patches,
++    apply_sparse_patch,
++    partition_qwen3_sparse_patches,
++)
++
++
++@pytest.mark.parametrize("bad_index", [-1, 8])
++def test_batched_bounds_validates_entire_flush_before_loading(bad_index):
++    from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import apply_sparse_hf_patches_with_loader
++    class NeverLoad:
++        def load_weights(self, weights):
++            pytest.fail("A malformed flush must not partially apply")
++    patches = [(SparseWeightPatch(str(i), torch.tensor([0, 7], dtype=torch.int32), torch.ones(2)), [2, 4])
++               for i in range(20)]
++    patches.append((SparseWeightPatch("invalid", torch.tensor([bad_index], dtype=torch.int32), torch.ones(1)), [4, 2]))
++    with pytest.raises(IndexError):
++        apply_sparse_hf_patches_with_loader(NeverLoad(), patches)
++
++
++def test_batched_bounds_keeps_distinct_shape_limits():
++    from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import _validate_sparse_hf_patches
++    patches = [(SparseWeightPatch("valid", torch.tensor([15], dtype=torch.int32), torch.ones(1)), [4, 4]),
++               (SparseWeightPatch("invalid", torch.tensor([8], dtype=torch.int32), torch.ones(1)), [2, 4])]
++    with pytest.raises(IndexError):
++        _validate_sparse_hf_patches(patches)
++
++
++@pytest.mark.parametrize("down", [False, True])
++@pytest.mark.parametrize("tp_rank", [0, 1, 2, 3])
++def test_batched_moe_group_matches_nan_masked_tp_loader(down, tp_rank):
++    from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import _apply_moe_group
++    tp, experts, hidden, intermediate = 4, 3, 8, 12
++    shape = (hidden, intermediate) if down else (intermediate, hidden)
++    runtime_shape = ((experts, intermediate // tp, hidden) if down
++                     else (experts, hidden, 2 * intermediate // tp))
++    actual = torch.randn(runtime_shape, dtype=torch.bfloat16)
++    expected = actual.clone()
++    entries = []
++    for expert in range(experts):
++        for projection in (["down_proj"] if down else ["gate_proj", "up_proj"]):
++            indices = torch.arange(expert, shape[0] * shape[1], 7, dtype=torch.int32)
++            values = torch.arange(indices.numel(), dtype=torch.bfloat16) - 5
++            values[::5] = float("nan")  # SGLang treats NaN as an unchanged slot.
++            values[1::5] = -0.0
++            patch = SparseWeightPatch(f"{expert}.{projection}", indices, values)
++            entries.append((patch, expert, projection))
++            dense = torch.full(shape, float("nan"), dtype=torch.bfloat16)
++            dense.view(-1)[indices.long()] = values
++            width = intermediate // tp
++            if down:
++                source = dense[:, tp_rank * width:(tp_rank + 1) * width].t()
++                destination = expected[expert]
++            else:
++                source = dense[tp_rank * width:(tp_rank + 1) * width].t()
++                offset = width if projection == "up_proj" else 0
++                destination = expected[expert, :, offset:offset + width]
++            destination.copy_(torch.where(torch.isnan(source), destination, source))
++    _apply_moe_group(actual, entries, shape, tp_rank, tp, down)
++    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
++
++class DummyModel(torch.nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.weight = torch.nn.Parameter(
++            torch.tensor([10.0, 20.0, 30.0, 40.0])
++        )
++
++
++def test_apply_sparse_patch_updates_only_selected_values():
++    model = DummyModel()
++    apply_sparse_patch(
++        model,
++        SparseWeightPatch(
++            "weight",
++            torch.tensor([1, 3], dtype=torch.int32),
++            torch.tensor([200.0, 400.0]),
++        ),
++        expected_shape=[4],
++    )
++    assert torch.equal(
++        model.weight,
++        torch.tensor([10.0, 200.0, 30.0, 400.0]),
++    )
++
++
++@pytest.mark.parametrize("indices", [[-1], [4]])
++def test_apply_sparse_patch_rejects_out_of_bounds_indices(indices):
++    with pytest.raises((IndexError, RuntimeError)):
++        apply_sparse_patch(
++            DummyModel(),
++            SparseWeightPatch(
++                "weight",
++                torch.tensor(indices, dtype=torch.int32),
++                torch.tensor([1.0]),
++            ),
++        )
++
++
++def test_apply_sparse_patch_rejects_declared_shape_mismatch():
++    with pytest.raises(ValueError, match="declared shape"):
++        apply_sparse_patch(
++            DummyModel(),
++            SparseWeightPatch(
++                "weight",
++                torch.tensor([0], dtype=torch.int32),
++                torch.tensor([1.0]),
++            ),
++            expected_shape=[2, 2],
++        )
++
++
++def test_apply_sparse_patch_empty_update_is_noop():
++    model = DummyModel()
++    before = model.weight.detach().clone()
++    apply_sparse_patch(
++        model,
++        SparseWeightPatch(
++            "weight",
++            torch.empty(0, dtype=torch.int32),
++            torch.empty(0, dtype=torch.float32),
++        ),
++    )
++    assert torch.equal(model.weight, before)
++
++
++@pytest.mark.parametrize(
++    ("indices", "values", "message"),
++    [
++        (
++            torch.tensor([0], dtype=torch.int64),
++            torch.tensor([1.0]),
++            "require int32 indices",
++        ),
++        (
++            torch.tensor([[0]], dtype=torch.int32),
++            torch.tensor([1.0]),
++            "must be 1D flattened updates",
++        ),
++        (
++            torch.tensor([0], dtype=torch.int32),
++            torch.tensor([[1.0]]),
++            "must be 1D flattened updates",
++        ),
++        (
++            torch.tensor([0, 1], dtype=torch.int32),
++            torch.tensor([1.0]),
++            "matching lengths",
++        ),
++        (
++            torch.tensor([0], dtype=torch.int32),
++            torch.tensor([1], dtype=torch.int32),
++            "does not match parameter dtype",
++        ),
++    ],
++)
++def test_apply_sparse_patch_rejects_invalid_patch(indices, values, message):
++    with pytest.raises(ValueError, match=message):
++        apply_sparse_patch(
++            DummyModel(),
++            SparseWeightPatch("weight", indices, values),
++        )
++
++
++def test_apply_sparse_patch_rejects_noncontiguous_parameter():
++    model = torch.nn.Module()
++    model.weight = torch.nn.Parameter(
++        torch.arange(6, dtype=torch.float32).reshape(2, 3).t()
++    )
++    assert not model.weight.is_contiguous()
++
++    with pytest.raises(NotImplementedError, match="require contiguous params"):
++        apply_sparse_patch(
++            model,
++            SparseWeightPatch(
++                "weight",
++                torch.tensor([0], dtype=torch.int32),
++                torch.tensor([1.0]),
++            ),
++        )
++
++
++class DummyTPModel(torch.nn.Module):
++    def __init__(self, rank: int):
++        super().__init__()
++        self.rank = rank
++        self.weight = torch.nn.Parameter(torch.tensor([10.0, 20.0]))
++
++    def load_weights(self, weights):
++        for name, full_weight in weights:
++            self.weight.data.copy_(full_weight[self.rank * 2 : (self.rank + 1) * 2])
++            return {name}
++
++
++class DummyStackedTPModel(DummyTPModel):
++    def load_weights(self, weights):
++        for _, full_weight in weights:
++            self.weight.data.copy_(full_weight[self.rank * 2 : (self.rank + 1) * 2])
++            return {"gate_up_proj.weight"}
++
++
++class DummyTPLayer(torch.nn.Module):
++    def __init__(self, shape, rank=0, size=2):
++        super().__init__()
++        self.tp_rank = rank
++        self.tp_size = size
++        self.weight = torch.nn.Parameter(torch.zeros(shape))
++
++
++class DummyDirectModel(torch.nn.Module):
++    def __init__(self, layer_name, layer):
++        super().__init__()
++        setattr(self, layer_name, layer)
++
++    def load_weights(self, weights):
++        raise AssertionError("direct sparse patch unexpectedly used load_weights")
++
++
++class DummyQKVLayer(DummyTPLayer):
++    def __init__(self, shape, rank=0, size=2):
++        super().__init__(shape, rank, size)
++        self.num_kv_head_replicas = 2
++
++    def _get_shard_offset_mapping(self, shard):
++        return {"q": 0, "k": 2, "v": 3}[shard]
++
++    def _get_shard_size_mapping(self, shard):
++        return {"q": 2, "k": 1, "v": 1}[shard]
++
++
++class DummyMergedModel(torch.nn.Module):
++    def __init__(self, rank=1):
++        super().__init__()
++        self.gate_up_proj = DummyTPLayer((4, 2), rank=rank)
++        self.gate_up_proj.output_sizes = [4, 4]
++        self.gate_up_proj.weight.output_dim = 0
++        self.gate_up_proj.weight.data.copy_(
++            torch.arange(8, dtype=torch.float32).reshape(4, 2)
++        )
++
++    def load_weights(self, weights):
++        for name, full_weight in weights:
++            shard_id = 0 if "gate_proj" in name else 1
++            shard_size = 2
++            source = full_weight.narrow(
++                0, self.gate_up_proj.tp_rank * shard_size, shard_size
++            )
++            target = self.gate_up_proj.weight.data.narrow(
++                0, shard_id * shard_size, shard_size
++            )
++            target.copy_(source)
++        return {name}
++
++
++@pytest.mark.parametrize(
++    ("rank", "expected"),
++    [(0, [10.0, 200.0]), (1, [300.0, 20.0])],
++)
++def test_apply_sparse_hf_patch_uses_tp_loader_and_preserves_untouched(rank, expected):
++    model = DummyTPModel(rank)
++    apply_sparse_hf_patch(
++        model,
++        SparseWeightPatch(
++            "weight",
++            torch.tensor([1, 2], dtype=torch.int32),
++            torch.tensor([200.0, 300.0]),
++        ),
++        [4],
++    )
++    assert torch.equal(model.weight, torch.tensor(expected))
++
++
++def test_apply_sparse_hf_patch_allows_stacked_parameter_name_mapping():
++    model = DummyStackedTPModel(rank=0)
++    apply_sparse_hf_patch(
++        model,
++        SparseWeightPatch(
++            "gate_proj.weight",
++            torch.tensor([1], dtype=torch.int32),
++            torch.tensor([200.0]),
++        ),
++        [4],
++    )
++    assert torch.equal(model.weight, torch.tensor([10.0, 200.0]))
++
++
++def test_apply_sparse_hf_patch_direct_row_parallel_index_copy():
++    layer = DummyTPLayer((2, 2), rank=1)
++    layer.weight.input_dim = 1
++    model = DummyDirectModel("down_proj", layer)
++
++    apply_sparse_hf_patch(
++        model,
++        SparseWeightPatch(
++            "down_proj.weight",
++            torch.tensor([1, 2, 3, 6], dtype=torch.int32),
++            torch.tensor([11.0, 12.0, 13.0, 16.0]),
++        ),
++        [2, 4],
++    )
++
++    assert torch.equal(layer.weight, torch.tensor([[12.0, 13.0], [16.0, 0.0]]))
++
++
++def test_apply_sparse_hf_patch_direct_merged_column_index_copy():
++    layer = DummyTPLayer((4, 2), rank=1)
++    layer.output_sizes = [4, 4]
++    layer.weight.output_dim = 0
++    model = DummyDirectModel("gate_up_proj", layer)
++
++    apply_sparse_hf_patch(
++        model,
++        SparseWeightPatch(
++            "gate_proj.weight",
++            torch.tensor([1, 4, 6], dtype=torch.int32),
++            torch.tensor([11.0, 14.0, 16.0]),
++        ),
++        [4, 2],
++    )
++    apply_sparse_hf_patch(
++        model,
++        SparseWeightPatch(
++            "up_proj.weight",
++            torch.tensor([4, 7], dtype=torch.int32),
++            torch.tensor([24.0, 27.0]),
++        ),
++        [4, 2],
++    )
++
++    assert torch.equal(
++        layer.weight,
++        torch.tensor([[14.0, 0.0], [16.0, 0.0], [24.0, 0.0], [0.0, 27.0]]),
++    )
++
++
++def test_apply_sparse_hf_patch_direct_qkv_honors_kv_replication():
++    layer = DummyQKVLayer((4, 2), rank=3, size=4)
++    layer.weight.output_dim = 0
++    model = DummyDirectModel("qkv_proj", layer)
++
++    apply_sparse_hf_patch(
++        model,
++        SparseWeightPatch(
++            "k_proj.weight",
++            torch.tensor([0, 2, 3], dtype=torch.int32),
++            torch.tensor([10.0, 12.0, 13.0]),
++        ),
++        [2, 2],
++    )
++
++    assert torch.equal(
++        layer.weight,
++        torch.tensor([[0.0, 0.0], [0.0, 0.0], [12.0, 13.0], [0.0, 0.0]]),
++    )
++
++
++def test_sparse_load_plan_coalesces_fused_patches_into_one_index_copy(monkeypatch):
++    model = DummyMergedModel()
++    patches = [
++        (
++            SparseWeightPatch(
++                "gate_proj.weight",
++                torch.tensor([4, 7], dtype=torch.int32),
++                torch.tensor([14.0, 17.0]),
++            ),
++            [4, 2],
++        ),
++        (
++            SparseWeightPatch(
++                "up_proj.weight",
++                torch.tensor([5, 6], dtype=torch.int32),
++                torch.tensor([25.0, 26.0]),
++            ),
++            [4, 2],
++        ),
++    ]
++    original_index_copy = torch.Tensor.index_copy_
++    target_data_ptr = model.gate_up_proj.weight.data_ptr()
++    calls = 0
++
++    def counted_index_copy(self, dim, index, source):
++        nonlocal calls
++        if self.data_ptr() == target_data_ptr:
++            calls += 1
++        return original_index_copy(self, dim, index, source)
++
++    monkeypatch.setattr(torch.Tensor, "index_copy_", counted_index_copy)
++    apply_sparse_hf_patches(model, patches)
++
++    assert calls == 1
++    assert torch.equal(
++        model.gate_up_proj.weight,
++        torch.tensor([[14.0, 1.0], [2.0, 17.0], [4.0, 25.0], [26.0, 7.0]]),
++    )
++
++
++def test_sparse_load_plan_direct_and_legacy_are_bit_exact():
++    direct_model = DummyMergedModel()
++    legacy_model = DummyMergedModel()
++    patches = [
++        (
++            SparseWeightPatch(
++                "gate_proj.weight",
++                torch.tensor([1, 4, 7], dtype=torch.int32),
++                torch.tensor([11.25, 14.5, 17.75]),
++            ),
++            [4, 2],
++        ),
++        (
++            SparseWeightPatch(
++                "up_proj.weight",
++                torch.tensor([0, 5, 6], dtype=torch.int32),
++                torch.tensor([20.25, 25.5, 26.75]),
++            ),
++            [4, 2],
++        ),
++    ]
++
++    apply_sparse_hf_patches(direct_model, patches)
++    apply_sparse_hf_patches(legacy_model, patches, force_legacy=True)
++
++    assert torch.equal(
++        direct_model.gate_up_proj.weight.view(torch.int32),
++        legacy_model.gate_up_proj.weight.view(torch.int32),
++    )
++
++
++def test_sparse_load_plan_cache_reuses_parameter_mapping():
++    model = DummyMergedModel()
++    cache = {}
++    patch = SparseWeightPatch(
++        "gate_proj.weight",
++        torch.tensor([4], dtype=torch.int32),
++        torch.tensor([14.0]),
++    )
++
++    apply_sparse_hf_patches(model, [(patch, [4, 2])], plan_cache=cache)
++    cached_plan = cache[("gate_proj.weight", (4, 2))]
++    apply_sparse_hf_patches(model, [(patch, [4, 2])], plan_cache=cache)
++
++    assert len(cache) == 1
++    assert cache[("gate_proj.weight", (4, 2))] is cached_plan
++
++
++def test_runtime_direct_path_preserves_duplicate_patch_order():
++    model = DummyMergedModel()
++    patches = [
++        (
++            SparseWeightPatch(
++                "gate_proj.weight",
++                torch.tensor([4], dtype=torch.int32),
++                torch.tensor([14.0]),
++            ),
++            [4, 2],
++        ),
++        (
++            SparseWeightPatch(
++                "gate_proj.weight",
++                torch.tensor([4], dtype=torch.int32),
++                torch.tensor([99.0]),
++            ),
++            [4, 2],
++        ),
++    ]
++
++    apply_sparse_hf_patches(model, patches)
++
++    assert model.gate_up_proj.weight[0, 0] == 99.0
++
++
++def test_partition_qwen3_sparse_patches_filters_qkv_and_row_by_rollout_rank():
++    q_patch = SparseWeightPatch(
++        "model.layers.0.self_attn.q_proj.weight",
++        torch.arange(0, 16, 2, dtype=torch.int32),
++        torch.arange(8, dtype=torch.float32),
++    )
++    k_patch = SparseWeightPatch(
++        "model.layers.0.self_attn.k_proj.weight",
++        torch.arange(0, 8, 2, dtype=torch.int32),
++        torch.arange(4, dtype=torch.float32),
++    )
++    row_patch = SparseWeightPatch(
++        "model.layers.0.self_attn.o_proj.weight",
++        torch.arange(16, dtype=torch.int32),
++        torch.arange(16, dtype=torch.float32),
++    )
++
++    per_rank = partition_qwen3_sparse_patches(
++        [(q_patch, [8, 2]), (k_patch, [4, 2]), (row_patch, [2, 8])],
++        [4],
++        num_attention_heads=4,
++        num_key_value_heads=2,
++    )
++
++    assert per_rank[2][0].indices.tolist() == [8, 10]
++    assert per_rank[0][1].indices.tolist() == [0, 2]
++    assert per_rank[1][1].indices.tolist() == [0, 2]
++    assert per_rank[2][1].indices.tolist() == [4, 6]
++    assert per_rank[3][1].indices.tolist() == [4, 6]
++    assert per_rank[1][2].indices.tolist() == [2, 3, 10, 11]
+diff --git a/tests/ut/distributed/weight_transfer/test_sparse_hccl_engine.py b/tests/ut/distributed/weight_transfer/test_sparse_hccl_engine.py
+new file mode 100644
+--- /dev/null
++++ b/tests/ut/distributed/weight_transfer/test_sparse_hccl_engine.py
+@@ -0,0 +1,266 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++
++from types import SimpleNamespace
++from unittest.mock import MagicMock, call
++
++import pytest
++import torch
++
++from vllm_ascend.distributed.weight_transfer.hccl_engine import (
++    HCCLTrainerSendWeightsArgs,
++)
++from vllm_ascend.distributed.weight_transfer.sparse_hccl_engine import (
++    SparseHCCLTrainerSendWeightsArgs,
++    SparseHCCLWeightTransferEngine,
++    SparseHCCLWeightTransferUpdateInfo,
++    SparseWeightPatch,
++    _delta_checksum,
++    _verify_dense_load,
++)
++
++
++class DummyModel(torch.nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.weight = torch.nn.Parameter(
++            torch.tensor([10.0, 20.0, 30.0, 40.0])
++        )
++
++    def load_weights(self, weights):
++        for name, tensor in weights:
++            if name == "weight":
++                self.weight.data.copy_(tensor)
++
++
++class EPLocalModel(DummyModel):
++    def load_weights(self, weights):
++        for name, tensor in weights:
++            if name == "model.layers.0.mlp.experts.0.gate_proj.weight":
++                self.weight.data.copy_(tensor)
++
++
++class PipelineLocalModel(DummyModel):
++    def __init__(self):
++        super().__init__()
++        self.model = SimpleNamespace(start_layer=24, end_layer=48)
++
++    def load_weights(self, weights):
++        for name, tensor in weights:
++            if name == "model.layers.24.self_attn.q_proj.weight":
++                self.weight.data.copy_(tensor)
++
++
++def make_info(**overrides):
++    values = {
++        "names": ["weight"],
++        "dtype_names": ["float32"],
++        "shapes": [[4]],
++        "num_updates_list": [2],
++    }
++    values.update(overrides)
++    return SparseHCCLWeightTransferUpdateInfo(**values)
++
++
++def make_engine(model=None):
++    engine = object.__new__(SparseHCCLWeightTransferEngine)
++    engine.model = model or DummyModel()
++    engine._load_plan_cache = {}
++    return engine
++
++
++def test_dense_verify_skips_experts_not_owned_by_local_ep_rank():
++    model = EPLocalModel()
++    current = model.weight.detach().clone()
++    _verify_dense_load(
++        model,
++        [
++            ("model.layers.0.mlp.experts.0.gate_proj.weight", current),
++            ("model.layers.0.mlp.experts.32.gate_proj.weight", current),
++        ],
++    )
++
++
++def test_dense_verify_keeps_non_expert_noop_strict():
++    model = EPLocalModel()
++    with pytest.raises(RuntimeError, match="did not touch any weight"):
++        _verify_dense_load(model, [("model.layers.0.self_attn.bad.weight", model.weight)])
++
++
++def test_dense_verify_skips_layers_owned_by_another_pipeline_stage():
++    model = PipelineLocalModel()
++    current = model.weight.detach().clone()
++    _verify_dense_load(
++        model,
++        [
++            ("model.layers.0.self_attn.q_proj.weight", current),
++            ("model.layers.24.self_attn.q_proj.weight", current),
++        ],
++    )
++
++
++def test_update_info_accepts_zero_updates():
++    assert make_info(num_updates_list=[0]).num_updates_list == [0]
++
++
++def test_update_info_accepts_dense_seed():
++    info = make_info(encoding="dense", num_updates_list=[4])
++    assert info.encoding == "dense"
++
++
++def test_update_info_rejects_unknown_encoding():
++    with pytest.raises(ValueError, match="encoding"):
++        make_info(encoding="xor")
++
++
++def test_update_info_rejects_unknown_checksum_algorithm():
++    with pytest.raises(ValueError, match="checksum algorithm"):
++        make_info(checksum_algorithm="unknown")
++
++
++def test_npu_moment_checksum_detects_payload_changes():
++    positions = torch.tensor([0, 3, 9], dtype=torch.int32).view(torch.uint8)
++    values = torch.tensor([1.0, -2.0, 4.0], dtype=torch.bfloat16)
++    expected = _delta_checksum(positions, values, algorithm="npu_moment_v1")
++    assert expected == _delta_checksum(positions.clone(), values.clone(), algorithm="npu_moment_v1")
++
++    changed_positions = positions.clone().view(torch.int32)
++    changed_positions[1] += 1
++    assert _delta_checksum(
++        changed_positions.view(torch.uint8), values, algorithm="npu_moment_v1"
++    ) != expected
++
++    changed_values = values.clone()
++    changed_values[1] += 1
++    assert _delta_checksum(positions, changed_values, algorithm="npu_moment_v1") != expected
++
++
++@pytest.mark.parametrize(
++    ("overrides", "message"),
++    [
++        ({"dtype_names": []}, "`dtype_names` should be"),
++        ({"shapes": []}, "`shapes` should be"),
++        ({"num_updates_list": []}, "cannot be empty"),
++        ({"num_updates_list": [1, 2]}, "`num_updates_list` should be"),
++        ({"num_updates_list": [-1]}, "must be non-negative"),
++    ],
++)
++def test_update_info_rejects_invalid_metadata(overrides, message):
++    with pytest.raises(ValueError, match=message):
++        make_info(**overrides)
++
++
++def test_start_allows_pipeline_parallelism():
++    engine = make_engine()
++    engine.parallel_config = SimpleNamespace(
++        world_size=2, pipeline_parallel_size=2
++    )
++    engine.start_weight_update()
++
++
++@pytest.mark.parametrize("world_size", [1, 4])
++def test_start_and_finish_allow_tp(world_size):
++    engine = make_engine()
++    engine.parallel_config = SimpleNamespace(
++        world_size=world_size, pipeline_parallel_size=1
++    )
++    engine.start_weight_update()
++    engine.finish_weight_update()
++
++
++def test_sparse_engine_does_not_support_draft_update():
++    assert SparseHCCLWeightTransferEngine.supports_draft_weight_update is False
++
++
++def test_receive_requires_initialized_group():
++    engine = make_engine()
++    engine.model_update_group = None
++    with pytest.raises(RuntimeError, match="not initialized"):
++        engine.receive_weights(make_info())
++
++
++def test_trainer_send_rejects_packed():
++    args = HCCLTrainerSendWeightsArgs(group=MagicMock(), packed=True)
++    with pytest.raises(ValueError, match="cannot be combined"):
++        SparseHCCLWeightTransferEngine.trainer_send_weights(iter(()), args)
++
++
++def test_trainer_send_packs_indices_and_values_by_dtype():
++    group = MagicMock()
++    stream = MagicMock()
++    args = HCCLTrainerSendWeightsArgs(group=group, stream=stream)
++    float_patch = SparseWeightPatch(
++        "weight",
++        torch.tensor([1, 3], dtype=torch.int32),
++        torch.tensor([2.0, 4.0]),
++    )
++    bf16_patch = SparseWeightPatch(
++        "other_weight",
++        torch.tensor([0], dtype=torch.int32),
++        torch.tensor([5.0], dtype=torch.bfloat16),
++    )
++
++    SparseHCCLWeightTransferEngine.trainer_send_weights(
++        iter([float_patch, bf16_patch]), args
++    )
++
++    assert len(group.broadcast.call_args_list) == 3
++    indices, float_values, bf16_values = [
++        broadcast.args[0] for broadcast in group.broadcast.call_args_list
++    ]
++    assert indices.tolist() == [1, 3, 0]
++    assert float_values.tolist() == [2.0, 4.0]
++    assert bf16_values.tolist() == [5.0]
++    assert group.broadcast.call_args_list == [
++        call(indices, src=0, stream=stream),
++        call(float_values, src=0, stream=stream),
++        call(bf16_values, src=0, stream=stream),
++    ]
++
++
++def test_trainer_send_uses_rank_specific_p2p_payloads():
++    group = MagicMock(world_size=3)
++    stream = MagicMock()
++    global_patch = SparseWeightPatch(
++        "weight",
++        torch.tensor([0, 1], dtype=torch.int32),
++        torch.tensor([10.0, 11.0]),
++    )
++    rank_patches = [
++        [
++            SparseWeightPatch(
++                "weight",
++                torch.tensor([0], dtype=torch.int32),
++                torch.tensor([10.0]),
++            )
++        ],
++        [
++            SparseWeightPatch(
++                "weight",
++                torch.tensor([1], dtype=torch.int32),
++                torch.tensor([11.0]),
++            )
++        ],
++    ]
++
++    SparseHCCLWeightTransferEngine.trainer_send_weights(
++        iter([global_patch]),
++        SparseHCCLTrainerSendWeightsArgs(
++            group=group, stream=stream, rank_patches=rank_patches
++        ),
++    )
++
++    assert group.broadcast.call_count == 0
++    assert [item.kwargs["dst"] for item in group.send.call_args_list] == [
++        1,
++        1,
++        2,
++        2,
++    ]
++
++
++def test_shutdown_clears_group():
++    engine = make_engine()
++    engine.model_update_group = MagicMock()
++    engine.shutdown()
++    assert engine.model_update_group is None
