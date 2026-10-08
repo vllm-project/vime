@@ -2563,3 +2563,143 @@ new file mode 100644
 +    engine.model_update_group = MagicMock()
 +    engine.shutdown()
 +    assert engine.model_update_group is None
+diff --git a/vllm_ascend/distributed/device_communicators/pyhccl.py b/vllm_ascend/distributed/device_communicators/pyhccl.py
+index 44d1b12fc..bfc75b379 100644
+--- a/vllm_ascend/distributed/device_communicators/pyhccl.py
++++ b/vllm_ascend/distributed/device_communicators/pyhccl.py
+@@ -169,3 +169,39 @@ class PyHcclCommunicator:
+             self.comm,
+             aclrtStream_t(stream.npu_stream),
+         )
++
++    def send(self, tensor: torch.Tensor, dst: int, stream=None) -> None:
++        """Send one contiguous tensor to a communicator rank."""
++        if self.disabled:
++            return
++        assert tensor.device == self.device
++        if not tensor.is_contiguous():
++            raise ValueError("PyHCCL send requires a contiguous tensor")
++        if stream is None:
++            stream = current_stream()
++        self.hccl.hcclSend(
++            buffer_type(tensor.data_ptr()),
++            tensor.numel(),
++            hcclDataTypeEnum.from_torch(tensor.dtype),
++            dst,
++            self.comm,
++            aclrtStream_t(stream.npu_stream),
++        )
++
++    def recv(self, tensor: torch.Tensor, src: int, stream=None) -> None:
++        """Receive one contiguous tensor from a communicator rank."""
++        if self.disabled:
++            return
++        assert tensor.device == self.device
++        if not tensor.is_contiguous():
++            raise ValueError("PyHCCL recv requires a contiguous tensor")
++        if stream is None:
++            stream = current_stream()
++        self.hccl.hcclRecv(
++            buffer_type(tensor.data_ptr()),
++            tensor.numel(),
++            hcclDataTypeEnum.from_torch(tensor.dtype),
++            src,
++            self.comm,
++            aclrtStream_t(stream.npu_stream),
++        )
+diff --git a/vllm_ascend/distributed/device_communicators/pyhccl_wrapper.py b/vllm_ascend/distributed/device_communicators/pyhccl_wrapper.py
+index a09ce3998..29c43865e 100644
+--- a/vllm_ascend/distributed/device_communicators/pyhccl_wrapper.py
++++ b/vllm_ascend/distributed/device_communicators/pyhccl_wrapper.py
+@@ -162,6 +162,36 @@ class HCCLLibrary:
+                 aclrtStream_t,
+             ],
+         ),
++        # HcclResult HcclSend(
++        #   void *sendBuf, uint64_t count, HcclDataType dataType,
++        #   uint32_t destRank, HcclComm comm, aclrtStream stream);
++        Function(
++            "HcclSend",
++            hcclResult_t,
++            [
++                buffer_type,
++                ctypes.c_size_t,
++                hcclDataType_t,
++                ctypes.c_int,
++                hcclComm_t,
++                aclrtStream_t,
++            ],
++        ),
++        # HcclResult HcclRecv(
++        #   void *recvBuf, uint64_t count, HcclDataType dataType,
++        #   uint32_t srcRank, HcclComm comm, aclrtStream stream);
++        Function(
++            "HcclRecv",
++            hcclResult_t,
++            [
++                buffer_type,
++                ctypes.c_size_t,
++                hcclDataType_t,
++                ctypes.c_int,
++                hcclComm_t,
++                aclrtStream_t,
++            ],
++        ),
+         # HcclResult HcclCommDestroy(HcclComm comm);
+         Function("HcclCommDestroy", hcclResult_t, [hcclComm_t]),
+     ]
+@@ -200,7 +230,13 @@ class HCCLLibrary:
+         if so_file not in HCCLLibrary.path_to_dict_mapping:
+             _funcs: dict[str, Any] = {}
+             for func in HCCLLibrary.exported_functions:
+-                f = getattr(self.lib, func.name)
++                f = getattr(self.lib, func.name, None)
++                if f is None and func.name in {"HcclSend", "HcclRecv"}:
++                    continue
++                if f is None:
++                    raise AttributeError(
++                        f"HCCL library does not export {func.name}"
++                    )
+                 f.restype = func.restype
+                 f.argtypes = func.argtypes
+                 _funcs[func.name] = f
+@@ -249,6 +285,40 @@ class HCCLLibrary:
+     ) -> None:
+         self.HCCL_CHECK(self._funcs["HcclBroadcast"](buf, count, datatype, root, comm, stream))
+ 
++    def hcclSend(
++        self,
++        buf: buffer_type,
++        count: int,
++        datatype: int,
++        dest_rank: int,
++        comm: hcclComm_t,
++        stream: aclrtStream_t,
++    ) -> None:
++        if "HcclSend" not in self._funcs:
++            raise NotImplementedError("The installed HCCL does not support P2P send")
++        self.HCCL_CHECK(
++            self._funcs["HcclSend"](
++                buf, count, datatype, dest_rank, comm, stream
++            )
++        )
++
++    def hcclRecv(
++        self,
++        buf: buffer_type,
++        count: int,
++        datatype: int,
++        src_rank: int,
++        comm: hcclComm_t,
++        stream: aclrtStream_t,
++    ) -> None:
++        if "HcclRecv" not in self._funcs:
++            raise NotImplementedError("The installed HCCL does not support P2P recv")
++        self.HCCL_CHECK(
++            self._funcs["HcclRecv"](
++                buf, count, datatype, src_rank, comm, stream
++            )
++        )
++
+     def hcclCommDestroy(self, comm: hcclComm_t) -> None:
+         self.HCCL_CHECK(self._funcs["HcclCommDestroy"](comm))
