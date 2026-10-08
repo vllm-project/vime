@@ -2663,7 +2663,7 @@ index a09ce3998..29c43865e 100644
                  f.restype = func.restype
                  f.argtypes = func.argtypes
                  _funcs[func.name] = f
-@@ -249,6 +285,40 @@ class HCCLLibrary:
+@@ -249,5 +285,39 @@ class HCCLLibrary:
      ) -> None:
          self.HCCL_CHECK(self._funcs["HcclBroadcast"](buf, count, datatype, root, comm, stream))
  
