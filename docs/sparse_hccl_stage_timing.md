@@ -23,6 +23,8 @@ CPU work and completion of device work; not pure HCCL bandwidth):
 | Stage | Boundary |
 | --- | --- |
 | sender export | Advance the dense HF or sparse diff iterator; excludes consuming yielded entries |
+| sender export_index | Build or refresh the cached Megatron-to-HF export directory |
+| sender snapshot_prime | Initialize delta snapshots after the dense seed, through completion |
 | sender gather_pack | Queue/gather sparse entries and consume into buckets; excludes nested checksum, transfer and receiver wait |
 | sender checksum | Compute payload checksum, including any runtime CPU fallback |
 | sender transfer | Send the already assembled HCCL buffers through completion |
@@ -34,8 +36,7 @@ CPU work and completion of device work; not pure HCCL bandwidth):
 | receiver verify | Read back changed local entries and compare to the received values |
 | receiver verify_dense_replay | Optional dense replay/idempotence check, including replay writes |
 
-Table note: initialization/export-index construction, snapshot priming,
-generation pause/cache flush/resume and some outer packing are not represented
+Table note: generation pause/cache flush/resume and some dense outer packing are not represented
 by these stages. Use the existing outer `update_weights` timer for total
 latency. Stage boundaries explicitly synchronize when enabled, which changes
 overlap and adds overhead. Measure performance with timing disabled as well;

@@ -484,7 +484,8 @@ class UpdateWeightFromSparseHCCL:
             queue.flush_all()
         if dist.get_rank() == 0:
             for bucket in buckets.values():
-                bucket.flush()
+                with timer.measure("gather_pack") if timer else nullcontext():
+                    bucket.flush()
         return statistics["flushes"], statistics["wire_bytes"], statistics["updates"]
 
     @torch.no_grad()
@@ -515,16 +516,19 @@ class UpdateWeightFromSparseHCCL:
 
         phase_error: BaseException | None = None
         try:
-            self._ensure_export_index()
+            timer = self._stage_timer
+            with timer.measure("export_index") if timer else nullcontext():
+                self._ensure_export_index()
             if not self._seeded:
                 flushes, wire_bytes = self._send_dense()
                 assert self._index is not None
-                prime_delta_snapshots(
-                    self._index,
-                    self._snapshots,
-                    pin=os.getenv("VIME_SPARSE_HCCL_SNAPSHOT_DEVICE", "device") == "cpu",
-                )
-                torch.accelerator.synchronize()
+                with timer.measure("snapshot_prime") if timer else nullcontext():
+                    prime_delta_snapshots(
+                        self._index,
+                        self._snapshots,
+                        pin=os.getenv("VIME_SPARSE_HCCL_SNAPSHOT_DEVICE", "device") == "cpu",
+                    )
+                    torch.accelerator.synchronize()
                 updates = sum(prod(shape) for record in self._index for _name, shape in record.slots or [])
                 self._seeded = True
             else:

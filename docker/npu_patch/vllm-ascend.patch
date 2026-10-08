@@ -574,7 +574,7 @@ index dd559f3..2e7ece1 100644
              self.cp_rank,
 diff --git a/vllm_ascend/distributed/weight_transfer/sparse_hccl_engine.py b/vllm_ascend/distributed/weight_transfer/sparse_hccl_engine.py
 new file mode 100644
-index 000000000..dde440907
+index 000000000..1a1bff8d2
 --- /dev/null
 +++ b/vllm_ascend/distributed/weight_transfer/sparse_hccl_engine.py
 @@ -0,0 +1,531 @@
@@ -648,7 +648,7 @@ index 000000000..dde440907
 +    checksum_algorithm: str | None = None
 +    """Checksum implementation used by the sender."""
 +    verify: bool = False
-+    """Treat a dense payload as an idempotence check of the live model."""
++    """Verify sparse local writes, or check dense live-model idempotence."""
 +    profile: bool = False
 +    """Opt-in synchronized stage diagnostics; never synchronizes when false."""
 +
@@ -1812,10 +1812,10 @@ index 000000000..ff2c3f6f4
 +        torch.Tensor.copy_ = original_copy
 diff --git a/tests/ut/distributed/weight_transfer/test_sparse_weight_patch.py b/tests/ut/distributed/weight_transfer/test_sparse_weight_patch.py
 new file mode 100644
-index 000000000..b6c8c71f9
+index 000000000..98c90f3d4
 --- /dev/null
 +++ b/tests/ut/distributed/weight_transfer/test_sparse_weight_patch.py
-@@ -0,0 +1,559 @@
+@@ -0,0 +1,561 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +
@@ -1839,6 +1839,8 @@ index 000000000..b6c8c71f9
 +@pytest.mark.parametrize("tp_size,tp_rank", [(1, 0), (2, 0), (2, 1)])
 +@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 +def test_ep_high_global_expert_uses_local_slot_without_fallback(monkeypatch, projection, expert, device, tp_size, tp_rank, dtype):
++    if device == "npu" and (not hasattr(torch, "npu") or not torch.npu.is_available()):
++        pytest.skip("NPU regression requires available NPU hardware")
 +    from vllm_ascend.distributed.weight_transfer import sparse_weight_patch as patcher
 +    from vllm_ascend.ops.fused_moe import routed_experts
 +
@@ -2806,10 +2808,10 @@ index a09ce3998..29c43865e 100644
          self.HCCL_CHECK(self._funcs["HcclCommDestroy"](comm))
 diff --git a/tests/ut/distributed/weight_transfer/test_stage_timer.py b/tests/ut/distributed/weight_transfer/test_stage_timer.py
 new file mode 100644
-index 000000000..082ec2e18
+index 000000000..caf873894
 --- /dev/null
 +++ b/tests/ut/distributed/weight_transfer/test_stage_timer.py
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,38 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +from unittest.mock import Mock
@@ -2838,12 +2840,22 @@ index 000000000..082ec2e18
 +            raise ValueError("mismatch")
 +    assert timer._stack == []
 +    assert timer.seconds["verify"] >= 0
++
++
++def test_device_sync_failure_also_unwinds_stage_stack():
++    synchronize = Mock(side_effect=[None, RuntimeError("device sync failed")])
++    timer = stage_timer.StageTimer(synchronize)
++    with pytest.raises(RuntimeError, match="device sync failed"):
++        with timer.measure("transfer"):
++            pass
++    assert timer._stack == []
++    assert timer.seconds["transfer"] >= 0
 diff --git a/vllm_ascend/distributed/weight_transfer/stage_timer.py b/vllm_ascend/distributed/weight_transfer/stage_timer.py
 new file mode 100644
-index 000000000..38f97ed62
+index 000000000..8157620f5
 --- /dev/null
 +++ b/vllm_ascend/distributed/weight_transfer/stage_timer.py
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,40 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +"""Opt-in, synchronized wall timing for weight synchronization diagnostics."""
@@ -2876,9 +2888,11 @@ index 000000000..38f97ed62
 +        try:
 +            yield
 +        finally:
-+            self.synchronize()
-+            elapsed = perf_counter() - start
-+            self._stack.pop()
-+            self.seconds[stage] = self.seconds.get(stage, 0.0) + elapsed - frame[0]
-+            if self._stack:
-+                self._stack[-1][0] += elapsed
++            try:
++                self.synchronize()
++            finally:
++                elapsed = perf_counter() - start
++                self._stack.pop()
++                self.seconds[stage] = self.seconds.get(stage, 0.0) + elapsed - frame[0]
++                if self._stack:
++                    self._stack[-1][0] += elapsed
