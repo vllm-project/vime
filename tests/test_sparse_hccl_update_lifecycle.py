@@ -40,6 +40,74 @@ def test_verify_schedule_checks_sparse_writes_without_dense_replay(updater):
 
 
 @pytest.mark.unit
+def test_default_off_timing_never_synchronizes(updater, monkeypatch):
+    monkeypatch.setattr(module.torch.accelerator, "synchronize", lambda: pytest.fail("profiling is off"))
+    updater._send_sparse_delta = lambda **kwargs: (1, 24, 4)
+    updater._finish_update = lambda: None
+    updater.update_weights()
+    assert updater._stage_timer is None
+    assert list(updater._timed_export(iter([1, 2]))) == [1, 2]
+    assert not any(key.endswith("_seconds") for key in updater.pop_metrics())
+
+
+@pytest.mark.unit
+def test_sparse_delta_reuses_dtype_bucket_without_changing_payload(updater, monkeypatch):
+    updater.args.update_weight_buffer_size = 1024
+    updater._index = object()
+    updater._snapshots = {}
+    created = []
+    original_bucket = module._SparseFlushBucket
+
+    def make_bucket(*args, **kwargs):
+        bucket = original_bucket(*args, **kwargs)
+        created.append(bucket)
+        return bucket
+
+    monkeypatch.setattr(module, "_SparseFlushBucket", make_bucket)
+    monkeypatch.setattr(module, "checksum", lambda positions, values: 123)
+    tensor = module.torch.tensor
+    entries = [
+        ([(name, [4])], "float32", tensor([1]),
+         tensor([index], dtype=module.torch.int32), tensor([value]), None)
+        for name, index, value in [("a", 1, 10.), ("b", 3, 20.)]
+    ]
+    monkeypatch.setattr(module, "iter_delta_entries", lambda *args, **kwargs: iter(entries))
+    payloads = []
+    updater._publish_flush = lambda flush, **kwargs: payloads.append(flush)
+    assert updater._send_sparse_delta() == (1, 16, 2)
+    assert len(created) == 1
+    assert [param.name for param in payloads[0].params] == ["a", "b"]
+    assert payloads[0].positions.view(module.torch.int32).tolist() == [1, 3]
+    assert payloads[0].values.tolist() == [10., 20.]
+
+
+@pytest.mark.unit
+def test_gather_queue_reuses_workspace_between_flushes(monkeypatch):
+    created, observed = [], []
+
+    def make_workspace():
+        workspace = object()
+        created.append(workspace)
+        return workspace
+
+    def gather(indices, values, counts, **kwargs):
+        observed.append(kwargs["workspace"])
+        return [(indices, values)]
+
+    monkeypatch.setattr(module, "GatherWorkspace", make_workspace)
+    monkeypatch.setattr(module, "gather_slot_entries_to_rank0", gather)
+    consumed = []
+    queue = module._GatherQueue(1, 1024, True, lambda *args: consumed.append(args))
+    group = object()
+    for name in ["a", "b"]:
+        queue.put(group, [(name, [4])], "float32", module.torch.tensor([1]),
+                  module.torch.tensor([1], dtype=module.torch.int32), module.torch.tensor([10.]))
+    assert len(created) == 1
+    assert observed == [created[0], created[0]]
+    assert [entry[0] for entry in consumed] == ["a", "b"]
+
+
+@pytest.mark.unit
 def test_partial_payload_failure_keeps_generation_paused_and_rejects_reuse(updater):
     def send(*, verify):
         updater._payload_started = True

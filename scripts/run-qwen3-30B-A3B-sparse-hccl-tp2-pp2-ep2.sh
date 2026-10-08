@@ -118,6 +118,9 @@ UPDATE_WEIGHT_ARGS=(
 if [[ "${UPDATE_WEIGHT_TRANSPORT:-sparse_hccl}" == "disk" ]]; then
    UPDATE_WEIGHT_ARGS+=(--update-weight-disk-dir "${UPDATE_WEIGHT_DISK_DIR:?set UPDATE_WEIGHT_DISK_DIR}")
 fi
+if [[ "${UPDATE_WEIGHT_STAGE_TIMING:-0}" == "1" ]]; then
+   UPDATE_WEIGHT_ARGS+=(--update-weight-stage-timing)
+fi
 if [[ "${UPDATE_WEIGHT_MODE:-delta}" == "delta" && "${UPDATE_WEIGHT_TRANSPORT:-sparse_hccl}" == "disk" ]]; then
    UPDATE_WEIGHT_ARGS+=(
       --update-weight-local-checkpoint-dir "${UPDATE_WEIGHT_LOCAL_CHECKPOINT_DIR:?set UPDATE_WEIGHT_LOCAL_CHECKPOINT_DIR}"

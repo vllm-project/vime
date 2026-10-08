@@ -584,6 +584,11 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--update-weight-stage-timing",
+                action="store_true",
+                help="Profile sparse HCCL stages with device synchronization (default off).",
+            )
+            parser.add_argument(
                 "--keep-old-actor",
                 action="store_true",
                 help="Whether to keep the rollout model on training process",

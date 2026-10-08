@@ -8,6 +8,7 @@ import socket
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import asdict
 from math import prod
 
@@ -21,6 +22,7 @@ from vllm_ascend.distributed.weight_transfer.sparse_hccl_engine import (
     SparseHCCLWeightTransferUpdateInfo,
 )
 from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import SparseWeightPatch
+from vllm_ascend.distributed.weight_transfer.stage_timer import StageTimer
 
 from vime.utils.distributed_utils import get_gloo_group
 
@@ -87,13 +89,17 @@ class _GatherQueue:
         counts = torch.cat([entry[1] for entry in batch])
         indices = torch.cat([entry[2] for entry in batch])
         values = torch.cat([entry[3] for entry in batch])
+        workspace_key = (id(group), dtype_name)
+        workspace = self.workspaces.get(workspace_key)
+        if workspace is None:
+            workspace = self.workspaces[workspace_key] = GatherWorkspace()
         gathered = gather_slot_entries_to_rank0(
             indices,
             values,
             counts,
             group=group,
             max_round_bytes=self.max_round_bytes,
-            workspace=self.workspaces.setdefault((id(group), dtype_name), GatherWorkspace()),
+            workspace=workspace,
         )
         if self.is_wire_master and gathered is not None:
             gathered_index = 0
@@ -107,9 +113,10 @@ class _GatherQueue:
 class _SparseFlushBucket:
     """One homogeneous-dtype sparse flush with bounded wire size."""
 
-    def __init__(self, capacity: int, publish):
+    def __init__(self, capacity: int, publish, timer=None):
         self.capacity = int(capacity)
         self.publish = publish
+        self.timer = timer
         self.patches: list[SparseWeightPatch] = []
         self.shapes: list[list[int]] = []
         self.nbytes = 0
@@ -158,13 +165,15 @@ class _SparseFlushBucket:
             value_offset += patch.values.numel()
         positions = torch.cat([patch.indices for patch in self.patches]).contiguous().view(torch.uint8)
         values = torch.cat([patch.values for patch in self.patches]).contiguous()
+        with self.timer.measure("checksum") if self.timer else nullcontext():
+            digest = checksum(positions, values)
         self.publish(
             DeltaFlush(
                 encoding="indices",
                 params=params,
                 positions=positions,
                 values=values,
-                checksum=checksum(positions, values),
+                checksum=digest,
             )
         )
         self.patches, self.shapes, self.nbytes = [], [], 0
@@ -343,6 +352,7 @@ class UpdateWeightFromSparseHCCL:
             encoding=flush.encoding,
             checksum=flush.checksum,
             verify=verify,
+            profile=getattr(self, "_stage_timer", None) is not None,
         )
         # From this point a receiver may have mutated live weights. A failure
         # must leave generation paused because sparse apply has no rollback.
@@ -352,22 +362,40 @@ class UpdateWeightFromSparseHCCL:
         future = self._rpc_executor.submit(
             self._client.update_weights, asdict(update_info)
         )
-        SparseHCCLWeightTransferEngine.trainer_send_packed(
-            flush.positions.view(torch.int32), flush.values,
-            SparseHCCLTrainerSendWeightsArgs(group=self._group),
-        )
-        future.result()
+        timer = getattr(self, "_stage_timer", None)
+        with timer.measure("transfer") if timer else nullcontext():
+            SparseHCCLWeightTransferEngine.trainer_send_packed(
+                flush.positions.view(torch.int32), flush.values,
+                SparseHCCLTrainerSendWeightsArgs(group=self._group),
+            )
+        with timer.measure("receiver_wait") if timer else nullcontext():
+            future.result()
+
+    def _timed_export(self, iterator):
+        """Time generator advancement only, excluding consumption/publish."""
+        timer = getattr(self, "_stage_timer", None)
+        if timer is None:
+            yield from iterator
+            return
+        iterator = iter(iterator)
+        while True:
+            with timer.measure("export"):
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    return
+            yield item
 
     def _send_dense(self, *, verify: bool = False) -> tuple[int, int]:
         flushes = wire_bytes = 0
-        for chunk in self._iterator.get_hf_weight_chunks(
+        for chunk in self._timed_export(self._iterator.get_hf_weight_chunks(
             self.weights_getter(),
             progress_desc=(
                 "Sparse HCCL state verification"
                 if verify
                 else "Sparse HCCL dense seed"
             ),
-        ):
+        )):
             if dist.get_rank() != 0:
                 continue
             by_dtype: dict[torch.dtype, list[tuple[str, torch.Tensor]]] = {}
@@ -395,12 +423,15 @@ class UpdateWeightFromSparseHCCL:
                     value_offset += flat.numel()
                 values = torch.cat(flat_values)
                 positions = torch.empty(0, dtype=torch.uint8, device=values.device)
+                timer = getattr(self, "_stage_timer", None)
+                with timer.measure("checksum") if timer else nullcontext():
+                    digest = checksum(positions, values)
                 flush = DeltaFlush(
                     encoding="dense",
                     params=params,
                     positions=positions,
                     values=values,
-                    checksum=checksum(positions, values),
+                    checksum=digest,
                 )
                 self._publish_flush(flush, verify=verify)
                 flushes += 1
@@ -424,13 +455,13 @@ class UpdateWeightFromSparseHCCL:
         buckets: dict[str, _SparseFlushBucket] = {}
 
         def consume(name, dtype_name, shape, indices, values):
-            bucket = buckets.setdefault(
-                dtype_name,
-                _SparseFlushBucket(
+            bucket = buckets.get(dtype_name)
+            if bucket is None:
+                bucket = buckets[dtype_name] = _SparseFlushBucket(
                     self.args.update_weight_buffer_size,
                     publish,
-                ),
-            )
+                    timer=getattr(self, "_stage_timer", None),
+                )
             bucket.add(name, shape, indices, values)
 
         if not hasattr(self, "_gather_workspaces"):
@@ -442,12 +473,15 @@ class UpdateWeightFromSparseHCCL:
             consume,
             workspaces=self._gather_workspaces,
         )
-        for slots, dtype_name, counts, indices, values, group in iter_delta_entries(
+        timer = getattr(self, "_stage_timer", None)
+        for slots, dtype_name, counts, indices, values, group in self._timed_export(iter_delta_entries(
             self._index, self._snapshots,
             batch_size=getattr(self.args, "update_weight_delta_batch_diff", 32),
-        ):
-            queue.put(group, slots, dtype_name, counts, indices, values)
-        queue.flush_all()
+        )):
+            with timer.measure("gather_pack") if timer else nullcontext():
+                queue.put(group, slots, dtype_name, counts, indices, values)
+        with timer.measure("gather_pack") if timer else nullcontext():
+            queue.flush_all()
         if dist.get_rank() == 0:
             for bucket in buckets.values():
                 bucket.flush()
@@ -463,6 +497,10 @@ class UpdateWeightFromSparseHCCL:
                 "restart or reconnect it to force a dense seed"
             )
         self.weight_version += 1
+        self._stage_timer = (
+            StageTimer(torch.accelerator.synchronize)
+            if getattr(self.args, "update_weight_stage_timing", False) else None
+        )
         self._payload_started = False
         begin_error: BaseException | None = None
         try:
@@ -532,6 +570,15 @@ class UpdateWeightFromSparseHCCL:
                 "perf/update_weights_sparse_hccl_flushes": float(flushes),
                 "perf/update_weights_sparse_hccl_updates": float(updates),
             }
+            if self._stage_timer is not None:
+                self.update_weight_metrics.update({
+                    f"perf/update_weights_sparse_hccl_{stage}_seconds": seconds
+                    for stage, seconds in self._stage_timer.seconds.items()
+                })
+                logger.warning(
+                    "SPARSE-STAGES sender v=%d synchronized_wall_seconds=%s",
+                    self.weight_version, self._stage_timer.seconds,
+                )
             logger.info(
                 "Sparse HCCL weight sync v=%d seed=%s flushes=%d wire=%.2f MiB "
                 "updates=%d",
