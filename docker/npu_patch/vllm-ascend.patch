@@ -1111,10 +1111,10 @@ index 000000000..1a1bff8d2
 +    return False
 diff --git a/vllm_ascend/distributed/weight_transfer/sparse_weight_patch.py b/vllm_ascend/distributed/weight_transfer/sparse_weight_patch.py
 new file mode 100644
-index 000000000..ff2c3f6f4
+index 000000000..e783d62e2
 --- /dev/null
 +++ b/vllm_ascend/distributed/weight_transfer/sparse_weight_patch.py
-@@ -0,0 +1,695 @@
+@@ -0,0 +1,696 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +"""Transport-independent sparse runtime weight patch operations."""
@@ -1358,9 +1358,11 @@ index 000000000..ff2c3f6f4
 +        expected = ((shape[1] // tp_size, shape[0]) if projection == "down_proj"
 +                    else (shape[1], 2 * (shape[0] // tp_size)))
 +        expert_map = getattr(layer, "ascend_expert_map", None)
++        eplb_enabled = (getattr(config, "enable_eplb", False)
++                        or getattr(layer.quant_method, "dynamic_eplb", False))
 +        if parallel.ep_size == 1:
 +            local_expert = expert
-+        elif expert_map is not None and not getattr(config, "enable_eplb", False):
++        elif expert_map is not None and not eplb_enabled:
 +            cached_map = getattr(layer, "_sparse_expert_map_cpu", None)
 +            if cached_map is None:
 +                cached_map = expert_map.detach().cpu()
@@ -1374,8 +1376,7 @@ index 000000000..ff2c3f6f4
 +                continue
 +        else:
 +            local_expert = -1
-+        if (local_expert < 0 or getattr(config, "enable_eplb", False)
-+                or getattr(layer.quant_method, "dynamic_eplb", False)
++        if (local_expert < 0 or eplb_enabled
 +                or not config.is_act_and_mul or param is None
 +                or getattr(param, "is_transposed", False)
 +                or shape[shard_dim] % tp_size or param.ndim != 3
@@ -1812,10 +1813,10 @@ index 000000000..ff2c3f6f4
 +        torch.Tensor.copy_ = original_copy
 diff --git a/tests/ut/distributed/weight_transfer/test_sparse_weight_patch.py b/tests/ut/distributed/weight_transfer/test_sparse_weight_patch.py
 new file mode 100644
-index 000000000..98c90f3d4
+index 000000000..fbf1d8e23
 --- /dev/null
 +++ b/tests/ut/distributed/weight_transfer/test_sparse_weight_patch.py
-@@ -0,0 +1,561 @@
+@@ -0,0 +1,592 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +
@@ -1895,6 +1896,37 @@ index 000000000..98c90f3d4
 +    patches.append((SparseWeightPatch("invalid", torch.tensor([bad_index], dtype=torch.int32), torch.ones(1)), [4, 2]))
 +    with pytest.raises(IndexError):
 +        apply_sparse_hf_patches_with_loader(NeverLoad(), patches)
++
++
++def test_dynamic_eplb_falls_back_before_cached_nonlocal_filter(monkeypatch):
++    from vllm_ascend.distributed.weight_transfer import sparse_weight_patch as patcher
++    from vllm_ascend.ops.fused_moe import routed_experts
++
++    class FakeMethod:
++        dynamic_eplb = True
++
++    class FakeExperts:
++        pass
++
++    monkeypatch.setattr(routed_experts, "AscendRoutedExperts", FakeExperts)
++    monkeypatch.setattr(routed_experts, "AscendUnquantizedFusedMoEMethod", FakeMethod)
++    layer = FakeExperts()
++    layer.quant_method = FakeMethod()
++    layer.moe_config = SimpleNamespace(
++        moe_parallel_config=SimpleNamespace(tp_size=1, ep_size=2),
++        tp_rank=0, enable_eplb=False, is_act_and_mul=True,
++    )
++    layer.ascend_expert_map = torch.tensor([-1, 0])
++    layer.w13_weight = torch.nn.Parameter(torch.arange(16.).reshape(1, 4, 4))
++    original = layer.w13_weight.detach().clone()
++    model = SimpleNamespace(config=SimpleNamespace(model_type="qwen3_moe"),
++                            get_submodule=lambda name: layer)
++    patch = SparseWeightPatch("model.layers.0.mlp.experts.0.gate_proj.weight",
++                             torch.tensor([0], dtype=torch.int32), torch.tensor([99.]))
++    patches = [(patch, [2, 4])]
++    assert patcher._apply_direct_moe_patches(model, patches) == patches
++    assert not hasattr(layer, "_sparse_expert_map_cpu")
++    assert torch.equal(layer.w13_weight, original)
 +
 +
 +def test_batched_bounds_keeps_distinct_shape_limits():
