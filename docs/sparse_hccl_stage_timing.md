@@ -54,3 +54,24 @@ entries) for gate/up/down projections, both local slots, nonlocal and invalid
 experts, CPU/NPU, float32/BF16 and TP1/TP2. These fixtures are not a proof of
 full-model equivalence; retain the end-to-end rank-local verification and dense
 oracle tests for their respective coverage.
+
+## HCCL gather payload lengths
+
+The count exchange and slot merge order are unchanged. After counts agree,
+the HCCL P2P path sends each nonempty rank's actual entries and posts matching
+receive slices; empty ranks still take part in the count exchange but send no
+padding. Other backends retain equal-sized padded `gather` buffers. Returned
+slot payloads remain independent of reusable receive scratch.
+
+For example, with int32 indices and FP32 values, non-root rank totals 5, 1, 0
+previously sent 3 × 5 × 8 = 120 payload bytes; actual lengths send
+(5 + 1) × 8 = 48 bytes. This example excludes count metadata, root-local copies
+and protocol overhead; it is not a measured end-to-end speedup.
+
+`tests/test_sparse_gather_payload_lengths.py` checks the exact operation lengths,
+empty participants, nonzero global destination ranks, scratch ownership and
+the unchanged padded non-HCCL path. Run the standalone
+`tests/npu_sparse_gather_regression.py` with four-process `torchrun`, setting
+`SPARSE_GATHER_CANDIDATE` to the absolute candidate `sparse_gather.py` path.
+It checks FP32/BF16, unequal/empty participants, noncontiguous input, split
+rounds and scratch reuse over 20 cases on actual HCCL.
