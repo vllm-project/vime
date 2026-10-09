@@ -5,7 +5,6 @@ set -euo pipefail
 set -x
 
 export PYTHONUNBUFFERED=1
-export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-4,5,6,7,8,9,10,11}"
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HCCL_HOST_SOCKET_PORT_RANGE="${HCCL_HOST_SOCKET_PORT_RANGE:-64000-64050}"
@@ -19,7 +18,6 @@ export VIME_SPARSE_HCCL_SNAPSHOT_DEVICE="${VIME_SPARSE_HCCL_SNAPSHOT_DEVICE:-cpu
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 VIME_REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 cd "${VIME_REPO_ROOT}"
-export PYTHONPATH="${VIME_REPO_ROOT}:${PYTHONPATH:-}"
 
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 
@@ -54,10 +52,6 @@ ROLLOUT_ARGS=(
    --global-batch-size "${GLOBAL_BATCH_SIZE}"
    --balance-data
 )
-
-# The short weight-sync validation is below the original eval interval (20),
-# so no evaluation is scheduled and no external DATA_ROOT is required.
-EVAL_ARGS=()
 
 PERF_ARGS=(
    --tensor-model-parallel-size 2
@@ -111,20 +105,10 @@ VLLM_ARGS=(
 UPDATE_WEIGHT_ARGS=(
    --update-weight-delta-batch-diff "${UPDATE_WEIGHT_DELTA_BATCH_DIFF:-32}"
    --update-weight-delta-batch-gather "${UPDATE_WEIGHT_DELTA_BATCH_GATHER:-32}"
-   --update-weight-mode "${UPDATE_WEIGHT_MODE:-delta}"
-   --update-weight-transport "${UPDATE_WEIGHT_TRANSPORT:-sparse_hccl}"
+   --update-weight-mode delta
+   --update-weight-transport sparse_hccl
    --update-weight-delta-verify-every "${UPDATE_WEIGHT_DELTA_VERIFY_EVERY:-1}"
 )
-if [[ "${UPDATE_WEIGHT_TRANSPORT:-sparse_hccl}" == "disk" ]]; then
-   UPDATE_WEIGHT_ARGS+=(--update-weight-disk-dir "${UPDATE_WEIGHT_DISK_DIR:?set UPDATE_WEIGHT_DISK_DIR}")
-fi
-if [[ "${UPDATE_WEIGHT_MODE:-delta}" == "delta" && "${UPDATE_WEIGHT_TRANSPORT:-sparse_hccl}" == "disk" ]]; then
-   UPDATE_WEIGHT_ARGS+=(
-      --update-weight-local-checkpoint-dir "${UPDATE_WEIGHT_LOCAL_CHECKPOINT_DIR:?set UPDATE_WEIGHT_LOCAL_CHECKPOINT_DIR}"
-      --update-weight-delta-encoding xor
-      --update-weight-delta-checksum xxh3-128
-   )
-fi
 
 MISC_ARGS=(
    --attention-dropout 0.0
@@ -157,7 +141,6 @@ ray job submit --address="http://127.0.0.1:${RAY_DASHBOARD_PORT:-8393}" \
    ${OPTIMIZER_ARGS[@]} \
    ${GRPO_ARGS[@]} \
    ${PERF_ARGS[@]} \
-   ${EVAL_ARGS[@]} \
-${VLLM_ARGS[@]} \
-${UPDATE_WEIGHT_ARGS[@]} \
-${MISC_ARGS[@]} 2>&1 | tee "${RESULT_LOG}"
+   ${VLLM_ARGS[@]} \
+   ${UPDATE_WEIGHT_ARGS[@]} \
+   ${MISC_ARGS[@]} 2>&1 | tee "${RESULT_LOG}"
