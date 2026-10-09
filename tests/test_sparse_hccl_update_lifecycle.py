@@ -40,13 +40,11 @@ def test_verify_schedule_checks_sparse_writes_without_dense_replay(updater):
 
 
 @pytest.mark.unit
-def test_default_off_timing_never_synchronizes(updater, monkeypatch):
-    monkeypatch.setattr(module.torch.accelerator, "synchronize", lambda: pytest.fail("profiling is off"))
+def test_steady_update_adds_no_device_synchronization(updater, monkeypatch):
+    monkeypatch.setattr(module.torch.accelerator, "synchronize", lambda: pytest.fail("unexpected synchronization"))
     updater._send_sparse_delta = lambda **kwargs: (1, 24, 4)
     updater._finish_update = lambda: None
     updater.update_weights()
-    assert updater._stage_timer is None
-    assert list(updater._timed_export(iter([1, 2]))) == [1, 2]
     assert not any(key.endswith("_seconds") for key in updater.pop_metrics())
 
 

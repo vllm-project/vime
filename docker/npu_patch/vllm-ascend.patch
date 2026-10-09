@@ -574,10 +574,10 @@ index dd559f3..2e7ece1 100644
              self.cp_rank,
 diff --git a/vllm_ascend/distributed/weight_transfer/sparse_hccl_engine.py b/vllm_ascend/distributed/weight_transfer/sparse_hccl_engine.py
 new file mode 100644
-index 000000000..1a1bff8d2
+index 000000000..9c8d088c5
 --- /dev/null
 +++ b/vllm_ascend/distributed/weight_transfer/sparse_hccl_engine.py
-@@ -0,0 +1,531 @@
+@@ -0,0 +1,511 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +"""Sparse HCCL weight transfer engine."""
@@ -585,7 +585,6 @@ index 000000000..1a1bff8d2
 +import logging
 +import re
 +from collections.abc import Iterator
-+from contextlib import nullcontext
 +from dataclasses import dataclass
 +from typing import TYPE_CHECKING, Any
 +
@@ -605,7 +604,6 @@ index 000000000..1a1bff8d2
 +    SparseWeightPatch,
 +    apply_sparse_hf_patches_with_loader,
 +)
-+from vllm_ascend.distributed.weight_transfer.stage_timer import StageTimer
 +
 +if TYPE_CHECKING:
 +    from vllm.config import VllmConfig
@@ -649,7 +647,6 @@ index 000000000..1a1bff8d2
 +    """Checksum implementation used by the sender."""
 +    verify: bool = False
 +    """Verify sparse local writes, or check dense live-model idempotence."""
-+    profile: bool = False
 +    """Opt-in synchronized stage diagnostics; never synchronizes when false."""
 +
 +    def __post_init__(self) -> None:
@@ -758,62 +755,59 @@ index 000000000..1a1bff8d2
 +            num_updates_list = update_info.rank_num_updates_lists[worker_index]
 +
 +        total_updates = sum(num_updates_list)
-+        timer = StageTimer(torch.npu.synchronize) if update_info.profile else None
-+        with timer.measure("transfer_allocate") if timer else nullcontext():
-+            dense = update_info.encoding == "dense"
-+            packed_indices = torch.empty(
-+                0 if dense else total_updates,
-+                dtype=torch.int32,
++        dense = update_info.encoding == "dense"
++        packed_indices = torch.empty(
++            0 if dense else total_updates,
++            dtype=torch.int32,
++            device=self.device,
++        )
++        if not dense and packed_indices.numel():
++            transfer = (
++                self.model_update_group.recv
++                if rank_partitioned
++                else self.model_update_group.broadcast
++            )
++            transfer(packed_indices, src=0, stream=torch.npu.current_stream())
++
++        # Values cannot be concatenated across different dtypes.  Keep one
++        # packed buffer per dtype instead, preserving first-seen dtype order so
++        # trainer and workers issue collectives in exactly the same sequence.
++        dtype_order = list(dict.fromkeys(update_info.dtype_names))
++        packed_values: dict[str, torch.Tensor] = {}
++        for dtype_name in dtype_order:
++            dtype_updates = sum(
++                num_updates
++                for patch_dtype, num_updates in zip(
++                    update_info.dtype_names,
++                    num_updates_list,
++                    strict=True,
++                )
++                if patch_dtype == dtype_name
++            )
++            values = torch.empty(
++                dtype_updates,
++                dtype=getattr(torch, dtype_name),
 +                device=self.device,
 +            )
-+            if not dense and packed_indices.numel():
++            if values.numel():
 +                transfer = (
 +                    self.model_update_group.recv
 +                    if rank_partitioned
 +                    else self.model_update_group.broadcast
 +                )
-+                transfer(packed_indices, src=0, stream=torch.npu.current_stream())
-+
-+            # Values cannot be concatenated across different dtypes.  Keep one
-+            # packed buffer per dtype instead, preserving first-seen dtype order so
-+            # trainer and workers issue collectives in exactly the same sequence.
-+            dtype_order = list(dict.fromkeys(update_info.dtype_names))
-+            packed_values: dict[str, torch.Tensor] = {}
-+            for dtype_name in dtype_order:
-+                dtype_updates = sum(
-+                    num_updates
-+                    for patch_dtype, num_updates in zip(
-+                        update_info.dtype_names,
-+                        num_updates_list,
-+                        strict=True,
-+                    )
-+                    if patch_dtype == dtype_name
-+                )
-+                values = torch.empty(
-+                    dtype_updates,
-+                    dtype=getattr(torch, dtype_name),
-+                    device=self.device,
-+                )
-+                if values.numel():
-+                    transfer = (
-+                        self.model_update_group.recv
-+                        if rank_partitioned
-+                        else self.model_update_group.broadcast
-+                    )
-+                    transfer(values, src=0, stream=torch.npu.current_stream())
-+                packed_values[dtype_name] = values
++                transfer(values, src=0, stream=torch.npu.current_stream())
++            packed_values[dtype_name] = values
 +
 +        if update_info.checksum is not None:
 +            if len(dtype_order) != 1:
 +                raise ValueError("Checksummed sparse HCCL flushes must use one dtype")
 +            positions = packed_indices.contiguous().view(torch.uint8)
 +            values = packed_values[dtype_order[0]]
-+            with timer.measure("checksum") if timer else nullcontext():
-+                got = _delta_checksum(
-+                    positions,
-+                    values,
-+                    algorithm=update_info.checksum_algorithm or "torch_hash_v1",
-+                )
++            got = _delta_checksum(
++                positions,
++                values,
++                algorithm=update_info.checksum_algorithm or "torch_hash_v1",
++            )
 +            if got != update_info.checksum:
 +                raise RuntimeError(
 +                    "Sparse HCCL checksum mismatch: "
@@ -845,16 +839,9 @@ index 000000000..1a1bff8d2
 +                value_offsets[dtype_name] = value_offset + num_updates
 +                named_tensors.append((name, tensor))
 +            if update_info.verify:
-+                with timer.measure("verify_dense_replay") if timer else nullcontext():
-+                    _verify_dense_load(self.model, named_tensors)
++                _verify_dense_load(self.model, named_tensors)
 +            else:
-+                with timer.measure("write") if timer else nullcontext():
-+                    self.model.load_weights(named_tensors)
-+            if timer:
-+                logging.getLogger(__name__).warning(
-+                    "SPARSE-STAGES receiver rank=%d synchronized_wall_seconds=%s",
-+                    self.model_update_group.rank, timer.seconds,
-+                )
++                self.model.load_weights(named_tensors)
 +            return
 +
 +        index_offset = 0
@@ -886,19 +873,12 @@ index 000000000..1a1bff8d2
 +                    expected_shape,
 +                )
 +            )
-+        with timer.measure("write") if timer else nullcontext():
-+            apply_sparse_hf_patches_with_loader(
-+                self.model,
-+                patches,
-+                direct_moe=True,
-+                verify=update_info.verify,
-+                timer=timer,
-+            )
-+        if timer:
-+            logging.getLogger(__name__).warning(
-+                "SPARSE-STAGES receiver rank=%d synchronized_wall_seconds=%s",
-+                self.model_update_group.rank, timer.seconds,
-+            )
++        apply_sparse_hf_patches_with_loader(
++            self.model,
++            patches,
++            direct_moe=True,
++            verify=update_info.verify,
++        )
 +        if update_info.verify:
 +            logging.getLogger(__name__).info(
 +                "SPARSE-VERIFY local_patches=%d mismatch_elems=0", len(patches)
@@ -1111,10 +1091,10 @@ index 000000000..1a1bff8d2
 +    return False
 diff --git a/vllm_ascend/distributed/weight_transfer/sparse_weight_patch.py b/vllm_ascend/distributed/weight_transfer/sparse_weight_patch.py
 new file mode 100644
-index 000000000..e783d62e2
+index 000000000..7160d5970
 --- /dev/null
 +++ b/vllm_ascend/distributed/weight_transfer/sparse_weight_patch.py
-@@ -0,0 +1,696 @@
+@@ -0,0 +1,692 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +"""Transport-independent sparse runtime weight patch operations."""
@@ -1122,7 +1102,7 @@ index 000000000..e783d62e2
 +import logging
 +import re
 +from collections.abc import Iterator
-+from contextlib import contextmanager, nullcontext
++from contextlib import contextmanager
 +from dataclasses import dataclass
 +from math import prod
 +from typing import Any
@@ -1231,7 +1211,6 @@ index 000000000..e783d62e2
 +    chunk_bytes: int = 512 * 1024 * 1024,
 +    direct_moe: bool = False,
 +    verify: bool = False,
-+    timer=None,
 +) -> None:
 +    """SGLang delta_loader semantics using vLLM's real TP-aware loader.
 +
@@ -1239,12 +1218,11 @@ index 000000000..e783d62e2
 +    Duplicate names (a parameter split across wire pieces) seal a load chunk
 +    because model loaders may group their input by parameter name.
 +    """
-+    with timer.measure("validate") if timer else nullcontext():
-+        _validate_sparse_hf_patches(patches)
++    _validate_sparse_hf_patches(patches)
 +    if direct_moe:
-+        patches = _apply_direct_moe_patches(model, patches, verify=verify, timer=timer)
++        patches = _apply_direct_moe_patches(model, patches, verify=verify)
 +
-+    with _masked_copy(verify=verify, timer=timer):
++    with _masked_copy(verify=verify):
 +        chunk, names, nbytes = [], set(), 0
 +        for patch, shape in patches:
 +            size = prod(shape) * patch.values.element_size()
@@ -1276,7 +1254,7 @@ index 000000000..e783d62e2
 +    return target, selected
 +
 +
-+def _apply_moe_group(param, entries, shape, tp_rank, tp_size, down, *, verify=False, timer=None):
++def _apply_moe_group(param, entries, shape, tp_rank, tp_size, down, *, verify=False):
 +    """Compact once per runtime weight, preserving HF absolute-copy semantics.
 +
 +    SGLang avoids per-expert dynamic boolean indexing in its masked loader.
@@ -1314,12 +1292,11 @@ index 000000000..e783d62e2
 +    flat = param.data.view(-1)
 +    flat.index_copy_(0, local_indices, local_values)
 +    if verify:
-+        with timer.measure("verify") if timer else nullcontext():
-+            if not torch.equal(flat.index_select(0, local_indices), local_values):
-+                raise RuntimeError("Sparse MoE rank-local verification failed")
++        if not torch.equal(flat.index_select(0, local_indices), local_values):
++            raise RuntimeError("Sparse MoE rank-local verification failed")
 +
 +
-+def _apply_direct_moe_patches(model, patches, *, verify=False, timer=None):
++def _apply_direct_moe_patches(model, patches, *, verify=False,):
 +    # Exact implementation and layout guards: unfamiliar models, quantization,
 +    # EP/EPLB, padded or NZ storage retain the SGLang-style native loader.
 +    if getattr(getattr(model, "config", None), "model_type", None) != "qwen3_moe":
@@ -1395,7 +1372,7 @@ index 000000000..e783d62e2
 +        group[1].append((patch, local_expert, projection))
 +    for param, entries, shape, tp_rank, tp_size, down in grouped.values():
 +        _apply_moe_group(
-+            param, entries, shape, tp_rank, tp_size, down, verify=verify, timer=timer
++            param, entries, shape, tp_rank, tp_size, down, verify=verify
 +        )
 +    logging.getLogger(__name__).info(
 +        "Sparse MoE apply: direct_patches=%d runtime_parameters=%d fallback_patches=%d",
@@ -1787,7 +1764,7 @@ index 000000000..e783d62e2
 +
 +
 +@contextmanager
-+def _masked_copy(*, verify: bool = False, timer=None) -> Iterator[None]:
++def _masked_copy(*, verify: bool = False) -> Iterator[None]:
 +    original_copy = torch.Tensor.copy_
 +
 +    def masked_copy(self: torch.Tensor, src: torch.Tensor, *args, **kwargs):
@@ -1800,9 +1777,8 @@ index 000000000..e783d62e2
 +            mask = ~torch.isnan(cast)
 +            result = original_copy(self, torch.where(mask, cast, self))
 +            if verify:
-+                with timer.measure("verify") if timer else nullcontext():
-+                    if bool(mask.any()) and not torch.equal(self[mask], cast[mask]):
-+                        raise RuntimeError("Sparse loader rank-local verification failed")
++                if bool(mask.any()) and not torch.equal(self[mask], cast[mask]):
++                    raise RuntimeError("Sparse loader rank-local verification failed")
 +            return result
 +        return original_copy(self, src, *args, **kwargs)
 +
@@ -2411,10 +2387,10 @@ index 000000000..fbf1d8e23
 +    assert per_rank[1][2].indices.tolist() == [2, 3, 10, 11]
 diff --git a/tests/ut/distributed/weight_transfer/test_sparse_hccl_engine.py b/tests/ut/distributed/weight_transfer/test_sparse_hccl_engine.py
 new file mode 100644
-index 000000000..5b3adf174
+index 000000000..db639d6c6
 --- /dev/null
 +++ b/tests/ut/distributed/weight_transfer/test_sparse_hccl_engine.py
-@@ -0,0 +1,283 @@
+@@ -0,0 +1,266 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +
@@ -2523,23 +2499,6 @@ index 000000000..5b3adf174
 +def test_update_info_accepts_dense_seed():
 +    info = make_info(encoding="dense", num_updates_list=[4])
 +    assert info.encoding == "dense"
-+
-+
-+@pytest.mark.parametrize("profile", [False, True])
-+def test_stage_timing_is_opt_in_and_preserves_dense_weights(monkeypatch, profile):
-+    engine = make_engine()
-+    engine.device = torch.device("cpu")
-+    engine.model_update_group = SimpleNamespace(
-+        rank=1, broadcast=lambda tensor, **kwargs: tensor.copy_(torch.arange(4.)),
-+    )
-+    sync = MagicMock()
-+    monkeypatch.setattr(torch.npu, "synchronize", sync)
-+    monkeypatch.setattr(torch.npu, "current_stream", lambda: None)
-+    info = make_info(encoding="dense", num_updates_list=[4], profile=profile)
-+    assert make_info().profile is False
-+    engine.receive_weights(info)
-+    assert torch.equal(engine.model.weight, torch.arange(4.))
-+    assert (sync.call_count > 0) == profile
 +
 +
 +def test_update_info_rejects_unknown_encoding():
@@ -2838,93 +2797,3 @@ index a09ce3998..29c43865e 100644
 +
      def hcclCommDestroy(self, comm: hcclComm_t) -> None:
          self.HCCL_CHECK(self._funcs["HcclCommDestroy"](comm))
-diff --git a/tests/ut/distributed/weight_transfer/test_stage_timer.py b/tests/ut/distributed/weight_transfer/test_stage_timer.py
-new file mode 100644
-index 000000000..caf873894
---- /dev/null
-+++ b/tests/ut/distributed/weight_transfer/test_stage_timer.py
-@@ -0,0 +1,38 @@
-+# SPDX-License-Identifier: Apache-2.0
-+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-+from unittest.mock import Mock
-+
-+import pytest
-+
-+from vllm_ascend.distributed.weight_transfer import stage_timer
-+
-+
-+def test_nested_stages_exclude_child_time(monkeypatch):
-+    ticks = iter([0.0, 1.0, 3.0, 5.0])
-+    monkeypatch.setattr(stage_timer, "perf_counter", lambda: next(ticks))
-+    synchronize = Mock()
-+    timer = stage_timer.StageTimer(synchronize)
-+    with timer.measure("write"):
-+        with timer.measure("verify"):
-+            pass
-+    assert timer.seconds == {"verify": 2.0, "write": 3.0}
-+    assert synchronize.call_count == 4
-+
-+
-+def test_exception_unwinds_stage_stack():
-+    timer = stage_timer.StageTimer(lambda: None)
-+    with pytest.raises(ValueError):
-+        with timer.measure("verify"):
-+            raise ValueError("mismatch")
-+    assert timer._stack == []
-+    assert timer.seconds["verify"] >= 0
-+
-+
-+def test_device_sync_failure_also_unwinds_stage_stack():
-+    synchronize = Mock(side_effect=[None, RuntimeError("device sync failed")])
-+    timer = stage_timer.StageTimer(synchronize)
-+    with pytest.raises(RuntimeError, match="device sync failed"):
-+        with timer.measure("transfer"):
-+            pass
-+    assert timer._stack == []
-+    assert timer.seconds["transfer"] >= 0
-diff --git a/vllm_ascend/distributed/weight_transfer/stage_timer.py b/vllm_ascend/distributed/weight_transfer/stage_timer.py
-new file mode 100644
-index 000000000..8157620f5
---- /dev/null
-+++ b/vllm_ascend/distributed/weight_transfer/stage_timer.py
-@@ -0,0 +1,40 @@
-+# SPDX-License-Identifier: Apache-2.0
-+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-+"""Opt-in, synchronized wall timing for weight synchronization diagnostics."""
-+
-+from collections.abc import Callable, Iterator
-+from contextlib import contextmanager
-+from time import perf_counter
-+
-+
-+class StageTimer:
-+    """Non-overlapping accumulated seconds; synchronization is profiling-only.
-+
-+    The caller constructs this object only when profiling is requested. Stages
-+    include CPU work and device completion, not just kernel execution time.
-+    Nested stages are excluded from the parent, so iterator export does not
-+    accidentally include downstream checksum/transport work.
-+    """
-+
-+    def __init__(self, synchronize: Callable[[], None]) -> None:
-+        self.synchronize = synchronize
-+        self.seconds: dict[str, float] = {}
-+        self._stack: list[list[float]] = []
-+
-+    @contextmanager
-+    def measure(self, stage: str) -> Iterator[None]:
-+        self.synchronize()
-+        start = perf_counter()
-+        frame = [0.0]
-+        self._stack.append(frame)
-+        try:
-+            yield
-+        finally:
-+            try:
-+                self.synchronize()
-+            finally:
-+                elapsed = perf_counter() - start
-+                self._stack.pop()
-+                self.seconds[stage] = self.seconds.get(stage, 0.0) + elapsed - frame[0]
-+                if self._stack:
-+                    self._stack[-1][0] += elapsed
