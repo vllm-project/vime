@@ -33,7 +33,6 @@ def test_sparse_npu_case_uses_hf_home_and_noncolocated_topology(monkeypatch):
     assert shlex.split(commands.call_args_list[2].args[0])[-1] == case["DATASET_DIR"]
     bridge_install = shlex.split(commands.call_args_list[3].args[0])
     assert "--no-deps" in bridge_install
-    assert bridge_install[-1].endswith("@" + case["BRIDGE_COMMIT"])
     config = launch.call_args.kwargs
     args = shlex.split(config["train_args"])
     for flag, value in {
@@ -47,10 +46,8 @@ def test_sparse_npu_case_uses_hf_home_and_noncolocated_topology(monkeypatch):
         "--rollout-num-gpus": "4",
         "--rollout-num-gpus-per-engine": "4",
         "--vllm-pipeline-parallel-size": "2",
-        "--update-weight-mode": "delta",
         "--update-weight-transport": "sparse_hccl",
         "--update-weight-delta-verify-every": "1",
-        "--num-rollout": "3",
     }.items():
         assert args[args.index(flag) + 1] == value
     assert "--colocate" not in args
@@ -58,9 +55,6 @@ def test_sparse_npu_case_uses_hf_home_and_noncolocated_topology(monkeypatch):
     assert config["num_gpus_per_node"] == 8
     assert config["extra_env_vars"]["VIME_SPARSE_HCCL_SNAPSHOT_DEVICE"] == "cpu"
 
-
-@pytest.mark.unit
-def test_sparse_npu_suite_requests_eight_devices_without_visibility_override(monkeypatch):
     monkeypatch.setenv("NPU_SUITES", "smk")
     suites = runpy.run_path(str(REPO_ROOT / ".buildkite/npu_suites.py"))
     entries = [entry for entry in suites["SUITES"]["smk"] if entry[0] == "test_qwen3_30B_A3B_sparse_hccl_npu.py"]

@@ -1,23 +1,30 @@
 """Run with torchrun --nproc-per-node=4 on four free NPUs."""
 
-import importlib.util
 import os
+import sys
 from datetime import timedelta
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
 import torch_npu  # noqa: F401
 
+# Prefer this checkout over another editable installation when launched by torchrun.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from vime.backends.megatron_utils.update_weight.delta_sync.sparse_gather import (
+    GatherWorkspace,
+    gather_slot_entries_to_rank0,
+)
+
 
 def main():
-    source = os.environ["SPARSE_GATHER_CANDIDATE"]
-    spec = importlib.util.spec_from_file_location("candidate_gather", source)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
     torch.npu.set_device(int(os.environ["LOCAL_RANK"]))
     dist.init_process_group("hccl", timeout=timedelta(seconds=120))
+    if dist.get_world_size() != 4:
+        dist.destroy_process_group()
+        raise ValueError("This regression requires exactly four ranks (--nproc-per-node=4)")
     rank = dist.get_rank()
-    workspace = module.GatherWorkspace()
+    workspace = GatherWorkspace()
     preserved = []
     cases = [
         [[0, 0, 0], [0, 0, 0], [2, 1, 0], [0, 0, 0]],
@@ -38,7 +45,7 @@ def main():
             indices = torch.stack([indices, indices], dim=1)[:, 0]
             values = torch.stack([values, values], dim=1)[:, 0]
             for budget in (None, 12):
-                result = module.gather_slot_entries_to_rank0(
+                result = gather_slot_entries_to_rank0(
                     indices,
                     values,
                     torch.tensor(counts[rank]),
