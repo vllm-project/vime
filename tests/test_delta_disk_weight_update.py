@@ -20,9 +20,8 @@ from vime.utils.disk_delta import checksum, make_tensor_reader
 MODEL_NAME = "Qwen3-0.6B"
 MODEL_TYPE = "qwen3-0.6B"
 NUM_GPUS = 4
-TEST_ROOT = "/root"
-HF_CKPT = f"{TEST_ROOT}/models/{MODEL_NAME}"
-DATASET_DIR = f"{TEST_ROOT}/datasets/gsm8k"
+HF_CKPT = f"/root/models/{MODEL_NAME}"
+DATASET_DIR = "/root/datasets/gsm8k"
 TORCH_DIST_CKPT = f"/dev/shm/{MODEL_NAME}_torch_dist"
 
 
