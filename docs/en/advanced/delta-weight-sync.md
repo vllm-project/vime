@@ -34,7 +34,7 @@ unsupported direct layouts use the loader fallback. Payloads are still broadcast
 PP/EP ownership filtering does not imply rank-targeted network traffic.
 
 For Qwen3-30B-A3B with training and rollout TP2/PP2/EP2, use
-`scripts/run-qwen3-30B-A3B-sparse-hccl-tp2-pp2-ep2.sh`. Set `MODEL_PATH`,
+`scripts/run-qwen3-30B-A3B-sparse-hccl.sh`. Set `MODEL_PATH`,
 `PROMPT_DATA_PATH`, and the dependency `PYTHONPATH` for your environment. The script
 uses four training and four rollout devices and enables sparse verification every update.
 

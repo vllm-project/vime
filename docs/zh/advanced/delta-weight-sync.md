@@ -29,7 +29,7 @@ NPU 镜像补丁包含 `sparse_hccl` 接收端注册和模块。接收端先过�
 PP/EP 所属关系过滤不等于按 rank 定向传输。
 
 Qwen3-30B-A3B 训练和 rollout 均为 TP2/PP2/EP2 时，可使用
-`scripts/run-qwen3-30B-A3B-sparse-hccl-tp2-pp2-ep2.sh`。按环境设置 `MODEL_PATH`、
+`scripts/run-qwen3-30B-A3B-sparse-hccl.sh`。按环境设置 `MODEL_PATH`、
 `PROMPT_DATA_PATH` 及依赖的 `PYTHONPATH`。脚本使用四张训练卡和四张 rollout 卡，
 每次稳态更新均开启稀疏写入校验。
 
