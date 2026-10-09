@@ -1,4 +1,11 @@
-"""Run with torchrun --nproc-per-node=4 on four free NPUs."""
+"""Exercise the repository's gather implementation over real four-rank HCCL.
+
+Check FP32/BF16 empty/unequal payloads, noncontiguous inputs, split transfers and
+returned-buffer stability after workspace reuse across 20 cases. Requires four
+free NPUs and the CANN/VIME environment; ordinary pytest does not run this test.
+
+Run: torchrun --nproc-per-node=4 tests/sparse_hccl/test_npu_sparse_gather_regression.py
+"""
 
 import os
 import sys

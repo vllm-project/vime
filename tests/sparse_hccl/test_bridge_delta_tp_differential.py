@@ -11,7 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""TP>1 differential oracle for the comm-stubbed mcore probe.
+"""Compare sparse reconstruction with an independent real Bridge full export.
+
+Guard TP/PP/EP coordinate conversion, global parameter ordering, expert mappings
+and snapshot reconstruction using tiny models and bitwise tensor comparisons.
+Run with torchrun in the Megatron-Bridge environment, not ordinary pytest.
+
+TP>1 differential oracle for the comm-stubbed mcore probe.
 
 For every conversion task of a tiny model the REAL ``megatron_to_hf`` (true
 collectives, run in lockstep by all ranks) must equal the probe assembly:

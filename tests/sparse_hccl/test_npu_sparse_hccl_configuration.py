@@ -1,4 +1,9 @@
-"""Check CI paths/topology without downloading weights or starting Ray."""
+"""Guard the 30B sparse smoke test's paths and CI topology without running it.
+
+Mock downloads/launching to check HF_HOME paths, pinned Bridge setup, TP2/PP2/EP2,
+separate training/rollout resources, sparse verification and the npu-8 suite entry.
+Run with pytest; this validates configuration, not real-model correctness.
+"""
 
 import importlib
 import runpy

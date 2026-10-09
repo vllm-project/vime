@@ -1,4 +1,10 @@
-"""CPU contract tests for the actual Ascend loader and delta exporter."""
+"""Check delta application against complete rank-local reference weights.
+
+Cover repeated/split parameter names, successive updates and empty patches;
+ensure untouched values remain unchanged and invalid bounds fail before writes.
+Also reject CPU backup tensors as live diff sources and detect missed updates.
+Run with pytest in an environment providing the real Ascend loader modules.
+"""
 
 from types import SimpleNamespace
 

@@ -1,4 +1,9 @@
-"""Process-local tests adapted from verl's sharded delta suite."""
+"""Check sparse delta encoding and trainer-side payload aggregation.
+
+Verify bit-exact changed values, empty deltas and uint64 checksums, then use
+transport mocks to check actual HCCL peer lengths, empty peers, padded fallback
+and ownership of returned buffers. Run with pytest; no real HCCL communication.
+"""
 
 from types import SimpleNamespace
 

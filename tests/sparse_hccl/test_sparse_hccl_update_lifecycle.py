@@ -1,4 +1,10 @@
-"""Verify sparse-update scheduling and fail-closed generation lifecycle."""
+"""Guard sparse update scheduling, buffer reuse and failure recovery.
+
+Verify periodic local checks without dense replay, workspace/bucket reuse and
+no added steady-update synchronization. Partial-write or finish failures must
+keep the updater unusable; failures before transmission may recover safely.
+Run with pytest using mocked communication and rollout workers.
+"""
 
 from types import SimpleNamespace
 
