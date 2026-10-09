@@ -5,14 +5,40 @@ that changed between two syncs, instead of a full checkpoint each time. It targe
 training/inference disaggregation across clusters or datacenters, where writing the whole actor
 every sync is the dominant cost.
 
-It is **disk-transport only**. The trainer publishes each sync as a canonical HF checkpoint
-directory; the engine's `/pull_weights` endpoint (shipped in vime's vllm patch) fans the
-apply out to **every host the engine spans** and verifies it, then the engine reloads the
-patched local checkpoint through the **ordinary** `update_weights_from_disk` endpoint. vime
-only ever talks to one endpoint per engine, so multi-node serving and external rollout engines
-need nothing extra on the vime side.
+Two transports are available: `disk` for shared-storage and cross-cluster deployments, and
+`sparse_hccl` for online transfer between Ascend trainers and vLLM-Ascend rollout workers.
+Sparse HCCL uses a values-only dense seed on the first sync and int32 positions plus values on
+every later sync.
 
 ## Configuration
+
+Sparse HCCL:
+
+```bash
+--update-weight-mode delta
+--update-weight-transport sparse_hccl
+--update-weight-delta-batch-gather 32
+--update-weight-delta-verify-every 0
+```
+
+This path requires non-colocated execution and unquantized rollout weights; TP2/PP2/EP2 requires the matching vLLM-Ascend sparse receiver.
+The gather trigger is based only on globally ordered parameter-row counts, keeping collective
+order identical on every Megatron rank. Set `verify-every` to a positive K to verify the locally applied sparse elements every K steady updates.
+
+Parallel rollout:
+
+The NPU image patch includes the `sparse_hccl` receiver registration and modules.
+The receiver filters PP-owned layers, maps global expert IDs through the Ascend EP map,
+and then applies the TP load plan before writing local parameter elements. Unknown or
+unsupported direct layouts use the loader fallback. Payloads are still broadcast;
+PP/EP ownership filtering does not imply rank-targeted network traffic.
+
+For Qwen3-30B-A3B with training and rollout TP2/PP2/EP2, use
+`scripts/run-qwen3-30B-A3B-sparse-hccl.sh`. Set `MODEL_PATH`,
+`PROMPT_DATA_PATH`, and the dependency `PYTHONPATH` for your environment. The script
+uses four training and four rollout devices and enables sparse verification every update.
+
+Disk transport configuration:
 
 ```bash
 --update-weight-mode delta
@@ -22,6 +48,8 @@ need nothing extra on the vime side.
 --update-weight-delta-encoding xor          # or: overwrite
 --update-weight-delta-checksum xxh3-128     # or: blake3, adler32
 ```
+
+Table 1: Disk delta transport flags and their roles.
 
 | Flag | Role |
 |---|---|
@@ -33,6 +61,16 @@ need nothing extra on the vime side.
 Deltas are always zstd-compressed (level 1); profiling showed it dominates lz4 / gzip / snappy / brotli on both wire size and decompress speed for this data, so it is not a knob.
 
 ## How it works
+
+### Sparse HCCL
+
+1. The first sync streams VIME's existing full Megatron-to-HF export as a values-only dense seed. Each rank captures its local Megatron shard snapshot in host memory only after that seed completes.
+2. Later syncs bit-diff each current shard against its snapshot through an integer view, then advance the snapshot immediately.
+3. A NaN probe maps local changes to final HF names and global flat indices. PP non-owners, DP/CP replicas, and unchanged ranks retain zero-count lockstep directory rows.
+4. TP, EP/ETP, and PP/VPP ranks execute batched variable-length gathers over one common directory; the wire master assembles verl-compatible `DeltaParam`/`DeltaFlush` manifests.
+5. `SparseHCCLWeightTransferEngine` verifies the checksum. Dense seeds use normal `model.load_weights()`, while sparse deltas reuse vLLM-Ascend's TP-aware HF patch loader to update live weights in place.
+
+### Disk transport
 
 1. **Seed.** On the first sync the trainer captures a CPU snapshot of every parameter — seeded
    from `--hf-checkpoint`, which is exactly what each rollout host materializes its local
