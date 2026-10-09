@@ -1,0 +1,77 @@
+"""Non-colocated Qwen3-MoE sparse synchronization with TP2/PP2/EP2."""
+
+import os
+import shlex
+import sys
+
+import vime.utils.external_utils.command_utils as U
+
+TEST_ROOT = os.environ.get("HF_HOME") or "/root"
+MODEL_DIR = f"{TEST_ROOT}/models/Qwen3-30B-A3B"
+DATASET_DIR = f"{TEST_ROOT}/datasets/dapo-math-17k"
+BRIDGE_COMMIT = "3fd3768045422d0aa5c97e90a4e6c659aea9acb9"
+
+
+def prepare():
+    U.exec_command(f"mkdir -p {shlex.quote(f'{TEST_ROOT}/models')} {shlex.quote(f'{TEST_ROOT}/datasets')}")
+    U.exec_command(f"hf download Qwen/Qwen3-30B-A3B --local-dir {shlex.quote(MODEL_DIR)}")
+    U.exec_command("hf download --repo-type dataset zhuzilin/dapo-math-17k " f"--local-dir {shlex.quote(DATASET_DIR)}")
+    # The reusable NPU image need not include Bridge; do not upgrade its torch stack.
+    U.exec_command(
+        f"{shlex.quote(sys.executable)} -m pip install --no-deps "
+        f"git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@{BRIDGE_COMMIT}"
+    )
+
+
+def execute():
+    model_dir = shlex.quote(MODEL_DIR)
+    prompt_data = shlex.quote(f"{DATASET_DIR}/dapo-math-17k.jsonl")
+    train_args = (
+        f"--hf-checkpoint {model_dir} --load {model_dir} --ref-load {model_dir} --no-load-optim "
+        f"--prompt-data {prompt_data} "
+        "--input-key prompt --label-key label --apply-chat-template --rollout-shuffle "
+        "--rm-type deepscaler --num-rollout 3 --rollout-batch-size 2 --n-samples-per-prompt 4 "
+        "--rollout-max-response-len 64 --rollout-temperature 1 --global-batch-size 8 --balance-data "
+        "--tensor-model-parallel-size 2 --sequence-parallel --pipeline-model-parallel-size 2 "
+        "--context-parallel-size 1 --expert-model-parallel-size 2 --expert-tensor-parallel-size 1 "
+        "--moe-token-dispatcher-type alltoall "
+        "--recompute-granularity full --recompute-method uniform --recompute-num-layers 1 "
+        "--use-dynamic-batch-size --max-tokens-per-gpu 8192 --micro-batch-size 1 "
+        "--advantage-estimator grpo --use-kl-loss --kl-loss-coef 0.00 --kl-loss-type low_var_kl "
+        "--entropy-coef 0.001 --eps-clip 0.2 --eps-clip-high 0.28 "
+        "--optimizer adam --lr 1e-6 --lr-decay-style constant --weight-decay 0.1 "
+        "--adam-beta1 0.9 --adam-beta2 0.98 --optimizer-cpu-offload "
+        "--overlap-cpu-optimizer-d2h-h2d --use-precision-aware-optimizer "
+        "--rollout-num-gpus-per-engine 4 --vllm-pipeline-parallel-size 2 "
+        "--vllm-enable-expert-parallel --vllm-expert-placement-strategy linear "
+        "--vllm-gpu-memory-utilization 0.6 --vllm-enforce-eager "
+        "--vllm-additional-config '{\"weight_nz_mode\":0}' "
+        "--update-weight-mode delta --update-weight-transport sparse_hccl "
+        "--update-weight-delta-batch-diff 32 --update-weight-delta-batch-gather 32 "
+        "--update-weight-delta-verify-every 1 "
+        "--attention-dropout 0.0 --hidden-dropout 0.0 --accumulate-allreduce-grads-in-fp32 "
+        "--attention-softmax-in-fp32 --attention-backend flash --use-flash-attn "
+        "--no-gradient-accumulation-fusion --train-backend megatron "
+        "--actor-num-nodes 1 --actor-num-gpus-per-node 4 --rollout-num-gpus 4 --ci-test "
+    )
+    U.execute_train(
+        train_args=train_args,
+        num_gpus_per_node=8,
+        megatron_model_type="qwen3-30B-A3B",
+        extra_env_vars={
+            "DISABLE_L2_CACHE": "1",
+            "VLLM_USE_AOT_COMPILE": "0",
+            "VIME_SPARSE_HCCL_SNAPSHOT_DEVICE": "cpu",
+        },
+    )
+
+
+def main():
+    prepare()
+    for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+        os.environ.pop(proxy_var, None)
+    execute()
+
+
+if __name__ == "__main__":
+    main()
