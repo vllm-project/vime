@@ -2,25 +2,18 @@
 
 import os
 import shlex
-import sys
 
 import vime.utils.external_utils.command_utils as U
 
 TEST_ROOT = os.environ.get("HF_HOME") or "/root"
 MODEL_DIR = f"{TEST_ROOT}/models/Qwen3-30B-A3B"
 DATASET_DIR = f"{TEST_ROOT}/datasets/dapo-math-17k"
-BRIDGE_COMMIT = "3fd3768045422d0aa5c97e90a4e6c659aea9acb9"
 
 
 def prepare():
     U.exec_command(f"mkdir -p {shlex.quote(f'{TEST_ROOT}/models')} {shlex.quote(f'{TEST_ROOT}/datasets')}")
     U.exec_command(f"hf download Qwen/Qwen3-30B-A3B --local-dir {shlex.quote(MODEL_DIR)}")
     U.exec_command("hf download --repo-type dataset zhuzilin/dapo-math-17k " f"--local-dir {shlex.quote(DATASET_DIR)}")
-    # The reusable NPU image need not include Bridge; do not upgrade its torch stack.
-    U.exec_command(
-        f"{shlex.quote(sys.executable)} -m pip install --no-deps "
-        f"git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@{BRIDGE_COMMIT}"
-    )
 
 
 def execute():
