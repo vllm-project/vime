@@ -26,33 +26,110 @@ def prepare():
 def execute():
     model_dir = shlex.quote(MODEL_DIR)
     prompt_data = shlex.quote(f"{DATASET_DIR}/dapo-math-17k.jsonl")
-    train_args = (
-        f"--hf-checkpoint {model_dir} --load {model_dir} --ref-load {model_dir} --no-load-optim "
+    checkpoint_args = (
+        f"--hf-checkpoint {model_dir} " f"--load {model_dir} " f"--ref-load {model_dir} " "--no-load-optim "
+    )
+
+    rollout_args = (
         f"--prompt-data {prompt_data} "
-        "--input-key prompt --label-key label --apply-chat-template --rollout-shuffle "
-        "--rm-type deepscaler --num-rollout 3 --rollout-batch-size 2 --n-samples-per-prompt 4 "
-        "--rollout-max-response-len 64 --rollout-temperature 1 --global-batch-size 8 --balance-data "
-        "--tensor-model-parallel-size 2 --sequence-parallel --pipeline-model-parallel-size 2 "
-        "--context-parallel-size 1 --expert-model-parallel-size 2 --expert-tensor-parallel-size 1 "
+        "--input-key prompt "
+        "--label-key label "
+        "--apply-chat-template "
+        "--rollout-shuffle "
+        "--rm-type deepscaler "
+        "--num-rollout 3 "
+        "--rollout-batch-size 2 "
+        "--n-samples-per-prompt 4 "
+        "--rollout-max-response-len 64 "
+        "--rollout-temperature 1 "
+        "--global-batch-size 8 "
+        "--balance-data "
+    )
+
+    parallel_args = (
+        "--tensor-model-parallel-size 2 "
+        "--sequence-parallel "
+        "--pipeline-model-parallel-size 2 "
+        "--context-parallel-size 1 "
+        "--expert-model-parallel-size 2 "
+        "--expert-tensor-parallel-size 1 "
         "--moe-token-dispatcher-type alltoall "
-        "--recompute-granularity full --recompute-method uniform --recompute-num-layers 1 "
-        "--use-dynamic-batch-size --max-tokens-per-gpu 8192 --micro-batch-size 1 "
-        "--advantage-estimator grpo --use-kl-loss --kl-loss-coef 0.00 --kl-loss-type low_var_kl "
-        "--entropy-coef 0.001 --eps-clip 0.2 --eps-clip-high 0.28 "
-        "--optimizer adam --lr 1e-6 --lr-decay-style constant --weight-decay 0.1 "
-        "--adam-beta1 0.9 --adam-beta2 0.98 --optimizer-cpu-offload "
-        "--overlap-cpu-optimizer-d2h-h2d --use-precision-aware-optimizer "
-        "--rollout-num-gpus-per-engine 4 --vllm-pipeline-parallel-size 2 "
-        "--vllm-enable-expert-parallel --vllm-expert-placement-strategy linear "
-        "--vllm-gpu-memory-utilization 0.6 --vllm-enforce-eager "
+        "--recompute-granularity full "
+        "--recompute-method uniform "
+        "--recompute-num-layers 1 "
+        "--use-dynamic-batch-size "
+        "--max-tokens-per-gpu 8192 "
+        "--micro-batch-size 1 "
+    )
+
+    grpo_args = (
+        "--advantage-estimator grpo "
+        "--use-kl-loss "
+        "--kl-loss-coef 0.00 "
+        "--kl-loss-type low_var_kl "
+        "--entropy-coef 0.001 "
+        "--eps-clip 0.2 "
+        "--eps-clip-high 0.28 "
+    )
+
+    optimizer_args = (
+        "--optimizer adam "
+        "--lr 1e-6 "
+        "--lr-decay-style constant "
+        "--weight-decay 0.1 "
+        "--adam-beta1 0.9 "
+        "--adam-beta2 0.98 "
+        "--optimizer-cpu-offload "
+        "--overlap-cpu-optimizer-d2h-h2d "
+        "--use-precision-aware-optimizer "
+    )
+
+    vllm_args = (
+        "--rollout-num-gpus-per-engine 4 "
+        "--vllm-pipeline-parallel-size 2 "
+        "--vllm-enable-expert-parallel "
+        "--vllm-expert-placement-strategy linear "
+        "--vllm-gpu-memory-utilization 0.6 "
+        "--vllm-enforce-eager "
         "--vllm-additional-config '{\"weight_nz_mode\":0}' "
-        "--update-weight-mode delta --update-weight-transport sparse_hccl "
-        "--update-weight-delta-batch-diff 32 --update-weight-delta-batch-gather 32 "
+    )
+
+    update_weight_args = (
+        "--update-weight-mode delta "
+        "--update-weight-transport sparse_hccl "
+        "--update-weight-delta-batch-diff 32 "
+        "--update-weight-delta-batch-gather 32 "
         "--update-weight-delta-verify-every 1 "
-        "--attention-dropout 0.0 --hidden-dropout 0.0 --accumulate-allreduce-grads-in-fp32 "
-        "--attention-softmax-in-fp32 --attention-backend flash --use-flash-attn "
-        "--no-gradient-accumulation-fusion --train-backend megatron "
-        "--actor-num-nodes 1 --actor-num-gpus-per-node 4 --rollout-num-gpus 4 --ci-test "
+    )
+
+    model_args = (
+        "--attention-dropout 0.0 "
+        "--hidden-dropout 0.0 "
+        "--accumulate-allreduce-grads-in-fp32 "
+        "--attention-softmax-in-fp32 "
+        "--attention-backend flash "
+        "--use-flash-attn "
+        "--no-gradient-accumulation-fusion "
+    )
+
+    runtime_args = (
+        "--train-backend megatron "
+        "--actor-num-nodes 1 "
+        "--actor-num-gpus-per-node 4 "
+        "--rollout-num-gpus 4 "
+        "--ci-test "
+    )
+
+    train_args = (
+        checkpoint_args
+        + rollout_args
+        + parallel_args
+        + grpo_args
+        + optimizer_args
+        + vllm_args
+        + update_weight_args
+        + model_args
+        + runtime_args
     )
     U.execute_train(
         train_args=train_args,

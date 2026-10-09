@@ -60,13 +60,13 @@ def test_sparse_npu_case_uses_hf_home_and_noncolocated_topology(monkeypatch):
 
 
 @pytest.mark.unit
-def test_sparse_npu_suite_requests_eight_visible_devices(monkeypatch):
+def test_sparse_npu_suite_requests_eight_devices_without_visibility_override(monkeypatch):
     monkeypatch.setenv("NPU_SUITES", "smk")
     suites = runpy.run_path(str(REPO_ROOT / ".buildkite/npu_suites.py"))
     entries = [entry for entry in suites["SUITES"]["smk"] if entry[0] == "test_qwen3_30B_A3B_sparse_hccl_npu.py"]
     assert len(entries) == 1
+    assert entries[0][3] == {}
     step = suites["npu_step"]("smk", *entries[0])
     assert step["agents"]["resource_class"] == "npu-8"
-    assert step["env"]["ASCEND_RT_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7"
     assert step["env"]["HF_HOME"] == "/root/.cache/huggingface"
     assert "python tests/test_qwen3_30B_A3B_sparse_hccl_npu.py" in step["command"]
