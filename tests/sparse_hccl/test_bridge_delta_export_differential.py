@@ -17,7 +17,7 @@ Guard TP/PP/EP coordinate conversion, global parameter ordering, expert mappings
 and snapshot reconstruction using tiny models and bitwise tensor comparisons.
 Run with torchrun in the Megatron-Bridge environment, not ordinary pytest.
 
-TP>1 differential oracle for the comm-stubbed mcore probe.
+Differential export oracle for the comm-stubbed mcore probe under TP/PP/EP.
 
 For every conversion task of a tiny model the REAL ``megatron_to_hf`` (true
 collectives, run in lockstep by all ranks) must equal the probe assembly:
@@ -29,8 +29,8 @@ rearrange rather than blend) -- rerun it whenever Megatron-Bridge is upgraded.
 
 Run under torchrun on >=2 GPUs, e.g.::
 
-    MODEL_KIND=qwen2 torchrun --nproc_per_node=2 tests/sparse_hccl/test_bridge_delta_tp_differential.py
-    MODEL_KIND=nemotron_h torchrun --nproc_per_node=2 tests/sparse_hccl/test_bridge_delta_tp_differential.py
+    MODEL_KIND=qwen2 torchrun --nproc_per_node=2 tests/sparse_hccl/test_bridge_delta_export_differential.py
+    MODEL_KIND=nemotron_h torchrun --nproc_per_node=2 tests/sparse_hccl/test_bridge_delta_export_differential.py
 
 ``MODEL_KIND``: ``qwen2`` (Column/Row/QKV/GatedMLP/Replicated), ``qwen3_moe``
 (adds fused-MoE expert mappings; uses etp=TP), ``nemotron_h`` (Mamba mixers --
