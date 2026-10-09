@@ -10,7 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.unit

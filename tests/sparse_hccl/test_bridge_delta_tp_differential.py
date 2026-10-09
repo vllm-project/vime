@@ -23,8 +23,8 @@ rearrange rather than blend) -- rerun it whenever Megatron-Bridge is upgraded.
 
 Run under torchrun on >=2 GPUs, e.g.::
 
-    MODEL_KIND=qwen2 torchrun --nproc_per_node=2 tests/test_bridge_delta_tp_differential.py
-    MODEL_KIND=nemotron_h torchrun --nproc_per_node=2 tests/test_bridge_delta_tp_differential.py
+    MODEL_KIND=qwen2 torchrun --nproc_per_node=2 tests/sparse_hccl/test_bridge_delta_tp_differential.py
+    MODEL_KIND=nemotron_h torchrun --nproc_per_node=2 tests/sparse_hccl/test_bridge_delta_tp_differential.py
 
 ``MODEL_KIND``: ``qwen2`` (Column/Row/QKV/GatedMLP/Replicated), ``qwen3_moe``
 (adds fused-MoE expert mappings; uses etp=TP), ``nemotron_h`` (Mamba mixers --
@@ -38,9 +38,9 @@ import sys
 import torch
 import torch.distributed as dist
 
-# torchrun executes this file with tests/ as sys.path[0]. Prefer the checkout
+# torchrun executes this file with its test directory as sys.path[0]. Prefer the checkout
 # being validated over an editable installation of another Vime revision.
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import vime.backends.megatron_utils  # noqa: F401 - Bootstrap NPU before importing Megatron.
 
 MODEL_KIND = os.environ.get("MODEL_KIND", "qwen2")

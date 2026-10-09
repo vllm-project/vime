@@ -10,7 +10,7 @@ import torch.distributed as dist
 import torch_npu  # noqa: F401
 
 # Prefer this checkout over another editable installation when launched by torchrun.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from vime.backends.megatron_utils.update_weight.delta_sync.sparse_gather import (
     GatherWorkspace,
     gather_slot_entries_to_rank0,
