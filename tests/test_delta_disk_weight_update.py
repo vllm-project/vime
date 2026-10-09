@@ -7,6 +7,7 @@ against the published checksums.
 
 import json
 import os
+import shlex
 import tempfile
 from pathlib import Path
 
@@ -19,14 +20,16 @@ from vime.utils.disk_delta import checksum, make_tensor_reader
 MODEL_NAME = "Qwen3-0.6B"
 MODEL_TYPE = "qwen3-0.6B"
 NUM_GPUS = 4
-HF_CKPT = f"/home/vllm/weights/{MODEL_NAME}"
+TEST_ROOT = os.environ.get("HF_HOME") or "/root"
+HF_CKPT = f"{TEST_ROOT}/models/{MODEL_NAME}"
+DATASET_DIR = f"{TEST_ROOT}/datasets/gsm8k"
 TORCH_DIST_CKPT = f"/dev/shm/{MODEL_NAME}_torch_dist"
 
 
 def prepare():
-    U.exec_command("mkdir -p /home/vllm/weights /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {HF_CKPT}")
-    U.hf_download_dataset("zhuzilin/gsm8k")
+    U.exec_command(f"mkdir -p {shlex.quote(HF_CKPT)} {shlex.quote(DATASET_DIR)}")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {shlex.quote(HF_CKPT)}")
+    U.exec_command("hf download --repo-type dataset zhuzilin/gsm8k " f"--local-dir {shlex.quote(DATASET_DIR)}")
     U.convert_checkpoint(
         model_name=MODEL_NAME,
         megatron_model_type=MODEL_TYPE,
@@ -82,10 +85,10 @@ def execute():
     for encoding in ("xor", "overwrite"):
         with tempfile.TemporaryDirectory(prefix=f"vime_delta_disk_{encoding}_") as disk_dir:
             ref_load = TORCH_DIST_CKPT if U.current_platform().torch_dist_convert else HF_CKPT
-            ckpt_args = f"--hf-checkpoint {HF_CKPT} " f"--ref-load {ref_load} "
+            ckpt_args = f"--hf-checkpoint {shlex.quote(HF_CKPT)} " f"--ref-load {shlex.quote(ref_load)} "
 
             rollout_args = (
-                "--prompt-data /root/datasets/gsm8k/train.parquet "
+                f"--prompt-data {shlex.quote(f'{DATASET_DIR}/train.parquet')} "
                 "--input-key messages "
                 "--label-key label "
                 "--apply-chat-template "
