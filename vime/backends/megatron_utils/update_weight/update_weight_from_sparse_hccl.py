@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import socket
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
@@ -463,7 +462,7 @@ class UpdateWeightFromSparseHCCL:
                 prime_delta_snapshots(
                     self._index,
                     self._snapshots,
-                    pin=os.getenv("VIME_SPARSE_HCCL_SNAPSHOT_DEVICE", "device") == "cpu",
+                    pin=True,
                 )
                 torch.accelerator.synchronize()
                 updates = sum(prod(shape) for record in self._index for _name, shape in record.slots or [])

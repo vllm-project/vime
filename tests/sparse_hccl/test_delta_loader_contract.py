@@ -16,6 +16,7 @@ from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import (
     apply_sparse_hf_patches_with_loader,
 )
 
+from vime.backends.megatron_utils.update_weight import megatron_delta_export
 from vime.backends.megatron_utils.update_weight.megatron_delta_export import _device_shard
 
 
@@ -38,6 +39,19 @@ class Model(torch.nn.Module):
 def test_cpu_backup_cannot_silently_become_diff_source():
     with pytest.raises(RuntimeError, match="live accelerator shard"):
         _device_shard(SimpleNamespace(param=torch.ones(4), megatron_name="weight"))
+
+
+def test_snapshots_are_independent_host_copies(monkeypatch):
+    local = torch.arange(4, dtype=torch.bfloat16)
+    monkeypatch.setattr(megatron_delta_export, "_device_shard", lambda record: local)
+    record = SimpleNamespace(param=local, spec=SimpleNamespace(contributes=True), megatron_name="weight")
+    snapshots = {}
+    megatron_delta_export.prime_delta_snapshots([record], snapshots)
+    snapshot = snapshots["weight"]
+    assert snapshot.device.type == "cpu"
+    assert torch.equal(snapshot, local)
+    local.add_(1)
+    assert torch.equal(snapshot, torch.arange(4, dtype=torch.bfloat16))
 
 
 @pytest.mark.parametrize("rank", [0, 1])

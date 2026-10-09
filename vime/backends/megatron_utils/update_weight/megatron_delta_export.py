@@ -52,7 +52,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -573,17 +572,12 @@ def _device_shard(record: McoreParamExport) -> torch.Tensor:
 
 
 def prime_delta_snapshots(index, snapshots, *, pin=False):
-    snapshot_device = os.getenv("VIME_SPARSE_HCCL_SNAPSHOT_DEVICE", "device")
+    """Keep baseline snapshots on the host to leave accelerator memory for training."""
     for record in index:
         if record.param is None or not record.spec.contributes:
             continue
         local = _device_shard(record)
-        if snapshot_device == "cpu":
-            snapshot = torch.empty_like(local, device="cpu", pin_memory=pin)
-        elif snapshot_device == "device":
-            snapshot = torch.empty_like(local)
-        else:
-            raise ValueError("VIME_SPARSE_HCCL_SNAPSHOT_DEVICE must be 'device' or 'cpu', " f"got {snapshot_device!r}")
+        snapshot = torch.empty_like(local, device="cpu", pin_memory=pin)
         snapshot.copy_(local, non_blocking=True)
         snapshots[record.megatron_name] = snapshot
 

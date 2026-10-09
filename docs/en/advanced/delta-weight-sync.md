@@ -64,7 +64,7 @@ Deltas are always zstd-compressed (level 1); profiling showed it dominates lz4 /
 
 ### Sparse HCCL
 
-1. The first sync streams VIME's existing full Megatron-to-HF export as a values-only dense seed. Each rank captures its local Megatron shard snapshot only after that seed completes. Set `VIME_SPARSE_HCCL_SNAPSHOT_DEVICE=cpu` to keep snapshots in host memory.
+1. The first sync streams VIME's existing full Megatron-to-HF export as a values-only dense seed. Each rank captures its local Megatron shard snapshot in host memory only after that seed completes.
 2. Later syncs bit-diff each current shard against its snapshot through an integer view, then advance the snapshot immediately.
 3. A NaN probe maps local changes to final HF names and global flat indices. PP non-owners, DP/CP replicas, and unchanged ranks retain zero-count lockstep directory rows.
 4. TP, EP/ETP, and PP/VPP ranks execute batched variable-length gathers over one common directory; the wire master assembles verl-compatible `DeltaParam`/`DeltaFlush` manifests.

@@ -13,8 +13,6 @@ export HYDRA_FULL_ERROR=1
 export DISABLE_L2_CACHE=1
 export VLLM_ASCEND_ENABLE_NZ=0
 export VLLM_USE_AOT_COMPILE=0
-# Keep snapshots on the host to leave NPU memory available for training.
-export VIME_SPARSE_HCCL_SNAPSHOT_DEVICE="${VIME_SPARSE_HCCL_SNAPSHOT_DEVICE:-cpu}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 VIME_REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 cd "${VIME_REPO_ROOT}"

@@ -59,7 +59,7 @@ delta 始终用 zstd（level 1）压缩；profiling 显示对这类数据它在 
 
 ### Sparse HCCL
 
-1. 首次同步通过 VIME 现有 Megatron→HF 全量导出流发送 values-only dense seed，完成后才保存各 rank 的本地 Megatron shard snapshot。设置 `VIME_SPARSE_HCCL_SNAPSHOT_DEVICE=cpu` 将 snapshot 保存在主机内存。
+1. 首次同步通过 VIME 现有 Megatron→HF 全量导出流发送 values-only dense seed，完成后才将各 rank 的本地 Megatron shard snapshot 保存在主机内存。
 2. 后续同步在每个 rank 上对当前 shard 和 snapshot 做整数视图的 bit-exact diff，并立即推进 snapshot。
 3. NaN probe 把本地变化映射成最终 HF 参数名和全局 flat index。PP 非 owner、DP/CP 重复副本和无变化 rank 仍发送 count=0 的目录行。
 4. TP、EP/ETP、PP/VPP 按统一目录执行 batched variable-length gather；wire master 将结果组装成 verl 兼容的 `DeltaParam`/`DeltaFlush` manifest。

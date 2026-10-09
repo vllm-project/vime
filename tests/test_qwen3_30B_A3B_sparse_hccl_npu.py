@@ -138,7 +138,6 @@ def execute():
         extra_env_vars={
             "DISABLE_L2_CACHE": "1",
             "VLLM_USE_AOT_COMPILE": "0",
-            "VIME_SPARSE_HCCL_SNAPSHOT_DEVICE": "cpu",
         },
     )
 
