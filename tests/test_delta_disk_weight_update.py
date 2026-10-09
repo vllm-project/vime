@@ -20,21 +20,22 @@ from vime.utils.disk_delta import checksum, make_tensor_reader
 MODEL_NAME = "Qwen3-0.6B"
 MODEL_TYPE = "qwen3-0.6B"
 NUM_GPUS = 4
-HF_CKPT = f"/root/models/{MODEL_NAME}"
-DATASET_DIR = "/root/datasets/gsm8k"
+TEST_ROOT = os.environ.get("HF_HOME") or "/root"
+MODEL_DIR = f"{TEST_ROOT}/models/{MODEL_NAME}"
+DATASET_DIR = f"{TEST_ROOT}/datasets/gsm8k"
 TORCH_DIST_CKPT = f"/dev/shm/{MODEL_NAME}_torch_dist"
 
 
 def prepare():
-    U.exec_command(f"mkdir -p {shlex.quote(HF_CKPT)} {shlex.quote(DATASET_DIR)}")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {shlex.quote(HF_CKPT)}")
+    U.exec_command(f"mkdir -p {shlex.quote(MODEL_DIR)} {shlex.quote(DATASET_DIR)}")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {shlex.quote(MODEL_DIR)}")
     U.exec_command("hf download --repo-type dataset zhuzilin/gsm8k " f"--local-dir {shlex.quote(DATASET_DIR)}")
     U.convert_checkpoint(
         model_name=MODEL_NAME,
         megatron_model_type=MODEL_TYPE,
         num_gpus_per_node=NUM_GPUS,
         dir_dst="/dev/shm",
-        hf_checkpoint=HF_CKPT,
+        hf_checkpoint=MODEL_DIR,
     )
 
 
@@ -83,8 +84,8 @@ def verify_checkpoints(case_dir: Path, encoding: str):
 def execute():
     for encoding in ("xor", "overwrite"):
         with tempfile.TemporaryDirectory(prefix=f"vime_delta_disk_{encoding}_") as disk_dir:
-            ref_load = TORCH_DIST_CKPT if U.current_platform().torch_dist_convert else HF_CKPT
-            ckpt_args = f"--hf-checkpoint {shlex.quote(HF_CKPT)} " f"--ref-load {shlex.quote(ref_load)} "
+            ref_load = TORCH_DIST_CKPT if U.current_platform().torch_dist_convert else MODEL_DIR
+            ckpt_args = f"--hf-checkpoint {shlex.quote(MODEL_DIR)} " f"--ref-load {shlex.quote(ref_load)} "
 
             rollout_args = (
                 f"--prompt-data {shlex.quote(f'{DATASET_DIR}/train.parquet')} "
