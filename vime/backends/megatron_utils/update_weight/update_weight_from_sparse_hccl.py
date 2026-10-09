@@ -25,19 +25,10 @@ from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import SparseWe
 from vime.utils.distributed_utils import get_gloo_group
 
 from .common import VimeRayWeightSyncClient
-from .delta_sync import (
-    DeltaFlush,
-    DeltaParam,
-    checksum,
-    gather_slot_entries_to_rank0,
-)
+from .delta_sync import DeltaFlush, DeltaParam, checksum, gather_slot_entries_to_rank0
 from .delta_sync.sparse_gather import GatherWorkspace
 from .hf_weight_iterator_sparse_bridge import HfWeightIteratorSparseBridge
-from .megatron_delta_export import (
-    build_export_index,
-    iter_delta_entries,
-    prime_delta_snapshots,
-)
+from .megatron_delta_export import build_export_index, iter_delta_entries, prime_delta_snapshots
 
 logger = logging.getLogger(__name__)
 
@@ -225,10 +216,7 @@ class UpdateWeightFromSparseHCCL:
         self._snapshots.clear()
         self._index = None
         self.rollout_engines = list(rollout_engines)
-        gpu_counts = list(
-            engine_gpu_counts
-            or [self.args.rollout_num_gpus_per_engine] * len(self.rollout_engines)
-        )
+        gpu_counts = list(engine_gpu_counts or [self.args.rollout_num_gpus_per_engine] * len(self.rollout_engines))
         self._client = VimeRayWeightSyncClient(
             self.rollout_engines,
             lambda: self.weight_version,
@@ -251,9 +239,7 @@ class UpdateWeightFromSparseHCCL:
                 "rank_offset": 1,
                 "world_size": sum(gpu_counts) + 1,
             }
-            future = self._rpc_executor.submit(
-                self._client.init_weight_transfer_engine, init_info
-            )
+            future = self._rpc_executor.submit(self._client.init_weight_transfer_engine, init_info)
             self._group = SparseHCCLWeightTransferEngine.trainer_init(init_info)
             future.result()
         dist.barrier(group=get_gloo_group())
@@ -309,12 +295,7 @@ class UpdateWeightFromSparseHCCL:
                     exc_info=True,
                 )
             try:
-                ray.get(
-                    [
-                        engine.continue_generation.remote()
-                        for engine in self.rollout_engines
-                    ]
-                )
+                ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
             except Exception:
                 logger.warning(
                     "Sparse HCCL failure cleanup could not resume every rollout engine",
@@ -331,10 +312,7 @@ class UpdateWeightFromSparseHCCL:
     def _raise_synchronized_error(error: BaseException | None, stage: str) -> None:
         if error is not None:
             raise error
-        raise RuntimeError(
-            "Sparse HCCL weight update failed on another trainer rank "
-            f"during {stage}"
-        )
+        raise RuntimeError("Sparse HCCL weight update failed on another trainer rank " f"during {stage}")
 
     def _publish_flush(self, flush: DeltaFlush, *, verify: bool = False) -> None:
         if dist.get_rank() != 0 or not flush.params:
@@ -354,11 +332,10 @@ class UpdateWeightFromSparseHCCL:
         self._payload_started = True
         # Same-stream HCCL uses the already assembled buffers. Keep the flush
         # alive until both the collective and receiver apply have completed.
-        future = self._rpc_executor.submit(
-            self._client.update_weights, asdict(update_info)
-        )
+        future = self._rpc_executor.submit(self._client.update_weights, asdict(update_info))
         SparseHCCLWeightTransferEngine.trainer_send_packed(
-            flush.positions.view(torch.int32), flush.values,
+            flush.positions.view(torch.int32),
+            flush.values,
             SparseHCCLTrainerSendWeightsArgs(group=self._group),
         )
         future.result()
@@ -367,11 +344,7 @@ class UpdateWeightFromSparseHCCL:
         flushes = wire_bytes = 0
         for chunk in self._iterator.get_hf_weight_chunks(
             self.weights_getter(),
-            progress_desc=(
-                "Sparse HCCL state verification"
-                if verify
-                else "Sparse HCCL dense seed"
-            ),
+            progress_desc=("Sparse HCCL state verification" if verify else "Sparse HCCL dense seed"),
         ):
             if dist.get_rank() != 0:
                 continue
@@ -448,7 +421,8 @@ class UpdateWeightFromSparseHCCL:
             workspaces=self._gather_workspaces,
         )
         for slots, dtype_name, counts, indices, values, group in iter_delta_entries(
-            self._index, self._snapshots,
+            self._index,
+            self._snapshots,
             batch_size=getattr(self.args, "update_weight_delta_batch_diff", 32),
         ):
             queue.put(group, slots, dtype_name, counts, indices, values)
@@ -496,9 +470,7 @@ class UpdateWeightFromSparseHCCL:
                 self._seeded = True
             else:
                 verify = self._verify_due()
-                flushes, wire_bytes, updates = self._send_sparse_delta(
-                    verify=verify
-                )
+                flushes, wire_bytes, updates = self._send_sparse_delta(verify=verify)
                 self._steady_updates += 1
         except BaseException as error:
             phase_error = error
@@ -538,8 +510,7 @@ class UpdateWeightFromSparseHCCL:
                 "perf/update_weights_sparse_hccl_updates": float(updates),
             }
             logger.info(
-                "Sparse HCCL weight sync v=%d seed=%s flushes=%d wire=%.2f MiB "
-                "updates=%d",
+                "Sparse HCCL weight sync v=%d seed=%s flushes=%d wire=%.2f MiB " "updates=%d",
                 self.weight_version,
                 self.weight_version == 1,
                 flushes,

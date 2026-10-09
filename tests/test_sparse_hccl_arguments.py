@@ -12,8 +12,14 @@ from vime.utils.arguments import get_vime_extra_args_provider
 def test_transport_options_are_registered_once(transport):
     parser = get_vime_extra_args_provider()(argparse.ArgumentParser())
     args = parser.parse_args(
-        ["--rollout-batch-size", "1", "--update-weight-transport", transport,
-         "--update-weight-delta-verify-every", "1"]
+        [
+            "--rollout-batch-size",
+            "1",
+            "--update-weight-transport",
+            transport,
+            "--update-weight-delta-verify-every",
+            "1",
+        ]
     )
     assert args.update_weight_transport == transport
     assert args.update_weight_delta_verify_every == 1

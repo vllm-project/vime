@@ -30,10 +30,7 @@ def create_weight_updater(
 
             update_weight_cls = UpdateWeightFromSparseHCCL
         else:
-            raise ValueError(
-                "--update-weight-mode=delta requires "
-                "--update-weight-transport=disk or sparse_hccl"
-            )
+            raise ValueError("--update-weight-mode=delta requires " "--update-weight-transport=disk or sparse_hccl")
     elif update_weight_transport == "disk":
         from .update_weight_from_disk import UpdateWeightFromDisk
 

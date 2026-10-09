@@ -68,9 +68,15 @@ def _build_tiny_hf_dir(rank: int) -> str:
         hf_config.architectures = ["Qwen2ForCausalLM"]
     elif MODEL_KIND == "qwen3":
         hf_config = AutoConfig.for_model(
-            "qwen3", hidden_size=64, intermediate_size=128,
-            num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
-            head_dim=16, vocab_size=512, max_position_embeddings=256,
+            "qwen3",
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=16,
+            vocab_size=512,
+            max_position_embeddings=256,
             tie_word_embeddings=False,
         )
         hf_config.architectures = ["Qwen3ForCausalLM"]
@@ -189,7 +195,10 @@ def _pp_differential(bridge, model, rank: int, world: int) -> None:
     ``bridge.export_hf_weights`` -- the bridge's own PP-broadcast full export,
     an independent chain. Bitwise, per HF tensor, with directory-lockstep and
     placeholder-row checks on the way."""
-    from vime.backends.megatron_utils.update_weight.megatron_delta_export import build_export_index, mcore_hf_delta_entry
+    from vime.backends.megatron_utils.update_weight.megatron_delta_export import (
+        build_export_index,
+        mcore_hf_delta_entry,
+    )
 
     slot_cache: dict = {}
     index = build_export_index(bridge, model, slot_cache)
@@ -298,14 +307,16 @@ def _pp_differential(bridge, model, rank: int, world: int) -> None:
         sys.exit(1)
 
 
-
 def _delta_entry_differential(model, cfg_dir, rank):
     from types import SimpleNamespace
+
     from vime.backends.megatron_utils.update_weight.hf_weight_iterator_sparse_bridge import (
         HfWeightIteratorSparseBridge as HfWeightIteratorBridge,
     )
     from vime.backends.megatron_utils.update_weight.megatron_delta_export import (
-        build_export_index, iter_delta_entries, prime_delta_snapshots,
+        build_export_index,
+        iter_delta_entries,
+        prime_delta_snapshots,
     )
     from vime.backends.megatron_utils.update_weight.update_weight_from_sparse_hccl import _GatherQueue
 
@@ -313,8 +324,12 @@ def _delta_entry_differential(model, cfg_dir, rank):
     with iterator.model_context():
         index = build_export_index(iterator.bridge, model, {})
     assert all(record.param is None or record.param.device.type == "npu" for record in index)
+
     def export():
-        return {name: weight.detach().cpu().clone() for chunk in iterator.get_hf_weight_chunks() for name, weight in chunk}
+        return {
+            name: weight.detach().cpu().clone() for chunk in iterator.get_hf_weight_chunks() for name, weight in chunk
+        }
+
     accumulated = export()
     snapshots = {}
     prime_delta_snapshots(index, snapshots, pin=False)
@@ -327,10 +342,12 @@ def _delta_entry_differential(model, cfg_dir, rank):
                         record.param.view(-1)[step::97] += 0.25
         expected = export()
         updates = [0]
+
         def consume(name, dtype, shape, positions, values, updates=updates):
             assert tuple(accumulated[name].shape) == tuple(shape)
             accumulated[name].view(-1).index_copy_(0, positions.cpu().long(), values.cpu())
             updates[0] += values.numel()
+
         queue = _GatherQueue(4, 4096, rank == 0, consume)
         for slots, dtype, counts, positions, values, group in iter_delta_entries(index, snapshots):
             assert positions.device.type == values.device.type == "npu"
@@ -341,7 +358,10 @@ def _delta_entry_differential(model, cfg_dir, rank):
             assert accumulated.keys() == expected.keys()
             for name, value in expected.items():
                 assert torch.equal(accumulated[name].view(torch.int16), value.view(torch.int16)), name
-            print(f"DELTA ENTRY step={step + 1} updates={updates[0]} tensors={len(expected)} bitwise_equal=True device=npu", flush=True)
+            print(
+                f"DELTA ENTRY step={step + 1} updates={updates[0]} tensors={len(expected)} bitwise_equal=True device=npu",
+                flush=True,
+            )
         dist.barrier()
     if rank == 0:
         print("DELTA ENTRY THREE CHANGED ROUNDS AND EMPTY ROUND PASSED", flush=True)

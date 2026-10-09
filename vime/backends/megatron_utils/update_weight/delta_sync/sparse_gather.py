@@ -144,10 +144,12 @@ def gather_slot_entries_to_rank0(
         padded_values[local_elements:].zero_()
     index_list = value_list = None
     if rank == 0:
-        index_list = list(workspace.tensor("recv_indices", world * max_elements,
-                                          idx_concat).view(world, max_elements).unbind(0))
-        value_list = list(workspace.tensor("recv_values", world * max_elements,
-                                          val_concat).view(world, max_elements).unbind(0))
+        index_list = list(
+            workspace.tensor("recv_indices", world * max_elements, idx_concat).view(world, max_elements).unbind(0)
+        )
+        value_list = list(
+            workspace.tensor("recv_values", world * max_elements, val_concat).view(world, max_elements).unbind(0)
+        )
     if use_hccl_p2p:
         root = dist.get_global_rank(group, 0) if group is not None else 0
         if rank == 0:
@@ -159,10 +161,12 @@ def gather_slot_entries_to_rank0(
                 if not totals[peer_rank]:
                     continue
                 peer = dist.get_global_rank(group, peer_rank) if group is not None else peer_rank
-                operations.extend((
-                    dist.P2POp(dist.irecv, index_list[peer_rank][:totals[peer_rank]], peer, group),
-                    dist.P2POp(dist.irecv, value_list[peer_rank][:totals[peer_rank]], peer, group),
-                ))
+                operations.extend(
+                    (
+                        dist.P2POp(dist.irecv, index_list[peer_rank][: totals[peer_rank]], peer, group),
+                        dist.P2POp(dist.irecv, value_list[peer_rank][: totals[peer_rank]], peer, group),
+                    )
+                )
         elif local_elements:
             operations = [
                 dist.P2POp(dist.isend, padded_indices, root, group),
@@ -226,11 +230,10 @@ def compact_shard_masks(locals_, masks, *, with_midpoints=False):
         total += local.numel()
         ends.append(total)
     positions = torch.cat(masks).nonzero(as_tuple=False).view(-1)
-    boundaries = torch.tensor(ends + midpoints if with_midpoints else ends,
-                              dtype=torch.int64, device=positions.device)
+    boundaries = torch.tensor(ends + midpoints if with_midpoints else ends, dtype=torch.int64, device=positions.device)
     splits = torch.searchsorted(positions, boundaries).cpu().tolist()
     result, start, base = [], 0, 0
-    for slot, (local, end, boundary) in enumerate(zip(locals_, splits[:len(ends)], ends, strict=True)):
+    for slot, (local, end, boundary) in enumerate(zip(locals_, splits[: len(ends)], ends, strict=True)):
         indices = positions[start:end] - base
         row = (indices, local.index_select(0, indices))
         result.append((*row, splits[len(ends) + slot] - start) if with_midpoints else row)

@@ -65,9 +65,8 @@ def test_sparse_delta_reuses_dtype_bucket_without_changing_payload(updater, monk
     monkeypatch.setattr(module, "checksum", lambda positions, values: 123)
     tensor = module.torch.tensor
     entries = [
-        ([(name, [4])], "float32", tensor([1]),
-         tensor([index], dtype=module.torch.int32), tensor([value]), None)
-        for name, index, value in [("a", 1, 10.), ("b", 3, 20.)]
+        ([(name, [4])], "float32", tensor([1]), tensor([index], dtype=module.torch.int32), tensor([value]), None)
+        for name, index, value in [("a", 1, 10.0), ("b", 3, 20.0)]
     ]
     monkeypatch.setattr(module, "iter_delta_entries", lambda *args, **kwargs: iter(entries))
     payloads = []
@@ -76,7 +75,7 @@ def test_sparse_delta_reuses_dtype_bucket_without_changing_payload(updater, monk
     assert len(created) == 1
     assert [param.name for param in payloads[0].params] == ["a", "b"]
     assert payloads[0].positions.view(module.torch.int32).tolist() == [1, 3]
-    assert payloads[0].values.tolist() == [10., 20.]
+    assert payloads[0].values.tolist() == [10.0, 20.0]
 
 
 @pytest.mark.unit
@@ -98,8 +97,14 @@ def test_gather_queue_reuses_workspace_between_flushes(monkeypatch):
     queue = module._GatherQueue(1, 1024, True, lambda *args: consumed.append(args))
     group = object()
     for name in ["a", "b"]:
-        queue.put(group, [(name, [4])], "float32", module.torch.tensor([1]),
-                  module.torch.tensor([1], dtype=module.torch.int32), module.torch.tensor([10.]))
+        queue.put(
+            group,
+            [(name, [4])],
+            "float32",
+            module.torch.tensor([1]),
+            module.torch.tensor([1], dtype=module.torch.int32),
+            module.torch.tensor([10.0]),
+        )
     assert len(created) == 1
     assert observed == [created[0], created[0]]
     assert [entry[0] for entry in consumed] == ["a", "b"]

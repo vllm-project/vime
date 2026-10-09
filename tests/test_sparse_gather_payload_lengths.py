@@ -37,16 +37,28 @@ def test_root_payload_lengths_and_returned_buffer_ownership(monkeypatch, backend
         buffers[3].zero_()
         calls.append(tensor)
 
-    monkeypatch.setattr(module, "dist", SimpleNamespace(
-        get_rank=lambda group: 0, get_world_size=lambda group: 4,
-        get_global_rank=lambda group, rank: 10 + rank,
-        get_backend=lambda group: backend, irecv="recv", isend="send",
-        P2POp=lambda *args: args, batch_isend_irecv=batch, gather=gather,
-    ))
+    monkeypatch.setattr(
+        module,
+        "dist",
+        SimpleNamespace(
+            get_rank=lambda group: 0,
+            get_world_size=lambda group: 4,
+            get_global_rank=lambda group, rank: 10 + rank,
+            get_backend=lambda group: backend,
+            irecv="recv",
+            isend="send",
+            P2POp=lambda *args: args,
+            batch_isend_irecv=batch,
+            gather=gather,
+        ),
+    )
     workspace = module.GatherWorkspace()
     result = module.gather_slot_entries_to_rank0(
-        torch.tensor([1], dtype=torch.int32), torch.tensor([1.]),
-        torch.tensor([1, 0]), group=object(), workspace=workspace,
+        torch.tensor([1], dtype=torch.int32),
+        torch.tensor([1.0]),
+        torch.tensor([1, 0]),
+        group=object(),
+        workspace=workspace,
         _counts_cpu=counts,
     )
     assert result[0][0].tolist() == [1, 10, 11]
@@ -66,12 +78,24 @@ def test_root_payload_lengths_and_returned_buffer_ownership(monkeypatch, backend
 @pytest.mark.unit
 def test_empty_hccl_peer_does_not_enqueue_p2p(monkeypatch):
     monkeypatch.setattr(module, "torch", SimpleNamespace(empty=torch.empty, cat=torch.cat))
-    monkeypatch.setattr(module, "dist", SimpleNamespace(
-        get_rank=lambda group: 1, get_world_size=lambda group: 2,
-        get_global_rank=lambda group, rank: rank, get_backend=lambda group: "hccl",
-        batch_isend_irecv=lambda operations: pytest.fail("empty peer must not send padding"),
-    ))
-    assert module.gather_slot_entries_to_rank0(
-        torch.empty(0, dtype=torch.int32), torch.empty(0), torch.tensor([0]),
-        group=object(), _counts_cpu=[[3], [0]],
-    ) is None
+    monkeypatch.setattr(
+        module,
+        "dist",
+        SimpleNamespace(
+            get_rank=lambda group: 1,
+            get_world_size=lambda group: 2,
+            get_global_rank=lambda group, rank: rank,
+            get_backend=lambda group: "hccl",
+            batch_isend_irecv=lambda operations: pytest.fail("empty peer must not send padding"),
+        ),
+    )
+    assert (
+        module.gather_slot_entries_to_rank0(
+            torch.empty(0, dtype=torch.int32),
+            torch.empty(0),
+            torch.tensor([0]),
+            group=object(),
+            _counts_cpu=[[3], [0]],
+        )
+        is None
+    )

@@ -28,8 +28,10 @@ def main():
     ]
     for dtype in (torch.float32, torch.bfloat16):
         for counts in cases:
-            pieces = [[torch.arange(size, dtype=torch.int32) + r * 100 + slot * 10
-                       for slot, size in enumerate(row)] for r, row in enumerate(counts)]
+            pieces = [
+                [torch.arange(size, dtype=torch.int32) + r * 100 + slot * 10 for slot, size in enumerate(row)]
+                for r, row in enumerate(counts)
+            ]
             indices = torch.cat(pieces[rank]).npu()
             values = torch.cat([piece.float().to(dtype) for piece in pieces[rank]]).npu()
             # Cover noncontiguous caller buffers as well as empty participants.
@@ -37,8 +39,11 @@ def main():
             values = torch.stack([values, values], dim=1)[:, 0]
             for budget in (None, 12):
                 result = module.gather_slot_entries_to_rank0(
-                    indices, values, torch.tensor(counts[rank]),
-                    max_round_bytes=budget, workspace=workspace,
+                    indices,
+                    values,
+                    torch.tensor(counts[rank]),
+                    max_round_bytes=budget,
+                    workspace=workspace,
                 )
                 if rank == 0:
                     for slot, (actual_indices, actual_values) in enumerate(result):

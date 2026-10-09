@@ -295,8 +295,12 @@ def build_export_index(bridge, megatron_model, slot_cache: dict | None = None) -
                 contributes=mpu.get_expert_data_parallel_rank() == 0,
             )
         elif is_tp_sharded:
-            spec = ShardSpec(full_shape=local_shape, place=0, gather_group=tp_group,
-                             contributes=mpu.get_data_parallel_rank(with_context_parallel=True) == 0)
+            spec = ShardSpec(
+                full_shape=local_shape,
+                place=0,
+                gather_group=tp_group,
+                contributes=mpu.get_data_parallel_rank(with_context_parallel=True) == 0,
+            )
         else:
             # replicated: engine's pg=None path (rank 0 consumes its own entry
             # directly, replicas stay in lockstep via zero counts).
@@ -385,8 +389,11 @@ def _direct_hf_delta_entry(rec, lidx, lval, *, sorted_indices=False, midpoint=No
     Subclasses may implement arithmetic transforms and deliberately do not match.
     """
     from megatron.bridge.models.conversion.param_mapping import (
-        AutoMapping, ColumnParallelMapping, GatedMLPMapping,
-        ReplicatedMapping, RowParallelMapping,
+        AutoMapping,
+        ColumnParallelMapping,
+        GatedMLPMapping,
+        ReplicatedMapping,
+        RowParallelMapping,
     )
 
     mapping = rec.probe
@@ -411,10 +418,15 @@ def _direct_hf_delta_entry(rec, lidx, lval, *, sorted_indices=False, midpoint=No
             # four dynamic boolean selections; generic callers retain fallback.
             split = int(torch.searchsorted(lidx, half)) if midpoint is None else midpoint
         for part, key in enumerate(("gate", "up")):
-            selected = (slice(0, split) if part == 0 else slice(split, None)) if sorted_indices else (
-                (lidx >= part * half) & (lidx < (part + 1) * half))
+            selected = (
+                (slice(0, split) if part == 0 else slice(split, None))
+                if sorted_indices
+                else ((lidx >= part * half) & (lidx < (part + 1) * half))
+            )
             pieces[str(mapping.hf_param[key])] = (
-                out_shape, lidx[selected] - part * half + rank * half, lval[selected],
+                out_shape,
+                lidx[selected] - part * half + rank * half,
+                lval[selected],
             )
     else:
         out_shape = list(shape)
@@ -453,11 +465,20 @@ def _direct_hf_delta_entry(rec, lidx, lval, *, sorted_indices=False, midpoint=No
         counts[slot] = indices.numel()
         index_parts.append(indices.to(torch.int32))
         value_parts.append(values)
-    return (rec.slots, str(lval.dtype).replace("torch.", ""), counts,
-            torch.cat(index_parts), torch.cat(value_parts))
+    return (rec.slots, str(lval.dtype).replace("torch.", ""), counts, torch.cat(index_parts), torch.cat(value_parts))
 
 
-def mcore_hf_delta_entry(rec: McoreParamExport, _place, lidx: torch.Tensor, lval: torch.Tensor, slot_cache: dict, *, force_probe=False, sorted_indices=False, midpoint=None):
+def mcore_hf_delta_entry(
+    rec: McoreParamExport,
+    _place,
+    lidx: torch.Tensor,
+    lval: torch.Tensor,
+    slot_cache: dict,
+    *,
+    force_probe=False,
+    sorted_indices=False,
+    midpoint=None,
+):
     """Probe one mcore param's shard-local delta into its final HF-coordinate
     entry ``(slots, dtype_str, counts, hf_idx, hf_val)``.
 
@@ -469,9 +490,9 @@ def mcore_hf_delta_entry(rec: McoreParamExport, _place, lidx: torch.Tensor, lval
     are deterministic, so every rank's cache agrees and the batched gather
     stays aligned)."""
     dtype_str = str(lval.dtype).replace("torch.", "")
-    assert lval.numel() == 0 or lval.is_floating_point(), (
-        f"{rec.megatron_name}: NaN sentinels require a floating-point param, got {lval.dtype}"
-    )
+    assert (
+        lval.numel() == 0 or lval.is_floating_point()
+    ), f"{rec.megatron_name}: NaN sentinels require a floating-point param, got {lval.dtype}"
 
     cached = rec.slots if rec.slots is not None else slot_cache.get(rec.megatron_name)
     if rec.param is None:
@@ -562,10 +583,7 @@ def prime_delta_snapshots(index, snapshots, *, pin=False):
         elif snapshot_device == "device":
             snapshot = torch.empty_like(local)
         else:
-            raise ValueError(
-                "VIME_SPARSE_HCCL_SNAPSHOT_DEVICE must be 'device' or 'cpu', "
-                f"got {snapshot_device!r}"
-            )
+            raise ValueError("VIME_SPARSE_HCCL_SNAPSHOT_DEVICE must be 'device' or 'cpu', " f"got {snapshot_device!r}")
         snapshot.copy_(local, non_blocking=True)
         snapshots[record.megatron_name] = snapshot
 
@@ -650,7 +668,10 @@ def _iter_delta_entries_unbatched(index, snapshots):
             else:
                 local_indices = torch.empty(0, dtype=torch.int64, device=local.device)
                 local_values = torch.empty(0, dtype=local.dtype, device=local.device)
-        yield (*mcore_hf_delta_entry(record, 0, local_indices, local_values, {}, sorted_indices=True), record.spec.gather_group)
+        yield (
+            *mcore_hf_delta_entry(record, 0, local_indices, local_values, {}, sorted_indices=True),
+            record.spec.gather_group,
+        )
     refresh.flush()
 
 
@@ -683,7 +704,10 @@ def iter_delta_entries(index, snapshots, *, batch_size=32):
                 dtype = local.dtype if local is not None else torch.bfloat16
                 indices = torch.empty(0, dtype=torch.int64, device=device)
                 values = torch.empty(0, dtype=dtype, device=device)
-            yield (*mcore_hf_delta_entry(record, 0, indices, values, {}, sorted_indices=True, midpoint=midpoint), record.spec.gather_group)
+            yield (
+                *mcore_hf_delta_entry(record, 0, indices, values, {}, sorted_indices=True, midpoint=midpoint),
+                record.spec.gather_group,
+            )
         pending.clear()
         masks.clear()
         locals_.clear()
@@ -693,8 +717,7 @@ def iter_delta_entries(index, snapshots, *, batch_size=32):
         active = local is not None and record.spec.contributes
         key = (local.device, local.dtype) if active else batch_key
         size = local.numel() if active else 0
-        if pending and (key != batch_key or mask_bytes + size > max_mask_bytes
-                        or len(pending) >= batch_size):
+        if pending and (key != batch_key or mask_bytes + size > max_mask_bytes or len(pending) >= batch_size):
             yield from flush()
             mask_bytes = 0
         batch_key = key
@@ -709,7 +732,7 @@ def iter_delta_entries(index, snapshots, *, batch_size=32):
                 if buffer is None or buffer.numel() < local.numel():
                     buffer = torch.empty_like(local)
                     staging[key] = buffer
-                base = buffer[:local.numel()]
+                base = buffer[: local.numel()]
                 base.copy_(snapshot, non_blocking=True)
             masks.append(shard_delta_mask(local, base))
             locals_.append(local)

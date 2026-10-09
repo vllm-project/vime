@@ -20,4 +20,3 @@ class ShardSpec:
     place: int = 0
     gather_group: ProcessGroup | None = None
     contributes: bool = True
-
