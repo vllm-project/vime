@@ -577,7 +577,7 @@ new file mode 100644
 index 000000000..9c8d088c5
 --- /dev/null
 +++ b/vllm_ascend/distributed/weight_transfer/sparse_hccl_engine.py
-@@ -0,0 +1,511 @@
+@@ -0,0 +1,495 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +"""Sparse HCCL weight transfer engine."""
@@ -652,7 +652,7 @@ index 000000000..9c8d088c5
 +    def __post_init__(self) -> None:
 +        if self.encoding not in {"dense", "indices"}:
 +            raise ValueError(f"Unsupported sparse HCCL encoding: {self.encoding!r}")
-+        if self.checksum_algorithm not in {None, "torch_hash_v1", "npu_moment_v1"}:
++        if self.checksum_algorithm not in {None, "torch_hash_v1"}:
 +            raise ValueError(f"Unsupported checksum algorithm: {self.checksum_algorithm!r}")
 +        num_params = len(self.names)
 +        if len(self.dtype_names) != num_params:
@@ -988,22 +988,6 @@ index 000000000..9c8d088c5
 +    algorithm: str = "torch_hash_v1",
 +) -> int:
 +    """Compute the negotiated payload checksum."""
-+    if algorithm == "npu_moment_v1":
-+        def digest(tensor: torch.Tensor, word_dtype: torch.dtype) -> int:
-+            if not tensor.numel():
-+                return 0
-+            words = tensor.contiguous().view(word_dtype)
-+            if words.dtype != torch.int32:
-+                words = words.to(torch.int32)
-+            first = words.sum(dtype=torch.int32)
-+            second = (words * words + words * 65537).sum(dtype=torch.int32)
-+            mixed = first + second * 65599
-+            return int(mixed.item()) & 0xFFFFFFFF
-+
-+        if positions.numel() % 4:
-+            raise ValueError("Packed sparse positions must contain complete int32 words")
-+        value_word_dtype = torch.int16 if values.element_size() == 2 else torch.int32
-+        return digest(positions, torch.int32) | (digest(values, value_word_dtype) << 32)
 +    if algorithm != "torch_hash_v1":
 +        raise ValueError(f"Unsupported checksum algorithm: {algorithm!r}")
 +    p = int(torch.hash_tensor(positions).item()) if positions.numel() else 0
@@ -2390,7 +2374,7 @@ new file mode 100644
 index 000000000..db639d6c6
 --- /dev/null
 +++ b/tests/ut/distributed/weight_transfer/test_sparse_hccl_engine.py
-@@ -0,0 +1,266 @@
+@@ -0,0 +1,249 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +
@@ -2509,23 +2493,6 @@ index 000000000..db639d6c6
 +def test_update_info_rejects_unknown_checksum_algorithm():
 +    with pytest.raises(ValueError, match="checksum algorithm"):
 +        make_info(checksum_algorithm="unknown")
-+
-+
-+def test_npu_moment_checksum_detects_payload_changes():
-+    positions = torch.tensor([0, 3, 9], dtype=torch.int32).view(torch.uint8)
-+    values = torch.tensor([1.0, -2.0, 4.0], dtype=torch.bfloat16)
-+    expected = _delta_checksum(positions, values, algorithm="npu_moment_v1")
-+    assert expected == _delta_checksum(positions.clone(), values.clone(), algorithm="npu_moment_v1")
-+
-+    changed_positions = positions.clone().view(torch.int32)
-+    changed_positions[1] += 1
-+    assert _delta_checksum(
-+        changed_positions.view(torch.uint8), values, algorithm="npu_moment_v1"
-+    ) != expected
-+
-+    changed_values = values.clone()
-+    changed_values[1] += 1
-+    assert _delta_checksum(positions, changed_values, algorithm="npu_moment_v1") != expected
 +
 +
 +@pytest.mark.parametrize(
