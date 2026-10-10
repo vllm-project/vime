@@ -76,6 +76,8 @@ register(
             "VLLM_ASCEND_ENABLE_NZ": "0",
             "HYDRA_FULL_ERROR": "1",
             "TRANSFORMERS_VERBOSITY": "error",  # silence transformers image-processing log spam
+            # NPU ring attention fails for CP>1; KV all-gather is the verified path.
+            "CP_COMM_TYPE": "all_gather",
         },
     )
 )

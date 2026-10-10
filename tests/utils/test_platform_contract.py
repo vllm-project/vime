@@ -116,6 +116,24 @@ def test_npu_runtime_env_is_scoped_to_npu_provider(monkeypatch, tmp_path):
     assert str(toolkit / "python" / "site-packages") in train_env["PYTHONPATH"]
     assert rollout_env["VLLM_USE_AOT_COMPILE"] == "0"
     assert rollout_env["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:False"
+    assert "CP_COMM_TYPE" not in train_env
+
+
+def test_npu_cp_gt1_defaults_to_kv_allgather(monkeypatch):
+    monkeypatch.setenv("VIME_PLATFORM", "npu")
+    args = Namespace(context_parallel_size=2)
+    env = current_platform().ray.train_runtime_env(args, {})
+    assert env["CP_COMM_TYPE"] == "all_gather"
+
+    args.context_parallel_algo = "kvallgather_cp_algo"
+    assert current_platform().ray.train_runtime_env(args, {})["CP_COMM_TYPE"] == "all_gather"
+
+
+def test_npu_megatron_cp_algo_keeps_ring_comm(monkeypatch):
+    monkeypatch.setenv("VIME_PLATFORM", "npu")
+    args = Namespace(context_parallel_size=2, context_parallel_algo="megatron_cp_algo")
+    env = current_platform().ray.train_runtime_env(args, {})
+    assert env["CP_COMM_TYPE"] == "p2p"
 
 
 def test_npu_vllm_env_replaces_cuda_and_rocm_visibility(monkeypatch):
