@@ -1,3 +1,4 @@
+import subprocess
 import sys
 import types
 from argparse import Namespace
@@ -25,6 +26,14 @@ class _FakeUpdater:
     [
         pytest.param("delta", "disk", False, "update_weight_from_disk_delta", "UpdateWeightFromDiskDelta", id="delta"),
         pytest.param("full", "disk", False, "update_weight_from_disk", "UpdateWeightFromDisk", id="disk"),
+        pytest.param(
+            "full",
+            "modelexpress",
+            False,
+            "update_weight_from_modelexpress_delta",
+            "UpdateWeightFromModelExpressDelta",
+            id="modelexpress",
+        ),
         pytest.param("full", "nccl", True, "update_weight_from_tensor", "UpdateWeightFromTensor", id="colocated"),
         pytest.param(
             "full",
@@ -68,3 +77,16 @@ def test_create_weight_updater_selects_implementation(monkeypatch, mode, transpo
     assert updater.model_name == "model"
     assert updater.quantization_config == {"quant_method": "test"}
     assert updater.weight_version == 7
+
+
+@pytest.mark.unit
+def test_factory_import_does_not_require_modelexpress():
+    code = """
+import sys
+sys.modules["modelexpress_rl"] = None
+from vime.backends.megatron_utils.update_weight import create_weight_updater
+assert callable(create_weight_updater)
+"""
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+
+    assert result.returncode == 0, result.stderr

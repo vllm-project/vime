@@ -81,6 +81,31 @@ Arguments in Vime are divided into three categories:
 
 `--rollout-num-gpus-per-engine` sets the tensor parallel size of each vLLM engine. The default rollout entry is `vime.rollout.vllm_rollout.generate_rollout`.
 
+`--update-weight-transport modelexpress` selects Vime's
+[`UpdateWeightFromModelExpressDelta`](vime/backends/megatron_utils/update_weight/update_weight_from_modelexpress_delta.py).
+It uses the ModelExpress Python SDK to publish canonical S3 XOR deltas and optional periodic full HF checkpoints,
+then installs them through vLLM's native ModelExpress weight-transfer backend.
+Install the ModelExpress Python package on the trainer and rollout workers; other transports do not require it.
+The updater itself lives in Vime, not in `modelexpress_rl`.
+
+Pass settings through `--modelexpress-config`:
+
+| Setting | Purpose |
+|---|---|
+| `model_name`, `server_url` | Policy identity and ModelExpress gRPC endpoint |
+| `object_storage_uri_prefix` | S3 destination, such as `s3://<bucket>/<run-prefix>` |
+| `object_storage_endpoint_url`, `object_storage_region_name` | MinIO endpoint and region; for AWS S3, omit the endpoint and set the bucket's region |
+| `initial_base_version_id`, `seed_checkpoint_path` | Original seed identity and local seed checkpoint; v0 is catalog-only, with no payload upload |
+| `refit_checkpoint_dir`, `refit_checkpoint_max_size_gb` | Rollout checkpoint-cache path and optional quota in decimal GB; omission keeps the SDK default, and `null` disables the quota |
+| `full_hf_checkpoint_interval` | Publish a full HF checkpoint every N weight updates; disabled by default |
+| `max_replay_chain_length` | Maximum recovery chain, default 64; use a larger positive value or a full-checkpoint interval no higher than this limit |
+
+These object-storage settings currently support S3-compatible storage only. The full-checkpoint root counts toward
+the replay limit; the limit does not cap the total number of training updates.
+Trainer sleep preserves rollout handles without reinitializing their weight-transfer engines. Replacement engines
+keep the original seed identity and restore the current version before resuming; a failed restore does not resume
+generation. Successful installs publish the exact MX version ID through vLLM's weight-version metadata.
+
 For complete usage instructions, please refer to the [Usage Documentation](docs/en/get_started/usage.md).
 
 ## Engine Deployment
