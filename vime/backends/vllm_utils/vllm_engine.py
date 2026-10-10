@@ -17,6 +17,7 @@ from vime.backends.vllm_utils.external import get_server_info
 from vime.ray.ray_actor import RayActor
 from vime.utils.http_utils import _wrap_ipv6, get_host_info
 
+
 logger = logging.getLogger(__name__)
 
 _VLLM_WAKE_TAGS = frozenset({"weights", "kv_cache"})
@@ -104,10 +105,17 @@ def _run_vllm_server(kwargs: dict, env: dict) -> None:
     ServeSubcommand.cmd(args)
 
 
-def _wait_server_healthy(base_url, is_process_alive):
+def _wait_server_healthy(base_url, is_process_alive, probe_timeout: float = 5.0):
+    """Poll ``{base_url}/health`` until the server reports healthy.
+
+    Each individual probe is bounded by ``probe_timeout`` so that a server
+    which accepts the connection but never responds cannot stall the loop
+    forever (and the ``is_process_alive`` check stays reachable). The
+    overall wait remains unbounded so slow model loads are unaffected.
+    """
     while True:
         try:
-            response = requests.get(f"{base_url}/health")
+            response = requests.get(f"{base_url}/health", timeout=probe_timeout)
             if response.status_code == 200:
                 break
         except requests.RequestException:
