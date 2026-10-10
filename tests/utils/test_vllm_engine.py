@@ -6,6 +6,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock, call
 
 _tests_root = Path(__file__).resolve().parents[1]
 if str(_tests_root) not in sys.path:
@@ -89,6 +90,53 @@ class _MockResponse:
         if self._json_data is None:
             raise ValueError("no json")
         return self._json_data
+
+
+@pytest.mark.unit
+def test_wait_server_healthy_returns_when_ready(monkeypatch):
+    get = Mock(return_value=_MockResponse(status_code=200))
+    is_alive = Mock()
+    sleep = Mock()
+    monkeypatch.setattr(mod.requests, "get", get)
+    monkeypatch.setattr(mod.time, "sleep", sleep)
+
+    mod._wait_server_healthy("http://127.0.0.1:8765", is_alive)
+
+    get.assert_called_once_with("http://127.0.0.1:8765/health", timeout=3)
+    is_alive.assert_not_called()
+    sleep.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("response", [requests.Timeout(), requests.ConnectionError(), _MockResponse(status_code=503)])
+def test_wait_server_healthy_retries_while_process_is_alive(monkeypatch, response):
+    get = Mock(side_effect=[response, _MockResponse(status_code=200)])
+    is_alive = Mock(return_value=True)
+    sleep = Mock()
+    monkeypatch.setattr(mod.requests, "get", get)
+    monkeypatch.setattr(mod.time, "sleep", sleep)
+
+    mod._wait_server_healthy("http://127.0.0.1:8765", is_alive)
+
+    assert get.call_args_list == [call("http://127.0.0.1:8765/health", timeout=3)] * 2
+    is_alive.assert_called_once_with()
+    sleep.assert_called_once_with(2)
+
+
+@pytest.mark.unit
+def test_wait_server_healthy_checks_process_after_timeout(monkeypatch):
+    get = Mock(side_effect=requests.Timeout())
+    is_alive = Mock(return_value=False)
+    sleep = Mock()
+    monkeypatch.setattr(mod.requests, "get", get)
+    monkeypatch.setattr(mod.time, "sleep", sleep)
+
+    with pytest.raises(Exception, match="Server process terminated unexpectedly"):
+        mod._wait_server_healthy("http://127.0.0.1:8765", is_alive)
+
+    get.assert_called_once_with("http://127.0.0.1:8765/health", timeout=3)
+    is_alive.assert_called_once_with()
+    sleep.assert_not_called()
 
 
 @pytest.mark.unit
