@@ -108,8 +108,7 @@ VLLM_ARGS=(
    --vllm-gpu-memory-utilization 0.70
    --vllm-enable-expert-parallel
    --vllm-data-parallel-size 64
-
-
+   --vllm-all2all-backend deepep_high_throughput
    --prefill-num-servers 1
 
    # mtp

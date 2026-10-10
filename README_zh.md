@@ -10,9 +10,11 @@
 1. **高性能训练**：通过连接 Megatron 与 vLLM，支持各种模式的高效训练；
 2. **灵活的数据生成**：通过自定义数据生成接口以及 server based engine，实现任意的训练数据生成流程。
 
+训练、rollout、数据 buffer 和环境反馈共享同一条数据流，在同一个训练循环中支持数学、代码、搜索、工具调用和长程 agent 工作流。
+
 Vime 继承了 slime 广泛的模型支持，包括：
 
-- Qwen 系列（Qwen3.6、Qwen3.5、Qwen3Next、Qwen3MoE、Qwen3、Qwen2.5）；
+- Qwen 系列（Qwen3.8、Qwen3.6、Qwen3.5、Qwen3Next、Qwen3MoE、Qwen3、Qwen2.5）；
 - DeepSeek V3 系列（DeepSeek V3、V3.1、DeepSeek R1）；
 - Llama 3。
 
@@ -53,6 +55,8 @@ vLLM 社区横向支持许多 LLM post-training 框架，包括（按字母顺�
 - **rollout (vLLM + router)**：启动 vLLM 推理引擎并路由生成请求；自定义生成函数可以在其上封装多轮循环、工具调用、环境/沙盒交互和基于 verifier 的奖励；
 - **data buffer**：桥梁模块，管理 prompt 初始化、自定义数据与 rollout 生成方法，包括通过同一接口产出样本的 agent 工作流。
 
+默认载荷传输为 Ray `object-store`。`--rollout-data-transport straw` 可在共享存储上持久化 prompt 任务、rollout continuation 和训练 batch。详见 [straw 架构与恢复指南](docs/zh/advanced/straw.md)。
+
 ## 快速开始
 
 有关环境配置、数据准备、训练启动和关键代码分析的完整快速开始指南，请参考：
@@ -67,7 +71,7 @@ Agent 工作负载通过 Vime 的定制接口接入标准 rollout / Data Buffer 
 
 - [`examples/multi_agent`](examples/multi_agent/README.md)：通过 `--custom-generate-function-path` 实现多 agent 生成；
 - [`examples/fully_async`](examples/fully_async/README.md)：面向长尾 agent 生成的全异步 rollout；
-- [`examples/coding_agent_rl`](examples/coding_agent_rl/README.md)：使用 Claude Code 或 Codex、沙盒工具、测试奖励和 token 精确轨迹片段的端到端 coding-agent RL；
+- [`examples/coding_agent_rl`](examples/coding_agent_rl/README.md)：使用 Qwen3.8-27B、小米 MiMo SWE 数据和 sunabako 沙盒，运行代码智能体 RL，保留官方测试奖励和 token 级训练轨迹。
 
 请参阅 [Agentic RL 训练路线图](docs/zh/get_started/agent.md)和[定制化指南](docs/zh/get_started/customization.md)。Coding-agent 示例内置 E2B 兼容后端；共享的 `vime.agent.sandbox.Sandbox` 协议也可以由 Docker、Modal 或本地虚拟机实现。
 

@@ -16,6 +16,7 @@ from tqdm import tqdm
 from vime.utils import accelerator
 from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.types import ParamInfo
+from vime.utils.weight_sync import should_flush_cache
 
 from ..dspark.export import export_dspark_model_weights
 from ..megatron_to_hf import convert_to_hf
@@ -221,8 +222,8 @@ class UpdateWeightFromTensor:
             if not self._expert_transfer_plan:
                 return
 
-        # Rank-local expert routing is the one case the generic IPC API cannot
-        # express: each rollout EP rank receives a different expert subset.
+        # Expert routing supplies per-worker payloads instead of using the
+        # generic trainer's shared weight source.
         if self._ipc_gather_group is None:
             for index in range(colocate_engine_nums):
                 group_ranks = list(
@@ -293,6 +294,14 @@ class UpdateWeightFromTensor:
         for request in dist.batch_isend_irecv(p2p_ops) if p2p_ops else ():
             request.wait()
 
+        # NCCL Work.wait() only orders the current CUDA stream. A fast rank
+        # must not enter quantization's CUDA allocations/copies while peers
+        # are still issuing grouped P2P calls: those host calls can synchronize
+        # with the unfinished transfer and prevent its peers from launching.
+        # Include ranks without local transfers so every batch has one fence.
+        dist.barrier(group=get_gloo_group())
+        torch.cuda.synchronize()
+
         hf_named_tensors = []
         for expert_param, tensor in local_params:
             hf_named_tensors.extend(
@@ -339,12 +348,21 @@ class UpdateWeightFromTensor:
     @torch.no_grad()
     def update_weights(self) -> None:
         """
-        version++, flush caches, process buckets. Progress on rank 0.
+        version++, pause generation, optionally flush caches, process buckets.
         """
         self.weight_version += 1
+        flush_cache = should_flush_cache(
+            self.args.flush_cache_interval, self.weight_version, getattr(self.args, "update_weight_start_version", 0)
+        )
         if self.rank == 0:
-            ray.get([engine.pause_generation.remote() for engine in self._all_rollout_engines])
-            ray.get([engine.flush_cache.remote() for engine in self._all_rollout_engines])
+            ray.get(
+                [
+                    engine.pause_generation.remote(mode="abort" if flush_cache else "in_place")
+                    for engine in self._all_rollout_engines
+                ]
+            )
+            if flush_cache:
+                ray.get([engine.flush_cache.remote() for engine in self._all_rollout_engines])
             if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
                 post_process_weights(
                     restore_weights_before_load=True,

@@ -1,4 +1,6 @@
 import os
+import tempfile
+from shlex import quote
 
 import vime.utils.external_utils.command_utils as U
 
@@ -29,6 +31,8 @@ def execute():
         ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME} " f"--ref-load /root/{MODEL_NAME}_torch_dist "
 
     rollout_args = (
+        "--rollout-data-transport straw "
+        "--rollout-queue-online-gc "
         "--prompt-data /root/datasets/dapo-math-17k/dapo-math-17k.jsonl "
         "--input-key prompt "
         "--label-key label "
@@ -40,7 +44,6 @@ def execute():
         "--n-samples-per-prompt 4 "
         "--rollout-max-response-len 8192 "
         "--rollout-temperature 1 "
-        "--rollout-data-transport nixl "
         "--global-batch-size 16 "
         "--balance-data "
     )
@@ -132,11 +135,13 @@ def execute():
         f"{misc_args} "
     )
 
-    U.execute_train(
-        train_args=train_args,
-        num_gpus_per_node=NUM_GPUS,
-        megatron_model_type=MODEL_TYPE,
-    )
+    with tempfile.TemporaryDirectory(prefix="vime_straw_") as rollout_dir:
+        train_args += f"--rollout-data-dir {quote(rollout_dir)} "
+        U.execute_train(
+            train_args=train_args,
+            num_gpus_per_node=NUM_GPUS,
+            megatron_model_type=MODEL_TYPE,
+        )
 
 
 if __name__ == "__main__":

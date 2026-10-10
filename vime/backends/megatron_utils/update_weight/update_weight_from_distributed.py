@@ -8,6 +8,7 @@ import torch.distributed as dist
 from ray.actor import ActorHandle
 
 from vime.utils.distributed_utils import get_gloo_group
+from vime.utils.weight_sync import should_flush_cache
 
 from ..dspark.export import export_dspark_model_weights
 from .common import HfWeightSource, VimeRayWeightSyncClient, create_nccl_trainer
@@ -86,10 +87,19 @@ class UpdateWeightFromDistributed:
     def update_weights(self) -> None:
         assert self._trainer is not None
         self.weight_version += 1
+        flush_cache = should_flush_cache(
+            self.args.flush_cache_interval, self.weight_version, getattr(self.args, "update_weight_start_version", 0)
+        )
 
         if dist.get_rank() == 0:
-            ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
-            ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
+            ray.get(
+                [
+                    engine.pause_generation.remote(mode="abort" if flush_cache else "in_place")
+                    for engine in self.rollout_engines
+                ]
+            )
+            if flush_cache:
+                ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
             if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
                 post_process_weights(
                     restore_weights_before_load=True,

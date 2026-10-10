@@ -133,6 +133,7 @@ def _args(**overrides):
         "actor_num_gpus_per_node": 2,
         "rollout_num_gpus_per_engine": 2,
         "update_weight_buffer_size": 1024,
+        "flush_cache_interval": 1,
         "enable_mtp_training": False,
         "dspark_enabled": False,
         "dspark_pretrained_model": None,

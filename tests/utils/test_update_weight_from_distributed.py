@@ -252,6 +252,7 @@ def _updater_for_transfer(update_module, *, mtp=False, dspark=False, fail=False)
     updater.args = types.SimpleNamespace(
         enable_mtp_training=mtp,
         dspark_enabled=dspark,
+        flush_cache_interval=1,
         vllm_speculative_config={"method": "mtp"} if mtp else {"method": "dspark"} if dspark else None,
     )
     updater.quantization_config = None

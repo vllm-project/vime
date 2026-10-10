@@ -5,8 +5,8 @@ import logging
 import multiprocessing
 import os
 import time
+from threading import Thread
 from typing import Any
-from urllib.parse import quote
 
 import cloudpickle
 import requests
@@ -14,6 +14,7 @@ from urllib3.exceptions import NewConnectionError
 from vllm.utils.system_utils import kill_process_tree
 
 from vime.backends.vllm_utils.external import get_server_info
+from vime.backends.vllm_utils.server_control import unregister_worker
 from vime.ray.ray_actor import RayActor
 from vime.utils.http_utils import _wrap_ipv6, get_host_info
 
@@ -38,6 +39,8 @@ def get_base_gpu_id(args, rank):
 
 
 def launch_server_process(server_args_dict: dict) -> multiprocessing.Process:
+    os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+    os.environ.pop("PYTORCH_ALLOC_CONF", None)
     env = _build_subprocess_env(server_args_dict)
     kwargs = {k: v for k, v in server_args_dict.items() if not k.startswith("_")}
     host = _wrap_ipv6(kwargs.get("host") or "127.0.0.1")
@@ -62,8 +65,6 @@ def launch_server_process(server_args_dict: dict) -> multiprocessing.Process:
 def _build_subprocess_env(server_args_dict: dict[str, Any]) -> dict[str, str]:
     args = server_args_dict["_args"]
     env = os.environ.copy()
-    env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
-    env.pop("PYTORCH_ALLOC_CONF", None)
     env.setdefault("NCCL_CUMEM_ENABLE", "0")
     env["CUDA_VISIBLE_DEVICES"] = server_args_dict["_visible_devices"]
     # ROCm: keep HIP visibility in sync with CUDA (no-op on CUDA).
@@ -93,6 +94,17 @@ def _build_subprocess_env(server_args_dict: dict[str, Any]) -> dict[str, str]:
 def _run_vllm_server(kwargs: dict, env: dict) -> None:
     os.environ.update(env)
 
+    parent = multiprocessing.parent_process()
+    if parent is not None:
+
+        def stop_when_parent_exits():
+            parent.join()
+            kill_process_tree(os.getpid())
+
+        Thread(target=stop_when_parent_exits, daemon=True).start()
+        if not parent.is_alive():
+            return
+
     from vllm.entrypoints.cli.serve import ServeSubcommand
     from vllm.entrypoints.launchers.cli_args import make_arg_parser, validate_parsed_serve_args
     from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -107,7 +119,7 @@ def _run_vllm_server(kwargs: dict, env: dict) -> None:
 def _wait_server_healthy(base_url, is_process_alive):
     while True:
         try:
-            response = requests.get(f"{base_url}/health")
+            response = requests.get(f"{base_url}/health_generate", timeout=5)
             if response.status_code == 200:
                 break
         except requests.RequestException:
@@ -230,7 +242,7 @@ class VLLMEngine(RayActor):
             )
             response.raise_for_status()
 
-    def _make_request(self, endpoint: str, payload: dict | None = None):
+    def _make_request(self, endpoint: str, payload: dict | None = None, *, timeout=None):
         """Make a POST request to the specified endpoint with the given payload.
 
         Args:
@@ -244,7 +256,7 @@ class VLLMEngine(RayActor):
             return
 
         url = f"http://{self.server_host}:{self.server_port}/{endpoint}"
-        response = requests.post(url, json=payload or {})
+        response = requests.post(url, json=payload or {}, timeout=timeout)
         try:
             response.raise_for_status()
         except requests.exceptions.HTTPError as e:
@@ -259,7 +271,7 @@ class VLLMEngine(RayActor):
             return True
 
         response = requests.get(
-            f"http://{self.server_host}:{self.server_port}/health",
+            f"http://{self.server_host}:{self.server_port}/health_generate",
             timeout=timeout,
         )
         response.raise_for_status()
@@ -286,7 +298,7 @@ class VLLMEngine(RayActor):
     def flush_cache(self):
         if self.node_rank != 0:
             return
-        params = {"reset_running_requests": True}
+        params = {"reset_running_requests": "true", "reset_external": "true"}
         for _ in range(60):
             try:
                 response = requests.post(
@@ -312,23 +324,21 @@ class VLLMEngine(RayActor):
 
     def shutdown(self):
         if self.args.rollout_external:
+            # The external cluster owns its processes; vime must not kill them.
             return
 
         logger.info(f"Shutdown engine {self.server_host}:{self.server_port}...")
         if self.worker_type != "encoder" and self.node_rank == 0:
             worker_url = f"http://{self.server_host}:{self.server_port}"
             try:
-                all_workers = requests.get(f"http://{self.router_ip}:{self.router_port}/workers").json()["workers"]
-                for worker in all_workers:
-                    if worker["url"] == worker_url:
-                        response = requests.delete(
-                            f"http://{self.router_ip}:{self.router_port}/workers/{quote(worker_url, safe='')}",
-                        )
-                        response.raise_for_status()
-                        break
-                else:
-                    logger.warning(f"Worker {worker_url} not found in vllm-router during shutdown.")
+                unregister_worker(
+                    f"http://{self.router_ip}:{self.router_port}",
+                    worker_url,
+                    timeout=self.args.rollout_health_check_timeout,
+                )
             except Exception as e:
+                # Even if router cleanup fails, terminate the local process.
+                # Owner-side cleanup keeps the URL outside this actor for retry.
                 logger.warning(f"Failed to fetch workers list or remove worker: {e}")
 
         kill_process_tree(self.process.pid)
@@ -336,7 +346,9 @@ class VLLMEngine(RayActor):
     def get_weight_version(self):
         if self.node_rank != 0:
             return
-        response = requests.get(f"http://{self.server_host}:{self.server_port}/weight_info")
+        response = requests.get(
+            f"http://{self.server_host}:{self.server_port}/weight_info", timeout=self.args.rollout_health_check_timeout
+        )
         try:
             response.raise_for_status()
         except requests.exceptions.HTTPError as error:
@@ -353,8 +365,9 @@ class VLLMEngine(RayActor):
         return result
 
     def release_memory_occupation(self, level: int = 2):
-        self.flush_cache()
-        response = requests.post(f"http://{self.server_host}:{self.server_port}/sleep", params={"level": level})
+        response = requests.post(
+            f"http://{self.server_host}:{self.server_port}/sleep", params={"level": level, "mode": "keep"}
+        )
         response.raise_for_status()
         if not response.content or not response.content.strip():
             return {"ok": True}
@@ -411,8 +424,9 @@ class VLLMEngine(RayActor):
         model_path: str,
         load_format: str | None = None,
         weight_version: str | None = None,
+        flush_cache: bool = True,
     ):
-        del load_format
+        del load_format, flush_cache
         if self.node_rank != 0:
             return
         response = requests.post(
@@ -444,7 +458,15 @@ class VLLMEngine(RayActor):
 
     def destroy_weights_update_group(self, group_name):
         del group_name
-        return None
+        return self.reset_weights_update_groups()
+
+    def reset_weights_update_groups(self):
+        """Remove dead trainer peers while retaining the serving process."""
+        return self._make_request(
+            "collective_rpc",
+            {"method": "shutdown_weight_transfer_engine"},
+            timeout=self.args.rollout_health_check_timeout,
+        )
 
     def update_weights_from_distributed(
         self,
@@ -468,12 +490,12 @@ class VLLMEngine(RayActor):
         del weight_version
         return result
 
-    def pause_generation(self):
+    def pause_generation(self, mode: str = "abort"):
         if self.node_rank != 0:
             return
         response = requests.post(
             f"http://{self.server_host}:{self.server_port}/pause",
-            params={"mode": "keep", "clear_cache": "false"},
+            params={"mode": "keep" if mode == "in_place" else mode, "clear_cache": "false"},
             json={},
         )
         response.raise_for_status()
@@ -669,6 +691,7 @@ def _compute_server_args(
         "tensor_parallel_size": tp,
         "logprobs_mode": "processed_logprobs",
         "enable_prompt_tokens_details": True,
+        "enable_scale_out": True,
         "enable_per_request_metrics": True,
         "enable_server_load_tracking": True,
     }
@@ -711,6 +734,10 @@ def _compute_server_args(
         kwargs["per_request_spec_decode_metrics"] = "summary"
     if getattr(args, "rollout_top_p", 1.0) != 1.0:
         kwargs["return_sampling_mask"] = True
+        if getattr(args, "use_score_centering", False):
+            kwargs["return_sampling_mask_logprobs"] = True
+    if getattr(args, "use_score_centering", False) and getattr(args, "rollout_top_p", 1.0) == 1.0:
+        kwargs["max_logprobs"] = args.score_centering_top_k + 1
     if args.fp16:
         kwargs["dtype"] = "float16"
 
@@ -765,6 +792,11 @@ def _compute_server_args(
         if "model_path" in vllm_overrides:
             kwargs["model"] = str(vllm_overrides["model_path"])
 
+    if getattr(args, "use_score_centering", False):
+        if kwargs["logprobs_mode"] != "processed_logprobs":
+            raise ValueError("Score centering requires vLLM logprobs_mode=processed_logprobs.")
+        external_engine_need_check_fields.append("logprobs_mode")
+
     kwargs["host"] = _wrap_ipv6(kwargs.get("host") or "127.0.0.1")
 
     # vLLM-specific: topology metadata consumed by launch_server_process / _build_subprocess_env.
@@ -804,4 +836,5 @@ _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS = [
     "enable_prompt_tokens_details",
     "enable_per_request_metrics",
     "enable_server_load_tracking",
+    "enable_scale_out",
 ]

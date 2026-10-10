@@ -17,12 +17,9 @@ from tau_bench.envs import get_env
 from tau_bench.types import Action, RunConfig
 from token_delta import get_token_delta
 
-from vime.rollout.vllm_rollout import (
-    GenerateState,
-    _build_inference_sampling_params,
-    _coerce_flat_int_token_ids,
-    _mm_render_response_to_generate_body,
-)
+from vime.rollout.vllm_rollout import GenerateState, _build_inference_sampling_params, _coerce_flat_int_token_ids
+from vime.rollout.vllm_rollout import _inference_generate_tokens_and_logprobs as _parse_choice_tokens_and_logprobs
+from vime.rollout.vllm_rollout import _mm_render_response_to_generate_body
 from vime.utils.http_utils import post
 from vime.utils.types import Sample
 
@@ -38,25 +35,6 @@ def patch_tau_user_retries() -> None:
         user_mod.RETRY_DELAY_SECONDS = float(os.environ.get("TAU_USER_LITELLM_RETRY_DELAY", "2"))
     except Exception:
         pass
-
-
-def _parse_choice_tokens_and_logprobs(choice: dict[str, Any]) -> tuple[list[int], list[float]]:
-    """Parse token_ids + logprobs from vLLM /inference/v1/generate choice."""
-    tids_raw = choice.get("token_ids")
-    if not (isinstance(tids_raw, list) and tids_raw and all(isinstance(x, int) for x in tids_raw)):
-        return [], []
-    tids = [int(x) for x in tids_raw]
-    lp = choice.get("logprobs")
-    if not isinstance(lp, dict):
-        return tids, [0.0] * len(tids)
-    content = lp.get("content")
-    if isinstance(content, list) and content:
-        log_probs = [
-            float(content[i].get("logprob", 0.0)) if i < len(content) and isinstance(content[i], dict) else 0.0
-            for i in range(len(tids))
-        ]
-        return tids, log_probs
-    return tids, [0.0] * len(tids)
 
 
 def _maybe_apply_routed_experts(args: Any, sample: Sample, choice: dict[str, Any]) -> None:
@@ -299,7 +277,13 @@ def _messages_for_render(messages: list[dict]) -> list[dict]:
 
 
 class TrainableTauBenchAgent:
-    """Trainable tau-bench agent using vLLM render + /inference/v1/generate."""
+    """Trainable tau-bench agent using vLLM render + /inference/v1/generate.
+
+    Tokenization logic adapted from:
+    https://verl.readthedocs.io/en/v0.4.1/sglang_multiturn/multiturn.html
+    to calculate the right token count in a multi-turn environment using
+    delta between messages.
+    """
 
     async def asolve(self, args: Any, sample: Sample, sampling_params) -> Sample:
         assert not args.partial_rollout, "Partial rollout is not supported for tau-bench interactions."

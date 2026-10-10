@@ -1,4 +1,4 @@
-# Quick Start
+# AMD ROCm
 
 This document will guide you through setting up the environment and getting started with vime on AMD ROCm, covering environment configuration, data preparation, weight conversion, and training startup.
 
@@ -39,18 +39,18 @@ hf download zhuzilin/dapo-math-17k --repo-type dataset --local-dir /root/dapo-ma
 
 ### HF → Megatron torch_dist ckpt
 
-Use Vime's built-in Hugging Face-to-Megatron loader for conversion. Load the model configuration for Qwen3-8B, then run the conversion. Two ROCm-specific flags are required: `--no-gradient-accumulation-fusion` and `--attention-backend flash`.
+Use Vime's built-in Hugging Face-to-Megatron loader for conversion. Load the model configuration for Qwen3-8B, then run the conversion with `--use-cpu-initialization` to initialize and save model weights on CPU. Retain the ROCm-specific flags `--no-gradient-accumulation-fusion` and `--attention-backend flash`.
 
 ```bash
 cd /root/vime && source scripts/models/qwen3-8B.sh
 
 HIP_VISIBLE_DEVICES=0 PYTHONPATH=/root/vime:/root/Megatron-LM \
   torchrun --nproc-per-node=1 tools/convert_hf_to_torch_dist.py "${MODEL_ARGS[@]}" \
-  --no-gradient-accumulation-fusion --attention-backend flash \
+  --no-gradient-accumulation-fusion --use-cpu-initialization --attention-backend flash \
   --hf-checkpoint /root/Qwen3-8B --save /root/Qwen3-8B_torch_dist
 ```
 
-> **Note**: On ROCm, use `HIP_VISIBLE_DEVICES` in place of `CUDA_VISIBLE_DEVICES` to select GPUs. The `--attention-backend flash` and `--no-gradient-accumulation-fusion` flags are required to avoid issues during conversion.
+> **Note**: On ROCm, use `HIP_VISIBLE_DEVICES` in place of `CUDA_VISIBLE_DEVICES` to select GPUs. The shared conversion script supports CPU initialization through `--use-cpu-initialization`; retain `--attention-backend flash` and `--no-gradient-accumulation-fusion` when adapting this recipe.
 
 ## Training
 

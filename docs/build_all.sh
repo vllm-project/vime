@@ -4,9 +4,9 @@ SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 cd "$SCRIPT_DIR"
 
 echo "[vime-docs] Building EN..."
-./build.sh en
+VIME_DOC_LAYOUT=prefix ./build.sh en
 echo "[vime-docs] Building ZH..."
-./build.sh zh
+VIME_DOC_LAYOUT=prefix ./build.sh zh
 
 # Create a lightweight root index with auto redirect based on localStorage (done client side)
 ROOT_INDEX=build/index.html
@@ -27,7 +27,7 @@ cat > "$ROOT_INDEX" <<'EOF'
     (function(){
       var stored = null;
       try{stored = localStorage.getItem('vime-doc-lang');}catch(e){}
-      var path = (stored === 'zh') ? 'zh/' : (stored === 'en') ? 'en/' : null;
+      var path = (stored === 'zh' || (!stored && navigator.language.startsWith('zh'))) ? 'zh/' : 'en/';
       if(path){ window.location.replace(path); }
     })();
   </script>

@@ -24,6 +24,67 @@ def _write_yaml(data: dict) -> str:
 
 
 class TestVllmConfigUpdateWeights:
+    @pytest.mark.parametrize("first_model", ["regular", "pd", "epd"])
+    @pytest.mark.parametrize("second_model", ["regular", "pd", "epd"])
+    def test_models_starting_concurrently_use_disjoint_ports(self, monkeypatch, first_model, second_model):
+        from vime.backends.vllm_utils import deployment, disaggregation
+        from vime.backends.vllm_utils.engine_group import ServerGroup
+        from vime.backends.vllm_utils.vllm_config import ModelConfig, ServerGroupConfig, VllmConfig
+
+        layouts = {
+            "regular": [("regular", 4)],
+            "pd": [("prefill", 2), ("decode", 2)],
+            "epd": [("encoder", 1), ("prefill", 1), ("decode", 2)],
+        }
+        config = VllmConfig(
+            models=[
+                ModelConfig(
+                    name=name,
+                    update_weights=(name == "actor"),
+                    server_groups=[
+                        ServerGroupConfig(worker_type=worker_type, num_gpus=num_gpus)
+                        for worker_type, num_gpus in layouts[layout]
+                    ],
+                )
+                for name, layout in (("actor", first_model), ("ref", second_model))
+            ]
+        )
+        allocated = []
+
+        def start_engines(self, port_cursors=None):
+            port = (port_cursors or {}).get(0, 15000)
+            allocated.append(port)
+            engine = Mock()
+            engine.get_url.remote.return_value = f"http://127.0.0.1:{port}"
+            self.all_engines = [engine for _ in self.all_engines]
+            return [f"init-{port}"], {0: port + 100}
+
+        monkeypatch.setattr(ServerGroup, "start_engines", start_engines)
+        monkeypatch.setattr(deployment, "resolve_vllm_config", lambda _args: config)
+        monkeypatch.setattr(deployment, "_start_router", lambda *_args, **_kwargs: ("127.0.0.1", 3456, None))
+        monkeypatch.setattr(deployment, "get_host_info", lambda: (None, "127.0.0.1"))
+        monkeypatch.setattr(deployment, "find_available_port", lambda _port: 3456)
+        monkeypatch.setattr(deployment, "collect_pd_urls", lambda _groups: ([], []))
+        monkeypatch.setattr(disaggregation.ray, "get", lambda refs: refs)
+        args = Namespace(
+            rollout_external=False,
+            rollout_num_gpus_per_engine=1,
+            num_gpus_per_node=8,
+            debug_train_only=False,
+            debug_rollout_only=False,
+            colocate=False,
+            actor_num_nodes=1,
+            actor_num_gpus_per_node=8,
+            offload_rollout=False,
+            hf_checkpoint="/tmp/hf",
+        )
+
+        servers, _ = deployment.start_rollout_servers(args, pg=(None, list(range(8)), list(range(8))))
+
+        assert list(servers) == ["actor", "ref"]
+        assert len(allocated) == len(layouts[first_model]) + len(layouts[second_model])
+        assert len(allocated) == len(set(allocated))
+
     @pytest.mark.parametrize("update_weights,level", [(True, 2), (False, 1)])
     @pytest.mark.parametrize("recover", [False, True])
     def test_offload_preserves_frozen_weights(self, monkeypatch, update_weights, level, recover):
@@ -263,7 +324,10 @@ class TestZeroGpuRolloutConfig:
 
     def test_vllm_server_args_derive_tp_from_overridden_pp(self, monkeypatch):
         from vime.backends.vllm_utils import vllm_engine
+        from vime.utils import accelerator
 
+        # Device mapping is tested separately; building server args needs no GPU.
+        monkeypatch.setattr(accelerator, "resolve_visible_device_id", lambda device_id: device_id)
         monkeypatch.setattr(vllm_engine, "_VLLM_SERVER_FIELDS", frozenset())
 
         args = Namespace(
@@ -300,7 +364,9 @@ class TestZeroGpuRolloutConfig:
 
     def test_offload_rollout_enables_vllm_sleep_mode(self, monkeypatch):
         from vime.backends.vllm_utils import vllm_engine
+        from vime.utils import accelerator
 
+        monkeypatch.setattr(accelerator, "resolve_visible_device_id", lambda device_id: device_id)
         monkeypatch.setattr(vllm_engine, "_VLLM_SERVER_FIELDS", frozenset())
 
         args = Namespace(

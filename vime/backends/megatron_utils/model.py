@@ -82,7 +82,11 @@ def _with_rollout_top_p_token_keys(args: Namespace, keys: Sequence[str]) -> list
 
 def _iter_critic_output_layers(model: Sequence[DDP]):
     for chunk_id, module in enumerate(unwrap_model(model)):
-        output_layer = getattr(module, "output_layer", None)
+        # VLM wrappers keep the value head on their inner language_model.
+        head_owner = getattr(module, "language_model", None)
+        if head_owner is None:
+            head_owner = module
+        output_layer = getattr(head_owner, "output_layer", None)
         if output_layer is not None:
             yield chunk_id, output_layer
 
@@ -115,8 +119,8 @@ except ImportError:
                         iteration = int(checkpoint_step.split("_")[1])
 
         # Allow user to specify the loaded iteration.
-        if getattr(args, "ckpt_step", None):
-            iteration = args.ckpt_step
+        if getattr(args, "ckpt_step", None) is not None:
+            iteration, release = args.ckpt_step, False
 
         return get_checkpoint_name(load_dir, iteration, release, return_base_dir=True)
 
@@ -315,6 +319,10 @@ def setup_model_and_optimizer(
             model_chunks=model,
             use_gloo_process_groups=args.enable_gloo_process_groups,
         )
+    if config.use_precision_aware_optimizer:
+        from .transformer_engine import patch_precision_aware_optimizer_checkpointing
+
+        patch_precision_aware_optimizer_checkpointing(optimizer)
     if args.use_stateless_adam:
         _disable_distributed_optimizer_state_initialization(optimizer)
     opt_param_scheduler = get_optimizer_param_scheduler(args, optimizer)
@@ -594,6 +602,9 @@ def train_one_step(
                     "advantages",
                     "returns",
                     "rollout_log_probs",
+                    "rollout_topk_token_ids",
+                    "rollout_topk_log_probs",
+                    "rollout_top_p_log_probs",
                     "teacher_log_probs",
                     "rollout_mask_sums",
                     # Only present when dumping train debug data; lets the loss
@@ -724,6 +735,9 @@ def train_one_step(
         assert update_successful
         opt_param_scheduler.step(increment=step_global_batch_size)
 
+    if isinstance(grad_norm, torch.Tensor):
+        grad_norm = grad_norm.item()
+
     # release grad
     for model_chunk in model:
         model_chunk.zero_grad_buffer()
@@ -793,13 +807,15 @@ def train(
     config.grad_scale_func = optimizer.scale_loss
     config.timers = None
     if isinstance(model[0], DDP) and args.overlap_grad_reduce:
-        assert config.no_sync_func is None, (
-            "When overlap_grad_reduce is True, config.no_sync_func must be None; "
-            "a custom no_sync_func is not supported when overlapping grad-reduce"
-        )
-        config.no_sync_func = [model_chunk.no_sync for model_chunk in model]
+        no_sync_func = [model_chunk.no_sync for model_chunk in model]
         if len(model) == 1:
-            config.no_sync_func = config.no_sync_func[0]
+            no_sync_func = no_sync_func[0]
+        # train() runs once per rollout, while the model/config survive across
+        # rollouts. Reuse our DDP callback instead of rejecting it as custom.
+        assert (
+            config.no_sync_func is None or config.no_sync_func == no_sync_func
+        ), "A custom no_sync_func is not supported when overlapping grad-reduce"
+        config.no_sync_func = no_sync_func
         if args.align_grad_reduce:
             config.grad_sync_func = [model_chunk.start_grad_sync for model_chunk in model]
             if len(model) == 1:
@@ -893,15 +909,19 @@ def train(
 
             mtp_loss_scale = 1 / num_microbatches[step_id]
             tracker = MTPLossLoggingHelper.tracker
-            if "values" in tracker:
-                values = tracker["values"]
+            loss_key = "loss_values" if "loss_values" in tracker else "values"
+            if loss_key in tracker:
+                values = tracker[loss_key]
                 if tracker.get("reduce_group") is not None:
                     torch.distributed.all_reduce(values, group=tracker.get("reduce_group"))
                 if tracker.get("avg_group") is not None:
                     torch.distributed.all_reduce(values, group=tracker["avg_group"], op=torch.distributed.ReduceOp.AVG)
-                # Multi-head MTP: tracker["values"] is [num_mtp_layers]; aggregate below.
-                mtp_losses = tracker["values"] * mtp_loss_scale
-                MTPLossLoggingHelper.clean_loss_in_tracker()
+                # Multi-head MTP losses have shape [num_mtp_layers]; aggregate below.
+                mtp_losses = values * mtp_loss_scale
+                if hasattr(MTPLossLoggingHelper, "clean_metrics_in_tracker"):
+                    MTPLossLoggingHelper.clean_metrics_in_tracker()
+                else:
+                    MTPLossLoggingHelper.clean_loss_in_tracker()
 
                 # CI check: verify MTP loss is within expected bounds
                 if args.ci_test:
@@ -944,12 +964,14 @@ def train(
                 if step_id == 0 and "train/ppo_kl" in log_dict and "train/pg_clipfrac" in log_dict:
                     # TODO: figure out why KL is not exactly zero when using PPO loss with KL clipping, and whether this is expected behavior or a bug.
                     assert log_dict["train/ppo_kl"] < 1e-8, f"{log_dict=}"
-                # R3 replays rollout routing for the actor path, while ref
-                # log-probs are computed with normal routing. The initial
-                # actor/ref KL is therefore not expected to be exactly zero.
+                # R3 uses replayed routing only for the actor. Top-p replay
+                # also normalizes the actor over the sampled support, while
+                # the reference uses the full vocabulary. Neither comparison
+                # has zero initial KL, even with identical model weights.
                 if (
                     accumulated_step_id == 0
                     and not getattr(args, "use_rollout_routing_replay", False)
+                    and args.rollout_top_p == 1.0
                     and "train/kl_loss" in log_dict
                 ):
                     assert log_dict["train/kl_loss"] < 1e-8, f"{log_dict=}"

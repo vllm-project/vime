@@ -119,6 +119,7 @@ VLLM_ARGS=(
    --vllm-data-parallel-size 8
 
     # enable deepep for vllm
+    --vllm-all2all-backend deepep_high_throughput
 
     # mtp
 

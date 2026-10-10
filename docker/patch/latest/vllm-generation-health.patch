@@ -1,0 +1,85 @@
+--- a/vllm/engine/protocol.py
++++ b/vllm/engine/protocol.py
+@@ -162,6 +162,11 @@
+         ...
+ 
+     @abstractmethod
++    async def check_health_generate(self, timeout: float = 20.0) -> None:
++        """Require a scheduler or inference response, not just a live frontend."""
++        ...
++
++    @abstractmethod
+     async def start_profile(
+         self,
+         profile_prefix: str | None = None,
+--- a/vllm/entrypoints/serve/instrumentator/health.py
++++ b/vllm/entrypoints/serve/instrumentator/health.py
+@@ -7,7 +7,7 @@
+ 
+ from vllm.engine.protocol import EngineClient
+ from vllm.logger import init_logger
+-from vllm.v1.engine.exceptions import EngineDeadError
++from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+ 
+ logger = init_logger(__name__)
+ 
+@@ -31,3 +31,16 @@
+         return Response(status_code=200)
+     except EngineDeadError:
+         return Response(status_code=503)
++
++
++@router.get("/health_generate", response_class=Response)
++async def health_generate(raw_request: Request) -> Response:
++    """Check inference progress while keeping the lightweight health route intact."""
++    client = engine_client(raw_request)
++    if client is None:
++        return Response(status_code=200)
++    try:
++        await client.check_health_generate()
++        return Response(status_code=200)
++    except (EngineDeadError, EngineGenerateError, TimeoutError):
++        return Response(status_code=503)
+--- a/vllm/v1/engine/async_llm.py
++++ b/vllm/v1/engine/async_llm.py
+@@ -47,6 +47,7 @@
+ from vllm.tracing import init_tracer
+ from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
+ from vllm.usage.usage_lib import UsageContext
++from vllm.utils import random_uuid
+ from vllm.utils.async_utils import cancel_task_threadsafe
+ from vllm.utils.collection_utils import as_list
+ from vllm.v1.engine import EngineCoreRequest, PauseMode
+@@ -1089,6 +1090,32 @@
+         if self.errored:
+             raise self.dead_error
+ 
++    async def check_health_generate(self, timeout: float = 20.0) -> None:
++        """Require a scheduler reply when busy, or an inference result when idle."""
++        async with asyncio.timeout(timeout):
++            await self.check_health()
++            loads = await self.get_inflight_queue_diagnostics(0)
++            if any(
++                load.get("has_pending_work", False)
++                or any(queue["num_requests"] for queue in load["queues"])
++                for load in loads
++            ):
++                return
++            request_id = f"healthcheck-{random_uuid()}"
++            prompt = TokensPrompt(prompt_token_ids=[0])
++            generator = (
++                self.generate(
++                    prompt, SamplingParams(max_tokens=1, temperature=1, top_k=1), request_id
++                )
++                if self.model_config.runner_type == "generate"
++                else self.encode(prompt, PoolingParams(), request_id)
++            )
++            try:
++                await anext(generator)
++            finally:
++                await self.abort(request_id)
++                await generator.aclose()
++
+     async def start_profile(
+         self,
+         profile_prefix: str | None = None,

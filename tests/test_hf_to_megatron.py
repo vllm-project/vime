@@ -77,6 +77,7 @@ _EXPORT_ARGS = types.SimpleNamespace(
     num_query_groups=2,
     num_layers=2,
     q_lora_rank=None,
+    vocab_size=1024,
 )
 
 
@@ -219,6 +220,49 @@ def test_qwen3_omni_encoder_mapping_is_replicated():
     tensors = dict(convert_qwen3_omni_to_hf(_EXPORT_ARGS, name, parameter))
     loaded = qwen3_omni_hf_tensor(name, Reader(**tensors), types.SimpleNamespace())
     assert loaded is parameter
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("mtp_module", ["transformer_layer", "mtp_model_layer"])
+@pytest.mark.parametrize(
+    ("component", "shape", "hf_suffixes"),
+    [
+        ("mlp.linear_fc1.layer_norm_weight", (8,), ["post_attention_layernorm.weight"]),
+        ("mlp.linear_fc1.weight", (12, 8), ["mlp.gate_proj.weight", "mlp.up_proj.weight"]),
+        ("mlp.linear_fc2.weight", (8, 6), ["mlp.down_proj.weight"]),
+    ],
+)
+@pytest.mark.parametrize(
+    ("model_type", "hf_prefix"),
+    [
+        ("mimo", "model.mtp_layers.1"),
+        ("deepseek_v3", "model.layers.3"),
+        ("glm4_moe", "model.layers.3"),
+        ("qwen3_next", "mtp.layers.1"),
+        ("qwen3_5_moe", "mtp.layers.1"),
+    ],
+)
+def test_mtp_live_module_names_export_and_load(model_type, hf_prefix, mtp_module, component, shape, hf_suffixes):
+    if model_type == "qwen3_next" and component.endswith(".weight"):
+        component = component.replace("mlp.", "mlp.experts.") + "3"
+        hf_suffixes = [suffix.replace("mlp.", "mlp.experts.3.") for suffix in hf_suffixes]
+    parameter = torch.arange(torch.tensor(shape).prod()).reshape(shape)
+    name = f"module.module.mtp.layers.1.{mtp_module}.{component}"
+
+    converted = convert_to_hf(_EXPORT_ARGS, model_type, name, parameter)
+
+    assert [key for key, _ in converted] == [f"{hf_prefix}.{suffix}" for suffix in hf_suffixes]
+    config = types.SimpleNamespace(
+        model_type=model_type,
+        hidden_size=8,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=2,
+        num_hidden_layers=2,
+        tie_word_embeddings=False,
+    )
+    loaded = _LOADERS[model_type](name, Reader(**dict(converted)), config)
+    assert torch.equal(loaded, parameter)
 
 
 @pytest.mark.unit

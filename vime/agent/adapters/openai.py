@@ -1,15 +1,16 @@
 """OpenAI Chat-Completions adapter for agent rollouts.
 
-Mirrors vime.agent.adapters.anthropic but speaks the OpenAI
-/v1/chat/completions protocol, so an OpenAI-compatible client (e.g. the Codex
-CLI) can drive the vime vllm server. Each request is rendered with the served
-model's chat template, sent to vllm ``/inference/v1/generate`` as ``token_ids``,
-parsed, and folded into a shared TrajectoryManager keyed by session id.
-finish_session(sid) drains a session's trajectory into a list of Sample.
+Mirrors slime.agent.adapters.anthropic but speaks the OpenAI
+/v1/chat/completions protocol, so a Chat Completions client can drive the vime
+vLLM server. Current Codex uses the separate ResponsesAdapter. Each request
+is rendered with the served model's chat template, sent to ``/inference/v1/generate`` as
+``token_ids``, parsed, and folded
+into a shared TrajectoryManager keyed by session id. finish_session(sid) drains
+a session's trajectory into a list of Sample.
 
-Only /v1/chat/completions is implemented; the Responses API (/v1/responses) is
-out of scope. The section layout (adapter class -> translation -> reply building
--> request framing) mirrors vime.agent.adapters.anthropic.
+This class implements only /v1/chat/completions. The section layout
+(adapter class -> translation -> reply building
+-> request framing) mirrors slime.agent.adapters.anthropic.
 """
 
 from __future__ import annotations

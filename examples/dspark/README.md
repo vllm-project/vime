@@ -136,4 +136,4 @@ On Qwen3-4B with 8x A800 GPUs and a pre-trained DSpark draft checkpoint:
 
 1. [DSpark Paper](https://arxiv.org/abs/2505.14269) — Semi-autoregressive speculative decoding.
 2. [vLLM Speculative Decoding Docs](https://docs.vllm.ai/en/latest/features/speculative_decoding/)
-3. [vime Speculative Decoding Docs](../../docs/en/advanced/speculative-decoding.md)
+3. [vime Speculative Decoding Docs](https://github.com/vllm-project/vime/blob/main/docs/en/advanced/speculative-decoding.md)

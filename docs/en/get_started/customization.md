@@ -44,7 +44,7 @@ For most agentic use cases, **start with `--custom-generate-function-path` plus 
 | Attach custom loss masks, metadata, or convert agentic outputs into training data | [`--rollout-data-postprocess-path`](#rollout-data-postprocess-path), [`--custom-convert-samples-to-train-data-path`](#custom-convert-samples-to-train-data-path) |
 | Debug long-running custom generation, verifier calls, tool calls, or sandbox steps | trace utilities in [`vime.observability.trace_utils`](../developer_guide/trace.md) |
 
-Native examples of this pattern: [`examples/multi_agent`](../../../examples/multi_agent/README.md) (a `--rollout-function-path`-based multi-agent pattern) and [`examples/fully_async`](../../../examples/fully_async/README.md) (long-tail agentic generation), both keeping vime's default `vllm_rollout` outer loop.
+Native examples of this pattern: [`examples/multi_agent`](../_examples_synced/multi_agent/README.md) (a `--rollout-function-path`-based multi-agent pattern) and [`examples/fully_async`](../_examples_synced/fully_async/README.md) (long-tail agentic generation), both keeping vime's default `vllm_rollout` outer loop.
 
 ## Detailed Interface Reference
 
@@ -65,6 +65,42 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False) -> Rollout
 - Integrating external tools or APIs during generation
 
 **Example**: See [examples/fully_async](../_examples_synced/fully_async/README.md)
+
+With `--rollout-data-transport straw`, custom rollout functions can return
+Sample lists directly or in `RolloutFnTrainOutput`; the manager persists them.
+`RolloutFnTrainOutput.samples` also accepts a `DiskPayloadRef`. To avoid holding
+an entire batch in memory, publish generated, scored and selected groups as they
+finish. The following helper takes the rollout function's `data_source` and an
+async iterator of completed groups:
+
+```python
+from vime.data.transport import publish_rollout_async
+from vime.rollout.base_types import finalize_rollout_groups
+
+
+async def generate_stored_batch(args, rollout_id, data_source, completed_groups):
+    refs = []
+    async for group in completed_groups:
+        ref = await publish_rollout_async(
+            group, args, rollout_id, group=True, controller=data_source.controller
+        )
+        refs.append(ref)
+    return finalize_rollout_groups(args, rollout_id, refs, controller=data_source.controller)
+```
+
+The controller from the data source commits leased groups to their queue.
+`finalize_rollout_groups` sorts groups, applies the configured batch sample
+filter once and stores the batch manifest. If the hook changes Samples, its
+result is saved again. Use `vime.data.transport.load_rollout_samples(output.samples)`
+when a wrapper needs the Sample objects.
+
+The default straw data source is `vime.data.queue_data_source.QueueDataSource`.
+It provides `get_samples(n)` and `add_samples(groups)` to acquire prompt groups
+and return work for continuation. Returned groups are persisted and available
+to any reader. For a custom remote worker, pass `source.reader_config("worker_id")`
+and call `config.open()` in that process. Reader IDs must be unique (`owner` is
+reserved); close the reader after its requests and writes finish. Readers renew
+leases automatically and return unfinished work when closed.
 
 ---
 
@@ -107,6 +143,7 @@ async def custom_generate(args, sample: Sample, sampling_params: dict) -> list[S
         s.response = segment.response
         s.response_length = segment.response_length
         s.loss_mask = segment.loss_mask
+        s.rollout_log_probs = segment.rollout_log_probs
         s.reward = segment.reward
         s.status = Sample.Status.COMPLETED
         s.rollout_id = rollout_id
@@ -114,7 +151,7 @@ async def custom_generate(args, sample: Sample, sampling_params: dict) -> list[S
     return samples
 ```
 
-If one full trajectory has a single total reward but is split into `K` training segments, a common pattern is to distribute that reward across the segments, for example by assigning `reward / K` to each segment, so the same rollout reward is not amplified.
+If one full trajectory has a single outcome reward, assign that same reward to every segment and preserve the original `group_index`. GRPO computes prompt-group statistics over distinct `rollout_id` values and copies each rollout's advantage to its segments. The loss reducer already averages over all unmasked tokens in the rollout, including across microbatches, so dividing the reward by the segment count would underweight trajectories with more segments. Shared generated prefixes must contribute loss only once.
 
 **Example**: See [examples/multi_agent/rollout_with_multi_agents.py](../../../examples/multi_agent/rollout_with_multi_agents.py)
 
@@ -376,11 +413,11 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics) -> bool
 
 ### `--data-source-path`
 
-**Default**: `vime.rollout.data_source.RolloutDataSourceWithBuffer`
+**Default**: `vime.data.data_source.RolloutDataSourceWithBuffer`
 
 **Purpose**: Override the data source for rollout prompts.
 
-**Base Class**: `vime.rollout.data_source.DataSource`
+**Base Class**: `vime.data.data_source.DataSource`
 
 **Required Methods**:
 ```python
@@ -446,7 +483,7 @@ def custom_hook(args, rollout_id, step_id, model, optimizer, opt_param_scheduler
 
 ---
 
-### 18. MoE Routing Replay
+### MoE Routing Replay
 
 Stabilize MoE RL training by recording and replaying expert routing decisions to ensure consistency.
 
@@ -457,7 +494,7 @@ Stabilize MoE RL training by recording and replaying expert routing decisions to
 
 ---
 
-### 19. Disk Weight-Sync Post-Write Hook (`--custom-update-weight-post-write-path`)
+### Disk Weight-Sync Post-Write Hook (`--custom-update-weight-post-write-path`)
 
 **Signature**:
 ```python
@@ -470,10 +507,12 @@ publish the writes on a non-POSIX shared filesystem — e.g. upload pending writ
 backing object store — where another host cannot see the files without an explicit sync. The hook is called
 on every rank and must gate itself (e.g. once per container).
 
-The post-write hook must make the completed version directory visible before it
-returns. Host-local full-checkpoint copies then use that published directory as
-their source. See [Delta Weight Sync](../advanced/delta-weight-sync.md) for the
-delta mechanism.
+The read-side counterpart runs inside the inference engine, on every host it spans, and is
+therefore a vLLM server argument rather than a vime hook: pass
+`--vllm-custom-pull-weights-pre-read-hook <import.path>` with signature
+`hook(source_dir: str, target_version: int)` — called before `pull_weights` reads the
+published weights (e.g. refresh the mount's view). See
+[Delta Weight Sync](../advanced/delta-weight-sync.md) for the full mechanism.
 
 ## Testing Custom Function Paths
 
