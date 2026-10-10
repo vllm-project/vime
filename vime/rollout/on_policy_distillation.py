@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import io
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+import numpy as np
 import torch
 
 from vime.utils.http_utils import post
@@ -15,7 +19,21 @@ def _teacher_base_url(rm_url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
 
 
+def _response_start(sample: Sample) -> int:
+    length = sample.response_length
+    if length < 0 or length > len(sample.tokens) or (length and length == len(sample.tokens)):
+        raise ValueError("OPD response_length must leave at least one context token for a nonempty response")
+    return len(sample.tokens) - length
+
+
+def _use_per_position(args, sample: Sample) -> bool:
+    return getattr(args, "opd_teacher_scoring", "prompt-logprobs") == "per-position" and not (
+        sample.multimodal_inputs or {}
+    ).get("images")
+
+
 async def reward_func(args, sample, **kwargs):
+    response_start = _response_start(sample)
     teacher_model = getattr(args, "opd_teacher_model", None)
     sampling_params = {
         "max_tokens": 1,
@@ -35,6 +53,9 @@ async def reward_func(args, sample, **kwargs):
             "OPD teacher scoring over /inference/v1/generate supports only image multimodal; "
             f"got unsupported modalities: {unsupported}"
         )
+
+    if sample.response_length == 0:
+        return {}
 
     if images:
         # Multimodal: render (preprocess images) to get token_ids + features, then
@@ -71,6 +92,12 @@ async def reward_func(args, sample, **kwargs):
             body.pop("model", None)
         return await post(args.rm_url, body)
 
+    if _use_per_position(args, sample):
+        sampling_params.pop("prompt_logprobs")
+        # Each logit row predicts the next token, including the first response token.
+        sampling_params["prompt_logprob_start"] = response_start - 1
+        sampling_params["prompt_logprob_token_ids"] = [[token] for token in sample.tokens[response_start:]]
+
     payload: dict[str, Any] = {"token_ids": sample.tokens, "sampling_params": sampling_params}
     if teacher_model:
         payload["model"] = teacher_model
@@ -100,31 +127,51 @@ def _logprob_for_token(pos_entry: dict | None, token_id: int) -> float:
     return float(entry.logprob)
 
 
+def _per_position_logprobs(reward: dict, response_length: int) -> torch.Tensor:
+    encoded = reward.get("prompt_token_id_logprobs")
+    if not isinstance(encoded, str):
+        raise ValueError(
+            "teacher response missing prompt_token_id_logprobs; per-position scoring requires "
+            "a vLLM teacher supporting per-row candidates with VLLM_USE_V2_MODEL_RUNNER=1"
+        )
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        if not raw.startswith(b"\x93NUMPY"):
+            raise ValueError("expected a NumPy array")
+        scores = np.load(io.BytesIO(raw), allow_pickle=False)
+    except (binascii.Error, ValueError, EOFError, OSError) as exc:
+        raise ValueError("teacher prompt_token_id_logprobs must be a base64-encoded NumPy array") from exc
+    if scores.dtype != np.float32 or scores.shape != (response_length, 1):
+        raise ValueError(
+            "teacher prompt_token_id_logprobs must be float32 with shape "
+            f"({response_length}, 1), got {scores.dtype} {scores.shape}"
+        )
+    if not np.isfinite(scores).all() or np.any(scores > 1e-5):
+        raise ValueError("teacher scores must be finite log probabilities; configure --logprobs-mode raw_logprobs")
+    return torch.from_numpy(scores[:, 0].copy())
+
+
 def post_process_rewards(args, samples: list[Sample], **kwargs):
-    """Extract teacher log-probs from the ``/inference/v1/generate`` responses.
-
-    1. Read top-level ``prompt_logprobs`` (aligned with the submitted token_ids).
-    2. Pick out each actual token's logprob, skipping position 0 (always None).
-    3. Trim to the response length and store on ``sample.teacher_log_probs``.
-    4. Return scalar rewards (0.0 for pure distillation); the learning signal is
-       the OPD KL penalty applied in ``compute_advantages_and_returns``.
-    """
-    raw_rewards = [sample.get_reward_value(args) for sample in samples]
-    response_lengths = [sample.response_length for sample in samples]
-
+    """Store response-token teacher scores, preserving the learner's OPD contract."""
     teacher_log_probs: list[torch.Tensor] = []
-    for reward, sample in zip(raw_rewards, samples, strict=True):
+    for sample in samples:
+        _response_start(sample)
+        if sample.response_length == 0:
+            teacher_log_probs.append(torch.empty(0, dtype=torch.float32))
+            continue
+        reward = sample.get_reward_value(args)
+        if _use_per_position(args, sample):
+            teacher_log_probs.append(_per_position_logprobs(reward, sample.response_length))
+            continue
         plp = reward.get("prompt_logprobs")
         assert plp is not None, "teacher response missing top-level prompt_logprobs"
+        if len(plp) != len(sample.tokens):
+            raise ValueError("teacher prompt_logprobs must align with the submitted token_ids")
         # plp[i] scores sample.tokens[i]; position 0 has no prior context.
         per_pos = [_logprob_for_token(plp[i], sample.tokens[i]) for i in range(1, len(sample.tokens))]
-        teacher_log_probs.append(torch.tensor(per_pos, dtype=torch.float32))
+        teacher_log_probs.append(torch.tensor(per_pos[-sample.response_length :], dtype=torch.float32))
 
-    trimmed: list[torch.Tensor] = []
-    for t_log_prob, response_length in zip(teacher_log_probs, response_lengths, strict=True):
-        trimmed.append(t_log_prob[-response_length:])
-
-    for sample, t_log_probs in zip(samples, trimmed, strict=True):
+    for sample, t_log_probs in zip(samples, teacher_log_probs, strict=True):
         sample.teacher_log_probs = t_log_probs
 
     # Pure on-policy distillation: task reward is 0; KL penalty carries the signal.

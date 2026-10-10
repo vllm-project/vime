@@ -1179,6 +1179,17 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                     "hf_checkpoint, which would mis-name a teacher!=student server."
                 ),
             )
+            parser.add_argument(
+                "--opd-teacher-scoring",
+                choices=["prompt-logprobs", "per-position"],
+                default="prompt-logprobs",
+                help=(
+                    "Text scoring path for the external vLLM OPD teacher. "
+                    "'per-position' requests only the actual response-token scores and requires "
+                    "a teacher with per-row candidate scoring and the V2 model runner. "
+                    "Image samples keep the prompt-logprobs path."
+                ),
+            )
             return parser
 
         # wandb
@@ -1908,6 +1919,10 @@ def vime_validate_args(args):
             )
 
     # Validate on-policy distillation (OPD) arguments
+    if getattr(args, "opd_teacher_scoring", "prompt-logprobs") == "per-position" and (
+        not args.use_opd or args.opd_type != "vllm"
+    ):
+        raise ValueError("--opd-teacher-scoring per-position requires --use-opd --opd-type vllm")
     if args.use_opd:
         if args.opd_type is None:
             raise ValueError("--opd-type must be specified when --use-opd is enabled. Choose 'vllm' or 'megatron'.")

@@ -345,6 +345,53 @@ def test_mm_render_response_to_generate_body_invalid_shape():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("mode", ["prompt-logprobs", "per-position"])
+def test_opd_images_keep_render_alignment_and_legacy_scores(monkeypatch, mode):
+    from PIL import Image
+
+    from vime.rollout import on_policy_distillation as opd
+
+    calls = []
+
+    async def fake_post(url, body):
+        calls.append((url, body))
+        if url.endswith("/render"):
+            return {
+                "token_ids": [99, 7, 7, 30],
+                "features": {"mm_placeholders": {"image": [{"offset": 1, "length": 2}]}},
+            }
+        return {"prompt_logprobs": [None] + [{str(t): {"logprob": -0.5}} for t in body["token_ids"][1:]]}
+
+    monkeypatch.setattr(opd, "post", fake_post)
+    args = Namespace(
+        rm_url="http://teacher/inference/v1/generate",
+        rollout_temperature=0.7,
+        opd_teacher_model="vision-teacher",
+        opd_teacher_scoring=mode,
+        reward_key=None,
+    )
+    sample = Sample(
+        prompt="Describe this image",
+        tokens=[10, 20, 7, 7, 30, 40],
+        response_length=1,
+        multimodal_inputs={"images": [Image.new("RGB", (2, 2))]},
+    )
+    sample.reward = asyncio.run(opd.reward_func(args, sample))
+    assert len(calls) == 2
+    assert calls[0][0] == "http://teacher/v1/chat/completions/render"
+    assert calls[0][1]["model"] == "vision-teacher"
+    assert calls[0][1]["messages"][0]["content"][1]["type"] == "image_url"
+    body = calls[1][1]
+    assert body["token_ids"] == sample.tokens
+    assert body["features"]["mm_placeholders"]["image"] == [{"offset": 2, "length": 2}]
+    assert body["model"] == "vision-teacher"
+    assert body["sampling_params"]["prompt_logprobs"] == 1
+    assert "prompt_logprob_token_ids" not in body["sampling_params"]
+    assert opd.post_process_rewards(args, [sample]) == ([0.0], [0.0])
+    assert sample.teacher_log_probs.tolist() == [-0.5]
+
+
+@pytest.mark.unit
 def test_prepare_prompt_ids_reuses_tokens_with_multimodal_train_inputs():
     sample = Sample(
         prompt="hi",

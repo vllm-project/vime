@@ -265,6 +265,35 @@ def make_vime_validate_args(**overrides):
 
 
 @pytest.mark.unit
+def test_opd_teacher_scoring_parser_defaults_and_opt_in(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    parser = module.get_vime_extra_args_provider()(argparse.ArgumentParser())
+    required = ["--rollout-batch-size", "1"]
+    assert parser.parse_args(required).opd_teacher_scoring == "prompt-logprobs"
+    assert (
+        parser.parse_args(required + ["--opd-teacher-scoring", "per-position"]).opd_teacher_scoring == "per-position"
+    )
+    with pytest.raises(SystemExit):
+        parser.parse_args(required + ["--opd-teacher-scoring", "typo"])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("use_opd,opd_type", [(False, None), (True, "megatron"), (True, None)])
+def test_per_position_scoring_requires_external_vllm_teacher(monkeypatch, use_opd, opd_type):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(use_opd=use_opd, opd_type=opd_type, opd_teacher_scoring="per-position")
+    with pytest.raises(ValueError, match="requires --use-opd --opd-type vllm"):
+        module.vime_validate_args(args)
+
+
+@pytest.mark.unit
+def test_per_position_scoring_allows_vllm_opd(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(use_opd=True, opd_type="vllm", opd_teacher_scoring="per-position")
+    module.vime_validate_args(args)
+
+
+@pytest.mark.unit
 def test_vime_validate_args_preserves_explicit_start_rollout_id(monkeypatch):
     """``--start-rollout-id`` is only a fallback when the user did not set it.
 
