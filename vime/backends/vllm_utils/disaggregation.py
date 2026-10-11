@@ -34,7 +34,7 @@ def start_epd_server_groups(
     router_ip: str | None,
     router_port: int | None,
 ) -> tuple[list[ServerGroup], list[Any], list[str]]:
-    """Start encoder groups first, then inject their endpoints into LLM groups."""
+    """Start encoder groups first, then return their endpoints for rollout."""
     server_groups = []
     transfer_overrides = {
         "ec_transfer_config": {
@@ -68,12 +68,6 @@ def start_epd_server_groups(
         if group_config.worker_type == "encoder":
             continue
         overrides_extra = transfer_overrides if group_config.worker_type in ("regular", "prefill") else None
-        if overrides_extra is not None and encoder_endpoints:
-            overrides_extra = {
-                **transfer_overrides,
-                "language_only": True,
-                "encoder_urls": encoder_endpoints,
-            }
         group = placement.create(
             group_config,
             router_ip,

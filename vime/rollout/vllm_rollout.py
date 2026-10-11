@@ -100,43 +100,45 @@ def get_model_url(args: Namespace, model_name: str, endpoint: str = "/inference/
     return f"http://{args.vllm_router_ip}:{args.vllm_router_port}{endpoint}"
 
 
-def _get_image_urls(messages: list[dict[str, Any]]) -> list[str]:
+def _get_multimodal_parts(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
-        image_url["url"]
+        part
         for message in messages
         if isinstance(message.get("content"), list)
         for part in message["content"]
-        if isinstance(part, dict) and part.get("type") == "image_url"
-        for image_url in [part.get("image_url")]
-        if isinstance(image_url, dict) and isinstance(image_url.get("url"), str)
+        if isinstance(part, dict) and part.get("type") in ("image_url", "audio_url", "video_url", "input_audio")
     ]
 
 
-async def prime_encoder(args: Namespace, messages: list[dict[str, Any]], *, model_name: str = "default") -> None:
-    """Make EC producers compute the images before their consumers generate."""
-    image_urls = _get_image_urls(messages)
+async def prime_encoder(
+    args: Namespace, messages: list[dict[str, Any]], *, model_name: str = "default"
+) -> dict[str, Any]:
+    """Make EC producers compute media and return their transfer parameters."""
+    media = _get_multimodal_parts(messages)
     encoders = (getattr(args, "vllm_model_encoder_endpoints", None) or {}).get(model_name)
     if encoders is None and model_name == "default":
         metadata = getattr(args, "vllm_model_encoder_endpoints", None) or {}
         if len(metadata) == 1:
             encoders = next(iter(metadata.values()))
-    if not image_urls or encoders is None or not encoders[1]:
-        return
+    if not media or encoders is None or not encoders[1]:
+        return {}
     model, endpoints = encoders
 
-    async def prime(index: int, image_url: str) -> None:
-        await post(
+    async def prime(index: int, item: dict[str, Any]) -> dict[str, Any]:
+        response = await post(
             f"{endpoints[index % len(endpoints)].rstrip('/')}/v1/chat/completions",
             {
                 "model": model,
-                "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_url}}]}],
+                "messages": [{"role": "user", "content": [item]}],
                 "max_tokens": 1,
                 "stream": False,
             },
             headers={"x-request-id": str(uuid.uuid4())},
         )
+        return response.get("ec_transfer_params") or {}
 
-    await asyncio.gather(*(prime(index, url) for index, url in enumerate(image_urls)))
+    parameters = await asyncio.gather(*(prime(index, item) for index, item in enumerate(media)))
+    return {key: value for params in parameters for key, value in params.items()}
 
 
 class GenerateState(metaclass=SingletonMeta):
@@ -442,11 +444,13 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
             "model": args.hf_checkpoint,
             "messages": messages,
         }
-        await prime_encoder(args, render_payload["messages"])
+        ec_transfer_params = await prime_encoder(args, render_payload["messages"])
         render_url = f"{base}/v1/chat/completions/render"
         with trace_span(sample, "vllm_mm_render", attrs={"model": args.hf_checkpoint}):
             render_data = await post(render_url, render_payload, headers=headers)
         generate_body = _mm_render_response_to_generate_body(render_data, args.hf_checkpoint)
+        if ec_transfer_params:
+            generate_body["ec_transfer_params"] = ec_transfer_params
         canonical_token_ids = _coerce_flat_int_token_ids(sample.tokens)
         if canonical_token_ids:
             _align_mm_feature_placeholders_to_tokens(generate_body, canonical_token_ids)

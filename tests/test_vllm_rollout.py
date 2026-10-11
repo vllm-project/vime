@@ -461,8 +461,11 @@ def test_generate_text_path_updates_sample(patch_generate_state, monkeypatch):
 
 @pytest.mark.unit
 @pytest.mark.parametrize("terminal_only", [False, True])
-def test_generate_streaming_records_weight_version(patch_generate_state, monkeypatch, terminal_only):
+@pytest.mark.parametrize("with_encoder", [False, True])
+def test_generate_streaming_records_weight_version(patch_generate_state, monkeypatch, terminal_only, with_encoder):
     from vime.rollout import vllm_streaming_rollout as streaming
+
+    ec_params = {"caller-media": {"peer_host": "encoder", "peer_port": 9000, "metadata": {}}}
 
     class FakeStreamResponse:
         async def __aenter__(self):
@@ -523,10 +526,18 @@ def test_generate_streaming_records_weight_version(patch_generate_state, monkeyp
 
     class FakeClient:
         def stream(self, *args, **kwargs):
+            if with_encoder:
+                assert kwargs["json"]["ec_transfer_params"] == ec_params
+            else:
+                assert "ec_transfer_params" not in kwargs["json"]
             return FakeStreamResponse()
 
     monkeypatch.setattr(streaming, "GenerateState", _PatchedGenerateState)
     monkeypatch.setattr(streaming.http_utils, "_http_client", FakeClient())
+    if with_encoder:
+        monkeypatch.setattr(streaming, "build_multimodal_messages", lambda *_args: [{"role": "user", "content": []}])
+        monkeypatch.setattr(streaming, "prime_encoder", AsyncMock(return_value=ec_params))
+        monkeypatch.setattr(streaming.http_utils, "post", AsyncMock(return_value={"token_ids": [97, 98, 99]}))
 
     result = asyncio.run(
         streaming.generate_streaming(
@@ -674,20 +685,34 @@ def test_generate_consistent_hash_header(patch_generate_state, monkeypatch):
 
 
 @pytest.mark.unit
-def test_generate_multimodal_render_then_generate(patch_generate_state, monkeypatch):
+@pytest.mark.parametrize("with_encoder", [False, True])
+@pytest.mark.parametrize("modality", ["image_url", "audio_url", "video_url"])
+def test_generate_multimodal_render_then_generate(patch_generate_state, monkeypatch, with_encoder, modality):
     render_resp = {"token_ids": [11, 12]}
     gen_resp = _generate_response([13])
+    item = {"type": modality, modality: {"url": "https://example.com/media"}, "uuid": "caller-media"}
+    ec_params = {"caller-media": {"peer_host": "encoder", "peer_port": 9000, "metadata": {}}}
+    args = _rollout_args(
+        vllm_model_encoder_endpoints={"default": ("/tmp/model", ["http://encoder"])} if with_encoder else {}
+    )
 
     async def fake_post(url, payload, headers=None, **kwargs):
+        if url.startswith("http://encoder"):
+            assert payload["messages"][0]["content"] == [item]
+            return {"ec_transfer_params": ec_params}
         if url.endswith("/render"):
             return render_resp
+        if with_encoder:
+            assert payload["ec_transfer_params"] == ec_params
+        else:
+            assert "ec_transfer_params" not in payload
         return gen_resp
 
     monkeypatch.setattr(mod, "post", fake_post)
-    monkeypatch.setattr(mod, "build_multimodal_messages", lambda *_args: [{"role": "user", "content": []}])
+    monkeypatch.setattr(mod, "build_multimodal_messages", lambda *_args: [{"role": "user", "content": [item]}])
 
     sample = Sample(index=0, prompt="look", multimodal_inputs={"images": ["img.png"]})
-    result = asyncio.run(mod.generate(_rollout_args(), sample, _default_sampling_params()))
+    result = asyncio.run(mod.generate(args, sample, _default_sampling_params()))
 
     assert result.response_length == 1
     assert result.tokens[-1] == 13

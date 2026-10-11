@@ -111,10 +111,12 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
     payload: dict[str, Any]
     if messages:
         render_payload = {"model": args.hf_checkpoint, "messages": messages}
-        await prime_encoder(args, render_payload["messages"])
+        ec_transfer_params = await prime_encoder(args, render_payload["messages"])
         with trace_span(sample, "vllm_mm_render", attrs={"model": args.hf_checkpoint}):
             render_data = await http_utils.post(f"{base}/v1/chat/completions/render", render_payload, headers=headers)
         payload = _mm_render_response_to_generate_body(render_data, args.hf_checkpoint)
+        if ec_transfer_params:
+            payload["ec_transfer_params"] = ec_transfer_params
         if token_ids:
             _align_mm_feature_placeholders_to_tokens(payload, token_ids)
             payload["token_ids"] = token_ids
