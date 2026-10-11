@@ -88,6 +88,10 @@ def _build_subprocess_env(server_args_dict: dict[str, Any]) -> dict[str, str]:
         env["VLLM_NIXL_SIDE_CHANNEL_HOST"] = host_for_subprocess
         env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(server_args_dict["_disaggregation_bootstrap_port"])
 
+    if worker_type == "encoder" and server_args_dict.get("node_rank", 0) == 0:
+        env["VLLM_EC_SIDE_CHANNEL_HOST"] = (server_args_dict.get("host") or "127.0.0.1").strip("[]")
+        env["VLLM_EC_SIDE_CHANNEL_PORT"] = str(server_args_dict["_disaggregation_bootstrap_port"])
+
     return env
 
 

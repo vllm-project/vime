@@ -1,7 +1,6 @@
 """PD and EPD-specific vLLM deployment sequencing."""
 
 import logging
-import uuid
 from typing import Any
 
 import ray
@@ -38,8 +37,10 @@ def start_epd_server_groups(
     server_groups = []
     transfer_overrides = {
         "ec_transfer_config": {
+            "ec_connector": "ECCPUConnector",
             "ec_connector_extra_config": {
-                "shared_storage_path": f"/dev/shm/vime-ec-{uuid.uuid4().hex}",
+                "ec_cpu_bytes": 1_000_000_000,
+                "ec_enable_nixl": True,
             },
         },
     }
@@ -67,7 +68,11 @@ def start_epd_server_groups(
     for group_config in model_config.server_groups:
         if group_config.worker_type == "encoder":
             continue
-        overrides_extra = transfer_overrides if group_config.worker_type in ("regular", "prefill") else None
+        overrides_extra = (
+            transfer_overrides | {"mm_decoder_only": True}
+            if encoder_endpoints and group_config.worker_type in ("regular", "prefill")
+            else None
+        )
         group = placement.create(
             group_config,
             router_ip,

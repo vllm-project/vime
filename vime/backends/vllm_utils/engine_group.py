@@ -560,6 +560,8 @@ def _allocate_rollout_engine_addr_and_ports_normal(
 
             if worker_type in ("prefill", "decode"):
                 addr_and_ports[current_rank]["disaggregation_bootstrap_port"] = get_port()
+            elif worker_type == "encoder":
+                addr_and_ports[current_rank]["disaggregation_bootstrap_port"] = get_port(_gpus_per_engine)
 
         if _gpus_per_engine > args.num_gpus_per_node:
             num_node_per_engine = _gpus_per_engine // args.num_gpus_per_node

@@ -7,12 +7,18 @@ ARG VLLM_RS_BUILD_VERSION=0.31.1rc1.dev23+g43b4aaea3
 COPY docker/patch/${PATCH_VERSION}/vllm-rust-frontend.patch /tmp/vllm-rust-frontend.patch
 COPY docker/patch/${PATCH_VERSION}/vllm-rust-observability.patch /tmp/vllm-rust-observability.patch
 COPY docker/patch/${PATCH_VERSION}/vllm-rust-multimodal.patch /tmp/vllm-rust-multimodal.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-rust-server-info.patch /tmp/vllm-rust-server-info.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-rust-mm-embeds.patch /tmp/vllm-rust-mm-embeds.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-rust-auth.patch /tmp/vllm-rust-auth.patch
 RUN git init /build && cd /build && \
     git remote add origin https://github.com/vllm-project/vllm.git && \
     git fetch --depth 1 origin ${VLLM_COMMIT} && git checkout FETCH_HEAD && \
     git apply /tmp/vllm-rust-frontend.patch && \
     git apply /tmp/vllm-rust-observability.patch && \
-    git apply /tmp/vllm-rust-multimodal.patch
+    git apply /tmp/vllm-rust-multimodal.patch && \
+    git apply --include='rust/*' /tmp/vllm-rust-server-info.patch && \
+    git apply /tmp/vllm-rust-mm-embeds.patch && \
+    git apply /tmp/vllm-rust-auth.patch
 RUN cd /build && VLLM_RS_BUILD_VERSION=${VLLM_RS_BUILD_VERSION} \
     cargo build --locked --release --manifest-path rust/Cargo.toml \
     -p vllm-cmd --bin vllm-rs --features native-tls-vendored
@@ -220,6 +226,9 @@ COPY docker/patch/${PATCH_VERSION}/vllm-fine-grained-tracing.patch /tmp/vllm-fin
 COPY docker/patch/${PATCH_VERSION}/vllm-nixl-peer-retirement.patch /tmp/vllm-nixl-peer-retirement.patch
 COPY docker/patch/${PATCH_VERSION}/vllm-mooncake-prom-metrics.patch /tmp/vllm-mooncake-prom-metrics.patch
 COPY docker/patch/${PATCH_VERSION}/vllm-host-cache-ratio.patch /tmp/vllm-host-cache-ratio.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-ec-dp-control.patch /tmp/vllm-ec-dp-control.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-mm-decoder-only.patch /tmp/vllm-mm-decoder-only.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-rust-server-info.patch /tmp/vllm-rust-server-info.patch
 COPY docker/patch/${PATCH_VERSION}/vllm-deepgemm-bf16.patch /tmp/vllm-deepgemm-bf16.patch
 COPY docker/patch/${PATCH_VERSION}/vllm-deepep-optional-shrink.patch /tmp/vllm-deepep-optional-shrink.patch
 COPY docker/patch/${PATCH_VERSION}/vllm-draft-weights-cpu-backup.patch /tmp/vllm-draft-weights-cpu-backup.patch
@@ -237,6 +246,9 @@ RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirn
     git apply -v /tmp/vllm-nixl-peer-retirement.patch && \
     git apply -v /tmp/vllm-mooncake-prom-metrics.patch && \
     git apply -v /tmp/vllm-host-cache-ratio.patch && \
+    git apply -v /tmp/vllm-ec-dp-control.patch && \
+    git apply -v /tmp/vllm-mm-decoder-only.patch && \
+    git apply -v --exclude='rust/*' /tmp/vllm-rust-server-info.patch && \
     git apply -v /tmp/vllm-deepgemm-bf16.patch && \
     git apply -v /tmp/vllm-deepep-optional-shrink.patch && \
     git apply -v /tmp/vllm-draft-weights-cpu-backup.patch && \
@@ -251,6 +263,9 @@ RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirn
        /tmp/vllm-nixl-peer-retirement.patch \
        /tmp/vllm-mooncake-prom-metrics.patch \
        /tmp/vllm-host-cache-ratio.patch \
+       /tmp/vllm-ec-dp-control.patch \
+       /tmp/vllm-mm-decoder-only.patch \
+       /tmp/vllm-rust-server-info.patch \
        /tmp/vllm-deepgemm-bf16.patch \
        /tmp/vllm-deepep-optional-shrink.patch /tmp/vllm-draft-weights-cpu-backup.patch
 
