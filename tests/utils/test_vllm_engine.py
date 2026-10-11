@@ -163,6 +163,8 @@ def test_launch_config_single_node(vllm_args):
     assert sa["enable_per_request_metrics"] is True
     assert sa["enable_scale_out"] is True
     assert "enable_scale_out" not in external_check_fields
+    assert sa["sleep_preserve_parameter_names"] == ["draft.*"]
+    assert "sleep_preserve_parameter_names" not in external_check_fields
 
 
 @pytest.mark.unit
@@ -170,9 +172,11 @@ def test_compute_server_args_preserves_non_topology_vllm_flags(vllm_args, monkey
     monkeypatch.setattr(mod, "_VLLM_SERVER_FIELDS", frozenset({"server_concurrency", "tool_call_parser"}))
     vllm_args.vllm_server_concurrency = 256
     vllm_args.vllm_tool_call_parser = "qwen3_coder"
+    vllm_args.vllm_sleep_preserve_parameter_names = ["frozen.weight"]
     sa, _ = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
     assert sa["server_concurrency"] == 256
     assert sa["tool_call_parser"] == "qwen3_coder"
+    assert sa["sleep_preserve_parameter_names"] == ["frozen.weight", "draft.*"]
 
 
 @pytest.mark.unit

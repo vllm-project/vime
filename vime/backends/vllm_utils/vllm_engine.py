@@ -458,15 +458,15 @@ class VLLMEngine(RayActor):
 
     def destroy_weights_update_group(self, group_name):
         del group_name
-        return self.reset_weights_update_groups()
+        return self._make_request(
+            "shutdown_weight_transfer_engine",
+            {},
+            timeout=self.args.rollout_health_check_timeout,
+        )
 
     def reset_weights_update_groups(self):
         """Remove dead trainer peers while retaining the serving process."""
-        return self._make_request(
-            "collective_rpc",
-            {"method": "shutdown_weight_transfer_engine"},
-            timeout=self.args.rollout_health_check_timeout,
-        )
+        return self.destroy_weights_update_group(None)
 
     def update_weights_from_distributed(
         self,
@@ -667,6 +667,10 @@ def _compute_server_args(
         "logprobs_mode": "processed_logprobs",
         "enable_prompt_tokens_details": True,
         "enable_scale_out": True,
+        "sleep_preserve_parameter_names": [
+            *(getattr(args, "vllm_sleep_preserve_parameter_names", None) or []),
+            "draft.*",
+        ],
         "enable_per_request_metrics": True,
         "enable_server_load_tracking": True,
     }
@@ -812,4 +816,5 @@ _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS = [
     "enable_per_request_metrics",
     "enable_server_load_tracking",
     "enable_scale_out",
+    "sleep_preserve_parameter_names",
 ]

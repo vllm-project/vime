@@ -477,8 +477,10 @@ def verify(run_dir, version, timings):
             assert all(u["grad_norm"] > 0 and u["changed_parameters"] > 0 for u in evidence)
     training_log = (run_dir / "train.log").read_text()
     acceptance = [
-        (float(length), float(rate))
-        for length, rate in re.findall(r"accept len: ([\d.]+), accept rate: ([\d.]+)", training_log)
+        (float(length), float(rate) / 100)
+        for length, rate in re.findall(
+            r"Mean acceptance length: ([\d.]+), .*?Avg Draft acceptance rate: ([\d.]+)%", training_log
+        )
     ]
     assert acceptance and any(length > 1 and rate > 0 for length, rate in acceptance), "No accepted MTP draft tokens"
     metrics = []
@@ -548,7 +550,7 @@ def verify(run_dir, version, timings):
         "samples_per_step": len(TASKS) * SAMPLES_PER_PROMPT,
         "training_steps": TRAINING_STEPS,
         "inference_mtp": {
-            "algorithm": "EAGLE",
+            "algorithm": "mtp",
             "num_steps": 3,
             "num_draft_tokens": 4,
             "observed_decode_batches": len(acceptance),

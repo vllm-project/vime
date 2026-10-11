@@ -139,7 +139,7 @@ async def generate(args, sample, sampling_params, evaluation=False):
     assert args.rollout_top_k == -1 and sampling_params.get("top_k", -1) == -1, "Top-k replay is unsupported"
     assert sampling_params.get("top_p") == 0.95 and args.use_score_centering
     assert args.n_samples_per_prompt == 4 and args.rewards_normalization and args.grpo_std_normalization
-    assert args.vllm_speculative_algorithm == "EAGLE", "Inference must exercise the model's MTP head"
+    assert args.vllm_speculative_config.get("method") == "mtp", "Inference must exercise the model's MTP head"
     step = sample.index // (args.rollout_batch_size * args.n_samples_per_prompt)
     assert step in (0, 1), "The E2E has exactly two sampling/training steps"
     name = ("codex", "claude_code")[step]

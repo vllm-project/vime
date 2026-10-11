@@ -203,6 +203,7 @@ COPY docker/patch/${PATCH_VERSION}/vllm-mooncake-prom-metrics.patch /tmp/vllm-mo
 COPY docker/patch/${PATCH_VERSION}/vllm-host-cache-ratio.patch /tmp/vllm-host-cache-ratio.patch
 COPY docker/patch/${PATCH_VERSION}/vllm-deepgemm-bf16.patch /tmp/vllm-deepgemm-bf16.patch
 COPY docker/patch/${PATCH_VERSION}/vllm-deepep-optional-shrink.patch /tmp/vllm-deepep-optional-shrink.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-draft-weights-cpu-backup.patch /tmp/vllm-draft-weights-cpu-backup.patch
 RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirname(vllm.__file__)))')" && \
     cd "$VLLM_SITE" && \
     git apply -v /tmp/vllm-pull_weights.patch && \
@@ -219,6 +220,7 @@ RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirn
     git apply -v /tmp/vllm-host-cache-ratio.patch && \
     git apply -v /tmp/vllm-deepgemm-bf16.patch && \
     git apply -v /tmp/vllm-deepep-optional-shrink.patch && \
+    git apply -v /tmp/vllm-draft-weights-cpu-backup.patch && \
     rm /tmp/vllm-pull_weights.patch /tmp/vllm.patch \
        /tmp/vllm-score-centering.patch \
        /tmp/vllm-pd-request-metrics.patch \

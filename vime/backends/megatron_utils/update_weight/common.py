@@ -1,6 +1,5 @@
 import inspect
 import re
-import socket
 from argparse import Namespace
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
@@ -10,7 +9,6 @@ import torch.distributed as dist
 from megatron.core import mpu
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
-from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.types import ParamInfo
 
 
@@ -280,32 +278,3 @@ class VimeRayWeightSyncClient:
 
         version = str(self.version_getter()) if weight_version is None else str(weight_version)
         ray.get([engine.finish_weight_update.remote(weight_version=version) for engine in self.engines])
-
-
-def create_nccl_trainer(
-    client: VimeRayWeightSyncClient,
-    source: HfWeightSource,
-    engine_gpu_counts: Sequence[int],
-):
-    import ray
-    from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
-    from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
-
-    rendezvous = [None]
-    if dist.get_rank() == 0:
-        with socket.socket() as sock:
-            sock.bind(("", 0))
-            rendezvous[0] = (ray._private.services.get_node_ip_address(), sock.getsockname()[1])
-    dist.broadcast_object_list(rendezvous, src=0, group=get_gloo_group())
-    master_address, master_port = rendezvous[0]
-    return WeightTransferTrainerFactory.trainer_init(
-        NCCLTrainerInitInfo(
-            master_address=master_address,
-            master_port=master_port,
-            world_size=sum(engine_gpu_counts) + 1,
-            rank=dist.get_rank(),
-            packed_num_buffers=1,
-        ),
-        client=client,
-        source=source,
-    )
