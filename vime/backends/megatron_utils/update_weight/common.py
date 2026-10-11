@@ -14,6 +14,31 @@ from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.types import ParamInfo
 
 
+def _gather_contiguous_rows(
+    name: str,
+    param: torch.nn.Parameter,
+    tp_size: int,
+    tp_group: dist.ProcessGroup,
+    *,
+    async_op: bool = False,
+) -> tuple[torch.Tensor | None, dist.Work | None]:
+    """Let NCCL write eligible row shards directly into their final tensor."""
+    if (
+        not param.is_cuda
+        or not param.is_contiguous()
+        or param.partition_dim != 0
+        or param.partition_stride != 1
+        or "linear_fc1.weight" in name
+        or "linear_fc1.bias" in name
+        or "linear_fc2.weight" in name
+        or dist.get_backend(tp_group) != "nccl"
+    ):
+        return None, None
+    output = param.data.new_empty((tp_size * param.shape[0], *param.shape[1:]))
+    handle = dist.all_gather_into_tensor(output, param.data, group=tp_group, async_op=async_op)
+    return output, handle
+
+
 def all_gather_param(name: str, param: torch.nn.Parameter) -> torch.Tensor:
     """
     All-gather TP-sharded param to full tensor. expert_bias→param,
@@ -39,6 +64,10 @@ def all_gather_param(name: str, param: torch.nn.Parameter) -> torch.Tensor:
         tp_group = mpu.get_expert_tensor_parallel_group()
     else:
         tp_group = mpu.get_tensor_model_parallel_group()
+
+    output, _ = _gather_contiguous_rows(name, param, tp_size, tp_group)
+    if output is not None:
+        return output
 
     param_partitions = [torch.empty_like(param.data) for _ in range(tp_size)]
     dist.all_gather(param_partitions, param.data, group=tp_group)
@@ -94,6 +123,12 @@ def all_gather_params_async(
             else:
                 tp_group = mpu.get_tensor_model_parallel_group()
 
+            output, handle = _gather_contiguous_rows(info.name, param, tp_size, tp_group, async_op=True)
+            if output is not None:
+                gather_tasks.append((info, output, handle, None, None))
+                handles.append(handle)
+                continue
+
             param_partitions = [torch.empty_like(param.data) for _ in range(tp_size)]
             handle = dist.all_gather(param_partitions, param.data, group=tp_group, async_op=True)
             gather_tasks.append((info, None, handle, param_partitions, param.partition_dim))
@@ -106,9 +141,9 @@ def all_gather_params_async(
 
     # Phase 3: Process all results after all communications are done
     gathered_params = []
-    for info, direct_param, handle, param_partitions, partition_dim in gather_tasks:
-        if handle is None:
-            # No all_gather needed
+    for info, direct_param, _handle, param_partitions, partition_dim in gather_tasks:
+        if param_partitions is None:
+            # Direct parameters and completed gathers already have final storage.
             param = direct_param
         else:
             # Process the gathered partitions (same logic as original all_gather_param)
