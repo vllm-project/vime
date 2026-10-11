@@ -7,7 +7,7 @@ index cfbb870e788..a3485ba9ed1 100644
 +    Use ``draft.<name>`` for draft-private parameters, or ``draft.*`` for all.
      The sender must omit these parameters; loaders must preserve their storage."""
 diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
-index d4c64c55427..3af14796a50 100644
+index d4c64c55427..88657761bb6 100644
 --- a/vllm/v1/worker/gpu_worker.py
 +++ b/vllm/v1/worker/gpu_worker.py
 @@ -252,2 +252,14 @@ class Worker(WorkerBase):
@@ -30,12 +30,12 @@ index d4c64c55427..3af14796a50 100644
 -        parameters = dict(model.named_parameters())
 +        parameters = self._get_sleep_parameters(model)
          names: set[str] = set()
-@@ -261,2 +273,4 @@ class Worker(WorkerBase):
+@@ -261,3 +273,3 @@ class Worker(WorkerBase):
              matches = fnmatch_filter(parameters, pattern)
-+            if not matches and pattern == "draft.*" and self.get_draft_model() is None:
-+                continue
-             if not matches:
-@@ -272,4 +286,5 @@ class Worker(WorkerBase):
+-            if not matches:
++            if not matches and pattern != "draft.*":
+                 raise ValueError(f"No parameter matches sleep retention: {pattern}")
+@@ -272,4 +284,5 @@ class Worker(WorkerBase):
      def _restore_sleep_parameters(self, model: nn.Module) -> None:
 +        parameters = self._get_sleep_parameters(model)
          for name, value in self._sleep_saved_parameters.items():
