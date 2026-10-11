@@ -6,11 +6,13 @@ ARG VLLM_COMMIT=43b4aaea3e40e20ef53ce2bfecfa1b72060bf2b5
 ARG VLLM_RS_BUILD_VERSION=0.31.1rc1.dev23+g43b4aaea3
 COPY docker/patch/${PATCH_VERSION}/vllm-rust-frontend.patch /tmp/vllm-rust-frontend.patch
 COPY docker/patch/${PATCH_VERSION}/vllm-rust-observability.patch /tmp/vllm-rust-observability.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-rust-multimodal.patch /tmp/vllm-rust-multimodal.patch
 RUN git init /build && cd /build && \
     git remote add origin https://github.com/vllm-project/vllm.git && \
     git fetch --depth 1 origin ${VLLM_COMMIT} && git checkout FETCH_HEAD && \
     git apply /tmp/vllm-rust-frontend.patch && \
-    git apply /tmp/vllm-rust-observability.patch
+    git apply /tmp/vllm-rust-observability.patch && \
+    git apply /tmp/vllm-rust-multimodal.patch
 RUN cd /build && VLLM_RS_BUILD_VERSION=${VLLM_RS_BUILD_VERSION} \
     cargo build --locked --release --manifest-path rust/Cargo.toml \
     -p vllm-cmd --bin vllm-rs --features native-tls-vendored
