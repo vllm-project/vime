@@ -1,6 +1,6 @@
 """OpenAI Chat-Completions adapter for agent rollouts.
 
-Mirrors slime.agent.adapters.anthropic but speaks the OpenAI
+Mirrors vime.agent.adapters.anthropic but speaks the OpenAI
 /v1/chat/completions protocol, so a Chat Completions client can drive the vime
 vLLM server. Current Codex uses the separate ResponsesAdapter. Each request
 is rendered with the served model's chat template, sent to ``/inference/v1/generate`` as
@@ -10,7 +10,7 @@ a session's trajectory into a list of Sample.
 
 This class implements only /v1/chat/completions. The section layout
 (adapter class -> translation -> reply building
--> request framing) mirrors slime.agent.adapters.anthropic.
+-> request framing) mirrors vime.agent.adapters.anthropic.
 """
 
 from __future__ import annotations

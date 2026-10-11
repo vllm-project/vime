@@ -235,7 +235,7 @@ grader output are saved under `$RUN_ROOT/sandboxes` before sandbox cleanup.
 
 ## Check real rollouts before training
 
-Start an vLLM server with Qwen3.8-27B, the `qwen3_coder` tool parser and the
+Start a vLLM server with Qwen3.8-27B, the `qwen3_coder` tool parser and the
 `qwen3` reasoning parser. Set the same sandbox and CLI environment as above,
 then run:
 
@@ -332,7 +332,7 @@ The shared adapter accepts messages from the agent and uses **token in, token ou
 at the model and training boundary:
 
 - The first message history is rendered with the served model's chat template
-  and sent to vLLM as `input_ids`. When the client echoes an unchanged history
+  and sent to vLLM as `token_ids`. When the client echoes an unchanged history
   and tool schema, the adapter reuses the original prompt and output tokens,
   including thinking omitted by the client, and renders only the new suffix.
   Changed or compacted histories, ambiguous matches and unverified message
@@ -341,7 +341,7 @@ at the model and training boundary:
   call order before rendering. Qwen's template omits those IDs, so preserving
   asynchronous completion order would associate file contents with the wrong
   `Read` call.
-- vLLM is called with `return_logprob=True`; the adapter records the exact
+- vLLM is called with `sampling_params.logprobs=1`; the adapter records the exact
   `prompt_ids`, sampled `output_ids`, and per-token rollout logprobs for that
   turn. Missing logprobs, inconsistent token counts/IDs and non-finite logprobs
   fail the request instead of producing an incomplete training trajectory.

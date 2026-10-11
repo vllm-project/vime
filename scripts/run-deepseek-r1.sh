@@ -125,7 +125,7 @@ VLLM_ARGS=(
 
     # make every dp rank has 128 concurrency
     --vllm-server-concurrency 1024
-    --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":4}'
+    --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 )
 
 MISC_ARGS=(

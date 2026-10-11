@@ -33,15 +33,6 @@ block step。可以选择一个或多个套件：
 job。验证 Dockerfile 或 vLLM patch 修改时，通过 `VIME_CI_IMAGE` 指定不可变的
 候选镜像 digest；未设置时使用 `vllm/vime:latest`，且 PR 合入前不得更新该标签。
 
-`megatron` 套件包含 `test_straw_checkpoint_fork.py`，覆盖 checkpoint
-步骤选择、回退分支和带索引的 debug 归档。
-
-`test_qwen2.5_0.5B_pipeline_rl.py` 使用 4 张 GPU，运行 fully async rollout
-和三个真实 GRPO step。探针检查同一请求跨权重更新持续生成，并确认训练改变了
-策略权重。固定矩阵覆盖 `--flush-cache-interval 0` 下的 NCCL 和 full disk
-权重同步，以及 NCCL 下 interval `2` 的周期性刷新。`test_pipeline_rl.py`
-在 CPU 上检查刷新周期。这些测试不衡量学习效果或吞吐增益。
-
 ### Agent 训练
 
 `tests/test_agent_sunabako_codex_e2e.py` 使用 **Codex 0.162.1**、**Claude Code 2.1.296**、
@@ -108,6 +99,29 @@ python tests/test_agent_sunabako_codex_e2e.py
 通过 `extra_env_vars` 传入 agent 环境。Ray CLI 直接向 Buildkite 控制台输出训练日志；
 训练结束后将该任务日志保存为 `train.log`，用于检查 MTP 和训练指标。
 Buildkite 在成功或失败后都会上传这些产物。
+
+### straw
+
+使用 straw 的端到端测试会显式设置 `--rollout-data-transport straw`，确保本地执行和固定测试列表使用同一种传输方式。覆盖范围包括：
+
+- R3：`test_qwen3_30B_A3B_r3.py` 和 `test_moonlight_16B_A3B_r3.py`。
+- SC：`test_qwen2.5_0.5B_score_centering.py`，分别检查 top-k 和 top-p 数据。
+- 全异步 rollout、fanout、PPO、MTP、PD/NIXL、分布式 vLLM、混合显存卸载后的故障恢复、调试数据重放，以及释放训练资源后继续 rollout。
+- Checkpoint 保存与加载：不同阶段共用 straw 存储池，检查队列和训练状态能否恢复。`test_straw_checkpoint_fork.py` 还检查指定恢复步骤、多次回退、自动选择分支和调试数据重放。
+
+R3、SC 和全异步测试同时开启在线 GC。普通 straw 测试使用独立的临时目录，并在结束后清理。单机 GPU 测试使用本地文件系统配置；多机 JuiceFS 的持久性需要单独验证。其他端到端测试继续覆盖 Ray object-store 和 NIXL 传输。
+
+`test_straw_fully_async_recovery.py` 是自动运行的 CPU 集成测试。它用 SIGKILL 终止一个包含两个本地 Ray 节点的任务，再启动新进程，从同一个文件系统队列恢复；在线 GC 开启和关闭两种情况都会验证。测试使用小规模 R3/SC 数据，以及结果固定的模拟推理和打分函数。安装兼容的 straw wheel 后，可以本地运行：
+
+```bash
+PYTHONPATH=. python tests/test_straw_fully_async_recovery.py
+```
+
+### PipelineRL
+
+`test_qwen2.5_0.5B_pipeline_rl.py` 使用 4 张 GPU，运行全异步 rollout 和三个实际的 GRPO 训练步骤。它检查同一个 HTTP 请求能否在权重更新期间继续生成，也检查训练是否确实改变了策略权重。
+
+固定测试列表包含三种配置：`--flush-cache-interval 0` 配合 NCCL 或完整权重落盘同步，以及 `--flush-cache-interval 2` 配合 NCCL 定期刷新缓存。CPU 测试 `test_pipeline_rl.py` 检查刷新周期和发给 vLLM 的控制请求。这些测试检查功能是否正确，不评估学习效果或吞吐提升。
 
 ### Megatron 手动重启
 

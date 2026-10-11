@@ -44,7 +44,7 @@ agentic workflow——multi-turn tool use、sandbox interaction、environment fe
 | 给 agentic 输出附加自定义 loss mask、metadata，或转换成训练数据 | [`--rollout-data-postprocess-path`](#rollout-data-postprocess-path)、[`--custom-convert-samples-to-train-data-path`](#custom-convert-samples-to-train-data-path) |
 | 调试长耗时的 custom generation、verifier、tool call 或 sandbox 调用 | [`vime.observability.trace_utils`](../developer_guide/trace.md) 中的 trace 工具 |
 
-这一模式的原生示例：[`examples/multi_agent`](../_examples_synced/multi_agent/README.md) 中基于 `--rollout-function-path` 的多 agent 模式，以及 [`examples/fully_async`](../_examples_synced/fully_async/README.md) 中适合 long-tail agentic 场景的 fully-async rollout，两者外层都走 vime 默认的 `vllm_rollout`。
+[`examples/multi_agent`](../_examples_synced/multi_agent/README.md) 通过 `--custom-generate-function-path` 实现每条 sample 的多 agent 生成；需要替换整个 rollout 编排时，参见 [`examples/fully_async`](../_examples_synced/fully_async/README.md)。
 
 ## 详细接口参考
 

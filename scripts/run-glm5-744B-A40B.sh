@@ -114,10 +114,10 @@ VLLM_ARGS=(
    # mtp
 
    # dsa
-   --vllm-max-cudagraph-capture-size 40
+   --vllm-max-cudagraph-capture-size 32
 
    --vllm-max-num-seqs 512
-   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":4}'
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 
 )
 

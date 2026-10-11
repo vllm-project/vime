@@ -35,16 +35,6 @@ per test. Set `VIME_CI_IMAGE` to an immutable candidate digest when validating
 Dockerfile or vLLM patch changes. Jobs otherwise use `vllm/vime:latest`, which
 must not be updated before the change merges.
 
-The `megatron` suite includes `test_straw_checkpoint_fork.py` for checkpoint
-step selection, rollback branches and indexed debug archives.
-
-`test_qwen2.5_0.5B_pipeline_rl.py` runs three GRPO steps with fully async rollout
-on 4 GPUs. Its probes check that requests continue across weight updates and
-that policy weights change. The matrix covers NCCL and full disk sync with
-`--flush-cache-interval 0`, plus periodic refresh with NCCL and interval `2`.
-`test_pipeline_rl.py` checks the schedule on CPU. These tests do not measure
-learning quality or throughput gains.
-
 ### Coding-agent training
 
 `tests/test_agent_sunabako_codex_e2e.py` uses Codex **0.162.1**, Claude Code
@@ -125,6 +115,29 @@ the agent environment passed through `extra_env_vars`. Ray's CLI prints training
 logs directly to the Buildkite console. After training, the test archives
 the job's log as `train.log` for the MTP and training-metric assertions.
 Buildkite uploads the evidence on success and failure.
+
+### straw
+
+straw end-to-end tests explicitly set `--rollout-data-transport straw`, so local runs and the fixed test list use the same transport. Coverage includes:
+
+- R3: `test_qwen3_30B_A3B_r3.py` and `test_moonlight_16B_A3B_r3.py`.
+- SC: `test_qwen2.5_0.5B_score_centering.py`, checking both top-k and top-p data.
+- Fully async rollout, fanout, PPO, MTP, PD/NIXL, distributed vLLM, fault recovery with mixed memory offload, debug replay, and continued rollout after releasing training resources.
+- Checkpoint saving and loading: phases share a straw storage pool to check queue and training-state recovery. `test_straw_checkpoint_fork.py` also checks step selection, repeated rollback, automatic branch selection, and debug replay.
+
+R3, SC, and fully async tests also enable online GC. Ordinary straw tests use isolated temporary directories and clean them up afterward. Single-host GPU tests use the local filesystem profile; multi-host JuiceFS durability needs separate validation. Other end-to-end tests continue to cover Ray object-store and NIXL transport.
+
+`test_straw_fully_async_recovery.py` is an automatic CPU integration test. It uses SIGKILL to terminate a job with two local Ray nodes, then starts a new process to recover from the same filesystem queue. It tests both enabled and disabled online GC, using small R3/SC payloads and deterministic inference and reward fixtures. After installing a compatible straw wheel, run it locally with:
+
+```bash
+PYTHONPATH=. python tests/test_straw_fully_async_recovery.py
+```
+
+### PipelineRL
+
+`test_qwen2.5_0.5B_pipeline_rl.py` runs fully async rollout and three actual GRPO training steps on 4 GPUs. It checks whether the same HTTP request continues generating across weight updates and whether training changes the policy weights.
+
+The fixed test list covers three configurations: `--flush-cache-interval 0` with NCCL or full disk weight synchronization, and `--flush-cache-interval 2` with NCCL for periodic cache flushing. The CPU test `test_pipeline_rl.py` checks the flush schedule and vLLM control requests. These tests check functionality, not learning quality or throughput gains.
 
 ### Manual Megatron Restart
 
