@@ -28,6 +28,21 @@ RUN mkdir /wheels && if [ "${TARGETARCH}" = "arm64" ]; then \
     git apply /tmp/sunabako-arm64.patch && \
     /opt/sdk-build/bin/maturin build --locked --release --target aarch64-unknown-linux-gnu --out /wheels; fi
 
+FROM ${BASE_IMAGE} AS vllm-router-wheel
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo CARGO_BUILD_JOBS=4
+COPY --from=rust:1.95-bookworm /usr/local/rustup /usr/local/rustup
+COPY --from=rust:1.95-bookworm /usr/local/cargo/bin /usr/local/cargo/bin
+ENV PATH=/usr/local/cargo/bin:${PATH}
+ARG PATCH_VERSION=latest
+ARG VLLM_ROUTER_COMMIT=1fbcde7443d75b36befb61bc081f64c2a1f13a4b
+COPY docker/patch/${PATCH_VERSION}/router-health-check.patch /tmp/router-health-check.patch
+RUN apt-get update && apt-get install -y --no-install-recommends git cmake pkg-config libssl-dev && \
+    uv pip install --system setuptools-rust wheel && \
+    git init /router && cd /router && git remote add origin https://github.com/vllm-project/router.git && \
+    git fetch --depth 1 origin ${VLLM_ROUTER_COMMIT} && git checkout FETCH_HEAD && \
+    git apply /tmp/router-health-check.patch && \
+    uv build --python /usr/bin/python3 --wheel --no-build-isolation --out-dir /wheels
+
 FROM ${BASE_IMAGE}
 
 # ======================================== Arguments =============================================
@@ -163,6 +178,8 @@ COPY --from=sunabako-wheel /wheels/ /tmp/sunabako-wheels/
 RUN if ls /tmp/sunabako-wheels/*.whl >/dev/null 2>&1; then pip install --no-deps /tmp/sunabako-wheels/*.whl; fi
 RUN pip install --ignore-installed PyJWT && \
     pip install -r /tmp/requirements.txt
+COPY --from=vllm-router-wheel /wheels/ /tmp/router-wheels/
+RUN pip install --no-deps --force-reinstall /tmp/router-wheels/*.whl && rm -rf /tmp/router-wheels
 
 # https://github.com/pytorch/pytorch/issues/168167
 # cu130 base already ships nvidia-cudnn-cu13 9.19.0; only cu129 needs the pin.
@@ -233,7 +250,7 @@ RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirn
        /tmp/vllm-mooncake-prom-metrics.patch \
        /tmp/vllm-host-cache-ratio.patch \
        /tmp/vllm-deepgemm-bf16.patch \
-       /tmp/vllm-deepep-optional-shrink.patch
+       /tmp/vllm-deepep-optional-shrink.patch /tmp/vllm-draft-weights-cpu-backup.patch
 
 # ====================================== Install main package ============================================
 COPY --from=vllm-rust-frontend /build/rust/target/release/vllm-rs /usr/local/lib/python3.12/dist-packages/vllm/vllm-rs

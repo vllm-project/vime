@@ -1,0 +1,357 @@
+diff --git a/py_src/vllm_router/router.py b/py_src/vllm_router/router.py
+index 5d92b90..2653653 100644
+--- a/py_src/vllm_router/router.py
++++ b/py_src/vllm_router/router.py
+@@ -91,6 +91,7 @@ class Router:
+         health_check_timeout_secs: Timeout in seconds for health check requests. Default: 5
+         health_check_interval_secs: Interval in seconds between runtime health checks. Default: 60
+         health_check_endpoint: Health check endpoint path. Default: '/health'
++        disable_health_check: Skip automatic startup, registration and periodic worker health checks when an external controller owns readiness. Default: False
+     """
+ 
+     def __init__(self, router: Optional[_Router] = None, **kwargs):
+diff --git a/py_src/vllm_router/router_args.py b/py_src/vllm_router/router_args.py
+index 5771bf4..4f11bca 100644
+--- a/py_src/vllm_router/router_args.py
++++ b/py_src/vllm_router/router_args.py
+@@ -83,6 +83,7 @@ class RouterArgs:
+     health_check_timeout_secs: int = 5
+     health_check_interval_secs: int = 60
+     health_check_endpoint: str = "/health"
++    disable_health_check: bool = False
+     # Circuit breaker configuration
+     cb_failure_threshold: int = 10
+     cb_success_threshold: int = 3
+@@ -441,6 +442,12 @@ class RouterArgs:
+             default=RouterArgs.health_check_endpoint,
+             help="Health check endpoint path",
+         )
++        parser.add_argument(
++            f"--{prefix}disable-health-check",
++            action="store_true",
++            default=RouterArgs.disable_health_check,
++            help="Disable automatic worker health checks when managed externally",
++        )
+         parser.add_argument(
+             f"--{prefix}max-concurrent-requests",
+             type=int,
+diff --git a/py_test/unit/test_arg_parser.py b/py_test/unit/test_arg_parser.py
+index c7a43f9..14f00fd 100644
+--- a/py_test/unit/test_arg_parser.py
++++ b/py_test/unit/test_arg_parser.py
+@@ -43,6 +43,16 @@ class TestRouterArgs:
+         assert args.cb_failure_threshold == 10
+         assert args.disable_retries is False
+         assert args.disable_circuit_breaker is False
++        assert args.disable_health_check is False
++
++    @pytest.mark.parametrize("prefix", ["", "router-"])
++    def test_disable_health_check(self, prefix):
++        import argparse
++
++        parser = argparse.ArgumentParser()
++        RouterArgs.add_cli_args(parser, use_router_prefix=bool(prefix))
++        parsed = parser.parse_args([f"--{prefix}disable-health-check"])
++        assert RouterArgs.from_cli_args(parsed, use_router_prefix=bool(prefix)).disable_health_check
+ 
+     def test_parse_selector_valid(self):
+         """Test parsing valid selector arguments."""
+diff --git a/src/config/types.rs b/src/config/types.rs
+index 413022f..a971685 100644
+--- a/src/config/types.rs
++++ b/src/config/types.rs
+@@ -333,6 +333,8 @@ fn default_retry_jitter_factor() -> f32 {
+ /// Health check configuration for worker monitoring
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct HealthCheckConfig {
++    #[serde(default)]
++    pub disable_health_check: bool,
+     /// Number of consecutive failures before marking unhealthy
+     pub failure_threshold: u32,
+     /// Number of consecutive successes before marking healthy
+@@ -348,6 +350,7 @@ pub struct HealthCheckConfig {
+ impl Default for HealthCheckConfig {
+     fn default() -> Self {
+         Self {
++            disable_health_check: false,
+             failure_threshold: 3,
+             success_threshold: 2,
+             timeout_secs: 5,
+diff --git a/src/lib.rs b/src/lib.rs
+index 5c4c406..2ae3b41 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -87,6 +87,7 @@ struct Router {
+     health_check_timeout_secs: u64,
+     health_check_interval_secs: u64,
+     health_check_endpoint: String,
++    disable_health_check: bool,
+     // IGW (Inference Gateway) configuration
+     enable_igw: bool,
+     queue_size: usize,
+@@ -214,6 +215,7 @@ impl Router {
+             disable_retries: self.disable_retries,
+             disable_circuit_breaker: self.disable_circuit_breaker,
+             health_check: config::HealthCheckConfig {
++                disable_health_check: self.disable_health_check,
+                 failure_threshold: self.health_failure_threshold,
+                 success_threshold: self.health_success_threshold,
+                 timeout_secs: self.health_check_timeout_secs,
+@@ -310,6 +312,7 @@ impl Router {
+         otlp_traces_endpoint = None,
+         // KV connector default (PD disaggregation)
+         kv_connector = String::from("nixl"),
++        disable_health_check = false,
+     ))]
+     #[allow(clippy::too_many_arguments)]
+     fn new(
+@@ -372,6 +375,7 @@ impl Router {
+         enable_trace: bool,
+         otlp_traces_endpoint: Option<String>,
+         kv_connector: String,
++        disable_health_check: bool,
+     ) -> PyResult<Self> {
+         Ok(Router {
+             host,
+@@ -426,6 +430,7 @@ impl Router {
+             health_check_timeout_secs,
+             health_check_interval_secs,
+             health_check_endpoint,
++            disable_health_check,
+             enable_igw,
+             queue_size,
+             queue_timeout_secs,
+diff --git a/src/main.rs b/src/main.rs
+index a642898..176e9bf 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -322,6 +322,9 @@ struct CliArgs {
+     #[arg(long, default_value = "/health")]
+     health_check_endpoint: String,
+ 
++    #[arg(long, default_value_t = false)]
++    disable_health_check: bool,
++
+     // IGW (Inference Gateway) configuration
+     /// Enable Inference Gateway mode
+     #[arg(long, default_value_t = false)]
+@@ -542,6 +545,7 @@ impl CliArgs {
+             disable_retries: self.disable_retries,
+             disable_circuit_breaker: self.disable_circuit_breaker,
+             health_check: HealthCheckConfig {
++                disable_health_check: self.disable_health_check,
+                 failure_threshold: self.health_failure_threshold,
+                 success_threshold: self.health_success_threshold,
+                 timeout_secs: self.health_check_timeout_secs,
+diff --git a/src/routers/http/pd_router.rs b/src/routers/http/pd_router.rs
+index 2f3e451..8475d91 100644
+--- a/src/routers/http/pd_router.rs
++++ b/src/routers/http/pd_router.rs
+@@ -32,6 +32,7 @@ pub struct PdRouterBase {
+     pub load_monitor_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
+     pub client: Client,
+     pub circuit_breaker_config: CircuitBreakerConfig,
++    pub disable_health_check: bool,
+     // Intra-node data parallel size for creating DPAwareWorker in add_*_server()
+     pub dp_size: usize,
+ }
+@@ -39,6 +40,9 @@ pub struct PdRouterBase {
+ impl PdRouterBase {
+     // Private helper method to perform health check on a new server
+     async fn wait_for_server_health(&self, url: &str) -> Result<(), PDRouterError> {
++        if self.disable_health_check {
++            return Ok(());
++        }
+         crate::routers::http::router::Router::wait_for_healthy_workers(
+             &[url.to_string()],
+             self.worker_startup_timeout_secs,
+@@ -636,7 +640,8 @@ impl PdRouterBase {
+             .map(|worker| worker.url().to_string())
+             .collect();
+         // At least one prefill and one decode are up
+-        if !prefill_workers_urls.is_empty() {
++        if !prefill_workers_urls.is_empty() && !ctx.router_config.health_check.disable_health_check
++        {
+             crate::routers::http::router::Router::wait_for_healthy_workers(
+                 &prefill_workers_urls,
+                 ctx.router_config.worker_startup_timeout_secs,
+@@ -645,7 +650,7 @@ impl PdRouterBase {
+             .await?;
+         }
+ 
+-        if !decode_workers_urls.is_empty() {
++        if !decode_workers_urls.is_empty() && !ctx.router_config.health_check.disable_health_check {
+             crate::routers::http::router::Router::wait_for_healthy_workers(
+                 &decode_workers_urls,
+                 ctx.router_config.worker_startup_timeout_secs,
+@@ -704,6 +709,7 @@ impl PdRouterBase {
+             load_monitor_handle,
+             client: ctx.client.clone(),
+             circuit_breaker_config: core_cb_config,
++            disable_health_check: ctx.router_config.health_check.disable_health_check,
+             dp_size,
+         })
+     }
+@@ -1241,10 +1247,30 @@ mod tests {
+             load_monitor_handle: None,
+             client: Client::new(),
+             circuit_breaker_config: CircuitBreakerConfig::default(),
++            disable_health_check: false,
+             dp_size: 1,
+         }
+     }
+ 
++    #[tokio::test]
++    async fn test_disabled_health_check_registers_pd_and_dp_workers() {
++        for dp_size in [1, 2] {
++            let mut router = create_test_pd_router_with_dp(dp_size);
++            router.disable_health_check = true;
++            router
++                .add_prefill_server("http://127.0.0.1:1".to_string(), None)
++                .await
++                .unwrap();
++            router
++                .add_decode_server("http://127.0.0.1:2".to_string())
++                .await
++                .unwrap();
++            let workers = router.worker_registry.get_all();
++            assert_eq!(workers.len(), 2 * dp_size);
++            assert!(workers.iter().all(|worker| worker.is_available()));
++        }
++    }
++
+     fn create_test_pd_router_with_dp(dp_size: usize) -> PdRouterBase {
+         let worker_registry = Arc::new(WorkerRegistry::new());
+         let policy_registry =
+@@ -1259,6 +1285,7 @@ mod tests {
+             load_monitor_handle: None,
+             client: Client::new(),
+             circuit_breaker_config: CircuitBreakerConfig::default(),
++            disable_health_check: false,
+             dp_size,
+         }
+     }
+diff --git a/src/routers/http/router.rs b/src/routers/http/router.rs
+index f68e4b0..900895c 100644
+--- a/src/routers/http/router.rs
++++ b/src/routers/http/router.rs
+@@ -43,6 +43,7 @@ pub struct Router {
+     api_key: Option<String>,
+     retry_config: RetryConfig,
+     circuit_breaker_config: CircuitBreakerConfig,
++    disable_health_check: bool,
+     _worker_loads: Arc<tokio::sync::watch::Receiver<HashMap<String, isize>>>,
+     _load_monitor_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
+ }
+@@ -58,7 +59,7 @@ impl Router {
+         RouterMetrics::set_active_workers(worker_urls.len());
+ 
+         // Wait for workers to be healthy (skip if empty - for service discovery mode)
+-        if !worker_urls.is_empty() {
++        if !worker_urls.is_empty() && !ctx.router_config.health_check.disable_health_check {
+             Self::wait_for_healthy_workers(
+                 &worker_urls,
+                 ctx.router_config.worker_startup_timeout_secs,
+@@ -179,6 +180,7 @@ impl Router {
+             api_key: ctx.router_config.api_key.clone(),
+             retry_config: ctx.router_config.effective_retry_config(),
+             circuit_breaker_config: core_cb_config,
++            disable_health_check: ctx.router_config.health_check.disable_health_check,
+             _worker_loads: worker_loads,
+             _load_monitor_handle: load_monitor_handle,
+         })
+@@ -1023,9 +1025,18 @@ impl Router {
+                 ));
+             }
+ 
+-            match client.get(format!("{}/health", worker_url)).send().await {
+-                Ok(res) => {
+-                    if res.status().is_success() {
++            let health_check = if self.disable_health_check {
++                Ok(true)
++            } else {
++                client
++                    .get(format!("{}/health", worker_url))
++                    .send()
++                    .await
++                    .map(|response| response.status().is_success())
++            };
++            match health_check {
++                Ok(healthy) => {
++                    if healthy {
+                         if self.intra_node_data_parallel_size > 1 {
+                             // Expand worker URL into multiple DP-aware URLs based on configured intra_node_data_parallel_size
+                             // (e.g., "http://host:8000" → "http://host:8000@0", "@1", etc.)
+@@ -1118,9 +1129,8 @@ impl Router {
+                         return Ok(format!("Successfully added worker: {}", worker_url));
+                     } else {
+                         debug!(
+-                            "Worker {} health check pending - status: {}",
+-                            worker_url,
+-                            res.status()
++                            "Worker {} health check pending - non-success status",
++                            worker_url
+                         );
+                         // if the url does not have http or https prefix, warn users
+                         if !worker_url.starts_with("http://") && !worker_url.starts_with("https://")
+@@ -1802,11 +1812,25 @@ mod tests {
+             client: Client::new(),
+             retry_config: RetryConfig::default(),
+             circuit_breaker_config: CircuitBreakerConfig::default(),
++            disable_health_check: false,
+             _worker_loads: Arc::new(rx),
+             _load_monitor_handle: None,
+         }
+     }
+ 
++    #[tokio::test]
++    async fn test_disabled_health_check_registers_regular_and_dp_workers() {
++        for dp_size in [1, 2] {
++            let mut router = create_test_regular_router();
++            router.disable_health_check = true;
++            router.intra_node_data_parallel_size = dp_size;
++            router.add_worker("http://127.0.0.1:1").await.unwrap();
++            let workers = router.worker_registry.get_all();
++            assert_eq!(workers.len(), 2 + dp_size);
++            assert!(workers.iter().all(|worker| worker.is_available()));
++        }
++    }
++
+     #[test]
+     fn test_router_get_worker_urls_regular() {
+         let router = create_test_regular_router();
+@@ -1874,6 +1898,7 @@ mod tests {
+             client: Client::new(),
+             retry_config: RetryConfig::default(),
+             circuit_breaker_config: CircuitBreakerConfig::default(),
++            disable_health_check: false,
+             _worker_loads: Arc::new(rx),
+             _load_monitor_handle: None,
+         }
+diff --git a/src/server.rs b/src/server.rs
+index d7c16df..3c6130c 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -951,13 +951,15 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
+         };
+ 
+     // Start health checker for all workers in the registry
+-    let _health_checker = app_context
+-        .worker_registry
+-        .start_health_checker(config.router_config.health_check.check_interval_secs);
+-    info!(
+-        "Started health checker for workers with {}s interval",
+-        config.router_config.health_check.check_interval_secs
+-    );
++    let _health_checker = (!config.router_config.health_check.disable_health_check).then(|| {
++        info!(
++            "Started health checker for workers with {}s interval",
++            config.router_config.health_check.check_interval_secs
++        );
++        app_context
++            .worker_registry
++            .start_health_checker(config.router_config.health_check.check_interval_secs)
++    });
+ 
+     // Set up concurrency limiter with queue if configured
+     let (limiter, processor) = middleware::ConcurrencyLimiter::new(
