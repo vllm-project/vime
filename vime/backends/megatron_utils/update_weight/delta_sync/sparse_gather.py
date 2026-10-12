@@ -125,14 +125,9 @@ def gather_slot_entries_to_rank0(
         return [(empty_indices, empty_values) for _ in range(slot_count)]
 
     local_elements = int(idx_concat.numel())
-    # NOTE: Do not use dist.gather for payloads in this Ascend sparse path:
-    # torch-npu's gather implementation uses all-gather, replicating the full
-    # payload on every trainer rank although only group rank zero needs it.
-    # Keep the small counts all-gather, then use actual-length P2P transfers
-    # to root without padding. This trainer-side aggregation is separate from
-    # the subsequent trainer-root-to-rollout broadcast.
-    # Counts already agree on every rank. Send only actual entries, without
-    # copying, zeroing or transmitting padding. This sparse path uses P2P.
+    # NOTE: torch-npu implements gather via all-gather, copying payloads to all ranks.
+    # After exchanging counts, send each rank's actual entries directly to group
+    # rank zero, without padding or replicating payloads on other trainer ranks.
     send_indices = idx_concat.contiguous()
     send_values = val_concat.contiguous()
     index_list = value_list = None
