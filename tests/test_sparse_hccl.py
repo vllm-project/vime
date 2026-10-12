@@ -11,7 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Compare sparse reconstruction with an independent real Bridge full export.
+"""Sparse HCCL regression checks and sparse/full weight comparison.
+
+pytest tests/test_sparse_hccl.py runs loader, dtype, NaN, checksum and failure
+recovery checks. torchrun runs the real Bridge differential; add
+DELTA_ENTRY_ORACLE=1 to compare one sparse update with full exported weights.
+Use --gather-regression for the four-rank payload length/buffer reuse checks.
+
+Compare sparse reconstruction with an independent real Bridge full export.
 
 Guard TP/PP/EP coordinate conversion, global parameter ordering, expert mappings
 and snapshot reconstruction using tiny models and bitwise tensor comparisons.
@@ -31,8 +38,8 @@ rearrange rather than blend) -- rerun it whenever Megatron-Bridge is upgraded.
 
 Run under torchrun on >=2 GPUs, e.g.::
 
-    MODEL_KIND=qwen2 torchrun --nproc_per_node=2 tests/sparse_hccl/test_bridge_delta_export_differential.py
-    MODEL_KIND=nemotron_h torchrun --nproc_per_node=2 tests/sparse_hccl/test_bridge_delta_export_differential.py
+    MODEL_KIND=qwen2 torchrun --nproc_per_node=2 tests/test_sparse_hccl.py
+    MODEL_KIND=nemotron_h torchrun --nproc_per_node=2 tests/test_sparse_hccl.py
 
 ``MODEL_KIND``: ``qwen2`` (Column/Row/QKV/GatedMLP/Replicated), ``qwen3_moe``
 (adds fused-MoE expert mappings; uses etp=TP), ``nemotron_h`` (Mamba mixers --
@@ -42,14 +49,32 @@ the tp_size-dependent de-interleave the probe must reproduce).
 import os
 import pathlib
 import sys
+from datetime import timedelta
+from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.distributed as dist
 
 # torchrun executes this file with its test directory as sys.path[0]. Prefer the checkout
 # being validated over an editable installation of another Vime revision.
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from vllm_ascend.distributed.weight_transfer.sparse_hccl_engine import _verify_dense_load
+from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import (
+    SparseWeightPatch,
+    apply_sparse_hf_patches_with_loader,
+)
+
 import vime.backends.megatron_utils  # noqa: F401 - Bootstrap NPU before importing Megatron.
+from vime.backends.megatron_utils.update_weight import megatron_delta_export
+from vime.backends.megatron_utils.update_weight import update_weight_from_sparse_hccl as updater_module
+from vime.backends.megatron_utils.update_weight.delta_sync import checksum, shard_delta_indices
+from vime.backends.megatron_utils.update_weight.delta_sync import sparse_gather as gather_module
+from vime.backends.megatron_utils.update_weight.delta_sync.sparse_gather import (
+    GatherWorkspace,
+    gather_slot_entries_to_rank0,
+)
+from vime.backends.megatron_utils.update_weight.megatron_delta_export import _device_shard
 
 MODEL_KIND = os.environ.get("MODEL_KIND", "qwen2")
 TP = int(os.environ.get("TP_SIZE", "2"))
@@ -499,5 +524,469 @@ def main():
         sys.exit(1)
 
 
+class Model(torch.nn.Module):
+    def __init__(self, rank):
+        super().__init__()
+        self.rank = rank
+        self.weight = torch.nn.Parameter(
+            torch.arange(8, dtype=torch.bfloat16).reshape(4, 2)[rank * 2 : rank * 2 + 2].clone()
+        )
+        self.calls = 0
+
+    def load_weights(self, weights):
+        self.calls += 1
+        for name, weight in dict(weights).items():
+            assert name == "weight"
+            self.weight.data.copy_(weight[self.rank * 2 : self.rank * 2 + 2])
+
+
+def test_cpu_backup_cannot_silently_become_diff_source():
+    with pytest.raises(RuntimeError, match="live accelerator shard"):
+        _device_shard(SimpleNamespace(param=torch.ones(4), megatron_name="weight"))
+
+
+def test_snapshots_are_independent_host_copies(monkeypatch):
+    local = torch.arange(4, dtype=torch.bfloat16)
+    monkeypatch.setattr(megatron_delta_export, "_device_shard", lambda record: local)
+    record = SimpleNamespace(param=local, spec=SimpleNamespace(contributes=True), megatron_name="weight")
+    snapshots = {}
+    megatron_delta_export.prime_delta_snapshots([record], snapshots)
+    snapshot = snapshots["weight"]
+    assert snapshot.device.type == "cpu"
+    assert torch.equal(snapshot, local)
+    local.add_(1)
+    assert torch.equal(snapshot, torch.arange(4, dtype=torch.bfloat16))
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_three_real_deltas_split_and_empty_preserve_full_state(rank):
+    model = Model(rank)
+    expected = torch.arange(8, dtype=torch.bfloat16).reshape(4, 2)
+    for round_id in range(3):
+        indices = torch.tensor([round_id, 7 - round_id], dtype=torch.int32)
+        values = torch.tensor([20 + round_id, 40 + round_id], dtype=torch.bfloat16)
+        # Same HF name appears in two wire pieces. Both must be applied.
+        patches = [(SparseWeightPatch("weight", indices[i : i + 1], values[i : i + 1]), [4, 2]) for i in range(2)]
+        apply_sparse_hf_patches_with_loader(model, patches, chunk_bytes=16)
+        expected.view(-1).index_copy_(0, indices.long(), values)
+        assert torch.equal(model.weight.view(torch.int16), expected[rank * 2 : rank * 2 + 2].view(torch.int16))
+        _verify_dense_load(model, [("weight", expected)])
+    apply_sparse_hf_patches_with_loader(model, [])
+
+
+def test_bad_wire_bounds_fail_before_mutation():
+    model = Model(0)
+    before = model.weight.detach().clone()
+    patches = [(SparseWeightPatch("weight", torch.tensor([8], dtype=torch.int32), torch.ones(1)), [4, 2])]
+    with pytest.raises(IndexError):
+        apply_sparse_hf_patches_with_loader(model, patches)
+    assert torch.equal(model.weight, before)
+
+
+def test_dense_verify_detects_missing_update():
+    model = Model(0)
+    with pytest.raises(RuntimeError, match="state verification failed"):
+        _verify_dense_load(model, [("weight", torch.ones(4, 2, dtype=torch.bfloat16))])
+
+
+@pytest.mark.parametrize("conflicting", [False, True])
+def test_slot_exchange_inherits_dtype_or_rejects_disagreement(monkeypatch, conflicting):
+    record = SimpleNamespace(param=None, megatron_name="remote")
+    slots = [("weight", (4,))]
+    rows = [[None], [(slots, torch.float32)], [(slots, torch.bfloat16 if conflicting else torch.float32)]]
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: len(rows))
+    monkeypatch.setattr(
+        torch.distributed, "all_gather_object", lambda output, local: output.__setitem__(slice(None), rows)
+    )
+    if conflicting:
+        with pytest.raises(ValueError, match="inconsistent owner dtypes"):
+            megatron_delta_export._exchange_slot_tables([record], {})
+    else:
+        megatron_delta_export._exchange_slot_tables([record], {})
+        assert record.dtype == torch.float32
+        assert record.slots == slots
+
+
+@pytest.mark.parametrize("batch_size", [1, 32])
+def test_fp32_placeholder_keeps_owner_dtype(monkeypatch, batch_size):
+    record = SimpleNamespace(
+        param=None,
+        megatron_name="remote",
+        dtype=torch.float32,
+        slots=[("weight", (4,))],
+        spec=SimpleNamespace(gather_group=None),
+    )
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: "cpu")
+    entries = list(megatron_delta_export.iter_delta_entries([record], {}, batch_size=batch_size))
+    assert entries[0][1] == "float32"
+    assert entries[0][4].dtype == torch.float32
+    assert entries[0][4].numel() == 0
+
+
+@pytest.mark.parametrize("local_nan,remote_nan", [(False, False), (True, False), (False, True)])
+def test_nan_reduction_rejects_local_or_remote_failure(monkeypatch, local_nan, remote_nan):
+    record = SimpleNamespace(param=torch.tensor([float("nan") if local_nan else 1.0]))
+    calls = []
+
+    def reduce(flag, op):
+        calls.append(int(flag))
+        if remote_nan:
+            flag.fill_(1)
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", reduce)
+    if local_nan or remote_nan:
+        with pytest.raises(ValueError, match="NaN weights"):
+            megatron_delta_export.validate_export_weights([record])
+    else:
+        megatron_delta_export.validate_export_weights([record])
+    assert calls == [int(local_nan)]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_shard_delta_indices_is_bit_exact(dtype):
+    torch.manual_seed(0)
+    previous = torch.randn(1000, dtype=dtype)
+    current = previous.clone()
+    changed = torch.tensor([3, 17, 500, 999], dtype=torch.int64)
+    current[changed] += 0.5
+
+    indices, values = shard_delta_indices(current, previous, offset=4096)
+
+    assert torch.equal(indices, changed + 4096)
+    integer_dtype = torch.int16 if dtype == torch.bfloat16 else torch.int32
+    assert torch.equal(values.view(integer_dtype), current[changed].view(integer_dtype))
+
+
+@pytest.mark.unit
+def test_shard_delta_indices_no_change_is_empty():
+    previous = torch.randn(256, dtype=torch.bfloat16)
+    indices, values = shard_delta_indices(previous.clone(), previous, offset=0)
+    assert indices.numel() == 0
+    assert values.numel() == 0
+
+
+@pytest.mark.unit
+def test_checksum_fits_uint64_wire_format(monkeypatch):
+    hashes = iter([2**63 - 1, 2**63 - 1])
+    monkeypatch.setattr(torch, "hash_tensor", lambda _: torch.tensor(next(hashes)))
+
+    result = checksum(torch.ones(1, dtype=torch.uint8), torch.ones(1))
+
+    assert 0 <= result <= 2**64 - 1
+
+
+@pytest.mark.unit
+def test_root_payload_lengths_and_returned_buffer_ownership(monkeypatch):
+    # CPU-only transport mock: do not trigger the production NPU normalization.
+    monkeypatch.setattr(gather_module, "torch", SimpleNamespace(empty=torch.empty, cat=torch.cat))
+    calls = []
+    counts = [[1, 0], [2, 3], [0, 1], [0, 0]]
+    peer_indices = torch.tensor([10, 11, 20, 21, 22], dtype=torch.int32)
+    peer_values = peer_indices.float()
+
+    def batch(operations):
+        for operation, tensor, peer, _group in operations:
+            assert operation == "recv" and peer in (11, 12)
+            assert tensor.numel() == (5 if peer == 11 else 1)
+            source = peer_indices if tensor.dtype == torch.int32 else peer_values
+            tensor.copy_(source if peer == 11 else torch.tensor([30], dtype=tensor.dtype))
+        calls.append(operations)
+        return [SimpleNamespace(wait=lambda: None)]
+
+    monkeypatch.setattr(
+        gather_module,
+        "dist",
+        SimpleNamespace(
+            get_rank=lambda group: 0,
+            get_world_size=lambda group: 4,
+            get_global_rank=lambda group, rank: 10 + rank,
+            irecv="recv",
+            isend="send",
+            P2POp=lambda *args: args,
+            batch_isend_irecv=batch,
+        ),
+    )
+    workspace = gather_module.GatherWorkspace()
+    result = gather_module.gather_slot_entries_to_rank0(
+        torch.tensor([1], dtype=torch.int32),
+        torch.tensor([1.0]),
+        torch.tensor([1, 0]),
+        group=object(),
+        workspace=workspace,
+        _counts_cpu=counts,
+    )
+    assert result[0][0].tolist() == [1, 10, 11]
+    assert result[1][0].tolist() == [20, 21, 22, 30]
+    assert torch.equal(result[0][1], result[0][0].float())
+    saved = [(indices.clone(), values.clone()) for indices, values in result]
+    assert len(calls) == 1
+    assert not any(key[0] == "send_indices" for key in workspace.buffers)
+    # Reuse scratch; previously returned slot payloads must remain independent.
+    for buffer in workspace.buffers.values():
+        buffer.zero_()
+    for actual, expected in zip(result, saved, strict=True):
+        assert torch.equal(actual[0], expected[0])
+        assert torch.equal(actual[1], expected[1])
+
+
+@pytest.mark.unit
+def test_empty_hccl_peer_does_not_enqueue_p2p(monkeypatch):
+    monkeypatch.setattr(gather_module, "torch", SimpleNamespace(empty=torch.empty, cat=torch.cat))
+    monkeypatch.setattr(
+        gather_module,
+        "dist",
+        SimpleNamespace(
+            get_rank=lambda group: 1,
+            get_world_size=lambda group: 2,
+            get_global_rank=lambda group, rank: rank,
+            batch_isend_irecv=lambda operations: pytest.fail("empty peer must not send padding"),
+        ),
+    )
+    assert (
+        gather_module.gather_slot_entries_to_rank0(
+            torch.empty(0, dtype=torch.int32),
+            torch.empty(0),
+            torch.tensor([0]),
+            group=object(),
+            _counts_cpu=[[3], [0]],
+        )
+        is None
+    )
+
+
+@pytest.fixture
+def updater(monkeypatch):
+    instance = updater_module.UpdateWeightFromSparseHCCL.__new__(updater_module.UpdateWeightFromSparseHCCL)
+    instance.args = SimpleNamespace(update_weight_delta_verify_every=2)
+    instance._client = object()
+    instance._failed = False
+    instance._seeded = True
+    instance._steady_updates = 0
+    instance.weight_version = 1
+    instance._begin_update = lambda: None
+    instance._ensure_export_index = lambda: None
+    instance._index = []
+    monkeypatch.setattr(updater_module, "validate_export_weights", lambda index: None)
+    instance._sync_update_state = lambda error: (error is not None, instance._payload_started)
+    monkeypatch.setattr(updater_module.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(updater_module.dist, "barrier", lambda **kwargs: None)
+    monkeypatch.setattr(updater_module, "get_gloo_group", lambda: None)
+    return instance
+
+
+@pytest.mark.unit
+def test_verify_schedule_checks_sparse_writes_without_dense_replay(updater):
+    verification = []
+    finishes = []
+    updater._send_sparse_delta = lambda *, verify: (verification.append(verify) or (1, 24, 4))
+    updater._send_dense = lambda **kwargs: pytest.fail("steady verification must not replay dense weights")
+    updater._finish_update = lambda: finishes.append(updater.weight_version)
+    for _ in range(3):
+        updater.update_weights()
+    assert verification == [False, True, False]
+    assert finishes == [2, 3, 4]
+    assert updater._steady_updates == 3
+
+
+@pytest.mark.unit
+def test_steady_update_adds_no_device_synchronization(updater, monkeypatch):
+    monkeypatch.setattr(
+        updater_module.torch.accelerator, "synchronize", lambda: pytest.fail("unexpected synchronization")
+    )
+    updater._send_sparse_delta = lambda **kwargs: (1, 24, 4)
+    updater._finish_update = lambda: None
+    updater.update_weights()
+    assert not any(key.endswith("_seconds") for key in updater.pop_metrics())
+
+
+@pytest.mark.parametrize("seeded", [False, True])
+def test_nan_rejection_precedes_payload_and_snapshot_changes(updater, monkeypatch, seeded):
+    updater._seeded = seeded
+    recovered = []
+    updater._recover_before_payload = lambda: recovered.append(True)
+    updater._send_dense = lambda **kwargs: pytest.fail("NaN seed must not be sent")
+    updater._send_sparse_delta = lambda **kwargs: pytest.fail("NaN delta must not be sent")
+    monkeypatch.setattr(updater_module, "prime_delta_snapshots", lambda *a, **kw: pytest.fail("snapshot changed"))
+
+    def reject(index):
+        raise ValueError("NaN weights")
+
+    monkeypatch.setattr(updater_module, "validate_export_weights", reject)
+    with pytest.raises(ValueError, match="NaN weights"):
+        updater.update_weights()
+    assert recovered == [True]
+    assert not updater._payload_started
+
+
+@pytest.mark.unit
+def test_sparse_delta_reuses_dtype_bucket_without_changing_payload(updater, monkeypatch):
+    updater.args.update_weight_buffer_size = 1024
+    updater._index = object()
+    updater._snapshots = {}
+    created = []
+    original_bucket = updater_module._SparseFlushBucket
+
+    def make_bucket(*args, **kwargs):
+        bucket = original_bucket(*args, **kwargs)
+        created.append(bucket)
+        return bucket
+
+    monkeypatch.setattr(updater_module, "_SparseFlushBucket", make_bucket)
+    monkeypatch.setattr(updater_module, "checksum", lambda positions, values: 123)
+    tensor = updater_module.torch.tensor
+    entries = [
+        (
+            [(name, [4])],
+            "float32",
+            tensor([1]),
+            tensor([index], dtype=updater_module.torch.int32),
+            tensor([value]),
+            None,
+        )
+        for name, index, value in [("a", 1, 10.0), ("b", 3, 20.0)]
+    ]
+    monkeypatch.setattr(updater_module, "iter_delta_entries", lambda *args, **kwargs: iter(entries))
+    payloads = []
+    updater._publish_flush = lambda flush, **kwargs: payloads.append(flush)
+    assert updater._send_sparse_delta() == (1, 16, 2)
+    assert len(created) == 1
+    assert [param.name for param in payloads[0].params] == ["a", "b"]
+    assert payloads[0].positions.view(updater_module.torch.int32).tolist() == [1, 3]
+    assert payloads[0].values.tolist() == [10.0, 20.0]
+
+
+@pytest.mark.unit
+def test_gather_queue_reuses_workspace_between_flushes(monkeypatch):
+    created, observed = [], []
+
+    def make_workspace():
+        workspace = object()
+        created.append(workspace)
+        return workspace
+
+    def gather(indices, values, counts, **kwargs):
+        observed.append(kwargs["workspace"])
+        return [(indices, values)]
+
+    monkeypatch.setattr(updater_module, "GatherWorkspace", make_workspace)
+    monkeypatch.setattr(updater_module, "gather_slot_entries_to_rank0", gather)
+    consumed = []
+    queue = updater_module._GatherQueue(1, 1024, True, lambda *args: consumed.append(args))
+    group = object()
+    for name in ["a", "b"]:
+        queue.put(
+            group,
+            [(name, [4])],
+            "float32",
+            updater_module.torch.tensor([1]),
+            updater_module.torch.tensor([1], dtype=updater_module.torch.int32),
+            updater_module.torch.tensor([10.0]),
+        )
+    assert len(created) == 1
+    assert observed == [created[0], created[0]]
+    assert [entry[0] for entry in consumed] == ["a", "b"]
+
+
+@pytest.mark.unit
+def test_partial_payload_failure_keeps_generation_paused_and_rejects_reuse(updater):
+    def send(*, verify):
+        updater._payload_started = True
+        raise RuntimeError("receiver failed after partial apply")
+
+    updater._send_sparse_delta = send
+    updater._finish_update = lambda: pytest.fail("partial weights must not resume generation")
+    updater._recover_before_payload = lambda: pytest.fail("partial apply has no rollback")
+    with pytest.raises(RuntimeError, match="partial apply"):
+        updater.update_weights()
+    assert updater._failed
+    with pytest.raises(RuntimeError, match="cannot be reused"):
+        updater.update_weights()
+
+
+@pytest.mark.unit
+def test_pre_payload_failure_uses_recovery_instead_of_finish(updater):
+    recovered = []
+
+    def prepare():
+        raise RuntimeError("export preparation failed")
+
+    updater._ensure_export_index = prepare
+    updater._recover_before_payload = lambda: recovered.append(True)
+    updater._finish_update = lambda: pytest.fail("failed preparation must not finish an update")
+    with pytest.raises(RuntimeError, match="preparation failed"):
+        updater.update_weights()
+    assert recovered == [True]
+    assert not updater._failed
+
+
+@pytest.mark.unit
+def test_finish_failure_rejects_following_update(updater):
+    updater._send_sparse_delta = lambda *, verify: (1, 24, 4)
+
+    def finish():
+        raise RuntimeError("finish RPC failed")
+
+    updater._finish_update = finish
+    with pytest.raises(RuntimeError, match="finish RPC failed"):
+        updater.update_weights()
+    assert updater._failed
+
+
+def run_gather_regression():
+    torch.npu.set_device(int(os.environ["LOCAL_RANK"]))
+    dist.init_process_group("hccl", timeout=timedelta(seconds=120))
+    if dist.get_world_size() != 4:
+        dist.destroy_process_group()
+        raise ValueError("This regression requires exactly four ranks (--nproc-per-node=4)")
+    rank = dist.get_rank()
+    workspace = GatherWorkspace()
+    preserved = []
+    cases = [
+        [[0, 0, 0], [0, 0, 0], [2, 1, 0], [0, 0, 0]],
+        [[1, 0, 3], [0, 0, 0], [0, 0, 0], [0, 0, 0]],
+        [[1, 3, 0], [0, 2, 1], [2, 0, 4], [0, 0, 0]],
+        [[0, 0, 0]] * 4,
+        [[2, 1, 2], [1, 3, 1], [2, 0, 2], [1, 1, 0]],
+    ]
+    for dtype in (torch.float32, torch.bfloat16):
+        for counts in cases:
+            pieces = [
+                [torch.arange(size, dtype=torch.int32) + r * 100 + slot * 10 for slot, size in enumerate(row)]
+                for r, row in enumerate(counts)
+            ]
+            indices = torch.cat(pieces[rank]).npu()
+            values = torch.cat([piece.float().to(dtype) for piece in pieces[rank]]).npu()
+            # Cover noncontiguous caller buffers as well as empty participants.
+            indices = torch.stack([indices, indices], dim=1)[:, 0]
+            values = torch.stack([values, values], dim=1)[:, 0]
+            for budget in (None, 12):
+                result = gather_slot_entries_to_rank0(
+                    indices,
+                    values,
+                    torch.tensor(counts[rank]),
+                    max_round_bytes=budget,
+                    workspace=workspace,
+                )
+                if rank == 0:
+                    for slot, (actual_indices, actual_values) in enumerate(result):
+                        expected = torch.cat([pieces[r][slot] for r in range(4)])
+                        assert torch.equal(actual_indices.cpu(), expected)
+                        assert torch.equal(actual_values.cpu(), expected.float().to(dtype))
+                        preserved.append((actual_indices, actual_values, expected, dtype))
+                else:
+                    assert result is None
+        dist.barrier()
+    if rank == 0:
+        for indices, values, expected, dtype in preserved:
+            assert torch.equal(indices.cpu(), expected)
+            assert torch.equal(values.cpu(), expected.float().to(dtype))
+        print("NPU-SPARSE-GATHER PASS: 20 cases; empty/unequal/noncontiguous/split/reused; FP32/BF16", flush=True)
+    dist.destroy_process_group()
+
+
 if __name__ == "__main__":
-    main()
+    if "--gather-regression" in sys.argv:
+        run_gather_regression()
+    else:
+        main()
