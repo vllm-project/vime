@@ -24,8 +24,8 @@ Sparse HCCL：
 并行 rollout：
 
 NPU 镜像补丁包含 `sparse_hccl` 接收端注册和模块。接收端先过滤 PP stage 所属层，
-通过 Ascend EP map 将全局 expert ID 映射到本地 slot，再按 TP load plan 写入本地参数。
-未知或不支持直接写入的布局走 loader 回退路径。当前 payload 仍采用广播；
+通过 Ascend EP map 将全局 expert ID 映射到本地 slot，支持的专家布局使用实际 MoE TP 配置直接写入。
+普通参数及不支持直接写入的布局通过原生 loader 完成 TP 切片和融合加载。训练侧 payload 按真实长度 P2P 汇聚到 rank0，推理侧仍采用广播；
 PP/EP 所属关系过滤不等于按 rank 定向传输。
 
 Qwen3-30B-A3B 训练和 rollout 均为 TP2/PP2/EP2 时，可使用

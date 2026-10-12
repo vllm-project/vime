@@ -61,7 +61,6 @@ def gather_slot_entries_to_rank0(
     """Gather K variable-length slot payloads to process-group rank zero."""
     rank = dist.get_rank(group)
     world = dist.get_world_size(group)
-    dst = dist.get_global_rank(group, 0) if group is not None else 0
     device = idx_concat.device
     if device.type == "cpu" and hasattr(torch, "npu"):
         # Delta extraction may leave its compact buffers on CPU after the
@@ -126,22 +125,16 @@ def gather_slot_entries_to_rank0(
         return [(empty_indices, empty_values) for _ in range(slot_count)]
 
     local_elements = int(idx_concat.numel())
-    # torch-npu implements gather through all-gather, which replicates the
-    # complete sparse payload on every training rank.  Keep the tiny counts
-    # exchange collective, then move payloads directly to group rank zero.
-    use_hccl_p2p = str(dist.get_backend(group)).lower() == "hccl"
-    if use_hccl_p2p:
-        # Counts already agree on every rank. P2P receives may have different
-        # lengths, unlike gather: do not copy/zero/transmit unused padding.
-        padded_indices = idx_concat.contiguous()
-        padded_values = val_concat.contiguous()
-    else:
-        padded_indices = workspace.tensor("send_indices", max_elements, idx_concat)
-        padded_values = workspace.tensor("send_values", max_elements, val_concat)
-        padded_indices[:local_elements].copy_(idx_concat)
-        padded_values[:local_elements].copy_(val_concat)
-        padded_indices[local_elements:].zero_()
-        padded_values[local_elements:].zero_()
+    # NOTE: Do not use dist.gather for payloads in this Ascend sparse path:
+    # torch-npu's gather implementation uses all-gather, replicating the full
+    # payload on every trainer rank although only group rank zero needs it.
+    # Keep the small counts all-gather, then use actual-length P2P transfers
+    # to root without padding. This trainer-side aggregation is separate from
+    # the subsequent trainer-root-to-rollout broadcast.
+    # Counts already agree on every rank. Send only actual entries, without
+    # copying, zeroing or transmitting padding. This sparse path uses P2P.
+    send_indices = idx_concat.contiguous()
+    send_values = val_concat.contiguous()
     index_list = value_list = None
     if rank == 0:
         index_list = list(
@@ -150,36 +143,32 @@ def gather_slot_entries_to_rank0(
         value_list = list(
             workspace.tensor("recv_values", world * max_elements, val_concat).view(world, max_elements).unbind(0)
         )
-    if use_hccl_p2p:
-        root = dist.get_global_rank(group, 0) if group is not None else 0
-        if rank == 0:
-            assert index_list is not None and value_list is not None
-            index_list[0][:local_elements].copy_(padded_indices)
-            value_list[0][:local_elements].copy_(padded_values)
-            operations = []
-            for peer_rank in range(1, world):
-                if not totals[peer_rank]:
-                    continue
-                peer = dist.get_global_rank(group, peer_rank) if group is not None else peer_rank
-                operations.extend(
-                    (
-                        dist.P2POp(dist.irecv, index_list[peer_rank][: totals[peer_rank]], peer, group),
-                        dist.P2POp(dist.irecv, value_list[peer_rank][: totals[peer_rank]], peer, group),
-                    )
+    root = dist.get_global_rank(group, 0) if group is not None else 0
+    if rank == 0:
+        assert index_list is not None and value_list is not None
+        index_list[0][:local_elements].copy_(send_indices)
+        value_list[0][:local_elements].copy_(send_values)
+        operations = []
+        for peer_rank in range(1, world):
+            if not totals[peer_rank]:
+                continue
+            peer = dist.get_global_rank(group, peer_rank) if group is not None else peer_rank
+            operations.extend(
+                (
+                    dist.P2POp(dist.irecv, index_list[peer_rank][: totals[peer_rank]], peer, group),
+                    dist.P2POp(dist.irecv, value_list[peer_rank][: totals[peer_rank]], peer, group),
                 )
-        elif local_elements:
-            operations = [
-                dist.P2POp(dist.isend, padded_indices, root, group),
-                dist.P2POp(dist.isend, padded_values, root, group),
-            ]
-        else:
-            operations = []
-        if operations:
-            for request in dist.batch_isend_irecv(operations):
-                request.wait()
+            )
+    elif local_elements:
+        operations = [
+            dist.P2POp(dist.isend, send_indices, root, group),
+            dist.P2POp(dist.isend, send_values, root, group),
+        ]
     else:
-        dist.gather(padded_indices, index_list, dst=dst, group=group)
-        dist.gather(padded_values, value_list, dst=dst, group=group)
+        operations = []
+    if operations:
+        for request in dist.batch_isend_irecv(operations):
+            request.wait()
     if rank != 0:
         return None
 

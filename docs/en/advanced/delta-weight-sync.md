@@ -29,8 +29,9 @@ Parallel rollout:
 
 The NPU image patch includes the `sparse_hccl` receiver registration and modules.
 The receiver filters PP-owned layers, maps global expert IDs through the Ascend EP map,
-and then applies the TP load plan before writing local parameter elements. Unknown or
-unsupported direct layouts use the loader fallback. Payloads are still broadcast;
+and directly writes supported expert layouts using the actual MoE TP configuration.
+Other parameters use the native loader for TP slicing and fused-weight loading.
+Trainer payloads use actual-length P2P aggregation to rank zero; rollout payloads are still broadcast;
 PP/EP ownership filtering does not imply rank-targeted network traffic.
 
 For Qwen3-30B-A3B with training and rollout TP2/PP2/EP2, use

@@ -1,7 +1,7 @@
 """Check sparse delta encoding and trainer-side payload aggregation.
 
 Verify bit-exact changed values, empty deltas and uint64 checksums, then use
-transport mocks to check actual HCCL peer lengths, empty peers, padded fallback
+transport mocks to check actual P2P peer lengths, empty peers
 and ownership of returned buffers. Run with pytest; no real HCCL communication.
 """
 
@@ -49,8 +49,7 @@ def test_checksum_fits_uint64_wire_format(monkeypatch):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("backend", ["hccl", "gloo"])
-def test_root_payload_lengths_and_returned_buffer_ownership(monkeypatch, backend):
+def test_root_payload_lengths_and_returned_buffer_ownership(monkeypatch):
     # CPU-only transport mock: do not trigger the production NPU normalization.
     monkeypatch.setattr(module, "torch", SimpleNamespace(empty=torch.empty, cat=torch.cat))
     calls = []
@@ -67,16 +66,6 @@ def test_root_payload_lengths_and_returned_buffer_ownership(monkeypatch, backend
         calls.append(operations)
         return [SimpleNamespace(wait=lambda: None)]
 
-    def gather(tensor, buffers, **kwargs):
-        assert tensor.numel() == 5
-        assert tensor[1:].count_nonzero() == 0
-        buffers[0].copy_(tensor)
-        buffers[1].copy_(peer_indices if tensor.dtype == torch.int32 else peer_values)
-        buffers[2].zero_()
-        buffers[2][0] = 30
-        buffers[3].zero_()
-        calls.append(tensor)
-
     monkeypatch.setattr(
         module,
         "dist",
@@ -84,12 +73,10 @@ def test_root_payload_lengths_and_returned_buffer_ownership(monkeypatch, backend
             get_rank=lambda group: 0,
             get_world_size=lambda group: 4,
             get_global_rank=lambda group, rank: 10 + rank,
-            get_backend=lambda group: backend,
             irecv="recv",
             isend="send",
             P2POp=lambda *args: args,
             batch_isend_irecv=batch,
-            gather=gather,
         ),
     )
     workspace = module.GatherWorkspace()
@@ -105,8 +92,8 @@ def test_root_payload_lengths_and_returned_buffer_ownership(monkeypatch, backend
     assert result[1][0].tolist() == [20, 21, 22, 30]
     assert torch.equal(result[0][1], result[0][0].float())
     saved = [(indices.clone(), values.clone()) for indices, values in result]
-    assert len(calls) == (1 if backend == "hccl" else 2)
-    assert (any(key[0] == "send_indices" for key in workspace.buffers)) == (backend != "hccl")
+    assert len(calls) == 1
+    assert not any(key[0] == "send_indices" for key in workspace.buffers)
     # Reuse scratch; previously returned slot payloads must remain independent.
     for buffer in workspace.buffers.values():
         buffer.zero_()
@@ -125,7 +112,6 @@ def test_empty_hccl_peer_does_not_enqueue_p2p(monkeypatch):
             get_rank=lambda group: 1,
             get_world_size=lambda group: 2,
             get_global_rank=lambda group, rank: rank,
-            get_backend=lambda group: "hccl",
             batch_isend_irecv=lambda operations: pytest.fail("empty peer must not send padding"),
         ),
     )
