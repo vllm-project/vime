@@ -83,3 +83,56 @@ def test_dense_verify_detects_missing_update():
     model = Model(0)
     with pytest.raises(RuntimeError, match="state verification failed"):
         _verify_dense_load(model, [("weight", torch.ones(4, 2, dtype=torch.bfloat16))])
+
+
+@pytest.mark.parametrize("conflicting", [False, True])
+def test_slot_exchange_inherits_dtype_or_rejects_disagreement(monkeypatch, conflicting):
+    record = SimpleNamespace(param=None, megatron_name="remote")
+    slots = [("weight", (4,))]
+    rows = [[None], [(slots, torch.float32)], [(slots, torch.bfloat16 if conflicting else torch.float32)]]
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: len(rows))
+    monkeypatch.setattr(
+        torch.distributed, "all_gather_object", lambda output, local: output.__setitem__(slice(None), rows)
+    )
+    if conflicting:
+        with pytest.raises(ValueError, match="inconsistent owner dtypes"):
+            megatron_delta_export._exchange_slot_tables([record], {})
+    else:
+        megatron_delta_export._exchange_slot_tables([record], {})
+        assert record.dtype == torch.float32
+        assert record.slots == slots
+
+
+@pytest.mark.parametrize("batch_size", [1, 32])
+def test_fp32_placeholder_keeps_owner_dtype(monkeypatch, batch_size):
+    record = SimpleNamespace(
+        param=None,
+        megatron_name="remote",
+        dtype=torch.float32,
+        slots=[("weight", (4,))],
+        spec=SimpleNamespace(gather_group=None),
+    )
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: "cpu")
+    entries = list(megatron_delta_export.iter_delta_entries([record], {}, batch_size=batch_size))
+    assert entries[0][1] == "float32"
+    assert entries[0][4].dtype == torch.float32
+    assert entries[0][4].numel() == 0
+
+
+@pytest.mark.parametrize("local_nan,remote_nan", [(False, False), (True, False), (False, True)])
+def test_nan_reduction_rejects_local_or_remote_failure(monkeypatch, local_nan, remote_nan):
+    record = SimpleNamespace(param=torch.tensor([float("nan") if local_nan else 1.0]))
+    calls = []
+
+    def reduce(flag, op):
+        calls.append(int(flag))
+        if remote_nan:
+            flag.fill_(1)
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", reduce)
+    if local_nan or remote_nan:
+        with pytest.raises(ValueError, match="NaN weights"):
+            megatron_delta_export.validate_export_weights([record])
+    else:
+        megatron_delta_export.validate_export_weights([record])
+    assert calls == [int(local_nan)]

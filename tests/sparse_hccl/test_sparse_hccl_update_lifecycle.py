@@ -1,7 +1,7 @@
 """Guard sparse update scheduling, buffer reuse and failure recovery.
 
 Verify periodic local checks without dense replay, workspace/bucket reuse and
-no added steady-update synchronization. Partial-write or finish failures must
+no explicit device-wide synchronization. Partial-write or finish failures must
 keep the updater unusable; failures before transmission may recover safely.
 Run with pytest using mocked communication and rollout workers.
 """
@@ -24,6 +24,8 @@ def updater(monkeypatch):
     instance.weight_version = 1
     instance._begin_update = lambda: None
     instance._ensure_export_index = lambda: None
+    instance._index = []
+    monkeypatch.setattr(module, "validate_export_weights", lambda index: None)
     instance._sync_update_state = lambda error: (error is not None, instance._payload_started)
     monkeypatch.setattr(module.dist, "get_rank", lambda: 0)
     monkeypatch.setattr(module.dist, "barrier", lambda **kwargs: None)
@@ -52,6 +54,25 @@ def test_steady_update_adds_no_device_synchronization(updater, monkeypatch):
     updater._finish_update = lambda: None
     updater.update_weights()
     assert not any(key.endswith("_seconds") for key in updater.pop_metrics())
+
+
+@pytest.mark.parametrize("seeded", [False, True])
+def test_nan_rejection_precedes_payload_and_snapshot_changes(updater, monkeypatch, seeded):
+    updater._seeded = seeded
+    recovered = []
+    updater._recover_before_payload = lambda: recovered.append(True)
+    updater._send_dense = lambda **kwargs: pytest.fail("NaN seed must not be sent")
+    updater._send_sparse_delta = lambda **kwargs: pytest.fail("NaN delta must not be sent")
+    monkeypatch.setattr(module, "prime_delta_snapshots", lambda *a, **kw: pytest.fail("snapshot changed"))
+
+    def reject(index):
+        raise ValueError("NaN weights")
+
+    monkeypatch.setattr(module, "validate_export_weights", reject)
+    with pytest.raises(ValueError, match="NaN weights"):
+        updater.update_weights()
+    assert recovered == [True]
+    assert not updater._payload_started
 
 
 @pytest.mark.unit

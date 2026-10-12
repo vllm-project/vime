@@ -193,6 +193,8 @@ class McoreParamExport:
     # exchange): identical on every rank of the row's merge group.
     slots: list | None = None
     hf_vocab_size: int | None = None
+    # Owner dtype shared with PP placeholders to preserve gather queue order.
+    dtype: torch.dtype | None = None
 
 
 def trim_hf_vocab_padding(name: str, tensor: torch.Tensor, vocab_size: int | None):
@@ -350,7 +352,7 @@ def _exchange_slot_tables(index: list[McoreParamExport], slot_cache: dict) -> No
     lists, and every row's table becomes the rank-order first-seen union --
     identical everywhere by construction. Dense/TP rows (same list on every
     rank) dedup to themselves; expert rows concatenate the per-ep-rank
-    lists; PP placeholder rows inherit the owners' union."""
+    lists; PP placeholder rows inherit the owners' union and dtype."""
     local_rows: list = []
     for rec in index:
         if rec.param is None:
@@ -358,9 +360,9 @@ def _exchange_slot_tables(index: list[McoreParamExport], slot_cache: dict) -> No
             continue
         if rec.megatron_name not in slot_cache:
             empty_idx = torch.empty(0, dtype=torch.int64, device=rec.param.device)
-            empty_val = torch.empty(0, dtype=torch.bfloat16, device=rec.param.device)
+            empty_val = torch.empty(0, dtype=rec.param.dtype, device=rec.param.device)
             mcore_hf_delta_entry(rec, 0, empty_idx, empty_val, slot_cache)
-        local_rows.append(slot_cache[rec.megatron_name])
+        local_rows.append((slot_cache[rec.megatron_name], rec.param.dtype))
 
     world = torch.distributed.get_world_size()
     gathered: list = [None] * world
@@ -372,12 +374,18 @@ def _exchange_slot_tables(index: list[McoreParamExport], slot_cache: dict) -> No
     )
     for k, rec in enumerate(index):
         union: dict = {}
+        dtypes = set()
         for rows in gathered:  # rank order -> identical result on every rank
             row = rows[k]
             if row is None:
                 continue
-            for slot in row:
+            slots, dtype = row
+            dtypes.add(dtype)
+            for slot in slots:
                 union[(slot[0], tuple(slot[1]))] = None  # ordered-set semantics
+        if len(dtypes) > 1:
+            raise ValueError(f"directory row {k} has inconsistent owner dtypes: {dtypes}")
+        rec.dtype = next(iter(dtypes), None)
         rec.slots = [(n, tuple(shape)) for (n, shape) in union.keys()] if union else None
 
 
@@ -582,6 +590,24 @@ def prime_delta_snapshots(index, snapshots, *, pin=False):
         snapshots[record.megatron_name] = snapshot
 
 
+def validate_export_weights(index):
+    """Reject NaN on every rank before payloads or snapshot changes.
+
+    NaN is the probe/loader sentinel. Reduce device-side flags once per update,
+    before ranks can enter different payload collectives; a local exception
+    during streaming would strand peers. No per-parameter host synchronization.
+    """
+    flags = [torch.isnan(rec.param.detach()).any() for rec in index if rec.param is not None]
+    invalid = (
+        torch.stack(flags).any().to(torch.int32)
+        if flags
+        else torch.zeros((), dtype=torch.int32, device=torch.accelerator.current_device_index())
+    )
+    torch.distributed.all_reduce(invalid, op=torch.distributed.ReduceOp.MAX)
+    if bool(invalid):
+        raise ValueError("Sparse HCCL cannot export NaN weights; update rejected on all trainer ranks")
+
+
 class _SnapshotRefreshQueue:
     """Bound sparse baseline refreshes by bytes and row count.
 
@@ -634,7 +660,7 @@ def _iter_delta_entries_unbatched(index, snapshots):
         if record.param is None:
             device = torch.accelerator.current_device_index()
             local_indices = torch.empty(0, dtype=torch.int64, device=device)
-            local_values = torch.empty(0, dtype=torch.bfloat16, device=device)
+            local_values = torch.empty(0, dtype=record.dtype, device=device)
         else:
             local = _device_shard(record)
             if record.spec.contributes:
@@ -695,7 +721,7 @@ def iter_delta_entries(index, snapshots, *, batch_size=32):
                     refresh.add(snapshot, indices, values)
             else:
                 device = local.device if local is not None else torch.accelerator.current_device_index()
-                dtype = local.dtype if local is not None else torch.bfloat16
+                dtype = local.dtype if local is not None else record.dtype
                 indices = torch.empty(0, dtype=torch.int64, device=device)
                 values = torch.empty(0, dtype=dtype, device=device)
             yield (

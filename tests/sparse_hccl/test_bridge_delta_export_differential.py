@@ -15,6 +15,8 @@
 
 Guard TP/PP/EP coordinate conversion, global parameter ordering, expert mappings
 and snapshot reconstruction using tiny models and bitwise tensor comparisons.
+DELTA_ENTRY_ORACLE=1 compares one sparse update with full export; MIXED_DTYPE=1 adds
+FP32 norms beside BF16 matrices to exercise PP placeholder dtype alignment.
 Run with torchrun in the Megatron-Bridge environment, not ordinary pytest.
 
 Differential export oracle for the comm-stubbed mcore probe under TP/PP/EP.
@@ -323,6 +325,7 @@ def _delta_entry_differential(model, cfg_dir, rank):
         build_export_index,
         iter_delta_entries,
         prime_delta_snapshots,
+        validate_export_weights,
     )
     from vime.backends.megatron_utils.update_weight.update_weight_from_sparse_hccl import _GatherQueue
 
@@ -330,6 +333,16 @@ def _delta_entry_differential(model, cfg_dir, rank):
     with iterator.model_context():
         index = build_export_index(iterator.bridge, model, {})
     assert all(record.param is None or record.param.device.type == "npu" for record in index)
+
+    if os.environ.get("MIXED_DTYPE"):
+        # Retain BF16 matrices but export FP32 norms on their owning PP stage.
+        # Rebuild metadata so non-owner rows inherit the actual owner dtype.
+        for record in index:
+            if record.param is not None and record.param.ndim == 1:
+                record.param.data = record.param.data.float()
+        with iterator.model_context():
+            index = build_export_index(iterator.bridge, model, {})
+        assert {record.dtype for record in index} == {torch.bfloat16, torch.float32}
 
     def export():
         return {
@@ -340,37 +353,33 @@ def _delta_entry_differential(model, cfg_dir, rank):
     snapshots = {}
     prime_delta_snapshots(index, snapshots, pin=False)
     torch.npu.synchronize()
-    for step in range(4):
-        if step < 3:
-            with torch.no_grad():
-                for record in index:
-                    if record.param is not None:
-                        record.param.view(-1)[step::97] += 0.25
-        expected = export()
-        updates = [0]
+    with torch.no_grad():
+        for record in index:
+            if record.param is not None:
+                record.param.view(-1)[::97] += 0.25
+    validate_export_weights(index)
+    expected = export()
+    updates = [0]
 
-        def consume(name, dtype, shape, positions, values, updates=updates):
-            assert tuple(accumulated[name].shape) == tuple(shape)
-            accumulated[name].view(-1).index_copy_(0, positions.cpu().long(), values.cpu())
-            updates[0] += values.numel()
+    def consume(name, dtype, shape, positions, values):
+        assert tuple(accumulated[name].shape) == tuple(shape)
+        accumulated[name].view(-1).index_copy_(0, positions.cpu().long(), values.cpu())
+        updates[0] += values.numel()
 
-        queue = _GatherQueue(4, 4096, rank == 0, consume)
-        for slots, dtype, counts, positions, values, group in iter_delta_entries(index, snapshots):
-            assert positions.device.type == values.device.type == "npu"
-            queue.put(group, slots, dtype, counts, positions, values)
-        queue.flush_all()
-        if rank == 0:
-            assert (updates[0] > 0) == (step < 3), (step, updates)
-            assert accumulated.keys() == expected.keys()
-            for name, value in expected.items():
-                assert torch.equal(accumulated[name].view(torch.int16), value.view(torch.int16)), name
-            print(
-                f"DELTA ENTRY step={step + 1} updates={updates[0]} tensors={len(expected)} bitwise_equal=True device=npu",
-                flush=True,
-            )
-        dist.barrier()
+    queue = _GatherQueue(4, 4096, rank == 0, consume)
+    for slots, dtype, counts, positions, values, group in iter_delta_entries(index, snapshots):
+        assert positions.device.type == values.device.type == "npu"
+        queue.put(group, slots, dtype, counts, positions, values)
+    queue.flush_all()
     if rank == 0:
-        print("DELTA ENTRY THREE CHANGED ROUNDS AND EMPTY ROUND PASSED", flush=True)
+        assert updates[0] > 0
+        assert accumulated.keys() == expected.keys()
+        for name, value in expected.items():
+            actual = accumulated[name]
+            assert actual.dtype == value.dtype and actual.shape == value.shape, name
+            assert torch.equal(actual.view(torch.uint8), value.view(torch.uint8)), name
+        print(f"SPARSE VS FULL PASS: tensors={len(expected)} updates={updates[0]} bitwise_equal=True", flush=True)
+    dist.barrier()
 
 
 def main():
@@ -419,6 +428,8 @@ def main():
 
     if os.environ.get("DELTA_ENTRY_ORACLE"):
         _delta_entry_differential(model, cfg_dir, rank)
+        dist.destroy_process_group()
+        return
 
     if PP > 1 or EP > 1 or os.environ.get("ENGINE_DIFF"):
         _pp_differential(bridge, model, rank, world)

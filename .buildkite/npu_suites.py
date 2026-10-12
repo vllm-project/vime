@@ -35,6 +35,20 @@ SUITES = {
         ("test_glm4.7_30B_A3B_npu.py", "npu-16", "", {}),
         # 35B convert plus the first rollout does not fit in the default 180 minutes.
         ("test_qwen3.5_35B_A3B_npu.py", "npu-16", "", {}, 360),
+        (
+            "sparse_hccl/test_bridge_delta_export_differential.py",
+            "npu-8",
+            "",
+            {
+                "MODEL_KIND": "qwen3_moe",
+                "TP_SIZE": "2",
+                "PP_SIZE": "2",
+                "EP_SIZE": "2",
+                "DELTA_ENTRY_ORACLE": "1",
+                "MIXED_DTYPE": "1",
+            },
+            30,
+        ),
     ],
     "nightly": [],
 }
@@ -95,6 +109,11 @@ def npu_step(
         **env,
     }
 
+    runner = (
+        "torchrun --standalone --nproc-per-node=4"
+        if test_name == "sparse_hccl/test_bridge_delta_export_differential.py"
+        else "python"
+    )
     commands = "\n".join(
         [
             'echo "INFO: update NPU environment"',
@@ -102,7 +121,7 @@ def npu_step(
             "  source /workspace/build/buildkite/.buildkite/scripts/update-npu-environment.sh",
             "fi",
             "export HF_HUB_OFFLINE=0",
-            f"python tests/{test_name}{' ' + extra_args if extra_args else ''}",
+            f"{runner} tests/{test_name}{' ' + extra_args if extra_args else ''}",
         ]
     )
     command = f"bash -c '{commands}'"

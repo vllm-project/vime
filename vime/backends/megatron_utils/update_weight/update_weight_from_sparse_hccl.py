@@ -27,7 +27,12 @@ from .common import VimeRayWeightSyncClient
 from .delta_sync import DeltaFlush, DeltaParam, checksum, gather_slot_entries_to_rank0
 from .delta_sync.sparse_gather import GatherWorkspace
 from .hf_weight_iterator_sparse_bridge import HfWeightIteratorSparseBridge
-from .megatron_delta_export import build_export_index, iter_delta_entries, prime_delta_snapshots
+from .megatron_delta_export import (
+    build_export_index,
+    iter_delta_entries,
+    prime_delta_snapshots,
+    validate_export_weights,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -456,6 +461,7 @@ class UpdateWeightFromSparseHCCL:
         phase_error: BaseException | None = None
         try:
             self._ensure_export_index()
+            validate_export_weights(self._index)
             if not self._seeded:
                 flushes, wire_bytes = self._send_dense()
                 assert self._index is not None
