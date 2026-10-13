@@ -4,23 +4,19 @@ Speculative decoding is a key optimization for speeding up rollouts. Instead of 
 
 ## Accelerating Inference with Speculative Decoding
 
-vLLM exposes speculative decoding as a single JSON config (`SpeculativeConfig`),
-which vime forwards via `--vllm-speculative-config`. For models with MTP layers
-(e.g., GLM-4.7, DeepSeek-V3/R1), pass:
+For models with MTP layers (e.g., GLM-4.7, DeepSeek-V3/R1), simply add:
 
 ```bash
 --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 ```
 
-If you want to use a separately trained draft model (e.g., one trained with
-[SpecForge](https://docs.sglang.ai/SpecForge/)), also set `model` in the same JSON:
+If you want to use a separately trained draft model (e.g., one trained with [SpecForge](https://docs.sglang.ai/SpecForge/)), set `model` in the same JSON:
 
 ```bash
 --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3,"model":"/your/draft/model/path"}'
 ```
 
-For detailed parameter meanings and configuration, see vLLM’s speculative decoding
-[documentation](https://docs.vllm.ai/en/latest/features/speculative_decoding/).
+For detailed parameter meanings and configuration, see vLLM’s speculative decoding [documentation](https://docs.vllm.ai/en/latest/features/speculative_decoding/).
 
 ## Configure EAGLE in the interactive builder
 

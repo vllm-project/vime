@@ -332,7 +332,7 @@ def _align_mm_feature_placeholders_to_tokens(generate_body: dict[str, Any], toke
 
 
 async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, Any]) -> Sample:
-    """Generate using vLLM router with token-based workflow"""
+    """Generate using traditional vLLM router with token-based workflow"""
     if args.ci_test:
         assert isinstance(sample.prompt, str)
 

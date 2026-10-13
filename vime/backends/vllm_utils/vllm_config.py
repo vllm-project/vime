@@ -24,15 +24,9 @@ class ServerGroupConfig:
         num_gpus: Total number of GPUs for this group.
         num_gpus_per_engine: GPUs per engine for this group.  Overrides the
                              model-level or global ``--rollout-num-gpus-per-engine``.
-        overrides: Optional dict of vLLM engine-arg field overrides, applied
-                   on top of the base CLI ``--vllm-*`` arguments in
-                   ``_compute_server_args`` (highest priority). Keys are vLLM
-                   ``AsyncEngineArgs`` / ``FrontendArgs`` field names in
-                   underscore style (e.g. ``gpu_memory_utilization``); the
-                   exact accepted set is ``_vllm_server_field_names()`` in
-                   ``vllm_engine``. The accepted set combines engine config
-                   (``AsyncEngineArgs``) and OpenAI-frontend config
-                   (``FrontendArgs``).
+        overrides: Optional dict of vLLM ``AsyncEngineArgs`` / ``FrontendArgs`` field overrides.
+                   These are applied on top of the base CLI ``--vllm-*``
+                   arguments in ``_compute_server_args``.
     """
 
     worker_type: str

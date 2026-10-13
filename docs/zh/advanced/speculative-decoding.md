@@ -4,22 +4,19 @@
 
 ## 使用投机采样加速推理
 
-vLLM 把投机采样的所有配置收敛到一个 JSON（`SpeculativeConfig`），vime 通过
-`--vllm-speculative-config` 透传。对于有 MTP 层的模型（例如 GLM-4.7、DeepSeek-V3/R1），传入：
+对于有 MTP 层的模型（例如 GLM-4.6、Deepseek-V3/R1），只需要添加：
 
 ```bash
 --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 ```
 
-如果要使用单独训练的 draft model（例如 [SpecForge](https://docs.sglang.ai/SpecForge/) 训练的），
-还需要在同一个 JSON 里设置 `model`：
+如果要使用单独训练的 draft model（例如 [SpecForge](https://docs.sglang.ai/SpecForge/) 训练的），还需要在同一个 JSON 里设置 `model`：
 
 ```bash
 --vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3,"model":"/your/draft/model/path"}'
 ```
 
-详细参数含义及配置方法，请参考 vLLM 的 speculative decoding
-[文档](https://docs.vllm.ai/en/latest/features/speculative_decoding/)。
+详细参数含义及配置方法，请参考 vLLM 的 speculative decoding [文档](https://docs.vllm.ai/en/latest/features/speculative_decoding/)
 
 ## 在交互向导中配置 EAGLE
 
