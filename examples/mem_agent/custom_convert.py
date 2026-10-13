@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import logging
-
 import torch
-
-logger = logging.getLogger(__name__)
 
 
 def _sample_has_rollout_log_probs(sample) -> bool:
@@ -40,6 +36,17 @@ def custom_convert(args, samples):
 
     normalized_rewards = rewards_tensor.flatten().tolist()
 
+    parent_ids = [sample.rollout_id if sample.rollout_id is not None else sample.index for sample in samples]
+    used_ids = {parent_id for parent_id in parent_ids if parent_id is not None}
+    next_id = 0
+    for position, parent_id in enumerate(parent_ids):
+        if parent_id is None:
+            while next_id in used_ids:
+                next_id += 1
+            parent_ids[position] = next_id
+            used_ids.add(next_id)
+
+    rollout_ids = []
     tokens_list = []
     response_lengths = []
     loss_masks = []
@@ -70,6 +77,7 @@ def custom_convert(args, samples):
             raw_reward_list.append(raw_rewards[i])
             truncated_list.append(1 if sample.status == sample.Status.TRUNCATED else 0)
             sample_indices.append(sample.index)
+            rollout_ids.append(parent_ids[i])
             if has_rollout_log_probs:
                 lp = sample.rollout_log_probs
                 if lp is None:
@@ -94,33 +102,12 @@ def custom_convert(args, samples):
             raw_reward_list.append(raw_rewards[i])
             truncated_list.append(is_truncated)
             sample_indices.append(sample.index)
+            rollout_ids.append(parent_ids[i])
             if has_rollout_log_probs:
                 lp = turn.get("rollout_log_probs")
                 if lp is None:
                     lp = [0.0] * turn["response_length"]
                 rollout_log_probs_list.append(lp)
-
-    gbs = args.global_batch_size
-    total = len(tokens_list)
-    trim_to = (total // gbs) * gbs
-    if trim_to == 0:
-        trim_to = total
-    if trim_to < total:
-        logger.info(
-            "custom_convert: trimming expanded samples from %d to %d (global_batch_size=%d)",
-            total,
-            trim_to,
-            gbs,
-        )
-        tokens_list = tokens_list[:trim_to]
-        response_lengths = response_lengths[:trim_to]
-        loss_masks = loss_masks[:trim_to]
-        rewards = rewards[:trim_to]
-        raw_reward_list = raw_reward_list[:trim_to]
-        truncated_list = truncated_list[:trim_to]
-        sample_indices = sample_indices[:trim_to]
-        if has_rollout_log_probs:
-            rollout_log_probs_list = rollout_log_probs_list[:trim_to]
 
     train_data = {
         "tokens": tokens_list,
@@ -130,6 +117,7 @@ def custom_convert(args, samples):
         "raw_reward": raw_reward_list,
         "truncated": truncated_list,
         "sample_indices": sample_indices,
+        "rollout_ids": rollout_ids,
     }
     if has_rollout_log_probs:
         train_data["rollout_log_probs"] = rollout_log_probs_list

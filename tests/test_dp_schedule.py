@@ -322,5 +322,58 @@ def test_rejects_when_fewer_rollouts_than_gbs():
         build_dp_schedule(args, tp, [3] * 6, global_batch_size=4, rollout_indices=[0, 0, 1, 1, 2, 2])
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "indices,parent_ids,expected_ids",
+    [
+        ((0, 1, 2), (None, None, None), (0, 1, 2)),
+        ((0, 0, 0), (7, 8, 9), (7, 8, 9)),
+        ((None, 0, None), (None, None, None), (1, 0, 2)),
+    ],
+)
+def test_memagent_turns_preserve_parent_rollout_groups(indices, parent_ids, expected_ids):
+    from examples.mem_agent.custom_convert import custom_convert
+    from vime.utils.types import Sample
+
+    args = make_args()
+    args.global_batch_size = 3
+    args.reward_key = None
+    args.advantage_estimator = "grpo"
+    args.rewards_normalization = False
+    samples = [
+        Sample(
+            index=sample_index,
+            rollout_id=parent_id,
+            reward=1.0,
+            status=Sample.Status.COMPLETED,
+            tokens=[11, 12, 13],
+            response_length=1,
+            train_metadata={"turns": [{"tokens": [11, 12, 13], "response_length": 1, "loss_mask": [1]}] * turn_count},
+        )
+        for sample_index, parent_id, turn_count in zip(indices, parent_ids, (3, 1, 1), strict=True)
+    ]
+    samples[-1].train_metadata = None
+    data = custom_convert(args, samples)
+
+    assert data["rollout_ids"] == [expected_ids[0]] * 3 + list(expected_ids[1:])
+    assert data["sample_indices"] == [indices[0]] * 3 + list(indices[1:])
+    assert data["rewards"] == pytest.approx([1 / 3] * 3 + [1, 1])
+    assert data["raw_reward"] == [1] * 5
+    assert data["loss_masks"] == [[1]] * 5
+    total_lengths = [len(tokens) for tokens in data["tokens"]]
+    partitions, microbatches, counts, batch_sizes = build_dp_schedule(
+        args, make_tp(), total_lengths, global_batch_size=3, rollout_indices=data["rollout_ids"]
+    )
+    assert batch_sizes == [3]
+    assert_invariants(
+        partitions,
+        microbatches,
+        counts,
+        dp_size=1,
+        expected_global_sample_indices=range(5),
+        total_lengths=total_lengths,
+    )
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
