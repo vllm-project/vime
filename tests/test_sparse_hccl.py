@@ -212,6 +212,98 @@ class _TPShardModel(torch.nn.Module):
             self.weight.data.copy_(weight[self.rank * 2 : self.rank * 2 + 2])
 
 
+@pytest.fixture
+def updater(monkeypatch):
+    instance = updater_module.UpdateWeightFromSparseHCCL.__new__(updater_module.UpdateWeightFromSparseHCCL)
+    instance.args = SimpleNamespace(update_weight_delta_verify_every=2)
+    instance._client = object()
+    instance._failed = False
+    instance._seeded = True
+    instance._steady_updates = 0
+    instance.weight_version = 1
+    instance._begin_update = lambda: None
+    instance._ensure_export_index = lambda: None
+    instance._index = []
+    monkeypatch.setattr(updater_module, "validate_export_weights", lambda index: None)
+    instance._sync_update_state = lambda error: (error is not None, instance._payload_started)
+    monkeypatch.setattr(updater_module.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(updater_module.dist, "barrier", lambda **kwargs: None)
+    monkeypatch.setattr(updater_module, "get_gloo_group", lambda: None)
+    return instance
+
+
+def _run_gather_regression():
+    """Check actual HCCL length/split/reuse behavior on the existing process group."""
+    rank = dist.get_rank()
+    workspace = GatherWorkspace()
+    preserved = []
+    cases = [
+        [[0, 0, 0], [0, 0, 0], [2, 1, 0], [0, 0, 0]],
+        [[1, 0, 3], [0, 0, 0], [0, 0, 0], [0, 0, 0]],
+        [[1, 3, 0], [0, 2, 1], [2, 0, 4], [0, 0, 0]],
+        [[0, 0, 0]] * 4,
+        [[2, 1, 2], [1, 3, 1], [2, 0, 2], [1, 1, 0]],
+    ]
+    for dtype in (torch.float32, torch.bfloat16):
+        for counts in cases:
+            pieces = [
+                [torch.arange(size, dtype=torch.int32) + r * 100 + slot * 10 for slot, size in enumerate(row)]
+                for r, row in enumerate(counts)
+            ]
+            indices = torch.cat(pieces[rank]).npu()
+            values = torch.cat([piece.float().to(dtype) for piece in pieces[rank]]).npu()
+            # Cover noncontiguous caller buffers as well as empty participants.
+            indices = torch.stack([indices, indices], dim=1)[:, 0]
+            values = torch.stack([values, values], dim=1)[:, 0]
+            for budget in (None, 12):
+                result = gather_slot_entries_to_rank0(
+                    indices,
+                    values,
+                    torch.tensor(counts[rank]),
+                    max_round_bytes=budget,
+                    workspace=workspace,
+                )
+                if rank == 0:
+                    for slot, (actual_indices, actual_values) in enumerate(result):
+                        expected = torch.cat([pieces[r][slot] for r in range(4)])
+                        assert torch.equal(actual_indices.cpu(), expected)
+                        assert torch.equal(actual_values.cpu(), expected.float().to(dtype))
+                        preserved.append((actual_indices, actual_values, expected, dtype))
+                else:
+                    assert result is None
+        dist.barrier()
+    if rank == 0:
+        for indices, values, expected, dtype in preserved:
+            assert torch.equal(indices.cpu(), expected)
+            assert torch.equal(values.cpu(), expected.float().to(dtype))
+        print("NPU-SPARSE-GATHER PASS: 20 cases; empty/unequal/noncontiguous/split/reused; FP32/BF16", flush=True)
+
+
+def _distributed_worker(rank, port, cfg_dir):
+    """Initialize one rank and guarantee cleanup for success or failed assertions."""
+    os.environ.update(
+        RANK=str(rank), LOCAL_RANK=str(rank), WORLD_SIZE=str(TP * PP), MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port)
+    )
+    torch.npu.set_device(rank)
+    store = dist.TCPStore("127.0.0.1", port, is_master=False, timeout=timedelta(seconds=120))
+    dist.init_process_group("hccl", store=store, rank=rank, world_size=TP * PP, timeout=timedelta(seconds=120))
+    try:
+        _run_gather_regression()
+        _run_sparse_full_comparison(rank, cfg_dir)
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.fixture
+def distributed_rendezvous(tmp_path):
+    """Reserve a unique store and checkpoint directory for the spawned ranks."""
+    if not torch.npu.is_available() or torch.npu.device_count() < TP * PP:
+        pytest.skip("Sparse HCCL integration requires four visible NPUs")
+    store = dist.TCPStore("127.0.0.1", 0, is_master=True, wait_for_workers=False, timeout=timedelta(seconds=120))
+    yield store.port, str(tmp_path / "qwen3_moe")
+    del store
+
+
 def test_snapshot_is_independent_and_requires_live_weights(monkeypatch):
     """Prevent stale CPU backups or shared storage from hiding real weight changes."""
     with pytest.raises(RuntimeError, match="live accelerator shard"):
@@ -396,26 +488,6 @@ def test_empty_hccl_peer_does_not_enqueue_p2p(monkeypatch):
     )
 
 
-@pytest.fixture
-def updater(monkeypatch):
-    instance = updater_module.UpdateWeightFromSparseHCCL.__new__(updater_module.UpdateWeightFromSparseHCCL)
-    instance.args = SimpleNamespace(update_weight_delta_verify_every=2)
-    instance._client = object()
-    instance._failed = False
-    instance._seeded = True
-    instance._steady_updates = 0
-    instance.weight_version = 1
-    instance._begin_update = lambda: None
-    instance._ensure_export_index = lambda: None
-    instance._index = []
-    monkeypatch.setattr(updater_module, "validate_export_weights", lambda index: None)
-    instance._sync_update_state = lambda error: (error is not None, instance._payload_started)
-    monkeypatch.setattr(updater_module.dist, "get_rank", lambda: 0)
-    monkeypatch.setattr(updater_module.dist, "barrier", lambda **kwargs: None)
-    monkeypatch.setattr(updater_module, "get_gloo_group", lambda: None)
-    return instance
-
-
 @pytest.mark.unit
 def test_verify_schedule_checks_sparse_writes_without_dense_replay(updater):
     """Honor the local verify interval without introducing a full-weight replay."""
@@ -493,78 +565,6 @@ def test_update_failure_preserves_safe_state(updater, phase):
     if phase != "prepare":
         with pytest.raises(RuntimeError, match="cannot be reused"):
             updater.update_weights()
-
-
-def _run_gather_regression():
-    """Check actual HCCL length/split/reuse behavior on the existing process group."""
-    rank = dist.get_rank()
-    workspace = GatherWorkspace()
-    preserved = []
-    cases = [
-        [[0, 0, 0], [0, 0, 0], [2, 1, 0], [0, 0, 0]],
-        [[1, 0, 3], [0, 0, 0], [0, 0, 0], [0, 0, 0]],
-        [[1, 3, 0], [0, 2, 1], [2, 0, 4], [0, 0, 0]],
-        [[0, 0, 0]] * 4,
-        [[2, 1, 2], [1, 3, 1], [2, 0, 2], [1, 1, 0]],
-    ]
-    for dtype in (torch.float32, torch.bfloat16):
-        for counts in cases:
-            pieces = [
-                [torch.arange(size, dtype=torch.int32) + r * 100 + slot * 10 for slot, size in enumerate(row)]
-                for r, row in enumerate(counts)
-            ]
-            indices = torch.cat(pieces[rank]).npu()
-            values = torch.cat([piece.float().to(dtype) for piece in pieces[rank]]).npu()
-            # Cover noncontiguous caller buffers as well as empty participants.
-            indices = torch.stack([indices, indices], dim=1)[:, 0]
-            values = torch.stack([values, values], dim=1)[:, 0]
-            for budget in (None, 12):
-                result = gather_slot_entries_to_rank0(
-                    indices,
-                    values,
-                    torch.tensor(counts[rank]),
-                    max_round_bytes=budget,
-                    workspace=workspace,
-                )
-                if rank == 0:
-                    for slot, (actual_indices, actual_values) in enumerate(result):
-                        expected = torch.cat([pieces[r][slot] for r in range(4)])
-                        assert torch.equal(actual_indices.cpu(), expected)
-                        assert torch.equal(actual_values.cpu(), expected.float().to(dtype))
-                        preserved.append((actual_indices, actual_values, expected, dtype))
-                else:
-                    assert result is None
-        dist.barrier()
-    if rank == 0:
-        for indices, values, expected, dtype in preserved:
-            assert torch.equal(indices.cpu(), expected)
-            assert torch.equal(values.cpu(), expected.float().to(dtype))
-        print("NPU-SPARSE-GATHER PASS: 20 cases; empty/unequal/noncontiguous/split/reused; FP32/BF16", flush=True)
-
-
-def _distributed_worker(rank, port, cfg_dir):
-    """Initialize one rank and guarantee cleanup for success or failed assertions."""
-    os.environ.update(
-        RANK=str(rank), LOCAL_RANK=str(rank), WORLD_SIZE=str(TP * PP), MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port)
-    )
-    torch.npu.set_device(rank)
-    store = dist.TCPStore("127.0.0.1", port, is_master=False, timeout=timedelta(seconds=120))
-    dist.init_process_group("hccl", store=store, rank=rank, world_size=TP * PP, timeout=timedelta(seconds=120))
-    try:
-        _run_gather_regression()
-        _run_sparse_full_comparison(rank, cfg_dir)
-    finally:
-        dist.destroy_process_group()
-
-
-@pytest.fixture
-def distributed_rendezvous(tmp_path):
-    """Reserve a unique store and checkpoint directory for the spawned ranks."""
-    if not torch.npu.is_available() or torch.npu.device_count() < TP * PP:
-        pytest.skip("Sparse HCCL integration requires four visible NPUs")
-    store = dist.TCPStore("127.0.0.1", 0, is_master=True, wait_for_workers=False, timeout=timedelta(seconds=120))
-    yield store.port, str(tmp_path / "qwen3_moe")
-    del store
 
 
 @pytest.mark.integration
