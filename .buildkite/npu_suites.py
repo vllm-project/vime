@@ -31,6 +31,7 @@ SUITES = {
         ("test_qwen3_4B_npu.py", "npu-8", "", {}),
         ("test_qwen3_30B_A3B_npu.py", "npu-16", "", {}),
         ("test_qwen3_30B_A3B_sparse_hccl_npu.py", "npu-8", "", {}),
+        ("test_sparse_hccl.py", "npu-8", "", {}),
         ("test_qwen3_vl_8B_npu.py", "npu-8", "", {}),
         ("test_glm4.7_30B_A3B_npu.py", "npu-16", "", {}),
         # 35B convert plus the first rollout does not fit in the default 180 minutes.
@@ -95,6 +96,12 @@ def npu_step(
         **env,
     }
 
+    # This regression owns its distributed worker launch through pytest.
+    test_command = (
+        f"python -m pytest -q -s tests/{test_name}"
+        if test_name == "test_sparse_hccl.py"
+        else f"python tests/{test_name}"
+    )
     commands = "\n".join(
         [
             'echo "INFO: update NPU environment"',
@@ -102,7 +109,7 @@ def npu_step(
             "  source /workspace/build/buildkite/.buildkite/scripts/update-npu-environment.sh",
             "fi",
             "export HF_HUB_OFFLINE=0",
-            f"python tests/{test_name}{' ' + extra_args if extra_args else ''}",
+            f"{test_command}{' ' + extra_args if extra_args else ''}",
         ]
     )
     command = f"bash -c '{commands}'"
