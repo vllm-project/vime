@@ -304,6 +304,11 @@ def distributed_rendezvous(tmp_path):
     del store
 
 
+# NOTE: Boundary and failure checks below use small tensors, simplified loaders
+# or communication mocks: prepare valid/invalid input, call the repository
+# implementation, then check exact outputs, unchanged state or expected failure.
+# Together they cover snapshots, split/empty patches, bounds, PP owner dtypes,
+# bitwise deltas, checksum integer bounds, gather buffers and update lifecycle.
 def test_snapshot_is_independent_and_requires_live_weights(monkeypatch):
     """Prevent stale CPU backups or shared storage from hiding real weight changes."""
     with pytest.raises(RuntimeError, match="live accelerator shard"):
@@ -570,6 +575,12 @@ def test_update_failure_preserves_safe_state(updater, phase):
 @pytest.mark.integration
 def test_distributed_sparse_hccl_matches_full(distributed_rendezvous):
     """Run real HCCL boundaries and full-state equality; any rank failure fails pytest."""
+    # NOTE: Spawn four ranks, check real HCCL gather boundaries, then build a
+    # TP2/PP2/EP2 Qwen3-MoE model. Save its full HF baseline, modify sparse
+    # positions and apply the gathered delta to that baseline. Compare every
+    # reconstructed tensor byte-for-byte with an independent Bridge full export
+    # of the updated model, including untouched positions and BF16/FP32 dtypes.
+    # This checks trainer-side HF reconstruction, not the live vLLM receiver.
     port, cfg_dir = distributed_rendezvous
     context = mp.spawn(_distributed_worker, args=(port, cfg_dir), nprocs=TP * PP, join=False)
     deadline = time.monotonic() + 600
