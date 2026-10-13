@@ -13,28 +13,28 @@
 # limitations under the License.
 """Fixed Qwen3-MoE TP2/PP2/EP2 sparse HCCL regression (ETP1).
 
-pytest runs focused loader, dtype, NaN, checksum and failure-state checks.
-Four-rank torchrun compares one sparse update with complete Bridge full export,
-including FP32 norms beside BF16 matrices. --gather-regression checks real HCCL
-empty/unequal/noncontiguous/split/reused payloads.
+pytest runs loader, dtype, NaN, checksum and failure-state checks, then launches
+four workers for real HCCL gather and one sparse/full weight comparison.
+The distributed test requires four visible NPUs, CANN and Megatron-Bridge;
+without four available NPUs, pytest reports it as skipped.
 
-Run manually in an Ascend/CANN environment with Megatron-Bridge:
-    pytest -q tests/test_sparse_hccl.py
-    torchrun --standalone --nproc-per-node=4 tests/test_sparse_hccl.py
+Run:
+    python -m pytest -q tests/test_sparse_hccl.py
 """
 
 import os
 import pathlib
 import sys
+import time
 from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 
-# torchrun executes this file with its test directory as sys.path[0]. Prefer the checkout
-# being validated over an editable installation of another Vime revision.
+# Keep spawned workers on the checkout under test, not another editable installation.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from vllm_ascend.distributed.weight_transfer.sparse_hccl_engine import _verify_dense_load
 from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import (
@@ -58,11 +58,10 @@ PP = 2
 EP = 2
 
 
-def _build_tiny_qwen3_moe_checkpoint(rank: int) -> str:
+def _build_tiny_qwen3_moe_checkpoint(rank: int, cfg_dir: str) -> str:
     """Keep real Qwen3-MoE mappings while making four-rank tests inexpensive."""
     from transformers import AutoConfig
 
-    cfg_dir = "/tmp/tiny_qwen3_moe_probe_diff_v4"
     hf_config = AutoConfig.for_model(
         "qwen3_moe",
         hidden_size=64,
@@ -155,13 +154,8 @@ def _compare_sparse_with_full_weights(model, cfg_dir, rank):
     dist.barrier()
 
 
-def main():
-    torch.npu.set_device(int(os.environ["LOCAL_RANK"]))
-    dist.init_process_group(backend="hccl")
-    rank, world = dist.get_rank(), dist.get_world_size()
-    torch.cuda.set_device(rank)
-    assert world == TP * PP, "This regression requires four ranks for TP2/PP2/EP2"
-
+def _run_sparse_full_comparison(rank, cfg_dir):
+    """Build the fixed parallel model inside an already initialized worker."""
     from megatron.core import parallel_state as mpu
 
     mpu.initialize_model_parallel(
@@ -174,7 +168,7 @@ def main():
 
     model_parallel_cuda_manual_seed(1234)
 
-    cfg_dir = _build_tiny_qwen3_moe_checkpoint(rank)
+    cfg_dir = _build_tiny_qwen3_moe_checkpoint(rank, cfg_dir)
 
     from megatron.bridge import AutoBridge
 
@@ -199,7 +193,7 @@ def main():
     bridge.load_hf_weights(model)
 
     _compare_sparse_with_full_weights(model, cfg_dir, rank)
-    dist.destroy_process_group()
+    mpu.destroy_model_parallel()
 
 
 class _TPShardModel(torch.nn.Module):
@@ -501,13 +495,8 @@ def test_update_failure_preserves_safe_state(updater, phase):
             updater.update_weights()
 
 
-def run_gather_regression():
-    """Check actual HCCL length/split/reuse behavior that CPU mocks cannot prove."""
-    torch.npu.set_device(int(os.environ["LOCAL_RANK"]))
-    dist.init_process_group("hccl", timeout=timedelta(seconds=120))
-    if dist.get_world_size() != 4:
-        dist.destroy_process_group()
-        raise ValueError("This regression requires exactly four ranks (--nproc-per-node=4)")
+def _run_gather_regression():
+    """Check actual HCCL length/split/reuse behavior on the existing process group."""
     rank = dist.get_rank()
     workspace = GatherWorkspace()
     preserved = []
@@ -551,11 +540,49 @@ def run_gather_regression():
             assert torch.equal(indices.cpu(), expected)
             assert torch.equal(values.cpu(), expected.float().to(dtype))
         print("NPU-SPARSE-GATHER PASS: 20 cases; empty/unequal/noncontiguous/split/reused; FP32/BF16", flush=True)
-    dist.destroy_process_group()
 
 
-if __name__ == "__main__":
-    if "--gather-regression" in sys.argv:
-        run_gather_regression()
-    else:
-        main()
+def _distributed_worker(rank, port, cfg_dir):
+    """Initialize one rank and guarantee cleanup for success or failed assertions."""
+    os.environ.update(
+        RANK=str(rank), LOCAL_RANK=str(rank), WORLD_SIZE=str(TP * PP), MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port)
+    )
+    torch.npu.set_device(rank)
+    store = dist.TCPStore("127.0.0.1", port, is_master=False, timeout=timedelta(seconds=120))
+    dist.init_process_group("hccl", store=store, rank=rank, world_size=TP * PP, timeout=timedelta(seconds=120))
+    try:
+        _run_gather_regression()
+        _run_sparse_full_comparison(rank, cfg_dir)
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.fixture
+def distributed_rendezvous(tmp_path):
+    """Reserve a unique store and checkpoint directory for the spawned ranks."""
+    if not torch.npu.is_available() or torch.npu.device_count() < TP * PP:
+        pytest.skip("Sparse HCCL integration requires four visible NPUs")
+    store = dist.TCPStore("127.0.0.1", 0, is_master=True, wait_for_workers=False, timeout=timedelta(seconds=120))
+    yield store.port, str(tmp_path / "qwen3_moe")
+    del store
+
+
+@pytest.mark.integration
+def test_distributed_sparse_hccl_matches_full(distributed_rendezvous):
+    """Run real HCCL boundaries and full-state equality; any rank failure fails pytest."""
+    port, cfg_dir = distributed_rendezvous
+    context = mp.spawn(_distributed_worker, args=(port, cfg_dir), nprocs=TP * PP, join=False)
+    deadline = time.monotonic() + 600
+    try:
+        while not context.join(timeout=1):
+            if time.monotonic() >= deadline:
+                pytest.fail("Sparse HCCL workers did not finish within 600 seconds")
+    finally:
+        for process in context.processes:
+            if process.is_alive():
+                process.terminate()
+        for process in context.processes:
+            process.join(timeout=10)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=5)
