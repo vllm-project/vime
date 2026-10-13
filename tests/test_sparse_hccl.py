@@ -304,11 +304,6 @@ def distributed_rendezvous(tmp_path):
     del store
 
 
-# NOTE: Boundary and failure checks below use small tensors, simplified loaders
-# or communication mocks: prepare valid/invalid input, call the repository
-# implementation, then check exact outputs, unchanged state or expected failure.
-# Together they cover snapshots, split/empty patches, bounds, PP owner dtypes,
-# bitwise deltas, checksum integer bounds, gather buffers and update lifecycle.
 def test_snapshot_is_independent_and_requires_live_weights(monkeypatch):
     """Prevent stale CPU backups or shared storage from hiding real weight changes."""
     with pytest.raises(RuntimeError, match="live accelerator shard"):
