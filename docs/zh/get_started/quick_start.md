@@ -21,31 +21,33 @@ AMD 支持见 [AMD 使用教程](../platform_support/amd_tutorial.md)。
 
 ### 拉取并启动 Docker 容器
 
-请执行以下命令，拉取最新镜像并启动一个交互式容器：
+在 Linux x86_64 GPU 主机上准备 Git、Docker、兼容的 NVIDIA 驱动，并配置好 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)。在**宿主机上**执行以下命令，拉取镜像、克隆 vime 并启动容器：
 
 ```shell
-# 拉取最新镜像
-docker pull vllm/vime:latest
-
-# 启动容器
-docker run --rm --gpus all --ipc=host --shm-size=16g \
-  --ulimit memlock=-1 --ulimit stack=67108864 \
-  -it vllm/vime:latest /bin/bash
+VIME_IMAGE=vllm/vime:latest
+docker pull "$VIME_IMAGE"
+git clone https://github.com/vllm-project/vime.git
+cd vime
+mkdir -p ../vime-data
+docker run --rm -it --gpus all --ipc=host \
+  --shm-size=16g --ulimit memlock=-1 --ulimit stack=67108864 \
+  -v "$PWD:/root/vime" -v "$PWD/../vime-data:/data" \
+  -w /root/vime "$VIME_IMAGE" /bin/bash
 ```
 
 ### 安装 vime
 
-vime 已经安装在该 Docker 镜像中。如需更新到最新版本，请在 Docker 容器中执行以下命令：
+镜像已经包含 vime 及所需依赖；挂载后，镜像内的代码目录被宿主机 checkout 替代。在**容器内**执行以下命令，安装该 checkout、保留镜像中固定的依赖版本，并检查模块导入和 GPU 可见性：
 
 ```bash
-# 路径可根据实际情况调整
-cd /root/vime
-git pull
 pip install -e . --no-deps
+python -c "import vime, vllm, megatron.core; import torch; print('GPUs:', torch.cuda.device_count())"
 ```
+
+输出的 GPU 数量应与容器可见设备一致。将配置器导出的 `experiment.sh` 保存到宿主机的 `vime` 目录后，即可在容器内的 `/root/vime/experiment.sh` 访问它。容器内 `/data` 下的模型、数据及 checkpoint 会保存在宿主机旁边的 `vime-data` 目录，退出容器后仍然保留。再次进入环境时，在同一 checkout 下重新执行 `docker run` 命令，并在新容器内执行上述 editable install。
 
 ## 挂载实验路径
 
-启动容器时挂载数据目录，例如 `-v /shared/data:/data`，并在向导中填写容器内可见路径。所有 Ray 节点以相同路径访问仓库和生成配置目录，并安装相同依赖。
+上述 Docker 命令已经将持久化数据目录挂载到 `/data`，与配置器默认值一致。使用已有数据或共享存储时，可将该挂载替换为 `-v /shared/data:/data`，并在向导中填写容器内可见路径。所有 Ray 节点以相同路径访问仓库和生成配置目录，安装相同依赖，并配置节点之间可达的网络；上述单机 Docker 命令不会自动搭好多机网络。
 
 继续阅读 [tutorial 的准备与启动步骤](experiment-guide.md)，完成所选模型的下载、转换和训练。已有 launcher 的参数说明见[使用参考](usage.md)。
