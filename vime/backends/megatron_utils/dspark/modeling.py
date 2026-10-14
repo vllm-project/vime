@@ -600,3 +600,35 @@ def attach_dspark_model(model, args, config) -> None:
     )
     for param in model.draft_model.parameters():
         param.grad_norm_group = "dspark"
+
+
+def restore_dspark_param_views(model_chunks):
+    """Restore view relationship between DSpark draft params and DDP buffer after TMS resume.
+
+    After torch_memory_saver.resume(), param.data tensors are no longer views into
+    the DDP contiguous buffer. This function rebinds each draft parameter to its
+    slice in the DDP buffer, so subsequent optimizer.step() updates are visible.
+
+    This should be called once after TMS resume, not after every optimizer step.
+    """
+    from megatron.core.utils import unwrap_model
+
+    for chunk in model_chunks:
+        if not hasattr(chunk, "buffers"):
+            continue
+        unwrapped = unwrap_model(chunk)
+        draft = getattr(unwrapped, "draft_model", None)
+        if draft is None:
+            continue
+        draft_param_ids = {id(p) for p in draft.parameters()}
+        for buffer in chunk.buffers:
+            pim = buffer.param_index_map
+            for param_obj, (_start, _end, bucket_id) in pim.items():
+                if id(param_obj) not in draft_param_ids:
+                    continue
+                bucket = buffer.buckets[bucket_id]
+                if hasattr(bucket, "param_to_index") and param_obj in bucket.param_to_index:
+                    local_start, local_end = bucket.param_to_index[param_obj]
+                    if isinstance(local_start, int):
+                        # Restore view: rebind param.data to DDP buffer slice
+                        param_obj.data = bucket.param_data.view(-1)[local_start:local_end].view(param_obj.data.shape)
