@@ -105,6 +105,7 @@ steps:
           python tests/test_megatron_checkpoint.py
           python tests/test_optional_straw.py
           python tests/test_value_temperature.py
+          python tests/test_on_policy_distillation.py
           python tests/test_docs_consistency.py
           python tests/test_placement_group.py
           python tests/test_external_vllm_engines.py

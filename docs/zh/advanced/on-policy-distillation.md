@@ -12,6 +12,7 @@
 | `--opd-teacher-load` | 教师模型的 Megatron checkpoint 路径。`--opd-type=megatron` 时**必须**设置，`--opd-type=vllm` 时**不可**设置。 |
 | `--opd-teacher-ckpt-step` | 可选的教师模型 checkpoint 步数。 |
 | `--opd-teacher-model` | `--opd-type=vllm` 时发送给外部 vLLM 教师服务的可选模型名。 |
+| `--opd-teacher-scoring` | vLLM 教师的文本打分路径：`prompt-logprobs`（默认）或 `per-position`。图像样本保留默认路径。 |
 
 ## 原理
 
@@ -64,6 +65,21 @@ $$
 --custom-reward-post-process-path vime.rollout.on_policy_distillation.post_process_rewards
 --rm-url http://<TEACHER_IP>:<TEACHER_PORT>/inference/v1/generate
 ```
+
+#### 可选的逐位置文本打分
+
+添加 `--opd-teacher-scoring per-position`，即可在每个位置只请求实际回答 token 的分数。VIME 仍发送完整的问题和回答；每个分数仍表示完整词表分布下的对数概率。损失函数、rollout temperature 和学习器输入格式保持不变。空回答不请求教师，直接得到空分数向量。
+
+教师需要包含 vLLM 的[逐位置候选打分](https://github.com/vllm-project/vllm/pull/56984)，启用 V2 model runner，并使用非流式 `/inference/v1/generate` 接口。例如，启动兼容的教师：
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-0.6B \
+  --enable-scale-out --logprobs-mode raw_logprobs
+```
+
+不要使用 logits 输出模式或 `--kv-sharing-fast-prefill`。候选打分会跳过 prefix cache 读取，以计算全部请求位置的分数。教师接口目前仍要求生成，因此保留现有的 `max_tokens=1`。候选分数缺失、格式错误或数值无效时会报错，不会悄悄切换文本打分方式。即使启用此选项，图像样本仍使用已有的渲染、特征对齐和 `prompt_logprobs` 路径。
+
+为兼容较旧的教师，默认值仍为 `prompt-logprobs`。返回分数更少不保证训练更快，短输入可能没有收益。
 
 ### Megatron 模式 (`--opd-type megatron`)
 

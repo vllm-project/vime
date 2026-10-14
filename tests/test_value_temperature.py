@@ -24,7 +24,7 @@ def test_opd_teacher_uses_rollout_temperature(monkeypatch):
         rm_url="http://teacher:8000/inference/v1/generate",
         rollout_temperature=0.7,
     )
-    sample = Namespace(tokens=[1, 2], multimodal_inputs=None)
+    sample = Namespace(tokens=[1, 2], response_length=1, multimodal_inputs=None)
 
     asyncio.run(on_policy_distillation.reward_func(args, sample))
 
