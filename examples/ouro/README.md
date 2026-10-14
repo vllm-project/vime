@@ -97,3 +97,26 @@ Metrics separate rollout, training, publication and whole-step time. Decode work
 counts physical layer/token evaluations, including speculative verification rows;
 trainer counts include padding and recomputation. These are work counters, not
 measured backward FLOPs. PD GPU-hours count distinct devices once.
+
+## Experimental deferred exact-KV decoding
+
+The inference-only runner groups loops three and four across response positions.
+Prompt prefill runs all four loops. With interval four, three response inputs
+read out at loop two, then the next input waits for the complete four-position
+deep block. Attention keeps each row's original position and separate per-loop
+KV history. Unread pending states are discarded when a response stops.
+
+```bash
+python examples/ouro/deferred_decode.py /models/Ouro-1.4B \
+  --prompt "What is 17 times 23?" --interval 4 --responses 4
+```
+
+Use the same importable companion source as above; its prepared KV batch and
+`recurrent_prepared` interfaces are required. Add `--eager` for immediate deep
+writes under the same readout schedule. Interval one uses four-loop readout at
+every position. Outputs retain raw token IDs, selected processed logprobs,
+readout depths and stop/length reasons; sampling stops at the first token 0 or 2.
+
+The mixed readout policy requires a separate quality comparison with native K4.
+Different BF16 batch shapes can change scores and sampled trajectories. This
+entry point does not modify the GRPO recipe or enable deferred-policy training.
