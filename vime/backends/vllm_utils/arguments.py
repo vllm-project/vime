@@ -151,9 +151,13 @@ def validate_args(args):
 
 
 def vllm_parse_args():
-    """Parse vLLM flags via an independent ArgumentParser + parse_known_args.
+    """
+    Parse vLLM server arguments independently using a separate ArgumentParser.
+    Uses parse_known_args() to only consume vLLM-related arguments from sys.argv,
+    allowing the remaining arguments to be parsed by megatron separately.
 
-    Returns a Namespace with all attrs prefixed ``vllm_``.
+    Returns:
+        argparse.Namespace: Parsed vLLM arguments (all attributes prefixed with vllm_).
     """
     parser = FlexibleArgumentParser(add_help=False)
     add_vllm_arguments(parser)

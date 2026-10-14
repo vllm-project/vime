@@ -624,7 +624,7 @@ class TestGetModelUrl:
         assert get_model_url(args, "unknown") == "http://10.0.0.1:3000/inference/v1/generate"
 
     def test_get_model_url_no_routers(self):
-        """get_model_url should work when model_routers is not set."""
+        """get_model_url should work when vllm_model_routers is not set."""
         from argparse import Namespace
 
         from vime.rollout.vllm_rollout import get_model_url

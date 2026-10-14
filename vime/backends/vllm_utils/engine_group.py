@@ -293,12 +293,7 @@ class ServerGroup:
 
 @dataclasses.dataclass
 class RolloutServer:
-    """A model served behind a shared router, with one or more server groups.
-
-    Each RolloutServer represents one model deployed behind a single router.
-    A server may contain multiple ServerGroups with different
-    ``num_gpus_per_engine`` (e.g. prefill TP=2, decode TP=4).
-    """
+    """A model served behind a shared router, with one or more server groups."""
 
     server_groups: list[ServerGroup]
     router_ip: str | None = None
@@ -358,10 +353,8 @@ class RolloutServer:
 
     def recover(self):
         """Recover dead engines across all active groups, overlapping init."""
-        # Record dead indices per group before starting.
         dead_per_group = [[i for i, engine in enumerate(g.all_engines) if engine is None] for g in self.server_groups]
 
-        # Start all groups concurrently.
         all_handles = []
         port_cursors: dict[int, int] = {}
         for g in self.server_groups:
@@ -370,7 +363,6 @@ class RolloutServer:
         if all_handles:
             ray.get(all_handles)
 
-        # Post-recovery: offload then onload weights for newly created engines.
         release_handles = []
         updatable_new_engines = []
         non_updatable_groups_engines: list[tuple[str, list]] = []

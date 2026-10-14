@@ -628,10 +628,7 @@ def test_removed_queue_flags_are_rejected(monkeypatch, flag):
 
 @pytest.mark.unit
 def test_vime_validate_args_preserves_explicit_start_rollout_id(monkeypatch):
-    """``--start-rollout-id`` is only a fallback when the user did not set it.
-
-    An explicit value is needed when there is no resumable Megatron checkpoint.
-    """
+    """``--start-rollout-id`` is only a fallback when the user did not set it."""
     module = load_vime_arguments_module(monkeypatch)
     args = make_vime_validate_args(start_rollout_id=100)
 

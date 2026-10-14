@@ -2,7 +2,8 @@
 
 Reproducibility is a bedrock of scientific progress. By combining vLLM's [batch-invariant deterministic inference](https://vllm.ai/blog/2025-11-10-bitwise-consistent-train-inference) with Megatron-LM's deterministic mode, vime supports bitwise experiment reproduction.
 
-To enable deterministic training, you need to first uninstall the flash attention 3 in the docker with `pip uninstall flash_attn_3 -y` and set:
+To enable deterministic training, uninstall FlashAttention 3 with `pip uninstall flash_attn_3 -y`, then set:
+
 ```bash
   # vLLM config
   --vllm-enable-deterministic-inference
@@ -12,7 +13,7 @@ To enable deterministic training, you need to first uninstall the flash attentio
   --deterministic-mode
 ```
 
-And set the following environment variables:
+Also set the following environment variables:
 
 ```bash
      "env_vars": {
@@ -23,9 +24,9 @@ And set the following environment variables:
      }
 ```
 
-Here we provide the script to do RL training on Qwen2.5 0.5B model and GSM8K dataset with full deterministic.
+We provide a fully deterministic GSM8K training script for Qwen2.5-0.5B.
 
-For data and checkpoint preparation, please run:
+Use the following commands to initialize the training data and checkpoint:
 
 ```bash
 # download
@@ -42,13 +43,13 @@ PYTHONPATH=/root/Megatron-LM/ python \
    --save /root/Qwen2.5-0.5B-Instruct_torch_dist/
 ```
 
-And to run training,
+Run training with:
 
 ```bash
 bash scripts/run-qwen2.5-0.5B-reproducibility.sh
 ```
 
-For screen shots of the wandb, please refer to [pull#370](https://github.com/THUDM/slime/pull/370).
+The wandb screenshots are recorded in [pull#370](https://github.com/THUDM/slime/pull/370).
 
 ## Train/rollout log-prob alignment (GLM-5)
 

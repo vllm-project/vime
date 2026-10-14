@@ -12,7 +12,7 @@ For full weight size $S_W$, transfer bandwidth $B_W$, and control/load overhead 
 
 $$t_W\approx S_W/B_W+t_0.$$
 
-Delta transfer substitutes changed bytes $S_\Delta$ but adds snapshot, diff, encoding, and reconstruction time. It wins only when the bytes saved outweigh those costs. vime uses CUDA IPC for colocation; disaggregated full updates can use NCCL or disk. Delta requires disk transport, a shared directory, host-local checkpoint directories, and patched vLLM `/pull_weights` endpoints.
+Delta transfer substitutes changed bytes $S_\Delta$ but adds snapshot, diff, encoding, and reconstruction time. It wins only when the bytes saved outweigh those costs. vime uses CUDA IPC for colocation; disaggregated full updates can use NCCL or disk. Delta requires disk transport, a shared directory, host-local checkpoint directories, and the patched vLLM `pull_weights` worker RPC.
 
 Related systems research: [HybridFlow](https://arxiv.org/abs/2409.19256). vime's actual interfaces: [external engines](external-rollout-engines.md), [delta sync](delta-weight-sync.md), and [training topology](megatron-config.md).
 
