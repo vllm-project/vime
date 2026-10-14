@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -23,6 +25,7 @@ MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)\n]+)\)")
 COMMAND_PATH_RE = re.compile(r"\b(?:bash|python)\s+((?:scripts?|tests)/[A-Za-z0-9_.+/-]+\.(?:sh|py))")
 LOCAL_ANCHOR_RE = re.compile(r"\]\(#([A-Za-z0-9_-]+)\)")
 HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
+RELEASE_CHECK = ROOT / ".claude/skills/release/scripts/check_release.py"
 
 
 def _markdown_files():
@@ -84,6 +87,70 @@ def test_customization_anchor_links_exist(language):
 
     missing = sorted(set(LOCAL_ANCHOR_RE.findall(text)) - headings)
     assert not missing, f"Local anchors without matching headings: {missing}"
+
+
+def test_release_metadata_check():
+    result = subprocess.run([sys.executable, str(RELEASE_CHECK), "--repo", str(ROOT)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.fixture
+def release_repo(tmp_path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docker/patch/latest").mkdir(parents=True)
+    (tmp_path / "setup.py").write_text('setup(version="1.2.3")\n')
+    (tmp_path / "docs/conf.py").write_text('__version__ = "1.2.3"\n')
+    (tmp_path / "docker/version.txt").write_text("nightly-dev-20261012a\n")
+    (tmp_path / "docker/patch/latest/vllm.patch").write_text("")
+    (tmp_path / "docker/Dockerfile").write_text(
+        "ARG BASE_IMAGE=vllm/vllm-openai@sha256:" + "a" * 64 + "\n"
+        "FROM ${BASE_IMAGE}\nARG PATCH_VERSION=latest\n"
+        "ARG VLLM_COMMIT=" + "b" * 40 + "\n"
+        "ARG MEGATRON_COMMIT=" + "c" * 40 + "\n"
+        "COPY docker/patch/${PATCH_VERSION}/vllm.patch /tmp/vllm.patch\n"
+        "RUN git apply --include='rust/*' /tmp/vllm.patch\n"
+    )
+    return tmp_path
+
+
+@pytest.mark.parametrize(
+    ("path", "old", "new", "error"),
+    [
+        ("docs/conf.py", "1.2.3", "1.2.4", "docs/conf.py"),
+        ("docker/Dockerfile", "@sha256:" + "a" * 64, ":nightly", "immutable"),
+        ("docker/Dockerfile", "b" * 40, "main", "full commit SHA"),
+        ("docker/Dockerfile", "RUN git apply", "RUN echo", "not_applied"),
+        ("docker/Dockerfile", "ARG PATCH_VERSION=latest", "ARG PATCH_VERSION=absent", "No patches"),
+        ("docker/version.txt", "nightly-dev-20261012a", "latest", "format"),
+    ],
+)
+def test_release_metadata_rejects_invalid_inputs(release_repo, path, old, new, error):
+    target = release_repo / path
+    target.write_text(target.read_text().replace(old, new))
+    result = subprocess.run(
+        [sys.executable, str(RELEASE_CHECK), "--repo", str(release_repo)], capture_output=True, text=True
+    )
+    assert result.returncode == 1
+    assert error in result.stderr
+
+
+def test_release_metadata_rejects_orphan_patch(release_repo):
+    (release_repo / "docker/patch/latest/orphan.patch").write_text("")
+    result = subprocess.run(
+        [sys.executable, str(RELEASE_CHECK), "--repo", str(release_repo)], capture_output=True, text=True
+    )
+    assert result.returncode == 1
+    assert "orphan.patch" in result.stderr
+
+
+@pytest.mark.parametrize(("version", "status"), [("1.2.3", 0), ("1.2.4", 1)])
+def test_release_metadata_expected_version(release_repo, version, status):
+    result = subprocess.run(
+        [sys.executable, str(RELEASE_CHECK), "--repo", str(release_repo), "--expected-version", version],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == status, result.stderr
 
 
 if __name__ == "__main__":
