@@ -1719,12 +1719,16 @@ def _pre_parse_mode():
     registering them twice.  The returned namespace is merged into
     the final ``args`` after Phase 2 parsing.
     """
+    from vime.backends.registry import parse_train_backend_args, train_backend_names
+
     temp_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    temp_parser.add_argument("--train-backend", type=str, choices=["megatron"], default="megatron")
+    temp_parser.add_argument("--train-backend", type=str, choices=train_backend_names(), default="megatron")
     temp_parser.add_argument("--debug-rollout-only", action="store_true", default=False)
     temp_parser.add_argument("--debug-train-only", action="store_true", default=False)
     temp_parser.add_argument("--load-debug-rollout-data", type=str, default=None)
     temp_args, _ = temp_parser.parse_known_args()
+    # Flags owned by the selected backend package (e.g. --fsdp-*).
+    vars(temp_args).update(vars(parse_train_backend_args(temp_args.train_backend)))
     return temp_args
 
 

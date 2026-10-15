@@ -93,6 +93,9 @@ steps:
           python tests/test_reloadable_process_group_memory_check.py
           python tests/test_ppo_logprob_entropy.py
           python tests/utils/test_hf_checkpoint_saver.py
+          python tests/test_fsdp2_backend_registry.py
+          python tests/test_fsdp2_data_packing.py
+          python tests/test_fsdp2_cpu_smoke.py
         '
 
   - label: ":robot_face: agent adapter tests"
@@ -154,6 +157,8 @@ steps:
             tests/test_draft_feature_collector.py \
             tests/test_draft_feature_metadata.py \
             tests/test_filter_long_prompt.py \
+            tests/test_fsdp2_backend_registry.py \
+            tests/test_fsdp2_cpu_smoke.py \
             tests/test_fully_async_rollout.py \
             tests/test_glm52_layerwise_comparison.py \
             tests/test_glm5_indexer_q_norm.py \
@@ -229,7 +234,7 @@ steps:
             value: vllm-config
           - label: "run-ci-megatron — up to 8 GPU, 21 runs"
             value: megatron
-          - label: "run-ci-vime-customized — 1–8 GPU, 5 tests"
+          - label: "run-ci-vime-customized — 1–8 GPU, 6 tests"
             value: vime-customized
           - label: "run-ci-precision — 8 GPU, 1 test"
             value: precision

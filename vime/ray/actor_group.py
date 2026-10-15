@@ -106,9 +106,9 @@ class RayTrainGroup:
             env_vars["ENABLE_ROUTING_REPLAY"] = "1"
 
         if self._actor_cls is None:
-            from vime.backends.megatron_utils.actor import MegatronTrainRayActor
+            from vime.backends.registry import get_train_actor_cls
 
-            actor_impl = MegatronTrainRayActor
+            actor_impl = get_train_actor_cls(getattr(self.args, "train_backend", "megatron"))
         else:
             actor_impl = self._actor_cls
 
