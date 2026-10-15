@@ -108,6 +108,7 @@ steps:
           python tests/test_docs_consistency.py
           python tests/test_placement_group.py
           python tests/test_external_vllm_engines.py
+          python tests/test_vllm_engine_health_probe.py
           python tests/plugin_contracts/test_plugin_rollout_contracts.py
           python tests/plugin_contracts/test_plugin_runtime_hook_contracts.py
           python tests/plugin_contracts/test_plugin_path_loading_contracts.py

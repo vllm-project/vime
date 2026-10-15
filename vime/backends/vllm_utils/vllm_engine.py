@@ -2,6 +2,7 @@ import argparse
 import base64
 import dataclasses
 import logging
+import math
 import multiprocessing
 import os
 import time
@@ -11,12 +12,14 @@ from typing import Any
 import cloudpickle
 import requests
 from urllib3.exceptions import NewConnectionError
+from urllib3.util import Timeout
 from vllm.utils.system_utils import kill_process_tree
 
 from vime.backends.vllm_utils.external import get_server_info
 from vime.backends.vllm_utils.server_control import unregister_worker
 from vime.ray.ray_actor import RayActor
 from vime.utils.http_utils import _wrap_ipv6, get_host_info
+
 
 logger = logging.getLogger(__name__)
 
@@ -120,19 +123,58 @@ def _run_vllm_server(kwargs: dict, env: dict) -> None:
     ServeSubcommand.cmd(args)
 
 
-def _wait_server_healthy(base_url, is_process_alive):
+def _wait_server_healthy(
+    base_url,
+    is_process_alive,
+    probe_timeout: float = 5.0,
+    *,
+    wait_timeout: float | None = None,
+):
+    """Wait for ``/health_generate`` with bounded probes and an optional budget.
+
+    ``probe_timeout`` bounds each probe's combined connection/read wait. By
+    default there is no overall deadline, so slow model loads can continue.
+    If ``wait_timeout`` is set, probes and retry sleeps share that total
+    budget, measured with a monotonic clock. Exhaustion raises TimeoutError.
+    """
+    if not math.isfinite(probe_timeout) or probe_timeout <= 0:
+        raise ValueError("probe_timeout must be finite and greater than zero")
+    if wait_timeout is not None and (not math.isfinite(wait_timeout) or wait_timeout < 0):
+        raise ValueError("wait_timeout must be finite and nonnegative, or None")
+
+    deadline = None if wait_timeout is None else time.monotonic() + wait_timeout
+
+    def remaining_wait():
+        if deadline is None:
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"Server did not become healthy within {wait_timeout} seconds.")
+        return remaining
+
     while True:
+        remaining = remaining_wait()
+        request_timeout = probe_timeout if remaining is None else min(probe_timeout, remaining)
         try:
-            response = requests.get(f"{base_url}/health_generate", timeout=5)
-            if response.status_code == 200:
-                break
+            # Only the status is needed. Do not wait for a response body, and
+            # close the connection on success, retry, or deadline exhaustion.
+            with requests.get(
+                f"{base_url}/health_generate",
+                timeout=Timeout(total=request_timeout),
+                stream=True,
+                allow_redirects=False,
+            ) as response:
+                if response.status_code == 200:
+                    remaining_wait()
+                    return
         except requests.RequestException:
             pass
 
         if not is_process_alive():
             raise Exception("Server process terminated unexpectedly.")
 
-        time.sleep(2)
+        remaining = remaining_wait()
+        time.sleep(2 if remaining is None else min(2, remaining))
 
 
 class VLLMEngine(RayActor):
