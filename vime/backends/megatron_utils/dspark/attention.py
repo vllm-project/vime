@@ -47,7 +47,7 @@ def rotate_half(x):
 
 
 class DSparkRotaryEmbedding(nn.Module):
-    """Precompute rotary sin/cos for DSpark positions.
+    """Compute rotary sin/cos for DSpark positions.
 
     DSpark position ids cover both context (0..seq_len-1) and draft tokens
     (anchor_pos..anchor_pos+block_size-1 per block). The rotary table must
@@ -58,11 +58,6 @@ class DSparkRotaryEmbedding(nn.Module):
         super().__init__()
         self.head_dim = head_dim
         self.rotary_base = rotary_base
-        # Precompute a large table; will be indexed as needed.
-        # Max position ~ seq_len + num_anchors * block_size, which is bounded
-        # by the model's max_position_embeddings.
-        inv_freq = 1.0 / (rotary_base ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def forward(self, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute (cos, sin) for the given position ids.
@@ -75,10 +70,16 @@ class DSparkRotaryEmbedding(nn.Module):
         # inv_freq: [head_dim/2]
         # position_ids: [bsz, seq_len]
         # freqs: [bsz, seq_len, head_dim/2]
-        inv_freq = self.inv_freq.float()  # [head_dim/2]
+        # Module dtype conversions also round floating-point buffers. Recompute
+        # in FP32 on the input device rather than widening a rounded inv_freq.
+        inv_freq = 1.0 / (
+            self.rotary_base
+            ** (torch.arange(0, self.head_dim, 2, device=position_ids.device, dtype=torch.float32) / self.head_dim)
+        )
         positions = position_ids.float()  # [bsz, seq_len]
         # Outer product per batch: [bsz, seq_len, head_dim/2]
-        freqs = torch.einsum("i,bj->bji", inv_freq, positions)
+        # Elementwise multiplication stays FP32 even under CUDA autocast.
+        freqs = positions.unsqueeze(-1) * inv_freq
         emb = torch.cat([freqs, freqs], dim=-1)  # [bsz, seq_len, head_dim]
         cos = emb.cos()
         sin = emb.sin()
@@ -86,7 +87,7 @@ class DSparkRotaryEmbedding(nn.Module):
         # Add head dim for broadcasting: [bsz, 1, seq_len, head_dim]
         cos = cos.unsqueeze(1)
         sin = sin.unsqueeze(1)
-        return cos.to(position_ids.dtype), sin.to(position_ids.dtype)
+        return cos, sin
 
 
 class DSparkParallelAttention(nn.Module):
@@ -169,6 +170,8 @@ class DSparkParallelAttention(nn.Module):
         # Apply rotary embeddings
         # position_ids: [bsz, ctx_len + q_len]
         cos, sin = self.rotary_emb(position_ids)
+        cos = cos.to(dtype=q.dtype)
+        sin = sin.to(dtype=q.dtype)
         # cos/sin: [1, 1, seq_len, head_dim] but we need to match k's shape
         # k shape: [bsz, kv_heads, kv_len, head_dim]
         # cos shape: [1, 1, kv_len, head_dim] -> broadcast over bsz and heads
