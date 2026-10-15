@@ -1,3 +1,4 @@
+import argparse
 import sys
 import types
 from argparse import Namespace
@@ -5,6 +6,8 @@ from argparse import Namespace
 import pytest
 
 from vime.backends.megatron_utils.update_weight import create_weight_updater
+
+from vime.utils.arguments import get_vime_extra_args_provider
 
 NUM_GPUS = 0
 
@@ -24,6 +27,14 @@ class _FakeUpdater:
     ("mode", "transport", "colocate", "module_name", "class_name"),
     [
         pytest.param("delta", "disk", False, "update_weight_from_disk_delta", "UpdateWeightFromDiskDelta", id="delta"),
+        pytest.param(
+            "delta",
+            "sparse_hccl",
+            False,
+            "update_weight_from_sparse_hccl",
+            "UpdateWeightFromSparseHCCL",
+            id="sparse-hccl-delta",
+        ),
         pytest.param("full", "disk", False, "update_weight_from_disk", "UpdateWeightFromDisk", id="disk"),
         pytest.param("full", "nccl", True, "update_weight_from_tensor", "UpdateWeightFromTensor", id="colocated"),
         pytest.param(
@@ -68,3 +79,23 @@ def test_create_weight_updater_selects_implementation(monkeypatch, mode, transpo
     assert updater.model_name == "model"
     assert updater.quantization_config == {"quant_method": "test"}
     assert updater.weight_version == 7
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("transport", ["nccl", "disk", "sparse_hccl"])
+def test_transport_options_are_registered_once(transport):
+    parser = get_vime_extra_args_provider()(argparse.ArgumentParser())
+    args = parser.parse_args(
+        [
+            "--rollout-batch-size",
+            "1",
+            "--update-weight-transport",
+            transport,
+            "--update-weight-delta-verify-every",
+            "1",
+        ]
+    )
+    assert args.update_weight_transport == transport
+    assert args.update_weight_delta_verify_every == 1
+    assert args.update_weight_delta_batch_diff == 32
+    assert args.update_weight_delta_batch_gather == 32
