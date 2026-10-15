@@ -42,7 +42,7 @@ from vime.rollout.filter_hub.base_types import DynamicFilterOutput
 return DynamicFilterOutput(keep=True, reason=None)
 ```
 
-Buffer filter (called in `vime/rollout/data_source.py`):
+Buffer filter (called in `vime/data/data_source.py`):
 
 ```python
 def buffer_filter(args, rollout_id, buffer, num_samples):
@@ -98,4 +98,4 @@ Example wiring:
 - Dynamic filter types: `vime/rollout/filter_hub/base_types.py`
 - Dynamic filter example: `vime/rollout/filter_hub/dynamic_sampling_filters.py`
 - Rollout generation hook points: `vime/rollout/vllm_rollout.py`
-- Buffer filter hook point: `vime/rollout/data_source.py`
+- Buffer filter hook point: `vime/data/data_source.py`

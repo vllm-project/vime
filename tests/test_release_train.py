@@ -46,6 +46,8 @@ def execute():
         )
 
         rollout_args = (
+            "--rollout-data-transport straw "
+            f"--rollout-data-dir {quote(str(save_dir / 'rollout_data'))} "
             "--prompt-data /root/datasets/gsm8k/train.parquet "
             "--input-key messages "
             "--label-key label "

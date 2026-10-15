@@ -11,7 +11,7 @@ On-policy distillation (OPD) trains a student on response tokens sampled from th
 | `--opd-kl-coef` | OPD KL penalty coefficient (default: 1.0). Controls the weight of the distillation signal relative to the RL advantage. |
 | `--opd-teacher-load` | Path to teacher Megatron checkpoint. **Required** when `--opd-type=megatron`, **must not be set** when `--opd-type=vllm`. |
 | `--opd-teacher-ckpt-step` | Optional checkpoint step for teacher model. |
-| `--opd-teacher-model` | Optional served model name sent to the external VLLM teacher when `--opd-type=vllm`. |
+| `--opd-teacher-model` | Optional served model name sent to the external vLLM teacher when `--opd-type=vllm`. |
 
 ## How It Works
 
@@ -43,14 +43,14 @@ Here, $A_t$ is the advantage from the configured estimator (or zero for pure dis
 
 ## Two Teacher Modes
 
-### VLLM Mode (`--opd-type vllm`)
+### vLLM Mode (`--opd-type vllm`)
 
-The teacher runs on an external VLLM server. Teacher log-probs are obtained during the rollout phase.
+The teacher runs on an external vLLM server. Teacher log-probs are obtained during the rollout phase.
 
 **When to use**: The teacher has a different architecture from the student, or the teacher is too large to load alongside the training model. Because the teacher scores the student's exact token IDs, the teacher and student must still use compatible tokenization and vocabularies.
 
 **How it works**:
-1. An external VLLM server runs the teacher model.
+1. An external vLLM server runs the teacher model.
 2. During rollout, the custom reward function (`vime.rollout.on_policy_distillation.reward_func`) sends the student's sampled token IDs to the teacher server and obtains the teacher log-probability of those same tokens.
 3. The custom post-processing function (`vime.rollout.on_policy_distillation.post_process_rewards`) trims the teacher log-probs to the response span and stores them in `sample.teacher_log_probs`.
 4. During training, vime subtracts the sampled log-probability difference, scaled by `--opd-kl-coef`, from the base advantage.
@@ -90,7 +90,7 @@ The teacher model is loaded directly into Megatron via `--opd-teacher-load`. Tea
 
 Complete example scripts are provided in `examples/on_policy_distillation/`:
 
-### VLLM Teacher
+### vLLM Teacher
 
 ```bash
 # 1. Download models and data

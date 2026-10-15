@@ -30,6 +30,7 @@ def add_vllm_router_arguments(parser):
         help="Timeout for requests to the vllm router in seconds",
     )
     RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
+    parser.set_defaults(router_log_level="warning")
     return parser
 
 
@@ -132,9 +133,6 @@ def add_vllm_arguments(parser):
 def validate_args(args):
     args.vllm_dp_size = args.vllm_data_parallel_size
     args.vllm_pp_size = args.vllm_pipeline_parallel_size
-
-    if getattr(args, "rollout_top_p", 1.0) != 1.0 and getattr(args, "rollout_top_k", -1) <= 0:
-        raise ValueError("vLLM top-p sampling replay requires --rollout-top-k > 0.")
 
     if getattr(args, "vllm_router_ip", None):
         args.vllm_router_ip = _wrap_ipv6(args.vllm_router_ip)

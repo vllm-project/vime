@@ -22,6 +22,17 @@ VLLM_TRACE_META_KEYS = (
     "queue_time",
     "e2e_latency",
     "decode_throughput",
+    "pd_decode_remote_kv_wait_duration",
+    "pd_decode_allocation_wait_duration",
+    "pd_decode_initial_queue_wait_duration",
+    "pd_decode_post_receive_queue_wait_duration",
+    "pd_transfer_worker_duration",
+    "pd_handshake_wait_worker_duration",
+    "pd_prefill_queue_duration",
+    "pd_prefill_allocation_wait_duration",
+    "pd_prefill_initial_queue_wait_duration",
+    "pd_prefill_ttft_duration",
+    "pd_transfer_post_worker_duration",
 )
 VLLM_PD_PREFILL_SEGMENTS = (
     ("pd_prefill_bootstrap_queue_duration", "vllm_pd_prefill_bootstrap_queue"),
@@ -36,6 +47,15 @@ VLLM_PD_DECODE_SEGMENTS = (
     ("pd_decode_alloc_wait_duration", "vllm_pd_decode_alloc_wait"),
     ("pd_decode_transfer_duration", "vllm_pd_decode_transfer"),
     ("pd_decode_forward_duration", "vllm_pd_decode_forward"),
+)
+VLLM_NATIVE_PREFILL_SEGMENTS = (
+    ("pd_prefill_queue_duration", "vllm_pd_prefill_queue"),
+    ("pd_prefill_ttft_duration", "vllm_pd_prefill_ttft"),
+)
+VLLM_NATIVE_DECODE_SEGMENTS = (
+    ("queue_time", "vllm_pd_decode_queue"),
+    ("pd_decode_ttft_duration", "vllm_pd_decode_ttft"),
+    ("pd_decode_generation_duration", "vllm_pd_decode_generation"),
 )
 VLLM_PD_SUMMARY_KEYS = (
     "pd_transfer_speed_gb_s",
@@ -140,6 +160,53 @@ def _new_span_id() -> str:
 def build_vllm_meta_trace_attrs(meta: dict[str, Any]) -> dict[str, Any]:
     attrs: dict[str, Any] = {}
     try:
+        if meta.get("choices"):
+            meta = dict(meta)
+            meta["finish_reason"] = meta["choices"][0].get("finish_reason")
+        if meta.get("usage"):
+            meta = dict(meta)
+            usage = meta["usage"]
+            meta["prompt_tokens"] = usage.get("prompt_tokens", 0)
+            meta["completion_tokens"] = usage.get("completion_tokens", 0)
+            meta["cached_tokens"] = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+        request_metrics = meta.get("metrics", meta.get("request_metrics"))
+        if isinstance(request_metrics, dict):
+            meta = dict(meta)
+            for target, source, scale in (
+                ("queue_time", "queue_time_ms", 0.001),
+                ("decode_throughput", "tokens_per_second", 1.0),
+                ("pd_decode_remote_kv_wait_duration", "remote_kv_wait_time_ms", 0.001),
+                ("pd_decode_allocation_wait_duration", "kv_allocation_wait_time_ms", 0.001),
+                ("pd_decode_initial_queue_wait_duration", "kv_initial_queue_wait_time_ms", 0.001),
+                ("pd_decode_post_receive_queue_wait_duration", "kv_post_receive_queue_wait_time_ms", 0.001),
+                ("pd_transfer_worker_duration", "kv_transfer_worker_time_ms", 0.001),
+                ("pd_handshake_wait_worker_duration", "kv_handshake_wait_worker_time_ms", 0.001),
+                ("pd_transfer_post_worker_duration", "kv_transfer_post_worker_time_ms", 0.001),
+                ("pd_prefill_queue_duration", "prefill_queue_time_ms", 0.001),
+                ("pd_prefill_allocation_wait_duration", "prefill_kv_allocation_wait_time_ms", 0.001),
+                ("pd_prefill_initial_queue_wait_duration", "prefill_kv_initial_queue_wait_time_ms", 0.001),
+                ("pd_prefill_ttft_duration", "prefill_time_to_first_token_ms", 0.001),
+                ("pd_transfer_total_mb", "kv_transfer_bytes", 1e-6),
+            ):
+                if request_metrics.get(source) is not None:
+                    meta[target] = request_metrics[source] * scale
+            latency_parts = [
+                request_metrics.get(key) for key in ("queue_time_ms", "time_to_first_token_ms", "generation_time_ms")
+            ]
+            if all(value is not None for value in latency_parts):
+                meta["e2e_latency"] = sum(latency_parts) / 1000
+            if request_metrics.get("remote_kv_wait_time_ms") is not None:
+                for target, source in (
+                    ("pd_decode_ttft_duration", "time_to_first_token_ms"),
+                    ("pd_decode_generation_duration", "generation_time_ms"),
+                ):
+                    if request_metrics.get(source) is not None:
+                        meta[target] = request_metrics[source] / 1000
+            transfer_duration = request_metrics.get("kv_transfer_worker_time_ms")
+            transfer_bytes = request_metrics.get("kv_transfer_bytes")
+            if transfer_bytes is not None and transfer_duration is not None and transfer_duration > 0:
+                meta["pd_transfer_speed_gb_s"] = transfer_bytes / transfer_duration / 1e6
+
         attrs.update({key: meta[key] for key in VLLM_TRACE_META_KEYS if key in meta and meta[key] is not None})
         finish_reason = meta.get("finish_reason")
         if isinstance(finish_reason, dict) and finish_reason.get("type") is not None:
@@ -147,8 +214,9 @@ def build_vllm_meta_trace_attrs(meta: dict[str, Any]) -> dict[str, Any]:
         elif finish_reason is not None:
             attrs["finish_reason"] = finish_reason
 
-        if meta.get("id") is not None:
-            attrs["vllm_request_id"] = meta["id"]
+        request_id = meta.get("request_id", meta.get("id"))
+        if request_id is not None:
+            attrs["vllm_request_id"] = request_id
 
         trace_children = _build_vllm_pd_trace_children(meta)
         if trace_children:
@@ -161,10 +229,12 @@ def build_vllm_meta_trace_attrs(meta: dict[str, Any]) -> dict[str, Any]:
 def _build_vllm_pd_trace_children(meta: dict[str, Any]) -> list[dict[str, Any]]:
     trace_children: list[dict[str, Any]] = []
     cursor = 0.0
-    for phase_name, phase_label, segments in (
-        ("vllm_pd_prefill", "prefill", VLLM_PD_PREFILL_SEGMENTS),
-        ("vllm_pd_decode", "decode", VLLM_PD_DECODE_SEGMENTS),
+    for phase_name, phase_label, segments, native_segments in (
+        ("vllm_pd_prefill", "prefill", VLLM_PD_PREFILL_SEGMENTS, VLLM_NATIVE_PREFILL_SEGMENTS),
+        ("vllm_pd_decode", "decode", VLLM_PD_DECODE_SEGMENTS, VLLM_NATIVE_DECODE_SEGMENTS),
     ):
+        if not any(meta.get(key) is not None for key, _ in segments):
+            segments = native_segments if any(meta.get(key) is not None for key, _ in native_segments[1:]) else ()
         phase_children: list[dict[str, Any]] = []
         phase_cursor = 0.0
         for key, child_name in segments:

@@ -1,0 +1,30 @@
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py b/vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+index 0bd8ebe3cd6..247d85d927d 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+@@ -3,6 +3,7 @@
+ """SimpleCPUOffloadConnector: minimal CPU KV cache offloading."""
+ 
+ from collections.abc import Iterable
++from math import isfinite
+ from typing import TYPE_CHECKING, Any
+ 
+ import torch
+@@ -150,6 +151,17 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
+             )
+             return
+ 
++        if "cpu_to_gpu_ratio" in extra_config and not any(
++            key in extra_config
++            for key in ("cpu_bytes_to_use", "cpu_bytes_to_use_per_rank")
++        ):
++            ratio = float(extra_config["cpu_to_gpu_ratio"])
++            if not isfinite(ratio) or ratio <= 0:
++                raise ValueError("cpu_to_gpu_ratio must be finite and positive")
++            cpu_capacity_per_rank = int(
++                ratio * kv_cache_config.kv_cache_tensors[0].size
++            )
++
+         logger.info(
+             "SimpleCPUOffloadConnector: role=%s, "
+             "per_rank=%.2f GB, world_size=%d, mode=%s, backend=%s, disk=%s",

@@ -1,8 +1,10 @@
 // Inject a language toggle button into the topbar (sphinx-book-theme compatible)
 (function(){
   const STORAGE_KEY = 'vime-doc-lang';
-  const ZH_SEGMENT = 'zh-cn';
-  // Default language EN has no URL prefix; Chinese uses 'zh-cn' inserted after optional repo root.
+  const readTheDocs = window.location.host.endsWith('readthedocs.io');
+  const ZH_SEGMENT = readTheDocs ? 'zh-cn' : 'zh';
+  const prefixedLayout = document.currentScript?.dataset.layout === 'prefix' || readTheDocs;
+  // Default language EN has no URL prefix; Chinese follows the deployment's language segment.
   function detectCurrent(){
     const { langIndex, parts } = analyzePath();
     if(langIndex === -1) return 'en';
@@ -15,7 +17,7 @@
    *  /en/…                (language as first segment)
    *  /vime/en/…          (GitHub Pages project site repo root, language second)
    *  /projects/vime/en/…  (Read the Docs project prefix, language third)
-   *  /vime/ (no lang yet) -> insert /vime/zh-cn/
+   *  /vime/ (no lang yet) -> insert /vime/zh/
    *  /projects/vime/ (no lang yet) -> insert /projects/vime/zh-cn/
    *  / (no lang) -> insert /zh/
    */
@@ -25,7 +27,7 @@
     let repoRootLen = 0;
     if(parts[0] === 'projects' && parts[1] === 'vime'){
       repoRootLen = 2;
-    } else if(parts.length > 0 && (window.location.host.endsWith('github.io') || parts[0] === 'vime')){
+    } else if(parts[0] === 'vime'){
       repoRootLen = 1;
     }
     let langIndex = -1;
@@ -45,12 +47,10 @@
     if(langIndex !== -1){
       parts.splice(langIndex, 1);
     }
-    if(repoRootLen > 0){
+    if(prefixedLayout){
       parts.splice(repoRootLen, 0, target === 'zh' ? ZH_SEGMENT : 'en');
     } else if(target === 'zh'){
-      parts.unshift(ZH_SEGMENT);
-    } else if(parts[0] !== 'en'){
-      parts.unshift('en');
+      parts.splice(repoRootLen, 0, ZH_SEGMENT);
     }
     let newPath = '/' + parts.join('/');
     if(newPath === '/') {

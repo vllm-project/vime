@@ -1,0 +1,1780 @@
+diff --git a/rust/Cargo.lock b/rust/Cargo.lock
+--- a/rust/Cargo.lock
++++ b/rust/Cargo.lock
+@@ -2905,6 +2905,66 @@
+  "openssl-src",
+  "pkg-config",
+  "vcpkg",
++]
++
++[[package]]
++name = "opentelemetry"
++version = "0.32.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b0142c63252a9e054e68a4c61a5778f7b14f576274d593f8ce883d191a099682"
++dependencies = [
++ "futures-core",
++ "futures-sink",
++ "js-sys",
++ "pin-project-lite",
++ "thiserror 2.0.18",
++ "tracing",
++]
++
++[[package]]
++name = "opentelemetry-otlp"
++version = "0.32.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9966929966d17620d7c316c643ba62631826e10021409357772d5eea84f62c35"
++dependencies = [
++ "http",
++ "opentelemetry",
++ "opentelemetry-proto",
++ "opentelemetry_sdk",
++ "prost",
++ "thiserror 2.0.18",
++ "tokio",
++ "tonic",
++ "tonic-types",
++]
++
++[[package]]
++name = "opentelemetry-proto"
++version = "0.32.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "56d658ba1faf63f7b9c492cfbe6e0ec365440a16132d3270c1065f7b33f1b638"
++dependencies = [
++ "opentelemetry",
++ "opentelemetry_sdk",
++ "prost",
++ "tonic",
++ "tonic-prost",
++]
++
++[[package]]
++name = "opentelemetry_sdk"
++version = "0.32.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9b59f80e1ac4d5ff7a2db8fb6c80badb7f0f3f858211fba08dd9aaec750894f9"
++dependencies = [
++ "futures-channel",
++ "futures-executor",
++ "futures-util",
++ "opentelemetry",
++ "percent-encoding",
++ "portable-atomic",
++ "rand 0.9.5",
++ "thiserror 2.0.18",
+ ]
+ 
+ [[package]]
+@@ -5189,6 +5249,17 @@
+  "syn 2.0.117",
+  "tempfile",
+  "tonic-build",
++]
++
++[[package]]
++name = "tonic-types"
++version = "0.14.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2a875a902255423d34c1f20838ab374126db8eb41625b7947a1d54113b0b7399"
++dependencies = [
++ "prost",
++ "prost-types",
++ "tonic",
+ ]
+ 
+ [[package]]
+@@ -5831,6 +5902,8 @@
+  "enum-as-inner",
+  "expect-test",
+  "futures",
++ "opentelemetry",
++ "opentelemetry_sdk",
+  "parking_lot",
+  "rmp-serde",
+  "serde",
+@@ -5947,6 +6020,10 @@
+  "libc",
+  "llm-multimodal",
+  "openssl",
++ "opentelemetry",
++ "opentelemetry-otlp",
++ "opentelemetry-proto",
++ "opentelemetry_sdk",
+  "prost",
+  "prost-types",
+  "rmp-serde",
+diff --git a/rust/Cargo.toml b/rust/Cargo.toml
+--- a/rust/Cargo.toml
++++ b/rust/Cargo.toml
+@@ -70,6 +70,10 @@
+ openai-harmony = { package = "oss-harmony", git = "https://github.com/oss-harmony/harmony", tag = "v0.0.11", default-features = false }
+ openai-protocol = "1.6.0"
+ openssl = "0.10"
++opentelemetry = "0.32.0"
++opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["grpc-tonic", "trace"] }
++opentelemetry-proto = { version = "0.32.0", default-features = false, features = ["gen-tonic", "trace"] }
++opentelemetry_sdk = "0.32.1"
+ parking_lot = "0.12.5"
+ parquet = { version = "59.2.0", default-features = false, features = ["json", "snap", "zstd", "flate2", "flate2-rust_backend", "lz4", "brotli"] }
+ paste = "1.0.15"
+diff --git a/rust/src/chat/src/lib.rs b/rust/src/chat/src/lib.rs
+--- a/rust/src/chat/src/lib.rs
++++ b/rust/src/chat/src/lib.rs
+@@ -201,6 +201,7 @@
+             add_special_tokens: request.add_special_tokens,
+             data_parallel_rank: request.data_parallel_rank,
+             session_id: request.session_id,
++            trace_headers: request.trace_headers,
+             kv_hints: None,
+             reasoning_parser_kwargs: ReasoningParserKwargs {
+                 chat_template_kwargs,
+diff --git a/rust/src/chat/src/request.rs b/rust/src/chat/src/request.rs
+--- a/rust/src/chat/src/request.rs
++++ b/rust/src/chat/src/request.rs
+@@ -1,7 +1,7 @@
+ // SPDX-License-Identifier: Apache-2.0
+ // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ 
+-use std::collections::{HashMap, HashSet};
++use std::collections::{BTreeMap, HashMap, HashSet};
+ 
+ use llm_multimodal::ImageDetail;
+ use serde::{Deserialize, Serialize};
+@@ -593,6 +593,8 @@
+     /// Stable session identity shared by related requests.
+     #[serde(default)]
+     pub session_id: Option<String>,
++    #[serde(default)]
++    pub trace_headers: Option<BTreeMap<String, String>>,
+     /// LoRA adapter selected for this request.
+     #[serde(default)]
+     pub lora_request: Option<LoraRequest>,
+@@ -616,6 +618,7 @@
+             add_special_tokens: false,
+             data_parallel_rank: None,
+             session_id: None,
++            trace_headers: None,
+             lora_request: None,
+         }
+     }
+diff --git a/rust/src/cmd/src/cli.rs b/rust/src/cmd/src/cli.rs
+--- a/rust/src/cmd/src/cli.rs
++++ b/rust/src/cmd/src/cli.rs
+@@ -31,8 +31,8 @@
+ use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
+ use vllm_server::{
+     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
+-    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, LoraModulePath, ParserSelection, RenderConfig,
+-    RendererSelection,
++    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, LoraModulePath, ObservabilityConfig,
++    ParserSelection, RenderConfig, RendererSelection,
+ };
+ use vllm_text::backend::hf::HfOverrides;
+ 
+@@ -435,6 +435,18 @@
+     #[serde(default)]
+     pub profiler_config: Option<ProfilerConfig>,
+ 
++    /// Target URL to which OpenTelemetry traces will be sent. Enables the Rust
++    /// frontend trace exporter; also forwarded to the managed Python engine.
++    #[arg(long)]
++    #[serde(default)]
++    pub otlp_traces_endpoint: Option<String>,
++
++    /// Modules to collect detailed traces for, forwarded verbatim to the engine.
++    /// Requires `--otlp-traces-endpoint`.
++    #[arg(long)]
++    #[serde(default)]
++    pub collect_detailed_traces: Option<String>,
++
+     /// Unsupported Python vLLM frontend arguments recognized but not yet
+     /// implemented in Rust.
+     #[educe(Debug(ignore))]
+@@ -519,6 +531,7 @@
+         let cors = self.cors_config();
+         let tls = self.ssl.tls_config();
+         let profiler = self.profiler();
++        let observability = self.observability_config();
+ 
+         Config {
+             transport_mode: TransportMode::Bootstrapped {
+@@ -561,6 +574,7 @@
+             manages_engine: false,
+             keep_alive_timeout,
+             profiler,
++            observability,
+         }
+     }
+ 
+@@ -584,6 +598,7 @@
+         let cors = self.cors_config();
+         let tls = self.ssl.tls_config();
+         let profiler = self.profiler();
++        let observability = self.observability_config();
+ 
+         Config {
+             transport_mode: TransportMode::HandshakeOwner {
+@@ -622,6 +637,7 @@
+             manages_engine,
+             keep_alive_timeout,
+             profiler,
++            observability,
+         }
+     }
+ 
+@@ -643,6 +659,14 @@
+             allow_methods: self.allowed_methods.0.clone(),
+             allow_headers: self.allowed_headers.0.clone(),
+             allow_credentials: self.allow_credentials,
++        }
++    }
++    /// Build the observability config. Public so the managed `serve` path can
++    /// validate it before spawning the Python engine.
++    pub fn observability_config(&self) -> ObservabilityConfig {
++        ObservabilityConfig {
++            otlp_traces_endpoint: self.otlp_traces_endpoint.clone(),
++            collect_detailed_traces: self.collect_detailed_traces.clone(),
+         }
+     }
+ }
+@@ -839,6 +863,8 @@
+             self.runtime.revision.clone(),
+             self.runtime.max_logprobs,
+             profiler_config,
++            self.runtime.otlp_traces_endpoint.clone(),
++            self.runtime.collect_detailed_traces.clone(),
+             reasoning_parser.as_deref(),
+             self.runtime.language_model_only,
+             self.runtime.disable_log_stats,
+diff --git a/rust/src/cmd/src/cli/tests.rs b/rust/src/cmd/src/cli/tests.rs
+--- a/rust/src/cmd/src/cli/tests.rs
++++ b/rust/src/cmd/src/cli/tests.rs
+@@ -228,6 +228,8 @@
+                             ssl_ciphers: None,
+                         },
+                         profiler_config: None,
++                        otlp_traces_endpoint: None,
++                        collect_detailed_traces: None,
+                     },
+                     managed_engine: ManagedEngineArgs {
+                         python: "../vllm/.venv/bin/python",
+@@ -1070,6 +1072,8 @@
+                             ssl_ciphers: None,
+                         },
+                         profiler_config: None,
++                        otlp_traces_endpoint: None,
++                        collect_detailed_traces: None,
+                     },
+                 },
+             ),
+@@ -1743,6 +1747,8 @@
+                             ssl_ciphers: None,
+                         },
+                         profiler_config: None,
++                        otlp_traces_endpoint: None,
++                        collect_detailed_traces: None,
+                     },
+                     managed_engine: ManagedEngineArgs {
+                         python: "python3",
+@@ -1896,6 +1902,10 @@
+             manages_engine: true,
+             keep_alive_timeout: 5s,
+             profiler: None,
++            observability: ObservabilityConfig {
++                otlp_traces_endpoint: None,
++                collect_detailed_traces: None,
++            },
+         }
+     "#]]
+     .assert_debug_eq(&Config {
+@@ -1992,6 +2002,10 @@
+             manages_engine: true,
+             keep_alive_timeout: 5s,
+             profiler: None,
++            observability: ObservabilityConfig {
++                otlp_traces_endpoint: None,
++                collect_detailed_traces: None,
++            },
+         }
+     "#]]
+     .assert_debug_eq(&config);
+@@ -2132,6 +2146,10 @@
+             manages_engine: false,
+             keep_alive_timeout: 5s,
+             profiler: None,
++            observability: ObservabilityConfig {
++                otlp_traces_endpoint: None,
++                collect_detailed_traces: None,
++            },
+         }
+     "#]]
+     .assert_debug_eq(&config);
+@@ -2312,3 +2330,106 @@
+     let engine = args.to_managed_engine_config(1234);
+     assert!(engine.python_args.windows(2).any(|args| args == ["--revision", "release"]));
+ }
++
++#[test]
++fn serve_args_accept_otlp_flags_into_config() {
++    let cli = Cli::try_parse_from([
++        "vllm-rs",
++        "serve",
++        "Qwen/Qwen3-0.6B",
++        "--otlp-traces-endpoint",
++        "localhost:4317",
++        "--collect-detailed-traces",
++        "all",
++    ])
++    .unwrap();
++
++    let Command::Serve(args) = cli.command else {
++        panic!("expected serve args");
++    };
++    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
++    assert_eq!(
++        config.observability.otlp_traces_endpoint.as_deref(),
++        Some("localhost:4317")
++    );
++    assert_eq!(
++        config.observability.collect_detailed_traces.as_deref(),
++        Some("all")
++    );
++}
++
++#[test]
++fn frontend_args_json_accepts_graduated_otlp_endpoint() {
++    // Previously rejected as an unsupported field; now a real config knob.
++    let cli = Cli::try_parse_from([
++        "vllm-rs",
++        "frontend",
++        "--listen-fd",
++        "3",
++        "--input-address",
++        "ipc:///tmp/input.sock",
++        "--output-address",
++        "ipc:///tmp/output.sock",
++        "--args-json",
++        r#"{"model_tag":"Qwen/Qwen3-0.6B","otlp_traces_endpoint":"localhost:4317"}"#,
++    ])
++    .unwrap();
++
++    let Command::Frontend(args) = cli.command else {
++        panic!("expected frontend args");
++    };
++    let config = args.into_config();
++    assert_eq!(
++        config.observability.otlp_traces_endpoint.as_deref(),
++        Some("localhost:4317")
++    );
++}
++
++#[test]
++fn serve_args_reject_detailed_traces_without_endpoint() {
++    let cli = Cli::try_parse_from([
++        "vllm-rs",
++        "serve",
++        "Qwen/Qwen3-0.6B",
++        "--collect-detailed-traces",
++        "all",
++    ])
++    .unwrap();
++
++    let Command::Serve(args) = cli.command else {
++        panic!("expected serve args");
++    };
++    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
++    let err = config.validate().unwrap_err().to_string();
++    assert!(err.contains("--collect-detailed-traces requires"), "{err}");
++}
++
++#[test]
++fn serve_args_forward_otlp_flags_to_managed_engine() {
++    let cli = Cli::try_parse_from([
++        "vllm-rs",
++        "serve",
++        "Qwen/Qwen3-0.6B",
++        "--otlp-traces-endpoint",
++        "localhost:4317",
++        "--collect-detailed-traces",
++        "all",
++    ])
++    .unwrap();
++
++    let Command::Serve(args) = cli.command else {
++        panic!("expected serve args");
++    };
++    let config = args.to_managed_engine_config(5555);
++    expect![[r#"
++        [
++            "--otlp-traces-endpoint",
++            "localhost:4317",
++            "--collect-detailed-traces",
++            "all",
++            "--reasoning-parser",
++            "qwen3",
++        ]
++    "#]]
++    .assert_debug_eq(&config.python_args);
++}
+diff --git a/rust/src/cmd/src/cli/unsupported.rs b/rust/src/cmd/src/cli/unsupported.rs
+--- a/rust/src/cmd/src/cli/unsupported.rs
++++ b/rust/src/cmd/src/cli/unsupported.rs
+@@ -351,14 +351,6 @@
+     #[arg(long)]
+     pub default_mm_loras: Option<Unsupported>,
+ 
+-    /// Target URL to which OpenTelemetry traces will be sent.
+-    #[arg(long)]
+-    pub otlp_traces_endpoint: Option<Unsupported>,
+-
+-    /// It makes sense to set this only if `--otlp-traces-endpoint` is set.
+-    #[arg(long)]
+-    pub collect_detailed_traces: Option<Unsupported>,
+-
+     /// The interval (or buffer size) for streaming in terms of token length.
+     #[arg(long)]
+     pub stream_interval: Option<Unsupported>,
+diff --git a/rust/src/cmd/src/main.rs b/rust/src/cmd/src/main.rs
+--- a/rust/src/cmd/src/main.rs
++++ b/rust/src/cmd/src/main.rs
+@@ -121,6 +121,10 @@
+             vllm_bench::run(bench_args).await
+         }
+         Command::Serve(args) => {
++            args.runtime
++                .observability_config()
++                .validate()
++                .context("invalid observability configuration")?;
+             let handshake_port = args.managed_engine.resolve_handshake_port()?;
+ 
+             if args.managed_engine.data_parallel_size_local == Some(0) {
+diff --git a/rust/src/llm/Cargo.toml b/rust/src/llm/Cargo.toml
+--- a/rust/src/llm/Cargo.toml
++++ b/rust/src/llm/Cargo.toml
+@@ -12,6 +12,7 @@
+ enum-as-inner.workspace = true
+ futures.workspace = true
+ parking_lot.workspace = true
++opentelemetry.workspace = true
+ serde.workspace = true
+ serde_json.workspace = true
+ thiserror.workspace = true
+@@ -23,6 +24,7 @@
+ vllm-metrics.workspace = true
+ 
+ [dev-dependencies]
++opentelemetry_sdk.workspace = true
+ anyhow.workspace = true
+ bytes.workspace = true
+ clap.workspace = true
+diff --git a/rust/src/llm/src/lib.rs b/rust/src/llm/src/lib.rs
+--- a/rust/src/llm/src/lib.rs
++++ b/rust/src/llm/src/lib.rs
+@@ -10,6 +10,7 @@
+ mod output;
+ mod request;
+ mod request_metrics;
++mod request_trace;
+ 
+ pub use error::{Error, Result};
+ pub use output::{
+@@ -36,6 +37,7 @@
+     randomize_request_id: bool,
+     stats_logger: Option<StatsLogger>,
+     inflight: InflightRequests,
++    tracing_enabled: bool,
+ }
+ 
+ impl Llm {
+@@ -47,6 +49,7 @@
+             randomize_request_id: true,
+             stats_logger: None,
+             inflight: InflightRequests::new(),
++            tracing_enabled: false,
+         }
+     }
+ 
+@@ -71,6 +74,11 @@
+         self
+     }
+ 
++    pub fn with_tracing(mut self, enabled: bool) -> Self {
++        self.tracing_enabled = enabled;
++        self
++    }
++
+     /// Expose the underlying engine-core client for low-level utility/admin
+     /// calls.
+     pub fn engine_core_client(&self) -> &EngineCoreClient {
+@@ -80,7 +88,11 @@
+     /// Submit one tokenized generate request and return a per-request output
+     /// stream.
+     pub async fn generate(&self, req: GenerateRequest) -> Result<GenerateOutputStream> {
+-        let prepared = req.prepare(self.randomize_request_id)?;
++        let mut prepared = req.prepare(self.randomize_request_id)?;
++        let request_trace = self
++            .tracing_enabled
++            .then(|| request_trace::RequestTrace::start(&mut prepared.engine_request))
++            .flatten();
+         let prompt_token_ids = prepared.prompt_token_ids().into();
+         let external_request_id = prepared
+             .engine_request
+@@ -115,6 +127,7 @@
+             stream,
+             request_metrics,
+             guard,
++            request_trace,
+         ))
+     }
+ 
+diff --git a/rust/src/llm/src/output.rs b/rust/src/llm/src/output.rs
+--- a/rust/src/llm/src/output.rs
++++ b/rust/src/llm/src/output.rs
+@@ -255,6 +255,7 @@
+     pending_prompt_info: Option<GeneratePromptInfo>,
+     raw_stream: EngineCoreOutputStream,
+     request_metrics: RequestMetricsTracker,
++    request_trace: Option<crate::request_trace::RequestTrace>,
+     /// Removes this request's external→internal tracking edge on drop. Held for
+     /// its `Drop` side effect only; never read directly.
+     _request_guard: RequestGuard,
+@@ -268,6 +269,7 @@
+         raw_stream: EngineCoreOutputStream,
+         request_metrics: RequestMetricsTracker,
+         request_guard: RequestGuard,
++        request_trace: Option<crate::request_trace::RequestTrace>,
+     ) -> Self {
+         Self {
+             pending_prompt_info: Some(GeneratePromptInfo {
+@@ -277,6 +279,7 @@
+             }),
+             raw_stream,
+             request_metrics,
++            request_trace,
+             _request_guard: request_guard,
+         }
+     }
+@@ -334,7 +337,12 @@
+ 
+         let finish_reason = finish_reason_from_engine(raw.finish_reason, raw.stop_reason);
+         if let Some(finish_reason) = finish_reason.as_ref() {
+-            self.request_metrics.record_finished(received_at, finish_reason.clone());
++            let state = self.as_mut().get_mut();
++            state.request_metrics.record_finished(
++                received_at,
++                finish_reason.clone(),
++                state.request_trace.as_mut(),
++            );
+         }
+         let request_timings = finish_reason.as_ref().map(|_| self.request_metrics.snapshot());
+ 
+@@ -381,9 +389,11 @@
+             AbortCause::DroppedStream => FinishReason::Abort,
+             AbortCause::StopStringMatched => FinishReason::Stop(None),
+         };
+-
+-        self.request_metrics
+-            .record_finished(current_unix_timestamp_secs(), finish_reason);
++        self.request_metrics.record_finished(
++            current_unix_timestamp_secs(),
++            finish_reason,
++            self.request_trace.as_mut(),
++        );
+     }
+ }
+ 
+diff --git a/rust/src/llm/src/request_metrics.rs b/rust/src/llm/src/request_metrics.rs
+--- a/rust/src/llm/src/request_metrics.rs
++++ b/rust/src/llm/src/request_metrics.rs
+@@ -2,6 +2,8 @@
+ // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ 
+ use std::time::{SystemTime, UNIX_EPOCH};
++
++use opentelemetry::KeyValue;
+ 
+ use vllm_engine_core_client::protocol::output::{
+     EngineCoreEvent, EngineCoreEventType, EngineCoreOutput,
+@@ -184,7 +186,12 @@
+     ///
+     /// Original Python finished-request stats:
+     /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/metrics/stats.py#L222-L237>
+-    pub(crate) fn record_finished(&self, received_at: f64, finish_reason: FinishReason) {
++    pub(crate) fn record_finished(
++        &self,
++        received_at: f64,
++        finish_reason: FinishReason,
++        trace: Option<&mut crate::request_trace::RequestTrace>,
++    ) {
+         let prefill_kv_computed_tokens =
+             self.prompt_len.saturating_sub(self.latest_num_cached_tokens);
+         let e2e_latency_seconds = received_at - self.arrival_time;
+@@ -196,6 +203,7 @@
+             0.0
+         };
+ 
++        let aborted = matches!(finish_reason, FinishReason::Abort);
+         self.record_request_success(finish_reason);
+ 
+         self.handles.request_prompt_tokens.observe(self.prompt_len as f64);
+@@ -217,6 +225,22 @@
+         self.handles
+             .request_time_per_output_token_seconds
+             .observe(time_per_output_token_seconds);
++        if let Some(trace) = trace.as_ref() {
++            trace.set_attributes([
++                KeyValue::new("gen_ai.usage.prompt_tokens", i64::from(self.prompt_len)),
++                KeyValue::new(
++                    "gen_ai.usage.completion_tokens",
++                    i64::from(self.num_generation_tokens),
++                ),
++                KeyValue::new("gen_ai.request.n", i64::from(self.n_param)),
++                KeyValue::new(
++                    "gen_ai.latency.time_to_first_token",
++                    self.first_token_latency,
++                ),
++                KeyValue::new("gen_ai.latency.e2e", e2e_latency_seconds),
++                KeyValue::new("gen_ai.latency.time_in_model_decode", decode_time_seconds),
++            ]);
++        }
+ 
+         if let Some(events) = &self.handles.events {
+             let queue_time_seconds = diff_or_zero(self.scheduled_ts, self.queued_ts);
+@@ -227,6 +251,19 @@
+             events.request_queue_time_seconds.observe(queue_time_seconds);
+             events.request_prefill_time_seconds.observe(prefill_time_seconds);
+             events.request_inference_time_seconds.observe(inference_time_seconds);
++            if let Some(trace) = trace.as_ref() {
++                trace.set_attributes([
++                    KeyValue::new("gen_ai.latency.time_in_queue", queue_time_seconds),
++                    KeyValue::new("gen_ai.latency.time_in_model_prefill", prefill_time_seconds),
++                    KeyValue::new(
++                        "gen_ai.latency.time_in_model_inference",
++                        inference_time_seconds,
++                    ),
++                ]);
++            }
++        }
++        if let Some(trace) = trace {
++            trace.finish(aborted);
+         }
+     }
+ 
+diff --git a/rust/src/llm/src/request_trace.rs b/rust/src/llm/src/request_trace.rs
+new file mode 100644
+--- /dev/null
++++ b/rust/src/llm/src/request_trace.rs
+@@ -0,0 +1,215 @@
++use std::collections::HashMap;
++use std::time::{Duration, UNIX_EPOCH};
++
++use opentelemetry::trace::{SpanKind, TraceContextExt, Tracer};
++use opentelemetry::{Context, KeyValue, global};
++use vllm_engine_core_client::protocol::request::EngineCoreRequest;
++
++pub(crate) struct RequestTrace {
++    context: Context,
++    finished: bool,
++}
++
++impl RequestTrace {
++    pub(crate) fn start(request: &mut EngineCoreRequest) -> Option<Self> {
++        let carrier: HashMap<String, String> = request
++            .trace_headers
++            .iter()
++            .flat_map(|headers| headers.iter())
++            .map(|(name, value)| (name.clone(), value.clone()))
++            .collect();
++        let parent = global::get_text_map_propagator(|propagator| propagator.extract(&carrier));
++        let tracer = global::tracer("vllm.llm_engine");
++        let start_time =
++            UNIX_EPOCH.checked_add(Duration::try_from_secs_f64(request.arrival_time).ok()?)?;
++        let span = tracer
++            .span_builder("llm_request")
++            .with_kind(SpanKind::Server)
++            .with_start_time(start_time)
++            .with_attributes([KeyValue::new(
++                "gen_ai.request.id",
++                request.external_req_id.as_ref().unwrap_or(&request.request_id).clone(),
++            )])
++            .start_with_context(&tracer, &parent);
++        let context = parent.with_span(span);
++        if !context.span().span_context().is_valid() {
++            return None;
++        }
++        if let Some(parameters) = request.sampling_params.as_ref() {
++            if parameters.temperature != 0.0 {
++                context.span().set_attribute(KeyValue::new(
++                    "gen_ai.request.temperature",
++                    f64::from(parameters.temperature),
++                ));
++            }
++            if parameters.top_p != 0.0 {
++                context.span().set_attribute(KeyValue::new(
++                    "gen_ai.request.top_p",
++                    f64::from(parameters.top_p),
++                ));
++            }
++            if parameters.max_tokens != 0 {
++                context.span().set_attribute(KeyValue::new(
++                    "gen_ai.request.max_tokens",
++                    i64::from(parameters.max_tokens),
++                ));
++            }
++        }
++        let mut propagated = HashMap::new();
++        global::get_text_map_propagator(|propagator| {
++            propagator.inject_context(&context, &mut propagated);
++        });
++        request.trace_headers = Some(propagated.into_iter().collect());
++        Some(Self {
++            context,
++            finished: false,
++        })
++    }
++
++    pub(crate) fn finish(&mut self, aborted: bool) {
++        if !self.finished {
++            if aborted {
++                self.context.span().set_attribute(KeyValue::new("aborted", true));
++            }
++            self.context.span().end();
++            self.finished = true;
++        }
++    }
++
++    pub(crate) fn set_attributes(&self, attributes: impl IntoIterator<Item = KeyValue>) {
++        self.context.span().set_attributes(attributes);
++    }
++}
++
++impl Drop for RequestTrace {
++    fn drop(&mut self) {
++        self.finish(true);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use std::sync::{Arc, Mutex};
++
++    use opentelemetry::Value;
++    use opentelemetry_sdk::error::OTelSdkResult;
++    use opentelemetry_sdk::propagation::TraceContextPropagator;
++    use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
++    use vllm_engine_core_client::protocol::output::{
++        EngineCoreEvent, EngineCoreEventType, EngineCoreOutput,
++    };
++    use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
++
++    use super::*;
++    use crate::FinishReason;
++    use crate::request_metrics::RequestMetricsTracker;
++
++    #[derive(Clone, Debug, Default)]
++    struct CaptureExporter(Arc<Mutex<Vec<SpanData>>>);
++
++    impl SpanExporter for CaptureExporter {
++        fn export(
++            &self,
++            batch: Vec<SpanData>,
++        ) -> impl std::future::Future<Output = OTelSdkResult> + Send {
++            self.0.lock().unwrap().extend(batch);
++            async { Ok(()) }
++        }
++    }
++
++    #[test]
++    fn root_preserves_parent_reports_metrics_and_ends_once_on_finish_or_drop() {
++        let exporter = CaptureExporter::default();
++        let provider = SdkTracerProvider::builder().with_simple_exporter(exporter.clone()).build();
++        global::set_tracer_provider(provider.clone());
++        global::set_text_map_propagator(TraceContextPropagator::new());
++        let mut request = EngineCoreRequest {
++            request_id: "internal".into(),
++            external_req_id: Some("external".into()),
++            arrival_time: 1000.0,
++            trace_headers: Some(
++                [(
++                    "traceparent".into(),
++                    "00-33333333333333333333333333333333-1111111111111111-01".into(),
++                )]
++                .into(),
++            ),
++            sampling_params: Some(EngineCoreSamplingParams {
++                max_tokens: 16,
++                temperature: 0.0,
++                top_p: 0.95,
++                ..EngineCoreSamplingParams::for_test()
++            }),
++            ..EngineCoreRequest::default()
++        };
++        let mut trace = RequestTrace::start(&mut request).unwrap();
++        assert!(
++            request.trace_headers.as_ref().unwrap()["traceparent"]
++                .starts_with("00-33333333333333333333333333333333-")
++        );
++        assert_ne!(
++            request.trace_headers.as_ref().unwrap()["traceparent"],
++            "00-33333333333333333333333333333333-1111111111111111-01"
++        );
++        let mut metrics =
++            RequestMetricsTracker::new("model".into(), 0, 1000.0, 3, Some(16), 1, true);
++        metrics.observe_output(
++            1002.0,
++            1002.0,
++            &EngineCoreOutput {
++                new_token_ids: vec![1, 2],
++                events: Some(vec![
++                    EngineCoreEvent {
++                        r#type: EngineCoreEventType::Queued,
++                        timestamp: 1000.0,
++                    },
++                    EngineCoreEvent {
++                        r#type: EngineCoreEventType::Scheduled,
++                        timestamp: 1001.0,
++                    },
++                ]),
++                ..EngineCoreOutput::default()
++            },
++        );
++        metrics.record_finished(1003.0, FinishReason::Length, Some(&mut trace));
++        drop(trace);
++        drop(RequestTrace::start(&mut request).unwrap());
++        provider.force_flush().unwrap();
++        let captured = exporter.0.lock().unwrap();
++        assert_eq!(captured.len(), 2);
++        assert_eq!(captured[0].name, "llm_request");
++        assert_eq!(
++            captured[0].span_context.trace_id().to_string(),
++            "33333333333333333333333333333333"
++        );
++        assert_eq!(captured[0].parent_span_id.to_string(), "1111111111111111");
++        let attributes: HashMap<_, _> = captured[0]
++            .attributes
++            .iter()
++            .map(|entry| (entry.key.as_str(), &entry.value))
++            .collect();
++        assert_eq!(
++            attributes["gen_ai.request.id"],
++            &Value::String("external".into())
++        );
++        assert_eq!(attributes["gen_ai.usage.prompt_tokens"], &Value::I64(3));
++        assert_eq!(attributes["gen_ai.usage.completion_tokens"], &Value::I64(2));
++        assert_eq!(attributes["gen_ai.request.max_tokens"], &Value::I64(16));
++        assert_eq!(attributes["gen_ai.latency.e2e"], &Value::F64(3.0));
++        assert_eq!(attributes["gen_ai.latency.time_in_queue"], &Value::F64(1.0));
++        assert_eq!(
++            attributes["gen_ai.latency.time_in_model_prefill"],
++            &Value::F64(1.0)
++        );
++        assert!(!attributes.contains_key("gen_ai.request.temperature"));
++        assert!(!attributes.contains_key("aborted"));
++        assert!(
++            captured[1]
++                .attributes
++                .iter()
++                .any(|entry| entry.key.as_str() == "aborted" && entry.value == Value::Bool(true))
++        );
++        drop(captured);
++        provider.shutdown().unwrap();
++    }
++}
+diff --git a/rust/src/managed-engine/src/cli.rs b/rust/src/managed-engine/src/cli.rs
+--- a/rust/src/managed-engine/src/cli.rs
++++ b/rust/src/managed-engine/src/cli.rs
+@@ -87,6 +87,8 @@
+         revision: Option<String>,
+         max_logprobs: Option<i32>,
+         profiler_config: Option<String>,
++        otlp_traces_endpoint: Option<String>,
++        collect_detailed_traces: Option<String>,
+         reasoning_parser: Option<&str>,
+         language_model_only: bool,
+         disable_log_stats: bool,
+@@ -112,6 +114,14 @@
+         if let Some(profiler_config) = profiler_config {
+             python_args.push("--profiler-config".to_string());
+             python_args.push(profiler_config);
++        }
++        if let Some(otlp_traces_endpoint) = otlp_traces_endpoint {
++            python_args.push("--otlp-traces-endpoint".to_string());
++            python_args.push(otlp_traces_endpoint);
++        }
++        if let Some(collect_detailed_traces) = collect_detailed_traces {
++            python_args.push("--collect-detailed-traces".to_string());
++            python_args.push(collect_detailed_traces);
+         }
+         if let Some(reasoning_parser) = reasoning_parser {
+             python_args.push("--reasoning-parser".to_string());
+diff --git a/rust/src/server/Cargo.toml b/rust/src/server/Cargo.toml
+--- a/rust/src/server/Cargo.toml
++++ b/rust/src/server/Cargo.toml
+@@ -20,6 +20,9 @@
+ libc.workspace = true
+ llm-multimodal.workspace = true
+ openssl.workspace = true
++opentelemetry.workspace = true
++opentelemetry-otlp.workspace = true
++opentelemetry_sdk.workspace = true
+ prost.workspace = true
+ prost-types.workspace = true
+ rmp-serde.workspace = true
+@@ -62,9 +65,12 @@
+ clap.workspace = true
+ expect-test.workspace = true
+ prost.workspace = true
++opentelemetry-proto.workspace = true
++rmp-serde.workspace = true
+ serial_test.workspace = true
+ tempfile.workspace = true
+ tokio = { workspace = true, features = ["test-util"] }
++tokio-stream = { workspace = true, features = ["net"] }
+ tower.workspace = true
+ vllm-engine-core-client = { workspace = true, features = ["test-util"] }
+ vllm-tokenizer = { workspace = true, features = ["test-utils"] }
+diff --git a/rust/src/server/examples/external_engine_openai_qwen.rs b/rust/src/server/examples/external_engine_openai_qwen.rs
+--- a/rust/src/server/examples/external_engine_openai_qwen.rs
++++ b/rust/src/server/examples/external_engine_openai_qwen.rs
+@@ -90,6 +90,7 @@
+         manages_engine: false,
+         keep_alive_timeout: Duration::from_secs(5),
+         profiler: None,
++        observability: Default::default(),
+     };
+ 
+     let bind_address = format!("127.0.0.1:{port}");
+diff --git a/rust/src/server/src/config.rs b/rust/src/server/src/config.rs
+--- a/rust/src/server/src/config.rs
++++ b/rust/src/server/src/config.rs
+@@ -205,6 +205,31 @@
+         }
+         serde_json::from_str(value)
+             .map_err(|e| format!("expected `name=path` or a JSON object: {e}"))
++    }
++}
++
++/// OpenTelemetry / observability settings, mirroring Python's
++/// `ObservabilityConfig`. A `None` endpoint disables tracing.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
++pub struct ObservabilityConfig {
++    /// Target endpoint for the OTLP trace exporter. When `None`, no trace
++    /// provider is initialized.
++    pub otlp_traces_endpoint: Option<String>,
++    /// Opaque `--collect-detailed-traces` value, forwarded verbatim to the
++    /// engine (the frontend does not interpret it). Requires an endpoint.
++    pub collect_detailed_traces: Option<String>,
++}
++
++impl ObservabilityConfig {
++    /// Validate the tracing configuration, failing closed.
++    pub fn validate(&self) -> Result<()> {
++        if self.collect_detailed_traces.is_some() && self.otlp_traces_endpoint.is_none() {
++            bail!("--collect-detailed-traces requires --otlp-traces-endpoint to be set");
++        }
++        if self.otlp_traces_endpoint.is_some() {
++            crate::otel::validate_protocol_env()?;
++        }
++        Ok(())
+     }
+ }
+ 
+@@ -286,6 +311,8 @@
+     /// Profiler mode that registers `/start_profile` and `/stop_profile`
+     /// routes when present.
+     pub profiler: Option<String>,
++    /// OpenTelemetry / observability settings (OTLP trace export).
++    pub observability: ObservabilityConfig,
+ }
+ 
+ impl Config {
+@@ -297,6 +324,7 @@
+         if let Some(tls) = &self.tls {
+             tls.validate()?;
+         }
++        self.observability.validate()?;
+         if let Some(max_logprobs) = self.max_logprobs
+             && max_logprobs < -1
+         {
+diff --git a/rust/src/server/src/grpc/convert.rs b/rust/src/server/src/grpc/convert.rs
+--- a/rust/src/server/src/grpc/convert.rs
++++ b/rust/src/server/src/grpc/convert.rs
+@@ -136,6 +136,7 @@
+         add_special_tokens: true,
+         data_parallel_rank: None,
+         session_id,
++        trace_headers: None,
+         kv_hints,
+         reasoning_parser_kwargs: Default::default(),
+         reasoning_ended: None,
+diff --git a/rust/src/server/src/grpc/inference.rs b/rust/src/server/src/grpc/inference.rs
+--- a/rust/src/server/src/grpc/inference.rs
++++ b/rust/src/server/src/grpc/inference.rs
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: Apache-2.0
+ // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ 
++use std::collections::BTreeMap;
+ use std::pin::Pin;
+ use std::sync::Arc;
+ use std::time::Instant;
+@@ -23,6 +24,23 @@
+ pub(crate) type InferenceGrpcService = InferenceServer<InferenceServiceImpl>;
+ 
+ const DATA_PARALLEL_RANK_METADATA_KEY: &str = "x-data-parallel-rank";
++
++fn trace_headers_from_metadata<Message>(
++    request: &Request<Message>,
++) -> Option<BTreeMap<String, String>> {
++    let headers: BTreeMap<_, _> = ["traceparent", "tracestate"]
++        .into_iter()
++        .filter_map(|name| {
++            request
++                .metadata()
++                .get(name)?
++                .to_str()
++                .ok()
++                .map(|value| (name.to_owned(), value.to_owned()))
++        })
++        .collect();
++    (!headers.is_empty()).then_some(headers)
++}
+ 
+ /// gRPC inference service backed by the shared application state.
+ pub struct InferenceServiceImpl {
+@@ -223,13 +241,15 @@
+         request: Request<pb::GenerateRequest>,
+     ) -> Result<Response<pb::GenerateResponse>, Status> {
+         let data_parallel_rank = data_parallel_rank_from_metadata(&request)?;
++        let trace_headers = trace_headers_from_metadata(&request);
+         let proto_req = request.into_inner();
+         let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
+         let PreparedGrpcRequest {
+-            text_request,
++            mut text_request,
+             request_span,
+             started_at,
+         } = self.prepare_request(proto_req, data_parallel_rank, false, "Generate").await?;
++        text_request.trace_headers = trace_headers;
+ 
+         let stream = self
+             .state
+@@ -285,15 +305,17 @@
+         request: Request<pb::GenerateRequest>,
+     ) -> Result<Response<Self::GenerateStreamStream>, Status> {
+         let data_parallel_rank = data_parallel_rank_from_metadata(&request)?;
++        let trace_headers = trace_headers_from_metadata(&request);
+         let proto_req = request.into_inner();
+         let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
+         let PreparedGrpcRequest {
+-            text_request,
++            mut text_request,
+             request_span,
+             started_at,
+         } = self
+             .prepare_request(proto_req, data_parallel_rank, true, "GenerateStream")
+             .await?;
++        text_request.trace_headers = trace_headers;
+ 
+         let stream = self
+             .state
+diff --git a/rust/src/server/src/lib.rs b/rust/src/server/src/lib.rs
+--- a/rust/src/server/src/lib.rs
++++ b/rust/src/server/src/lib.rs
+@@ -9,6 +9,7 @@
+ mod listener;
+ mod lora;
+ mod middleware;
++mod otel;
+ mod render;
+ mod routes;
+ mod runtime;
+@@ -29,7 +30,7 @@
+ use axum::http::Request;
+ pub use config::{
+     ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
+-    HttpListenerMode, LoraModulePath, TlsConfig,
++    HttpListenerMode, LoraModulePath, ObservabilityConfig, TlsConfig,
+ };
+ use hyper::body::Incoming;
+ use hyper::server::conn::http1;
+@@ -123,7 +124,9 @@
+     .await
+     .context("failed to connect to engine core")?;
+ 
+-    let llm = Llm::new(client).with_log_stats(!config.disable_log_stats);
++    let llm = Llm::new(client)
++        .with_log_stats(!config.disable_log_stats)
++        .with_tracing(config.observability.otlp_traces_endpoint.is_some());
+     let text = TextLlm::new(llm, text_backend).with_max_logprobs(config.max_logprobs);
+ 
+     let chat = ChatLlm::new(text, chat_backend)
+@@ -260,6 +263,9 @@
+         None
+     };
+ 
++    // Init after all fallible setup, so an early return has no provider to leak.
++    let tracer_provider = otel::init_tracer_provider(&config.observability)?;
++
+     let scheme = if tls_config.is_some() {
+         "https"
+     } else {
+@@ -384,13 +390,21 @@
+     };
+ 
+     let (http_res, grpc_res) = tokio::join!(http_fut, grpc_fut);
+-    http_res.and(grpc_res)?;
++    let serve_result = http_res.and(grpc_res);
+ 
+     let shutdown_deadline = shutdown_deadline
+         .get()
+         .copied()
+         .unwrap_or_else(|| Instant::now() + config.shutdown_timeout);
+-    state.shutdown(shutdown_deadline).await
++    let state_result = state.shutdown(shutdown_deadline).await;
++
++    // Flush on every exit path (clean or error); `shutdown_provider` bounds the
++    // budget by the shutdown deadline.
++    if let Some(provider) = tracer_provider {
++        otel::shutdown_provider(provider, shutdown_deadline).await;
++    }
++
++    serve_result.and(state_result)
+ }
+ 
+ /// Per-connection timeouts applied while serving HTTP/HTTPS.
+diff --git a/rust/src/server/src/middleware/auth.rs b/rust/src/server/src/middleware/auth.rs
+--- a/rust/src/server/src/middleware/auth.rs
++++ b/rust/src/server/src/middleware/auth.rs
+@@ -13,7 +13,7 @@
+ 
+ use crate::state::{ApiKeyHash, AppState, hash_api_key};
+ 
+-const GUARDED_PREFIXES: &[&str] = &["/v1", "/v2", "/inference"];
++const GUARDED_PREFIXES: &[&str] = &["/v1", "/v2", "/inference", "/dumper"];
+ 
+ /// Authenticate guarded HTTP routes with an OpenAI-compatible bearer token.
+ ///
+diff --git a/rust/src/server/src/otel.rs b/rust/src/server/src/otel.rs
+new file mode 100644
+--- /dev/null
++++ b/rust/src/server/src/otel.rs
+@@ -0,0 +1,247 @@
++// SPDX-License-Identifier: Apache-2.0
++// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++
++//! OpenTelemetry trace-exporter bootstrap: a gRPC OTLP exporter (insecure by
++//! default) feeding a batch span processor on a `TracerProvider` tagged with the
++//! `vllm.*` resource attributes. No span is emitted here; this module only stands
++//! up the provider and flushes it on shutdown.
++
++use std::borrow::Cow;
++use std::time::Duration;
++
++use anyhow::{Context, Result, bail};
++use opentelemetry::KeyValue;
++use opentelemetry_otlp::{SpanExporter, WithExportConfig};
++use opentelemetry_sdk::Resource;
++use opentelemetry_sdk::trace::SdkTracerProvider;
++use tokio::time::Instant;
++use tracing::{info, warn};
++
++use crate::config::ObservabilityConfig;
++
++/// Env var selecting the OTLP transport.
++const OTEL_TRACES_PROTOCOL_ENV: &str = "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL";
++
++/// Instrumenting-module name set on every span's resource.
++const INSTRUMENTING_MODULE_NAME: &str = "vllm.llm_engine";
++
++/// Minimum flush budget, so a span buffered right before shutdown survives even
++/// when `shutdown_timeout` is 0 (the default).
++const MIN_FLUSH: Duration = Duration::from_secs(3);
++
++/// Validate the OTLP transport selected by the environment, failing closed.
++pub(crate) fn validate_protocol_env() -> Result<()> {
++    validate_protocol(std::env::var(OTEL_TRACES_PROTOCOL_ENV).ok().as_deref())
++}
++
++/// Validate an OTLP transport value, failing closed. Only gRPC is wired;
++/// `http/protobuf` is recognized but unimplemented, anything else rejected.
++fn validate_protocol(protocol: Option<&str>) -> Result<()> {
++    match protocol {
++        None | Some("grpc") => Ok(()),
++        Some("http/protobuf") => bail!(
++            "OTLP protocol 'http/protobuf' is not yet supported in the Rust frontend; \
++             use 'grpc' (the default) via OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"
++        ),
++        Some(other) => bail!("unsupported OTLP protocol '{other}' is configured"),
++    }
++}
++
++/// Default a scheme-less endpoint to plaintext `http://`, so a bare `host:port`
++/// is accepted.
++fn normalize_endpoint(endpoint: &str) -> Cow<'_, str> {
++    if let Some(address) = endpoint.strip_prefix("grpc://") {
++        Cow::Owned(format!("http://{address}"))
++    } else if endpoint.contains("://") {
++        Cow::Borrowed(endpoint)
++    } else {
++        Cow::Owned(format!("http://{endpoint}"))
++    }
++}
++
++/// Build the OTLP trace provider and register it globally; returns the flush
++/// handle, or `None` when no endpoint is set. Protocol is assumed already validated.
++pub(crate) fn init_tracer_provider(obs: &ObservabilityConfig) -> Result<Option<SdkTracerProvider>> {
++    let Some(endpoint) = obs.otlp_traces_endpoint.as_deref() else {
++        return Ok(None);
++    };
++
++    let endpoint_url = normalize_endpoint(endpoint);
++    let exporter = SpanExporter::builder()
++        .with_tonic()
++        .with_endpoint(endpoint_url.as_ref())
++        .build()
++        .context("failed to build OTLP gRPC span exporter")?;
++
++    let resource = Resource::builder()
++        .with_attributes([
++            KeyValue::new("vllm.instrumenting_module_name", INSTRUMENTING_MODULE_NAME),
++            KeyValue::new("vllm.process_id", std::process::id().to_string()),
++        ])
++        .build();
++
++    let provider = SdkTracerProvider::builder()
++        .with_resource(resource)
++        .with_batch_exporter(exporter)
++        .build();
++
++    opentelemetry::global::set_tracer_provider(provider.clone());
++    opentelemetry::global::set_text_map_propagator(
++        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
++    );
++    info!(endpoint, "OpenTelemetry trace exporter initialized (gRPC)");
++    Ok(Some(provider))
++}
++
++/// Flush and shut down the provider before `deadline` (floored by `MIN_FLUSH`), so
++/// a span buffered right before shutdown still ships. The calls block, so they run
++/// on a blocking task.
++pub(crate) async fn shutdown_provider(provider: SdkTracerProvider, deadline: Instant) {
++    let budget = deadline.saturating_duration_since(Instant::now()).max(MIN_FLUSH);
++    let flush = tokio::task::spawn_blocking(move || {
++        if let Err(error) = provider.force_flush() {
++            warn!(%error, "failed to flush OpenTelemetry spans on shutdown");
++        }
++        if let Err(error) = provider.shutdown() {
++            warn!(%error, "failed to shut down OpenTelemetry provider");
++        }
++    });
++    if tokio::time::timeout(budget, flush).await.is_err() {
++        warn!(
++            ?budget,
++            "OpenTelemetry flush did not finish within the shutdown budget"
++        );
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{ObservabilityConfig, init_tracer_provider, normalize_endpoint, validate_protocol};
++
++    #[test]
++    fn no_provider_when_tracing_disabled() {
++        assert!(init_tracer_provider(&ObservabilityConfig::default()).unwrap().is_none());
++    }
++
++    #[test]
++    fn endpoint_gets_a_scheme_only_when_missing() {
++        assert_eq!(
++            normalize_endpoint("localhost:4317"),
++            "http://localhost:4317"
++        );
++        assert_eq!(normalize_endpoint("http://x:4317"), "http://x:4317");
++        assert_eq!(normalize_endpoint("https://x:4317"), "https://x:4317");
++        assert_eq!(normalize_endpoint("grpc://x:4317"), "http://x:4317");
++    }
++
++    #[test]
++    fn protocol_defaults_and_grpc_are_accepted() {
++        validate_protocol(None).unwrap();
++        validate_protocol(Some("grpc")).unwrap();
++    }
++
++    #[test]
++    fn http_protobuf_fails_closed_with_guidance() {
++        let err = validate_protocol(Some("http/protobuf")).unwrap_err().to_string();
++        assert!(err.contains("not yet supported"), "{err}");
++    }
++
++    #[test]
++    fn unknown_protocol_is_rejected() {
++        let err = validate_protocol(Some("carrier-pigeon")).unwrap_err().to_string();
++        assert!(err.contains("unsupported OTLP protocol"), "{err}");
++    }
++}
++
++#[cfg(test)]
++mod lifecycle_tests {
++    use std::time::Duration;
++
++    use opentelemetry::global;
++    use opentelemetry::trace::Tracer as _;
++    use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::{
++        TraceService, TraceServiceServer,
++    };
++    use opentelemetry_proto::tonic::collector::trace::v1::{
++        ExportTraceServiceRequest, ExportTraceServiceResponse,
++    };
++    use tokio::sync::mpsc;
++    use tokio::time::Instant;
++    use tokio_stream::wrappers::TcpListenerStream;
++    use tonic::{Request, Response, Status};
++
++    use super::{ObservabilityConfig, init_tracer_provider, shutdown_provider};
++
++    /// In-process OTLP gRPC collector that forwards each export over a channel for
++    /// assertions.
++    struct FakeCollector {
++        exports: mpsc::UnboundedSender<ExportTraceServiceRequest>,
++    }
++
++    #[tonic::async_trait]
++    impl TraceService for FakeCollector {
++        async fn export(
++            &self,
++            request: Request<ExportTraceServiceRequest>,
++        ) -> Result<Response<ExportTraceServiceResponse>, Status> {
++            let _ = self.exports.send(request.into_inner());
++            Ok(Response::new(ExportTraceServiceResponse::default()))
++        }
++    }
++
++    /// The shutdown flush delivers a buffered span with the `vllm.*` resource attrs.
++    #[tokio::test(flavor = "multi_thread")]
++    #[serial_test::serial]
++    async fn shutdown_flush_delivers_a_buffered_span_to_the_collector() {
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let addr = listener.local_addr().unwrap();
++        let (tx, mut rx) = mpsc::unbounded_channel();
++        let server = tokio::spawn(async move {
++            tonic::transport::Server::builder()
++                .add_service(TraceServiceServer::new(FakeCollector { exports: tx }))
++                .serve_with_incoming(TcpListenerStream::new(listener))
++                .await
++        });
++
++        let obs = ObservabilityConfig {
++            otlp_traces_endpoint: Some(format!("http://{addr}")),
++            collect_detailed_traces: None,
++        };
++        let provider = init_tracer_provider(&obs).unwrap().expect("provider initialized");
++
++        // Emit and end a span but do not flush it; the shutdown flush must deliver it.
++        global::tracer("test").start("llm_request");
++
++        shutdown_provider(provider, Instant::now() + Duration::from_secs(10)).await;
++
++        let export = tokio::time::timeout(Duration::from_secs(10), rx.recv())
++            .await
++            .expect("collector received an export within the budget")
++            .expect("export payload present");
++        let resource = export.resource_spans[0].resource.as_ref().expect("resource present");
++        let keys: Vec<&str> = resource.attributes.iter().map(|kv| kv.key.as_str()).collect();
++        assert!(keys.contains(&"vllm.instrumenting_module_name"), "{keys:?}");
++        assert!(keys.contains(&"vllm.process_id"), "{keys:?}");
++
++        server.abort();
++    }
++
++    #[tokio::test(flavor = "multi_thread")]
++    #[serial_test::serial]
++    async fn shutdown_flush_returns_within_budget_when_endpoint_is_unreachable() {
++        let obs = ObservabilityConfig {
++            // Reserved port 1: connection is refused.
++            otlp_traces_endpoint: Some("http://127.0.0.1:1".to_string()),
++            collect_detailed_traces: None,
++        };
++        let provider = init_tracer_provider(&obs).unwrap().expect("provider initialized");
++        global::tracer("test").start("llm_request");
++
++        let start = Instant::now();
++        shutdown_provider(provider, start + Duration::from_secs(2)).await;
++        assert!(
++            start.elapsed() < Duration::from_secs(9),
++            "flush must not hang"
++        );
++    }
++}
+diff --git a/rust/src/server/src/routes.rs b/rust/src/server/src/routes.rs
+--- a/rust/src/server/src/routes.rs
++++ b/rust/src/server/src/routes.rs
+@@ -16,6 +16,7 @@
+ pub(super) mod render;
+ mod server_info;
+ mod sleep;
++mod tensor_dump;
+ mod tokenize;
+ mod version;
+ mod weight_checker;
+@@ -56,6 +57,7 @@
+         server_dev_mode_enabled(),
+         runtime_lora_updating_enabled(),
+         scale_out_endpoints_enabled,
++        std::env::var("DUMPER_SERVER_PORT").ok().as_deref() == Some("reuse"),
+     )
+ }
+ 
+@@ -70,7 +72,13 @@
+     dev_mode_enabled: bool,
+     runtime_lora_updating_enabled: bool,
+ ) -> Router {
+-    build_router_with_options(state, dev_mode_enabled, runtime_lora_updating_enabled, true)
++    build_router_with_options(
++        state,
++        dev_mode_enabled,
++        runtime_lora_updating_enabled,
++        true,
++        false,
++    )
+ }
+ 
+ #[cfg(test)]
+@@ -78,7 +86,7 @@
+     state: Arc<AppState>,
+     scale_out_endpoints_enabled: bool,
+ ) -> Router {
+-    build_router_with_options(state, false, false, scale_out_endpoints_enabled)
++    build_router_with_options(state, false, false, scale_out_endpoints_enabled, false)
+ }
+ 
+ fn build_router_with_options(
+@@ -86,6 +94,7 @@
+     dev_mode_enabled: bool,
+     runtime_lora_updating_enabled: bool,
+     scale_out_endpoints_enabled: bool,
++    dumper_enabled: bool,
+ ) -> Router {
+     let mut router = Router::new()
+         // Health & monitoring
+@@ -103,6 +112,10 @@
+         .route("/tokenize", post(tokenize::tokenize))
+         .route("/detokenize", post(tokenize::detokenize));
+ 
++    if dumper_enabled {
++        router = router.route("/dumper/{action}", post(tensor_dump::control));
++    }
++
+     if scale_out_endpoints_enabled {
+         router = router.route("/inference/v1/generate", post(inference::generate));
+     } else {
+diff --git a/rust/src/server/src/routes/inference/generate/convert.rs b/rust/src/server/src/routes/inference/generate/convert.rs
+--- a/rust/src/server/src/routes/inference/generate/convert.rs
++++ b/rust/src/server/src/routes/inference/generate/convert.rs
+@@ -84,6 +84,7 @@
+         add_special_tokens: false,
+         data_parallel_rank: ctx.data_parallel_rank,
+         session_id: ctx.session_id,
++        trace_headers: ctx.trace_headers,
+         kv_hints: None,
+         reasoning_parser_kwargs: Default::default(),
+         reasoning_ended: None,
+diff --git a/rust/src/server/src/routes/openai/chat_completions/convert.rs b/rust/src/server/src/routes/openai/chat_completions/convert.rs
+--- a/rust/src/server/src/routes/openai/chat_completions/convert.rs
++++ b/rust/src/server/src/routes/openai/chat_completions/convert.rs
+@@ -201,6 +201,7 @@
+         add_special_tokens: request.add_special_tokens,
+         data_parallel_rank: ctx.data_parallel_rank,
+         session_id,
++        trace_headers: ctx.trace_headers,
+         lora_request: lora_resolution.lora_request.clone(),
+     };
+ 
+diff --git a/rust/src/server/src/routes/openai/completions/convert.rs b/rust/src/server/src/routes/openai/completions/convert.rs
+--- a/rust/src/server/src/routes/openai/completions/convert.rs
++++ b/rust/src/server/src/routes/openai/completions/convert.rs
+@@ -157,6 +157,7 @@
+         add_special_tokens: request.add_special_tokens,
+         data_parallel_rank: ctx.data_parallel_rank,
+         session_id,
++        trace_headers: ctx.trace_headers,
+         kv_hints: None,
+         reasoning_parser_kwargs: Default::default(),
+         reasoning_ended: None,
+diff --git a/rust/src/server/src/routes/tensor_dump.rs b/rust/src/server/src/routes/tensor_dump.rs
+new file mode 100644
+--- /dev/null
++++ b/rust/src/server/src/routes/tensor_dump.rs
+@@ -0,0 +1,44 @@
++use std::collections::BTreeMap;
++use std::sync::Arc;
++
++use axum::Json;
++use axum::extract::{Path, State};
++use rmpv::Value as MsgpackValue;
++use serde::Deserialize;
++use serde_json::{Map, Value};
++
++use crate::error::ApiError;
++use crate::state::AppState;
++use crate::utils::utility_call_error;
++
++#[derive(Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub(crate) enum Action {
++    Configure,
++    Reset,
++    GetState,
++}
++
++pub async fn control(
++    Path(action): Path<Action>,
++    State(state): State<Arc<AppState>>,
++    body: Option<Json<Option<Map<String, Value>>>>,
++) -> Result<Json<Vec<MsgpackValue>>, ApiError> {
++    let action = match action {
++        Action::Configure => "configure",
++        Action::Reset => "reset",
++        Action::GetState => "get_state",
++    };
++    let body = Value::Object(body.and_then(|Json(body)| body).unwrap_or_default()).to_string();
++    let results = state
++        .engine_core_client()
++        .collective_rpc(
++            "dumper_control",
++            None,
++            (action, body),
++            BTreeMap::<String, Value>::new(),
++        )
++        .await
++        .map_err(|error| utility_call_error("dumper_control", error))?;
++    Ok(Json(results))
++}
+diff --git a/rust/src/server/src/routes/tests.rs b/rust/src/server/src/routes/tests.rs
+--- a/rust/src/server/src/routes/tests.rs
++++ b/rust/src/server/src/routes/tests.rs
+@@ -5913,6 +5913,120 @@
+             }]
+         })
+     );
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++#[serial]
++async fn dumper_control_routes_forward_without_dev_mode_and_return_worker_lists() {
++    let (state, engine_task) =
++        test_admin_state_with_ready_and_engine_script(default_ready_response(), |dealer, push| {
++            boxed_test_future(async move {
++                for (action, expected_body) in [
++                    ("configure", json!({"enable": true})),
++                    ("reset", json!({})),
++                    ("get_state", json!({})),
++                ] {
++                    let utility = recv_engine_message(dealer).await;
++                    let payload = decode_value(&utility[1]).unwrap();
++                    let request = payload.as_array().unwrap();
++                    assert_eq!(request[2], Value::from("collective_rpc"));
++                    let arguments = request[3].as_array().unwrap();
++                    assert_eq!(arguments[0], Value::from("dumper_control"));
++                    assert_eq!(arguments[1], Value::Nil);
++                    let positional = arguments[2].as_array().unwrap();
++                    assert_eq!(positional[0], Value::from(action));
++                    assert_eq!(
++                        serde_json::from_str::<serde_json::Value>(positional[1].as_str().unwrap())
++                            .unwrap(),
++                        expected_body
++                    );
++                    assert_eq!(arguments[3], Value::Map(vec![]));
++                    send_outputs(
++                        push,
++                        utility_outputs(
++                            request[1].as_u64().unwrap(),
++                            UtilityResultEnvelope::without_type_info(Value::Array(vec![
++                                Value::Map(vec![(Value::from("action"), Value::from(action))]),
++                            ])),
++                        ),
++                    )
++                    .await;
++                }
++            })
++        })
++        .await;
++    let mut disabled = super::build_router_with_options(state.clone(), false, false, false, false);
++    let response = disabled
++        .call(
++            Request::builder()
++                .method("POST")
++                .uri("/dumper/get_state")
++                .body(Body::empty())
++                .unwrap(),
++        )
++        .await
++        .unwrap();
++    assert_eq!(response.status(), StatusCode::NOT_FOUND);
++    let mut enabled = super::build_router_with_options(state, false, false, false, true);
++    for (action, body) in [
++        ("configure", Some(r#"{"enable":true}"#)),
++        ("reset", None),
++        ("get_state", Some("null")),
++    ] {
++        let request = Request::builder().method("POST").uri(format!("/dumper/{action}"));
++        let request = if let Some(body) = body {
++            request
++                .header("content-type", "application/json")
++                .body(Body::from(body))
++                .unwrap()
++        } else {
++            request.body(Body::empty()).unwrap()
++        };
++        let response = enabled.call(request).await.unwrap();
++        assert_eq!(response.status(), StatusCode::OK);
++        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
++        assert_eq!(
++            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
++            json!([{"action": action}])
++        );
++    }
++    engine_task.await.unwrap();
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++#[serial]
++async fn dumper_control_routes_require_configured_api_keys() {
++    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
++        b"engine-dumper-auth",
++        default_stream_output_specs(),
++        Arc::new(FakeChatBackend::new()),
++    )
++    .await;
++    let state =
++        Arc::new(AppState::new(vec!["model".into()], chat).with_api_keys(vec!["secret".into()]));
++    let mut app = super::build_router_with_options(state, false, false, false, true);
++    for token in [None, Some("Bearer wrong")] {
++        let request = Request::builder().method("POST").uri("/dumper/reset");
++        let request = if let Some(token) = token {
++            request.header("authorization", token)
++        } else {
++            request
++        };
++        let response = app.call(request.body(Body::empty()).unwrap()).await.unwrap();
++        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
++    }
++    let response = app
++        .call(
++            Request::builder()
++                .method("GET")
++                .uri("/dumper/get_state")
++                .header("authorization", "Bearer secret")
++                .body(Body::empty())
++                .unwrap(),
++        )
++        .await
++        .unwrap();
++    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+ }
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+diff --git a/rust/src/server/src/routes/tokenize/types.rs b/rust/src/server/src/routes/tokenize/types.rs
+--- a/rust/src/server/src/routes/tokenize/types.rs
++++ b/rust/src/server/src/routes/tokenize/types.rs
+@@ -54,6 +54,7 @@
+             add_special_tokens: self.add_special_tokens,
+             data_parallel_rank: None,
+             session_id: None,
++            trace_headers: None,
+             kv_hints: None,
+             reasoning_parser_kwargs: Default::default(),
+             reasoning_ended: None,
+@@ -126,6 +127,7 @@
+             add_special_tokens: self.add_special_tokens,
+             data_parallel_rank: None,
+             session_id: None,
++            trace_headers: None,
+             lora_request: None,
+         })
+     }
+diff --git a/rust/src/server/src/utils.rs b/rust/src/server/src/utils.rs
+--- a/rust/src/server/src/utils.rs
++++ b/rust/src/server/src/utils.rs
+@@ -1,7 +1,7 @@
+ // SPDX-License-Identifier: Apache-2.0
+ // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ 
+-use std::collections::HashMap;
++use std::collections::{BTreeMap, HashMap};
+ use std::time::{Duration, SystemTime, UNIX_EPOCH};
+ 
+ use axum::BoxError;
+@@ -21,6 +21,7 @@
+     pub data_parallel_rank: Option<u32>,
+     pub priority: Option<i32>,
+     pub session_id: Option<String>,
++    pub trace_headers: Option<BTreeMap<String, String>>,
+ }
+ 
+ /// Return the current Unix timestamp in seconds for OpenAI response objects.
+@@ -167,6 +168,19 @@
+         data_parallel_rank,
+         priority,
+         session_id,
++        trace_headers: {
++            let headers: BTreeMap<_, _> = ["traceparent", "tracestate"]
++                .into_iter()
++                .filter_map(|name| {
++                    headers
++                        .get(name)?
++                        .to_str()
++                        .ok()
++                        .map(|value| (name.to_owned(), value.to_owned()))
++                })
++                .collect();
++            (!headers.is_empty()).then_some(headers)
++        },
+     }
+ }
+ 
+diff --git a/rust/src/text/src/lower.rs b/rust/src/text/src/lower.rs
+--- a/rust/src/text/src/lower.rs
++++ b/rust/src/text/src/lower.rs
+@@ -69,7 +69,7 @@
+         reasoning_ended: request.reasoning_ended,
+         lora_request: request.lora_request.clone(),
+         arrival_time: request.arrival_time,
+-        trace_headers: None,
++        trace_headers: request.trace_headers.clone(),
+     };
+ 
+     Ok(PreparedTextRequest {
+diff --git a/rust/src/text/src/request.rs b/rust/src/text/src/request.rs
+--- a/rust/src/text/src/request.rs
++++ b/rust/src/text/src/request.rs
+@@ -1,7 +1,7 @@
+ // SPDX-License-Identifier: Apache-2.0
+ // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ 
+-use std::collections::HashMap;
++use std::collections::{BTreeMap, HashMap};
+ 
+ use enum_as_inner::EnumAsInner;
+ use serde::{Deserialize, Deserializer, Serialize};
+@@ -239,6 +239,8 @@
+     /// Stable session identity shared by related requests.
+     #[serde(default)]
+     pub session_id: Option<String>,
++    #[serde(default)]
++    pub trace_headers: Option<BTreeMap<String, String>>,
+     /// Optional orchestrator-originated KV hints.
+     #[serde(default)]
+     pub kv_hints: Option<KvHintsEnvelope>,
+@@ -282,6 +284,7 @@
+             add_special_tokens: false,
+             data_parallel_rank: None,
+             session_id: None,
++            trace_headers: None,
+             kv_hints: None,
+             reasoning_parser_kwargs: Default::default(),
+             reasoning_ended: None,

@@ -31,11 +31,11 @@ vllm:
   - name: <model_name>              # Required. Unique identifier for this model.
     model_path: <path>              # Optional. HF checkpoint path. Defaults to --hf-checkpoint.
     update_weights: <bool>          # Optional. Whether to sync weights from training. Auto-inferred.
-    num_gpus_per_engine: <int>      # Optional. Default worker GPU count per engine.
+    num_gpus_per_engine: <int>      # Optional. Default TP size for all groups in this model.
     server_groups:                  # Required. List of server group configurations.
       - worker_type: <type>         # Required. One of: regular, prefill, decode, placeholder.
         num_gpus: <int>             # Required. Total GPUs allocated to this group.
-        num_gpus_per_engine: <int>  # Optional. Worker GPU count override for this group.
+        num_gpus_per_engine: <int>  # Optional. TP size override for this group.
         overrides: <dict>           # Optional. vLLM EngineArgs field overrides.
 ```
 
@@ -48,7 +48,7 @@ vllm:
 | `name` | `str` | **Required** | Unique name for this model (e.g., `"actor"`, `"ref"`, `"reward"`). Used as the key in `args.vllm_model_routers`. |
 | `model_path` | `str` | `args.hf_checkpoint` | HuggingFace checkpoint path. All server groups within a model must use the same model path. |
 | `update_weights` | `bool` | Auto | Whether this model receives weight updates from training. When not set, automatically inferred: `true` if `model_path` matches `--hf-checkpoint`, `false` otherwise. |
-| `num_gpus_per_engine` | `int` | `args.rollout_num_gpus_per_engine` | Default total worker GPU count per engine. Individual groups can override. |
+| `num_gpus_per_engine` | `int` | `args.rollout_num_gpus_per_engine` | Default TP size for server groups in this model. Individual groups can override. |
 | `server_groups` | `list` | **Required** | List of `ServerGroupConfig` entries defining the engine topology. (`engine_groups` is accepted as a backward-compatible alias.) |
 
 #### Server Group Fields
@@ -57,7 +57,7 @@ vllm:
 |-------|------|---------|-------------|
 | `worker_type` | `str` | **Required** | Engine type: `regular` (standard), `prefill` (PD prefill worker), `decode` (PD decode worker), or `placeholder` (reserve GPU slots without launching engines). |
 | `num_gpus` | `int` | **Required** | Total number of GPUs for this group. Must be > 0. |
-| `num_gpus_per_engine` | `int` | Model's `num_gpus_per_engine` | Total worker GPU count per engine instance. This equals TP only when DP and PP are both 1. |
+| `num_gpus_per_engine` | `int` | Model's `num_gpus_per_engine` | TP size override. Number of GPUs per engine instance. |
 | `overrides` | `dict` | `{}` | vLLM `EngineArgs` field overrides. Applied on top of `--vllm-*` CLI args with highest priority. |
 
 ### Worker Types
@@ -107,10 +107,10 @@ vllm:
     server_groups:
       - worker_type: prefill
         num_gpus: 4
-        num_gpus_per_engine: 2    # 2 prefill engines, TP=2 with default DP/PP
+        num_gpus_per_engine: 2    # 2 prefill engines, TP=2
       - worker_type: decode
         num_gpus: 12
-        num_gpus_per_engine: 4    # 3 decode engines, TP=4 with default DP/PP
+        num_gpus_per_engine: 4    # 3 decode engines, TP=4
 ```
 
 ```bash

@@ -1,0 +1,99 @@
+--- a/.cargo/config.toml
++++ b/.cargo/config.toml
+@@ -4,2 +4,5 @@
+ [target.x86_64-unknown-linux-gnu]
+ rustflags = ["-C", "target-feature=+crt-static"]
++
++[target.aarch64-unknown-linux-gnu]
++rustflags = ["-C", "target-feature=+crt-static"]
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,5 +1,8 @@
+-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+-compile_error!("sunabako currently supports Linux x86_64");
++#[cfg(not(all(
++    target_os = "linux",
++    any(target_arch = "x86_64", target_arch = "aarch64")
++)))]
++compile_error!("sunabako supports Linux x86_64 and aarch64");
+ mod fsbroker;
+ mod linux;
+ mod model;
+--- a/src/linux.rs
++++ b/src/linux.rs
+@@ -218,8 +218,8 @@
+             let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
+             cv(fd, "loopback configuration socket")?;
+             let mut req: libc::ifreq = std::mem::zeroed();
+-            req.ifr_name[0] = b'l' as i8;
+-            req.ifr_name[1] = b'o' as i8;
++            req.ifr_name[0] = b'l' as libc::c_char;
++            req.ifr_name[1] = b'o' as libc::c_char;
+             let get = libc::ioctl(fd, libc::SIOCGIFFLAGS, &mut req);
+             if get >= 0 {
+                 req.ifr_ifru.ifru_flags |= libc::IFF_UP as i16;
+@@ -436,9 +436,14 @@
+         }
+     }
+     let deny = 0x00050000 | libc::EPERM as u32;
++    let audit_arch = if cfg!(target_arch = "aarch64") {
++        0xc00000b7
++    } else {
++        0xc000003e
++    };
+     let mut b = vec![
+         stmt(0x20, 4),
+-        jump(0xc000003e, 1, 0),
++        jump(audit_arch, 1, 0),
+         stmt(0x06, 0x80000000),
+         stmt(0x20, 0),
+         jump(u32::MAX, 0, 1),
+@@ -461,6 +466,7 @@
+         libc::SYS_chroot,
+         libc::SYS_setns,
+         libc::SYS_unshare,
++        #[cfg(target_arch = "x86_64")]
+         libc::SYS_mknod,
+         libc::SYS_mknodat,
+         libc::SYS_open_by_handle_at,
+@@ -506,7 +512,11 @@
+         b.push(stmt(0x06, deny));
+         b.push(jump(libc::SYS_openat2 as u32, 0, 1));
+         b.push(stmt(0x06, 0x00050000 | libc::ENOSYS as u32));
+-        for (sys, arg) in [(libc::SYS_open, 24), (libc::SYS_openat, 32)] {
++        for (sys, arg) in [
++            #[cfg(target_arch = "x86_64")]
++            (libc::SYS_open, 24),
++            (libc::SYS_openat, 32),
++        ] {
+             b.push(jump(sys as u32, 0, 5));
+             b.push(stmt(0x20, arg));
+             b.push(libc::sock_filter {
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -250,18 +250,23 @@
+         }
+     }
+     dependencies(Path::new("/usr/bin/nvidia-smi"), root)?;
++    let library_dir = Path::new(if cfg!(target_arch = "aarch64") {
++        "/usr/lib/aarch64-linux-gnu"
++    } else {
++        "/usr/lib/x86_64-linux-gnu"
++    });
+     for name in [
+         "libcuda.so.1",
+         "libnvidia-ml.so.1",
+         "libnvidia-ptxjitcompiler.so.1",
+         "libnvidia-nvvm.so.4",
+     ] {
+-        let lib = Path::new("/usr/lib/x86_64-linux-gnu").join(name);
++        let lib = library_dir.join(name);
+         if lib.exists() {
+             dependencies(&lib, root)?;
+         }
+     }
+-    for entry in fs::read_dir("/usr/lib/x86_64-linux-gnu")?.flatten() {
++    for entry in fs::read_dir(library_dir)?.flatten() {
+         if entry
+             .file_name()
+             .to_string_lossy()

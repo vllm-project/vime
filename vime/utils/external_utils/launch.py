@@ -101,27 +101,22 @@ def launch_commands(
     num_devices: int,
     megatron_model_type: str | None,
     repo_base_dir: str,
-    train_script: str = "train.py",
     extra_env: dict | None = None,
     external_ray: bool = False,
     master_addr: str = "127.0.0.1",
+    ray_running: bool = False,
 ) -> list:
     """Ordered shell commands to launch a training job on `platform` (pure; caller execs).
 
     Driven entirely by platform data (ray resources + device env), so any non-CUDA platform
-    works with no change here. Lives outside `execute_train` so its CUDA body stays
-    byte-identical to upstream and only adds a one-line seam.
+    works with no change here. The caller checks Ray liveness; existing clusters
+    and independently owned serving processes must survive trainer restarts.
     """
     extra_env = extra_env or {}
     all_env = {**platform.env, **extra_env}
     all_env["VIME_PLATFORM"] = platform.name
     cmds: list = []
-    cmds.append(
-        "pkill -9 -f '[v]llm serve|VLL[M]::'; sleep 3; "
-        + ("" if external_ray else "ray stop --force; pkill -9 ray; ")
-        + "pkill -9 vime; sleep 3; true; "
-    )
-    if not external_ray:
+    if not external_ray and not ray_running:
         # Export the device env BEFORE `ray start` so the raylet and the actors it spawns
         # (e.g. vLLM engines) inherit it; a job's runtime_env does not reach those actors.
         exports = "".join(f"export {k}={shlex.quote(str(v))} && " for k, v in all_env.items())
@@ -137,6 +132,6 @@ def launch_commands(
         f"export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && {src}"
         f'ray job submit --address="http://127.0.0.1:8265" '
         f"--runtime-env-json={shlex.quote(json.dumps(runtime_env))} "
-        f"-- python3 {train_script} {model_args} {train_args}"
+        f"-- python3 train.py {model_args} {train_args}"
     )
     return cmds

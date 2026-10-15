@@ -74,6 +74,32 @@ def test_discover_external_engines_reads_server_info(monkeypatch):
     }
 
 
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize(
+    "ec_connector, ec_role, kv_role, expected",
+    [
+        ("ECExampleConnector", "ec_producer", None, "encoder"),
+        ("ECExampleConnector", "ec_consumer", "kv_producer", "prefill"),
+        ("ECExampleConnector", "ec_consumer", "kv_consumer", "decode"),
+        ("ECExampleConnector", "ec_both", None, "regular"),
+        (None, "ec_producer", None, "regular"),
+    ],
+)
+def test_discover_external_native_ec_roles(monkeypatch, nested, ec_connector, ec_role, kv_role, expected):
+    config = {
+        "ec_transfer_config": {"ec_connector": ec_connector, "ec_role": ec_role},
+        "kv_transfer_config": {"kv_role": kv_role},
+        "parallel_config": {"tensor_parallel_size": 1},
+    }
+    payload = {"vllm_config": config} if nested else config
+    monkeypatch.setattr("vime.backends.vllm_utils.external.requests.get", lambda *args, **kwargs: _Response(payload))
+
+    info = discover_external_engines(["host1:10090"])[0]
+
+    assert info.worker_type == expected
+    assert info.server_info["ec_transfer_config"] == config["ec_transfer_config"]
+
+
 def test_start_external_rollout_servers_exposes_parallel_configs(monkeypatch):
     class FakeActor:
         init = Namespace(remote=lambda **kwargs: kwargs)

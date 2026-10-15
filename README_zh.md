@@ -10,9 +10,11 @@
 1. **高性能训练**：通过连接 Megatron 与 vLLM，支持各种模式的高效训练；
 2. **灵活的数据生成**：通过自定义数据生成接口以及 server based engine，实现任意的训练数据生成流程。
 
+训练、rollout、数据 buffer 和环境反馈共享同一条数据流，在同一个训练循环中支持数学、代码、搜索、工具调用和长程 agent 工作流。
+
 Vime 继承了 slime 广泛的模型支持，包括：
 
-- Qwen 系列（Qwen3.6、Qwen3.5、Qwen3Next、Qwen3MoE、Qwen3、Qwen2.5）；
+- Qwen 系列（Qwen3.8、Qwen3.6、Qwen3.5、Qwen3Next、Qwen3MoE、Qwen3、Qwen2.5）；
 - DeepSeek V3 系列（DeepSeek V3、V3.1、DeepSeek R1）；
 - Llama 3。
 
@@ -34,6 +36,8 @@ vLLM 社区横向支持许多 LLM post-training 框架，包括（按字母顺�
   - [快速开始](#快速开始)
     - [Agentic RL 示例](#agentic-rl-示例)
   - [参数说明](#参数说明)
+  - [Engine 部署](#engine-部署)
+  - [正确性、稳定性与 CI](#正确性稳定性与-ci)
   - [代码阅读路径](#代码阅读路径)
   - [开发指南](#开发指南)
   - [slime doc](#slime-doc)
@@ -51,6 +55,8 @@ vLLM 社区横向支持许多 LLM post-training 框架，包括（按字母顺�
 - **rollout (vLLM + router)**：启动 vLLM 推理引擎并路由生成请求；自定义生成函数可以在其上封装多轮循环、工具调用、环境/沙盒交互和基于 verifier 的奖励；
 - **data buffer**：桥梁模块，管理 prompt 初始化、自定义数据与 rollout 生成方法，包括通过同一接口产出样本的 agent 工作流。
 
+默认载荷传输为 Ray `object-store`。`--rollout-data-transport straw` 可在共享存储上持久化 prompt 任务、rollout continuation 和训练 batch。详见 [straw 架构与恢复指南](docs/zh/advanced/straw.md)。
+
 ## 快速开始
 
 有关环境配置、数据准备、训练启动和关键代码分析的完整快速开始指南，请参考：
@@ -65,7 +71,7 @@ Agent 工作负载通过 Vime 的定制接口接入标准 rollout / Data Buffer 
 
 - [`examples/multi_agent`](examples/multi_agent/README.md)：通过 `--custom-generate-function-path` 实现多 agent 生成；
 - [`examples/fully_async`](examples/fully_async/README.md)：面向长尾 agent 生成的全异步 rollout；
-- [`examples/coding_agent_rl`](examples/coding_agent_rl/README.md)：使用 Claude Code 或 Codex、沙盒工具、测试奖励和 token 精确轨迹片段的端到端 coding-agent RL；
+- [`examples/coding_agent_rl`](examples/coding_agent_rl/README.md)：使用 Qwen3.8-27B、小米 MiMo SWE 数据和 sunabako 沙盒，运行代码智能体 RL，保留官方测试奖励和 token 级训练轨迹。
 
 请参阅 [Agentic RL 训练路线图](docs/zh/get_started/agent.md)和[定制化指南](docs/zh/get_started/customization.md)。Coding-agent 示例内置 E2B 兼容后端；共享的 `vime.agent.sandbox.Sandbox` 协议也可以由 Docker、Modal 或本地虚拟机实现。
 
@@ -77,9 +83,32 @@ Vime 的参数分为三类：
 2. **vLLM 参数**：vLLM server 与 engine 相关选项以 `--vllm-` 为前缀（例如 `--vllm-gpu-memory-utilization`）。vllm-router 自身的选项以 `--router-` 传入（例如 `--router-policy round_robin`）；Vime 侧的 router 编排参数使用 `--vllm-router-` 前缀，包括 `--vllm-router-ip`、`--vllm-router-port` 和实际生效的 `--vllm-router-request-timeout-secs`。完整参数见 [vime/backends/vllm_utils/arguments.py](vime/backends/vllm_utils/arguments.py)。
 3. **框架参数**：与 Vime 编排相关的开关（rollout GPU、数据路径、RL 算法等），见 [vime/utils/arguments.py](vime/utils/arguments.py)。
 
-`--rollout-num-gpus-per-engine` 对应每个 vLLM engine 的 tensor parallel size。默认 rollout 入口为 `vime.rollout.vllm_rollout.generate_rollout`。
+`--rollout-num-gpus-per-engine` 设置每个 vLLM engine 的 GPU 数量；仅在 DP、PP 和 PCP 均为 1 时等于 TP。默认 rollout 入口为 `vime.rollout.vllm_rollout.generate_rollout`。
 
 完整使用说明请查阅 [使用文档](docs/zh/get_started/usage.md)。
+
+## Engine 部署
+
+Vime 在 Megatron 与 vLLM 原生控制接口外组织 RL 数据流。除上述参数透传外，请参阅：
+
+- [vLLM Config](docs/zh/advanced/vllm-config.md)：可选的 YAML 拓扑配置、异构 server group、多模型 serving 和 per-group override；
+- [PD Disaggregation](docs/zh/advanced/pd-disaggregation.md)：面向 prefill/decode 资源需求不同的多轮和 agentic 工作负载；
+- 面向多轮 agent 的 session affinity 等 router policy，见 [vLLM Config](docs/zh/advanced/vllm-config.md)；
+- [Delta Weight Sync](docs/zh/advanced/delta-weight-sync.md)：分离部署 rollout engine 的磁盘增量更新；
+- [External Rollout Engines](docs/zh/advanced/external-rollout-engines.md)：由训练任务外部管理 serving。Serving 可以使用独立环境；disk transport 无需训练端和 serving 端组成 NCCL group。不同 GPU 型号或厂商仍需满足模型格式、精度和 vLLM 硬件支持的兼容要求。
+
+## 正确性、稳定性与 CI
+
+RL bug 可能不会立即报错。Vime 保持显式数据流，支持 rollout-only 和 train-only 分离调试。CPU 单测、customization hook contract test 和 GPU 端到端测试分别保护这条链路的不同部分。Buildkite 自动运行 CPU 检查；GPU suite 需要手动开启 gate，因此 CPU 构建通过不代表 GPU 验证通过。
+
+相关工程文档：
+
+- [CI](docs/zh/developer_guide/ci.md)
+- [Debugging](docs/zh/developer_guide/debug.md)
+- [Reproducibility](docs/zh/advanced/reproducibility.md)
+- [Fault Tolerance](docs/zh/advanced/fault-tolerance.md)
+- [Trace Viewer](docs/zh/developer_guide/trace.md)
+- [Profiling](docs/zh/developer_guide/profiling.md)
 
 ## 代码阅读路径
 

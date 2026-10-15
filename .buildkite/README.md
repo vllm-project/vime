@@ -61,6 +61,9 @@ the per-test `VIME_TEST_USE_DEEPEP` / `VIME_TEST_USE_FP8_ROLLOUT` /
 The block uses `blocked_state: passed`, so a build whose CPU steps are green
 reports a passing commit status even if nobody unblocks the GPU gate.
 
+For sync validation, always select all six suites.  The REST unblock payload
+wraps the selection in `fields`, for example `{"fields": {"gpu-suites": "short\nvllm-config\nmegatron\nvime-customized\nprecision\nckpt"}}`.
+
 GPU jobs run on the shared **`mithril-h100-pool`** queue, following the same
 pattern vllm-omni uses for it: each job is a Kubernetes pod (agent-stack-k8s
 `kubernetes` plugin) on an H100 SXM node, with GPUs allocated via

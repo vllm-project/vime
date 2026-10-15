@@ -1,0 +1,217 @@
+--- a/vllm/engine/protocol.py
++++ b/vllm/engine/protocol.py
+@@ -321,3 +321,7 @@
+     async def get_weight_version(self) -> str:
+         """Return the latest committed weight version."""
+         raise NotImplementedError
++
++    async def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
++        """Return bounded snapshots of in-flight request queues."""
++        raise NotImplementedError
+--- a/vllm/entrypoints/serve/instrumentator/basic.py
++++ b/vllm/entrypoints/serve/instrumentator/basic.py
+@@ -28,7 +28,9 @@
+ 
+ 
+ @router.get("/load")
+-async def get_server_load_metrics(request: Request):
++async def get_server_load_metrics(
++    request: Request, include_inflight: bool = False, inflight_limit: int = 100
++):
+     # This endpoint returns the current server load metrics.
+     # It tracks requests utilizing the GPU from the following routes:
+     # - /v1/responses
+@@ -47,7 +49,12 @@
+     # - /rerank
+     # - /v1/rerank
+     # - /v2/rerank
+-    return JSONResponse(content={"server_load": request.app.state.server_load_metrics})
++    content = {"server_load": request.app.state.server_load_metrics}
++    if include_inflight:
++        content["inflight"] = await engine_client(
++            request
++        ).get_inflight_queue_diagnostics(inflight_limit)
++    return JSONResponse(content=content)
+ 
+ 
+ @router.get("/version")
+--- a/vllm/v1/core/sched/interface.py
++++ b/vllm/v1/core/sched/interface.py
+@@ -3,7 +3,7 @@
+ import enum
+ from abc import ABC, abstractmethod
+ from collections.abc import Iterable
+-from typing import TYPE_CHECKING
++from typing import TYPE_CHECKING, Any
+ 
+ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+ 
+@@ -243,6 +244,11 @@
+         """Returns (num_running_reqs, num_waiting_reqs)."""
+         raise NotImplementedError
+ 
++    @abstractmethod
++    def get_inflight_queue_diagnostics(self, limit: int) -> dict[str, Any]:
++        """Return a bounded snapshot of in-flight request queues."""
++        raise NotImplementedError
++
+     def get_kv_cache_usage(self) -> float:
+         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
+         return 0.0
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -2613,6 +2613,45 @@
+         """Returns (num_running_reqs, num_waiting_reqs)."""
+         return len(self.running), len(self.waiting) + len(self.kv_holding_waiting)
+ 
++    def get_inflight_queue_diagnostics(self, limit: int) -> dict[str, Any]:
++        """Return a bounded snapshot of in-flight request queues."""
++        now = time.time()
++        remaining = max(0, min(limit, 1000))
++        queues = []
++
++        for name, requests in (
++            ("running", self.running),
++            ("waiting", self.waiting),
++            ("kv_holding_waiting", self.kv_holding_waiting),
++            (
++                "finished_pending_cleanup",
++                [request for request in self.requests.values() if request.is_finished()],
++            ),
++        ):
++            entries = []
++            for request in requests:
++                if remaining == 0:
++                    break
++                entries.append(
++                    {
++                        "request_id": request.request_id,
++                        "status": request.status.name,
++                        "age_seconds": round(max(0.0, now - request.arrival_time), 3),
++                        "prompt_tokens": request.num_prompt_tokens,
++                        "output_tokens": request.num_output_tokens,
++                    }
++                )
++                remaining -= 1
++            queues.append(
++                {"name": name, "num_requests": len(requests), "requests": entries}
++            )
++
++        return {
++            "data_parallel_rank": self.parallel_config.data_parallel_index,
++            "has_pending_work": self.has_requests(),
++            "queues": queues,
++        }
++
+     def get_kv_cache_usage(self) -> float:
+         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
+         return self.kv_cache_manager.usage
+--- a/vllm/v1/engine/async_llm.py
++++ b/vllm/v1/engine/async_llm.py
+@@ -1358,3 +1358,6 @@
+ 
+     def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
+         return self.engine_core.get_kv_event_sources()
++
++    async def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
++        return await self.engine_core.get_inflight_queue_diagnostics_async(limit)
+--- a/vllm/v1/engine/core.py
++++ b/vllm/v1/engine/core.py
+@@ -1057,6 +1057,9 @@
+         """Return the latest committed weight version."""
+         return self._weight_version
+ 
++    def get_inflight_queue_diagnostics(self, limit: int) -> dict[str, Any]:
++        return self.scheduler.get_inflight_queue_diagnostics(limit)
++
+     def preprocess_add_request(self, request: EngineCoreRequest) -> tuple[Request, int]:
+         """Preprocess the request.
+ 
+--- a/vllm/v1/engine/core_client.py
++++ b/vllm/v1/engine/core_client.py
+@@ -222,6 +222,9 @@
+     def get_weight_version(self) -> str:
+         raise NotImplementedError
+ 
++    def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
++        raise NotImplementedError
++
+     async def execute_dummy_batch_async(self) -> None:
+         raise NotImplementedError
+ 
+@@ -229,6 +232,11 @@
+         raise NotImplementedError
+ 
+     async def get_weight_version_async(self) -> str:
++        raise NotImplementedError
++
++    async def get_inflight_queue_diagnostics_async(
++        self, limit: int
++    ) -> list[dict[str, Any]]:
+         raise NotImplementedError
+ 
+     def abort_requests(self, request_ids: list[str]) -> None:
+@@ -452,6 +460,9 @@
+ 
+     def get_weight_version(self) -> str:
+         return self.engine_core.get_weight_version()
++
++    def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
++        return [self.engine_core.get_inflight_queue_diagnostics(limit)]
+ 
+     def add_lora(self, lora_request: LoRARequest) -> bool:
+         return self.engine_core.add_lora(lora_request)
+@@ -1101,6 +1112,9 @@
+     def get_weight_version(self) -> str:
+         return self.call_utility("get_weight_version")
+ 
++    def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
++        return [self.call_utility("get_inflight_queue_diagnostics", limit)]
++
+     def collective_rpc(
+         self,
+         method: str | Callable[..., _R],
+@@ -1376,6 +1390,12 @@
+ 
+     async def get_weight_version_async(self) -> str:
+         return await self.call_utility_consensus_async("get_weight_version")
++
++    async def get_inflight_queue_diagnostics_async(
++        self, limit: int
++    ) -> list[dict[str, Any]]:
++        result = await self.call_utility_async("get_inflight_queue_diagnostics", limit)
++        return [result]
+ 
+     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
+         return await self.call_utility_async("add_lora", lora_request)
+@@ -1713,6 +1733,18 @@
+         # Only the result from the first engine is returned.
+         return (await self.call_utility_all_async(method, *args))[0]
+ 
++    async def get_inflight_queue_diagnostics_async(
++        self, limit: int
++    ) -> list[dict[str, Any]]:
++        return await asyncio.gather(
++            *[
++                self._call_utility_async(
++                    "get_inflight_queue_diagnostics", limit, engine=engine
++                )
++                for engine in self.core_engines
++            ]
++        )
++
+     @staticmethod
+     async def process_engine_outputs(
+         self: "DPLBAsyncMPClient", outputs: EngineCoreOutputs
+--- a/vllm/v1/engine/llm_engine.py
++++ b/vllm/v1/engine/llm_engine.py
+@@ -497,6 +497,9 @@
+         """Return the latest committed weight version."""
+         return self.engine_core.get_weight_version()
+ 
++    def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
++        return self.engine_core.get_inflight_queue_diagnostics(limit)
++
+     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
+         return self.collective_rpc("apply_model", args=(func,))
+ 

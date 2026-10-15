@@ -108,7 +108,7 @@ def save_hf_model_to_path(
             progress_desc=progress_desc,
             # Megatron-to-HF conversion is stateful for some parameters.  For
             # example, q_a_proj and kv_a_proj can land in adjacent chunks but
-            # must be emitted together for VLLM compatibility.  Every node
+            # must be emitted together for vLLM compatibility.  Every node
             # writer therefore has to observe every chunk so that pairs can
             # cross chunk boundaries.  Writers still only persist their
             # modulo-assigned shards below; non-writer ranks skip conversion.

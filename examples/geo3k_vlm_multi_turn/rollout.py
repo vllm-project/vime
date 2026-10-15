@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import base64
 import importlib
 import importlib.util
-import io
 import json
 import sys
 import uuid
@@ -12,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 from PIL import Image
 
@@ -20,6 +17,7 @@ from vime.rollout.vllm_rollout import (
     GenerateState,
     _build_inference_sampling_params,
     _coerce_flat_int_token_ids,
+    _inference_generate_meta_info,
     _mm_render_response_to_generate_body,
 )
 from vime.utils.http_utils import post
@@ -240,24 +238,19 @@ def _observation_token_ids(
     return boundary[1:] if canonical_ids and canonical_ids[-1] == eos_token_id else boundary
 
 
-def _decode_routing_metadata(args: Any, choice: dict[str, Any], *, expected_transitions: int) -> dict[str, Any] | None:
-    routed_experts = choice.get("routed_experts")
+def _validate_routing_metadata(args: Any, meta_info: dict[str, Any], *, expected_transitions: int) -> None:
+    routed_experts = meta_info.get("routed_experts")
     if routed_experts is None:
         if getattr(args, "use_rollout_routing_replay", False):
             raise RuntimeError("vLLM routing replay response is missing choices[0].routed_experts")
-        return None
-    if not isinstance(routed_experts, str):
-        raise TypeError("choice.routed_experts must be a base64 string")
-    raw = base64.b64decode(routed_experts.encode("ascii"), validate=True)
-    decoded = np.load(io.BytesIO(raw), allow_pickle=False)
+        return
     if getattr(args, "use_rollout_routing_replay", False):
         expected_size = expected_transitions * args.num_layers * args.moe_router_topk
-        if int(decoded.size) != expected_size:
+        if int(routed_experts.size) != expected_size:
             raise ValueError(
                 "vLLM routed experts shape does not match the generated sequence: "
-                f"actual_size={decoded.size}, expected_size={expected_size}"
+                f"actual_size={routed_experts.size}, expected_size={expected_size}"
             )
-    return {"routed_experts": decoded}
 
 
 def _response_budget(sampling_params: dict[str, Any], context_limit: int | None, prompt_length: int) -> int | None:
@@ -303,7 +296,7 @@ def _validate_rollout_request(args: Any, sample: Sample) -> None:
 
 @dataclass(frozen=True, kw_only=True)
 class _Turn:
-    choice: dict[str, Any]
+    meta_info: dict[str, Any]
     tokens: list[int]
     log_probs: list[float]
     text: str
@@ -387,7 +380,7 @@ class _Geo3kRollout:
         finish, tokens, log_probs = _parse_choice(choice)
         text = self.state.tokenizer.decode(tokens, skip_special_tokens=False) if tokens else ""
         return _Turn(
-            choice=choice,
+            meta_info=_inference_generate_meta_info(output),
             tokens=tokens,
             log_probs=log_probs,
             text=text,
@@ -401,9 +394,9 @@ class _Geo3kRollout:
                 "vLLM generated more tokens than requested: "
                 f"generated_tokens={len(turn.tokens)}, remaining_budget={remaining}"
             )
-        meta = _decode_routing_metadata(
+        _validate_routing_metadata(
             self.args,
-            turn.choice,
+            turn.meta_info,
             expected_transitions=len(self.sample.tokens) + len(turn.tokens) - 1,
         )
         eos_token_id = None
@@ -423,8 +416,7 @@ class _Geo3kRollout:
             tokens=turn.tokens,
             log_probs=turn.log_probs,
             trainable=True,
-            meta_info=meta,
-            update_terminal_info=False,
+            meta_info=turn.meta_info,
         )
         self.response_tokens.extend(turn.tokens)
         if eos_token_id is None:

@@ -30,6 +30,7 @@ REFERENCE_CUSTOM_GENERATE_WITH_EVAL_PATH = (
 )
 
 from vime.rollout.vllm_rollout import generate_and_rm
+from vime.utils.async_utils import AsyncPacer
 from vime.utils.misc import load_function
 from vime.utils.types import Sample
 
@@ -58,9 +59,12 @@ class FakeGenerateState:
     def __init__(self, args) -> None:
         self.args = args
         self.semaphore = types.SimpleNamespace(__aenter__=None)
+        self.generation_pacer = AsyncPacer()
         self.pendings = set()
         self.remaining_batch_size = 0
         self.aborted = False
+        self.cancellable_tasks = set()
+        self.active_server_generations = 0
         self.group_sampling_seeds = None
         if getattr(args, "vllm_enable_deterministic_inference", False):
             self.group_sampling_seeds = [args.rollout_seed + i for i in range(args.n_samples_per_prompt)]

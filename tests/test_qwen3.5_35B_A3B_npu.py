@@ -13,7 +13,7 @@ MODEL_DIR = f"{TEST_ROOT}/models/{MODEL_NAME}"
 DATASET_DIR = f"{TEST_ROOT}/datasets/dapo-math-17k"
 
 
-def prepare(torch_dist_ref_load=True):
+def prepare(checkpoint_root, torch_dist_ref_load=True):
     models_dir = shlex.quote(f"{TEST_ROOT}/models")
     datasets_dir = shlex.quote(f"{TEST_ROOT}/datasets")
     model_dir = shlex.quote(MODEL_DIR)
@@ -33,7 +33,7 @@ def prepare(torch_dist_ref_load=True):
     if not torch_dist_ref_load:
         return None
 
-    checkpoint_path = Path(tempfile.mkdtemp(prefix=f"{MODEL_NAME}_torch_dist_", dir=f"{TEST_ROOT}/models"))
+    checkpoint_path = Path(checkpoint_root)
     checkpoint_dir = shlex.quote(str(checkpoint_path))
     # Keep tensor parallel at 1. The converter then pipeline-splits the 40 layers
     # across the 8 NPUs. TP 2 with PP 1 builds every layer on each device.
@@ -176,10 +176,16 @@ def execute(torch_dist_checkpoint=None):
 
 
 def main():
-    checkpoint = prepare(torch_dist_ref_load=os.environ.get("VIME_TEST_TORCH_DIST_REF_LOAD", "1") == "1")
-    for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
-        os.environ.pop(proxy_var, None)
-    execute(checkpoint)
+    checkpoint_tmp_root = Path(TEST_ROOT) / "tmp"
+    checkpoint_tmp_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f"{MODEL_NAME}_torch_dist_", dir=checkpoint_tmp_root) as checkpoint_root:
+        checkpoint = prepare(
+            checkpoint_root,
+            torch_dist_ref_load=os.environ.get("VIME_TEST_TORCH_DIST_REF_LOAD", "1") == "1",
+        )
+        for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+            os.environ.pop(proxy_var, None)
+        execute(checkpoint)
 
 
 if __name__ == "__main__":

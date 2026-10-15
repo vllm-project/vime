@@ -123,6 +123,7 @@ VLLM_ARGS=(
    --vllm-gpu-memory-utilization 0.7
    --vllm-data-parallel-size 4
    --vllm-enable-expert-parallel
+   --vllm-all2all-backend deepep_high_throughput
    --vllm-cudagraph-capture-sizes 1 2 4 8 $(seq 16 8 256)
 
 )

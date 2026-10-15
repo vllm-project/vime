@@ -4,6 +4,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from vime.data.tensor import TensorRef
 from vime.observability import logging_utils
 from vime.observability.metric_utils import (
     compute_pass_rate,
@@ -13,6 +14,7 @@ from vime.observability.metric_utils import (
     has_repetition,
 )
 from vime.utils.misc import group_by, load_function
+from vime.utils.staleness import compute_staleness_metrics
 from vime.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -23,6 +25,8 @@ _VLLM_REQUEST_PERF_FIELDS = (
     ("decode/throughput", "decode_throughput"),
 )
 _VLLM_PREFILL_PERF_FIELDS = (
+    ("prefill/queue_duration", "pd_prefill_queue_duration"),
+    ("prefill/ttft_duration", "pd_prefill_ttft_duration"),
     ("prefill/bootstrap_queue_duration", "pd_prefill_bootstrap_queue_duration"),
     ("prefill/bootstrap_duration", "pd_prefill_bootstrap_duration"),
     ("prefill/alloc_wait_duration", "pd_prefill_alloc_wait_duration"),
@@ -33,6 +37,11 @@ _VLLM_PREFILL_PERF_FIELDS = (
     ("prefill/retry_count", "pd_prefill_retry_count"),
 )
 _VLLM_DECODE_PERF_FIELDS = (
+    ("decode/remote_kv_wait_duration", "pd_decode_remote_kv_wait_duration"),
+    ("decode/allocation_wait_duration", "pd_decode_allocation_wait_duration"),
+    ("decode/transfer_worker_duration", "pd_transfer_worker_duration"),
+    ("decode/handshake_wait_worker_duration", "pd_handshake_wait_worker_duration"),
+    ("decode/transfer_post_worker_duration", "pd_transfer_post_worker_duration"),
     ("decode/prealloc_duration", "pd_decode_prealloc_duration"),
     ("decode/bootstrap_duration", "pd_decode_bootstrap_duration"),
     ("decode/alloc_wait_duration", "pd_decode_alloc_wait_duration"),
@@ -166,6 +175,8 @@ def _compute_top_p_kept_vocab_metrics(all_samples: list[Sample]):
         offsets = sample.rollout_top_p_token_offsets
         if offsets is None or sample.response_length == 0:
             continue
+        if isinstance(offsets, TensorRef):
+            offsets = offsets.load()
         offsets = torch.as_tensor(offsets, dtype=torch.int64)
         if offsets.numel() == 0:
             continue
@@ -190,7 +201,7 @@ def _compute_top_p_kept_vocab_metrics(all_samples: list[Sample]):
 
 
 def _compute_spec_metrics(args, all_samples: list[Sample]):
-    if getattr(args, "vllm_speculative_algorithm", None) is None:
+    if getattr(args, "vllm_speculative_config", None) is None:
         return {}
     num_samples = len(all_samples)
     metrics = {}
@@ -253,7 +264,7 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any] 
     return log_dict
 
 
-def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time):
+def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time, *, weight_version=None):
     if args.custom_rollout_log_function_path is not None:
         custom_log_func = load_function(args.custom_rollout_log_function_path)
         if custom_log_func(rollout_id, args, samples, rollout_extra_metrics, rollout_time):
@@ -263,6 +274,7 @@ def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_t
         return
 
     log_dict = {**(rollout_extra_metrics or {})}
+    log_dict |= dict_add_prefix(compute_staleness_metrics(samples, weight_version), "rollout/")
     log_dict |= dict_add_prefix(compute_metrics_from_samples(args, samples), "rollout/")
     log_dict |= dict_add_prefix(compute_perf_metrics_from_samples(args, samples, rollout_time), "perf/")
     logger.info(f"perf {rollout_id}: {log_dict}")

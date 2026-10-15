@@ -48,6 +48,8 @@ steps:
       VIME_IMAGE_TAG: "${BUILDKITE_COMMIT}"
       IMAGE_NAME: "vime-ci-npu"
       IMAGE_REGISTRY: "swr.cn-southwest-2.myhuaweicloud.com/modelfoundry"
+      RUST_IMAGE: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/rust:1.95-bookworm"
+      CARGO_REGISTRY: "sparse+https://rsproxy.cn/index/"
       BUILDKITD_ADDR: "tcp://buildkitd-service.buildkitd:1234"
     command: |
       set -ex
@@ -65,6 +67,9 @@ steps:
       fi
 
       sed -i '/^RUN git config --global http.sslVerify false/i RUN git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf "https://github.com/"' docker/Dockerfile.npu
+      sed -i \
+        's|git remote add origin https://github\.com/vllm-project/router\.git|git remote add origin https://gh-proxy.test.osinfra.cn/https://github.com/vllm-project/router.git|' \
+        docker/Dockerfile.npu
       sed -i '/^# syntax=docker\/dockerfile:1\.7$$/d' docker/Dockerfile.npu
 
       export DOCKER_CONFIG=/home/user/.docker
@@ -78,6 +83,9 @@ steps:
         --local context=. \
         --local dockerfile=./docker \
         --opt filename=Dockerfile.npu \
+        --opt build-arg:VIME_COMMIT="$${VIME_IMAGE_TAG}" \
+        --opt build-arg:RUST_IMAGE="$${RUST_IMAGE}" \
+        --opt build-arg:CARGO_REGISTRY="$${CARGO_REGISTRY}" \
         --opt build-arg:APTMIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081 \
         --opt build-arg:PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple \
         --secret id=dockerconfig,src=/home/user/.docker/config.json \

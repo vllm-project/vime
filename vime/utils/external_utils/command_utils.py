@@ -6,6 +6,7 @@ import datetime
 import json
 import os
 import random
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,7 +102,6 @@ def execute_train(
     train_args: str,
     num_gpus_per_node: int,
     megatron_model_type: str | None,
-    train_script: str = "train.py",
     before_ray_job_submit=None,
     extra_env_vars=None,
     config: ExecuteTrainConfig | None = None,
@@ -111,9 +111,25 @@ def execute_train(
     if config is None:
         config = ExecuteTrainConfig()
 
-    # Platform seam: non-CUDA delegates to the launcher; the CUDA path below stays
-    # byte-identical to upstream.
     platform = current_platform()
+    external_ray = get_bool_env_var("VIME_SCRIPT_EXTERNAL_RAY")
+    master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
+
+    # Launching another trainer must preserve independently owned serving.
+    # Successful training cleans up its own resources; failures retain them.
+    ray_running = False
+    if not external_ray:
+        # A manual trainer restart must leave the Ray head and its detached
+        # rollout session alive. A stale address file alone is not proof of a
+        # running cluster, so query the head before deciding to start one.
+        ray_running = (
+            subprocess.run(
+                ["ray", "status"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30
+            ).returncode
+            == 0
+        )
+
+    # NPU supplies device resources and environment after the shared liveness check.
     if platform.name != "cuda":
         cmds = launch_commands(
             platform,
@@ -121,39 +137,20 @@ def execute_train(
             num_devices=num_gpus_per_node,
             megatron_model_type=megatron_model_type,
             repo_base_dir=str(repo_base_dir),
-            train_script=train_script,
             extra_env={**extra_env_vars, **_parse_extra_env_vars(config.extra_env_vars)},
-            external_ray=get_bool_env_var("VIME_SCRIPT_EXTERNAL_RAY"),
-            master_addr=os.environ.get("MASTER_ADDR", "127.0.0.1"),
+            external_ray=external_ray,
+            ray_running=ray_running,
+            master_addr=master_addr,
         )
         for cmd in cmds[:-1]:
             exec_command(cmd)
         if before_ray_job_submit is not None:
             before_ray_job_submit()
-        exec_command(cmds[-1])
+        if get_bool_env_var("VIME_SCRIPT_ENABLE_RAY_SUBMIT", "1"):
+            exec_command(cmds[-1])
         return
 
-    external_ray = get_bool_env_var("VIME_SCRIPT_EXTERNAL_RAY")
-    master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
-
-    exec_command(
-        "pkill -9 -f '[v]llm serve|VLL[M]::'; "
-        "sleep 3; "
-        f"{'' if external_ray else 'ray stop --force; '}"
-        f"{'' if external_ray else 'pkill -9 ray; '}"
-        # cannot be run in CI, o/w kill the parent script
-        # TODO: do we really need this kill? (or can we instead kill vime)
-        # "pkill -9 python; "
-        "pkill -9 vime; "
-        "sleep 3; "
-        f"{'' if external_ray else 'pkill -9 ray; '}"
-        # "pkill -9 python; "
-        "pkill -9 vime; "
-        "pkill -9 redis; "
-        "true; "
-    )
-
-    if not external_ray:
+    if not external_ray and not ray_running:
         exec_command(
             # will prevent ray from buffering stdout/stderr
             f"export PYTHONUNBUFFERED=1 && "
@@ -218,7 +215,7 @@ def execute_train(
             exec_command(
                 f"export {amd_exports} && "
                 f"{cmd_megatron_model_source}"
-                f"python3 {train_script} {model_args} {train_args}"
+                f"python3 train.py {model_args} {train_args}"
             )
         else:
             exec_command(
@@ -226,7 +223,7 @@ def execute_train(
                 f"{cmd_megatron_model_source}"
                 f'ray job submit --address="http://127.0.0.1:8265" '
                 f"--runtime-env-json='{runtime_env_json}' "
-                f"-- python3 {train_script} "
+                f"-- python3 train.py "
                 f"{model_args} "
                 f"{train_args}"
             )
@@ -278,7 +275,7 @@ def create_run_id() -> str:
 _warned_bool_env_var_keys = set()
 
 
-# copied from VLLM
+# copied from SGLang
 def get_bool_env_var(name: str, default: str = "false") -> bool:
     value = os.getenv(name, default)
     value = value.lower()

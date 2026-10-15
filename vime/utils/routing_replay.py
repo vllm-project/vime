@@ -31,9 +31,11 @@ def consume_ordered_topk(module):
 
 
 def register_ordered_topk_capture(module):
-    """Capture one forward's VLLM-compatible top-k order without R3."""
+    """Capture one forward's vLLM-compatible top-k order without R3."""
     if getattr(module, "_vime_ordered_topk_capture_registered", False):
         return
+
+    _install_router_replay_bridge(module)
 
     def pre_forward_hook(patched_module, *args, **kwargs):
         del args, kwargs
@@ -56,7 +58,7 @@ def _compute_topk_for_current_router(
     num_groups=None,
     group_topk=None,
 ):
-    # VLLM's deterministic DeepSeek/GLM biased top-k uses
+    # vLLM's deterministic DeepSeek/GLM biased top-k uses
     # torch.topk(..., sorted=False).  Megatron's local compute_topk uses the
     # default sorted=True.  The selected expert set is the same, but the
     # low-latency-compatible owner reduction consumes experts in top-k column
@@ -64,7 +66,7 @@ def _compute_topk_for_current_router(
     # actually diverges.
     #
     # Only override routers registered by the DeepEP alignment bridge, and only for the
-    # non-grouped Megatron path used by GLM-5 (n_group=topk_group=1 in VLLM,
+    # non-grouped Megatron path used by GLM-5 (n_group=topk_group=1 in vLLM,
     # represented as no group limit in Megatron).  Other training paths retain
     # Megatron's original semantics.
     if ORDERED_TOPK_CAPTURE_ROUTER is not None and not group_topk:
@@ -217,10 +219,37 @@ def get_routing_replay_compute_topk(old_compute_topk):
 
 
 def register_routing_replay(module):
-    if os.environ.get("ENABLE_ROUTING_REPLAY", "0") == "1":
+    if os.environ.get("ENABLE_ROUTING_REPLAY", "0") == "1" and not hasattr(module, "routing_replay"):
         module.routing_replay = RoutingReplay()
+        _install_router_replay_bridge(module)
 
         def pre_forward_hook(*args, **kwargs):
             set_routing_replay(module.routing_replay)
 
         module.register_forward_pre_hook(pre_forward_hook)
+
+
+class _SlimeRouterReplay:
+    def __init__(self, original):
+        self.original = original
+
+    def get_replay_topk(self, scores, topk, num_groups, group_topk, compute_topk):
+        if self.original is not None:
+            original_compute_topk = compute_topk
+
+            def compute_topk(scores, topk, num_groups=None, group_topk=None):
+                return self.original.get_replay_topk(scores, topk, num_groups, group_topk, original_compute_topk)
+
+        return get_routing_replay_compute_topk(compute_topk)(scores, topk, num_groups, group_topk)
+
+
+def _install_router_replay_bridge(module):
+    if not hasattr(module, "router_replay") or isinstance(module.router_replay, _SlimeRouterReplay):
+        return
+
+    from megatron.core.transformer.moe.moe_utils import topk_routing_with_score_function
+
+    # Older patched Megatron calls the slime hook directly; avoid recording twice.
+    if "get_routing_replay_compute_topk" in topk_routing_with_score_function.__code__.co_names:
+        return
+    module.router_replay = _SlimeRouterReplay(module.router_replay)

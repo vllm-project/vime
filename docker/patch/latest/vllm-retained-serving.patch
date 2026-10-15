@@ -1,0 +1,212 @@
+diff --git a/vllm/distributed/weight_transfer/base.py b/vllm/distributed/weight_transfer/base.py
+index 2fb60fb71b4..ff351608936 100644
+--- a/vllm/distributed/weight_transfer/base.py
++++ b/vllm/distributed/weight_transfer/base.py
+@@ -514,9 +514,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
+
+     @abstractmethod
+     def shutdown(self) -> None:
+-        """Shutdown the weight transfer engine.
+-        This should be called when the worker is shutting down.
+-        """
++        """Release transfer resources without shutting down the inference worker."""
+         raise NotImplementedError
+
+
+diff --git a/vllm/distributed/weight_transfer/clients.py b/vllm/distributed/weight_transfer/clients.py
+index 1bd2f98937a..1f4838e7832 100644
+--- a/vllm/distributed/weight_transfer/clients.py
++++ b/vllm/distributed/weight_transfer/clients.py
+@@ -60,7 +60,7 @@ class HTTPVLLMWeightSyncClient:
+
+     Mirrors `vllm/entrypoints/serve/dev/rlhf/api_router.py`:
+     `/init_weight_transfer_engine`, `/start_weight_update`, `/update_weights`,
+-    `/finish_weight_update`.
++    `/finish_weight_update`, `/shutdown_weight_transfer_engine`.
+     """
+
+     def __init__(self, base_url: str, timeout: float = 300) -> None:
+@@ -78,6 +78,9 @@ class HTTPVLLMWeightSyncClient:
+     def init_weight_transfer_engine(self, init_info: dict[str, Any]) -> None:
+         self._post("init_weight_transfer_engine", {"init_info": init_info})
+
++    def shutdown_weight_transfer_engine(self) -> None:
++        self._post("shutdown_weight_transfer_engine")
++
+     def start_weight_update(self) -> None:
+         self._post("start_weight_update")
+
+@@ -109,6 +112,11 @@ class RayVLLMWeightSyncClient:
+         request = WeightTransferInitRequest(init_info=init_info)
+         ray.get([h.init_weight_transfer_engine.remote(request) for h in self.handles])
+
++    def shutdown_weight_transfer_engine(self) -> None:
++        import ray
++
++        ray.get([h.shutdown_weight_transfer_engine.remote() for h in self.handles])
++
+     def start_weight_update(self) -> None:
+         import ray
+
+diff --git a/vllm/distributed/weight_transfer/m2n_engine.py b/vllm/distributed/weight_transfer/m2n_engine.py
+index c61bac4f2d1..e480e60eaf9 100644
+--- a/vllm/distributed/weight_transfer/m2n_engine.py
++++ b/vllm/distributed/weight_transfer/m2n_engine.py
+@@ -449,5 +449,7 @@ class M2NWeightTransferEngine(
+             torch.accelerator.synchronize()
+             self._handle.destroy()
+             self._handle = None
+-        self.model_update_group = None
++        if self.model_update_group is not None:
++            self.model_update_group.destroy()
++            self.model_update_group = None
+         self._parameter_destinations = []
+diff --git a/vllm/distributed/weight_transfer/m2n_trainer.py b/vllm/distributed/weight_transfer/m2n_trainer.py
+index 68c62f72dba..3eb624a9334 100644
+--- a/vllm/distributed/weight_transfer/m2n_trainer.py
++++ b/vllm/distributed/weight_transfer/m2n_trainer.py
+@@ -411,4 +411,6 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
+         if self._executor is not None:
+             self._executor.shutdown()
+             self._executor = None
+-        self.group = None
++        if self.group is not None:
++            self.group.destroy()
++            self.group = None
+diff --git a/vllm/distributed/weight_transfer/nccl_engine.py b/vllm/distributed/weight_transfer/nccl_engine.py
+index 5b98845870f..150639e0416 100644
+--- a/vllm/distributed/weight_transfer/nccl_engine.py
++++ b/vllm/distributed/weight_transfer/nccl_engine.py
+@@ -230,7 +230,7 @@ class NCCLWeightTransferEngine(
+
+     def shutdown(self) -> None:
+         if self.model_update_group is not None:
+-            # Clean up the communicator by removing the reference
++            self.model_update_group.destroy()
+             self.model_update_group = None
+
+
+@@ -457,4 +457,6 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
+             torch.cuda.current_stream().synchronize()
+
+     def shutdown(self) -> None:
+-        self.model_update_group = None
++        if self.model_update_group is not None:
++            self.model_update_group.destroy()
++            self.model_update_group = None
+diff --git a/vllm/distributed/weight_transfer/sparse_nccl_engine.py b/vllm/distributed/weight_transfer/sparse_nccl_engine.py
+index 9c704ab344e..22c41ced5c0 100644
+--- a/vllm/distributed/weight_transfer/sparse_nccl_engine.py
++++ b/vllm/distributed/weight_transfer/sparse_nccl_engine.py
+@@ -187,6 +187,7 @@ class SparseNCCLWeightTransferEngine(
+
+     def shutdown(self) -> None:
+         if self.model_update_group is not None:
++            self.model_update_group.destroy()
+             self.model_update_group = None
+
+
+@@ -372,4 +373,6 @@ class SparseNCCLTrainerWeightTransferEngine(
+             torch.cuda.current_stream().synchronize()
+
+     def shutdown(self) -> None:
+-        self.model_update_group = None
++        if self.model_update_group is not None:
++            self.model_update_group.destroy()
++            self.model_update_group = None
+diff --git a/vllm/engine/protocol.py b/vllm/engine/protocol.py
+index 2bb128ba073..da361a259c0 100644
+--- a/vllm/engine/protocol.py
++++ b/vllm/engine/protocol.py
+@@ -298,6 +298,10 @@ class EngineClient(ABC):
+         """Initialize weight transfer for RL training."""
+         raise NotImplementedError
+
++    async def shutdown_weight_transfer_engine(self) -> None:
++        """Release the trainer connection without shutting down inference."""
++        raise NotImplementedError
++
+     async def start_weight_update(self) -> None:
+         """Start a new weight update."""
+         raise NotImplementedError
+diff --git a/vllm/entrypoints/llm.py b/vllm/entrypoints/llm.py
+index 45b6aede583..bb39e2bbd50 100644
+--- a/vllm/entrypoints/llm.py
++++ b/vllm/entrypoints/llm.py
+@@ -901,6 +901,10 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
+             "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
+         )
+
++    def shutdown_weight_transfer_engine(self) -> None:
++        """Release the trainer connection without shutting down inference."""
++        self.llm_engine.collective_rpc("shutdown_weight_transfer_engine")
++
+     def start_weight_update(self) -> None:
+         """Start a new weight update."""
+         self.llm_engine.collective_rpc("start_weight_update")
+diff --git a/vllm/entrypoints/serve/dev/rlhf/api_router.py b/vllm/entrypoints/serve/dev/rlhf/api_router.py
+index 7e52e512170..ffe4177ff2f 100644
+--- a/vllm/entrypoints/serve/dev/rlhf/api_router.py
++++ b/vllm/entrypoints/serve/dev/rlhf/api_router.py
+@@ -171,6 +171,13 @@ async def init_weight_transfer_engine(
+     return JSONResponse(content={"message": "Weight transfer initialized"})
+
+
++@router.post("/shutdown_weight_transfer_engine")
++async def shutdown_weight_transfer_engine(raw_request: Request):
++    with weight_operation_metrics().record("shutdown"):
++        await engine_client(raw_request).shutdown_weight_transfer_engine()
++    return JSONResponse(content={"message": "Weight transfer shut down"})
++
++
+ @router.post("/start_weight_update")
+ async def start_weight_update(raw_request: Request):
+     with weight_operation_metrics().record("start"):
+diff --git a/vllm/entrypoints/serve/dev/rlhf/metrics.py b/vllm/entrypoints/serve/dev/rlhf/metrics.py
+index ed16f9a820b..b67f479f6dc 100644
+--- a/vllm/entrypoints/serve/dev/rlhf/metrics.py
++++ b/vllm/entrypoints/serve/dev/rlhf/metrics.py
+@@ -10,7 +10,7 @@ from typing import Literal
+
+ from prometheus_client import REGISTRY, CollectorRegistry, Gauge, Histogram
+
+-Operation = Literal["init", "start", "start_draft", "update", "finish"]
++Operation = Literal["init", "shutdown", "start", "start_draft", "update", "finish"]
+
+
+ class WeightOperationMetrics:
+diff --git a/vllm/v1/engine/async_llm.py b/vllm/v1/engine/async_llm.py
+index 7e50aa04512..3dd6b9d7216 100644
+--- a/vllm/v1/engine/async_llm.py
++++ b/vllm/v1/engine/async_llm.py
+@@ -1323,6 +1323,10 @@ class AsyncLLM(EngineClient):
+             "init_weight_transfer_engine", kwargs={"init_info": request.init_info}
+         )
+
++    async def shutdown_weight_transfer_engine(self) -> None:
++        """Release the trainer connection without shutting down inference."""
++        await self.collective_rpc("shutdown_weight_transfer_engine")
++
+     async def start_weight_update(self) -> None:
+         """Start a new weight update."""
+         await self.collective_rpc("start_weight_update")
+diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
+index d4c64c55427..b39ddf47332 100644
+--- a/vllm/v1/worker/gpu_worker.py
++++ b/vllm/v1/worker/gpu_worker.py
+@@ -1493,6 +1493,15 @@ class Worker(WorkerBase):
+         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
+         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
+
++    def shutdown_weight_transfer_engine(self) -> None:
++        """Release a trainer connection without shutting down inference."""
++        if self._weight_update_active:
++            raise RuntimeError(
++                "Cannot release a trainer connection during a weight update"
++            )
++        if self.weight_transfer_engine is not None:
++            self.weight_transfer_engine.shutdown()
++
+     def start_weight_update(self) -> None:
+         """Start a new weight update session.
+ 

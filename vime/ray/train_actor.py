@@ -79,6 +79,7 @@ class TrainRayActor(RayActor):
         try:
             if torch.version.hip is not None:
                 logger.info("Detected ROCm/HIP environment, skipping NUMA affinity setup")
+                # will find the coresponding API to implement ROCm version as below
             else:
                 import pynvml
 
