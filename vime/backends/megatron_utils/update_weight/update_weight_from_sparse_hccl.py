@@ -152,7 +152,7 @@ class UpdateWeightFromSparseHCCL:
         quantization_config: dict[str, int | str | list[str]] | None,
     ) -> None:
         if getattr(args, "update_weight_delta_verify_every", 0):
-            raise ValueError("Native PR #18915 sparse HCCL does not expose rank-local verify; set --update-weight-delta-verify-every 0. Correctness is checked by the dedicated E2E oracle.")
+            raise ValueError("Sparse HCCL does not expose rank-local verify; set --update-weight-delta-verify-every 0. Correctness is checked by the dedicated E2E oracle.")
         if quantization_config:
             raise NotImplementedError("Sparse HCCL delta sync does not support quantized rollout weights")
         if args.colocate:

@@ -2,8 +2,8 @@
 
 This guide provides instructions for installing Vime with NPU support, including the required dependencies and patches.
 
-Sparse HCCL follows [vllm-ascend PR #18915](https://github.com/vllm-project/vllm-ascend/pull/18915).
-See [the native integration notes](../../docs/sparse-hccl-pr18915.md) for public
+Sparse HCCL uses the public trainer and checkpoint-loading APIs.
+See [the integration notes](../../docs/sparse-hccl.md) for public
 APIs, full-index seed overhead, supported layouts and pending validation.
 No packed sparse transport, MoE direct write or receiver checksum/verify extension
 is added; native sparse runs require `--update-weight-delta-verify-every 0`.

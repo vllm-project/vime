@@ -1,8 +1,7 @@
 # Native sparse HCCL integration
 
-This proposal is based on VIME #447 and reuses
-[vllm-ascend #18915](https://github.com/vllm-project/vllm-ascend/pull/18915), pinned
-to `988f993c1ab125372596dfcba9ba844832292453`.
+Sparse HCCL synchronizes checkpoint-coordinate updates from Megatron training
+workers to vLLM inference workers through the public sparse trainer APIs.
 
 ## API and update flow
 
@@ -12,8 +11,8 @@ full shapes, int32 flat indices and replacement values. VIME constructs the publ
 lists through `SparseHCCLTrainerWeightTransferEngine.send_weight_chunk` inside
 its existing pause/start/update/finish/resume lifecycle.
 
-The Ascend patch takes `sparse_hccl_engine.py` and `sparse_weight_patch.py` directly
-from #18915. Every inference rank consumes all broadcasts before upstream
+The Ascend patch provides `sparse_hccl_engine.py` and `sparse_weight_patch.py`.
+Every inference rank consumes all broadcasts before upstream
 `is_pp_missing_parameter` filters parameters for its PP stage. The public vLLM
 checkpoint loader performs TP/expert mapping. The temporary checkpoint loader
 view restores Ascend's inference orientation in `finally` without replacing
@@ -54,7 +53,7 @@ Both dependency patches pass pristine-source application checks and reverse-appl
 against the patched remote trees. Container imports and native sparse HCCL
 hardware correctness have passed. The native receiver TP2/PP2/EP2 test matches
 complete worker parameter hashes and generated tokens against dense loading.
-See [the functional logs and timing definitions](validation/pr18915/README.md).
+See [the functional logs and timing definitions](validation/sparse-hccl/README.md).
 
 VIME full-versus-sparse 30B end-to-end measurements are still **pending**; the full
 baseline has started. Results from the earlier direct-write implementation do

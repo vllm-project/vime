@@ -579,7 +579,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 type=int,
                 default=0,
                 help=(
-                    "Reserved for sparse receiver verification extensions. Native PR #18915 "
+                    "Reserved for sparse receiver verification extensions. Native "
                     "sparse_hccl requires zero; use the dedicated correctness E2E oracle."
                 ),
             )

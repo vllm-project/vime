@@ -1,8 +1,8 @@
 # Native sparse HCCL container validation
 
-These logs validate the PR #480 native integration, not the earlier packed/direct-write implementation.
+These logs validate checkpoint-coordinate sparse HCCL synchronization in the VIME container.
 
-- `patch-check.json`: both complete dependency patches apply to pristine pinned source; native sparse engine/helper match Ascend #18915 head `988f993c...` verbatim.
+- `patch-check.json`: both complete dependency patches apply to pristine pinned source; native sparse engine/helper match the recorded source revision verbatim.
 - `patch-apply.log`: patches applied inside the existing VIME Docker container.
 - `functional-manifest.json`: actual Python source and patch SHA256 values, installed package metadata, and successful reverse-apply checks against the patched trees.
 - `imports.log`: real imports of the patched vLLM/Ascend trees and VIME updater.
