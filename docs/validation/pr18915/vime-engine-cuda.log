@@ -1,0 +1,20 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.13, pytest-8.3.2, pluggy-1.6.0
+rootdir: /home/w00899129/pr480-native.eJFlbD/vime
+configfile: pyproject.toml
+plugins: mock-3.15.1, xdist-3.6.1, anyio-4.14.0
+collected 70 items
+
+tests/utils/test_vllm_engine.py ........................................ [ 57%]
+..............................                                           [100%]
+
+=============================== warnings summary ===============================
+../../../../usr/local/python3.12.13/lib/python3.12/site-packages/torch/jit/_script.py:362: 14 warnings
+  /usr/local/python3.12.13/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+============================== slowest durations ===============================
+
+(210 durations < 0.005s hidden.  Use -vv to show these durations.)
+======================= 70 passed, 14 warnings in 10.67s =======================

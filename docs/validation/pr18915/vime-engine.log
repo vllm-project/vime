@@ -1,0 +1,45 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.13, pytest-8.3.2, pluggy-1.6.0
+rootdir: /home/w00899129/pr480-native.eJFlbD/vime
+configfile: pyproject.toml
+plugins: mock-3.15.1, xdist-3.6.1, anyio-4.14.0
+collected 70 items
+
+tests/utils/test_vllm_engine.py .............F.......................... [ 57%]
+..............................                                           [100%]
+
+=================================== FAILURES ===================================
+___ test_compute_server_args_external_check_fields_skip_orchestration_fields ___
+
+vllm_args = namespace(rollout_external=True, hf_checkpoint='/tmp/model', vllm_router_ip=None, vllm_router_port=None, num_gpus_per_...=1, vllm_prefill_context_parallel_size=1, vllm_data_parallel_size=1, vllm_dp_size=1, vllm_enable_expert_parallel=False)
+
+    @pytest.mark.unit
+    def test_compute_server_args_external_check_fields_skip_orchestration_fields(vllm_args):
+        sa, check_fields = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
+        assert "model" not in check_fields
+        assert "host" not in check_fields
+        assert "port" not in check_fields
+        assert "nnodes" in check_fields
+        assert "node_rank" in check_fields
+        assert "weight_transfer_config" in check_fields
+>       assert sa["weight_transfer_config"] == {"backend": "nccl"}
+E       AssertionError: assert {'backend': 'hccl'} == {'backend': 'nccl'}
+E         
+E         Differing items:
+E         {'backend': 'hccl'} != {'backend': 'nccl'}
+E         Use -v to get more diff
+
+tests/utils/test_vllm_engine.py:277: AssertionError
+=============================== warnings summary ===============================
+../../../../usr/local/python3.12.13/lib/python3.12/site-packages/torch/jit/_script.py:362: 14 warnings
+  /usr/local/python3.12.13/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+============================== slowest durations ===============================
+0.01s setup    tests/utils/test_vllm_engine.py::test_update_weights_from_disk_surfaces_http_error
+
+(209 durations < 0.005s hidden.  Use -vv to show these durations.)
+=========================== short test summary info ============================
+FAILED tests/utils/test_vllm_engine.py::test_compute_server_args_external_check_fields_skip_orchestration_fields
+================== 1 failed, 69 passed, 14 warnings in 10.89s ==================

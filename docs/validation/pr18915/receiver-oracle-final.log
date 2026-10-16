@@ -1,0 +1,41 @@
+INFO 10-16 08:18:38 [__init__.py:52] Available plugins for group vllm.platform_plugins:
+INFO 10-16 08:18:38 [__init__.py:54] - ascend -> vllm_ascend:register
+INFO 10-16 08:18:38 [__init__.py:57] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 10-16 08:18:38 [__init__.py:254] Platform plugin ascend is activated
+INFO 10-16 08:18:39 [platform.py:70] Breakable CUDAGraph on Ascend is opt-in; using VLLM_USE_BREAKABLE_CUDAGRAPH=0.
+[2026-10-16 08:18:44] [INFO] get env TORCHINDUCTOR_CACHE_DIR = /tmp/torchinductor_root
+[2026-10-16 08:18:44] [INFO] get env VLLM_USE_BREAKABLE_CUDAGRAPH = 0
+WARNING 10-16 08:18:46 [patch_triton.py:332] NPU Triton causal_conv1d_update is unavailable (cannot import name 'causal_conv1d_update_npu' from 'vllm_ascend.ops.triton.mamba.causal_conv1d' (/home/w00899129/pr480-native.eJFlbD/ascend/vllm_ascend/ops/triton/mamba/causal_conv1d.py)); falling back to the PyTorch implementation, which syncs per request and therefore stalls ACL graph capture at decode-FULL.
+[2026-10-16 08:18:48] [INFO] Patched Eagle3LlamaForCausalLM and Eagle3DeepseekV2ForCausalLM __init__ to use get_total_num_hidden_layers() for target_layer_num.
+WARNING 10-16 08:18:48 [interface.py:1145] Current platform npu does not have '_pytestfixturefunction' attribute.
+============================= test session starts ==============================
+platform linux -- Python 3.12.13, pytest-8.3.2, pluggy-1.6.0
+rootdir: /home/w00899129/pr480-native.eJFlbD/ascend
+configfile: pyproject.toml
+plugins: mock-3.15.1, xdist-3.6.1, anyio-4.14.0
+collected 6 items / 5 deselected / 1 selected
+
+tests/e2e/pull_request/eight_card/test_sparse_hccl_checkpoint.py INFO 10-16 08:20:59 [factory.py:203] Creating weight transfer trainer engine: SparseHCCLTrainerWeightTransferEngine
+INFO 10-16 08:21:04 [utils.py:492] Found hccl from library libhccl.so
+INFO 10-16 08:21:04 [pyhccl.py:88] vLLM is using pyhccl
+.[INFO] Model cache cleared
+
+
+=============================== warnings summary ===============================
+../../../../usr/local/python3.12.13/lib/python3.12/site-packages/torch/jit/_script.py:362: 14 warnings
+  /usr/local/python3.12.13/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+<frozen importlib._bootstrap>:488
+  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type SwigPyPacked has no __module__ attribute
+
+<frozen importlib._bootstrap>:488
+  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type SwigPyObject has no __module__ attribute
+
+tests/e2e/pull_request/eight_card/test_sparse_hccl_checkpoint.py::test_sparse_checkpoint_matches_native_dense[tp2-pp2-ep2]
+  /home/w00899129/pr480-native.eJFlbD/ascend/vllm_ascend/distributed/device_communicators/pyhccl.py:150: UserWarning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (Triggered internally at ../torch_npu/csrc/aten/common/TensorFactories.cpp:340.)
+    out_tensor = torch.empty_like(in_tensor)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========== 1 passed, 5 deselected, 17 warnings in 144.55s (0:02:24) ===========
+sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute

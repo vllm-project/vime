@@ -1,0 +1,122 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.13, pytest-8.3.2, pluggy-1.6.0
+rootdir: /home/w00899129/pr480-native.eJFlbD/vime
+configfile: pyproject.toml
+plugins: mock-3.15.1, xdist-3.6.1, anyio-4.14.0
+collected 21 items / 17 deselected / 4 selected
+
+tests/test_sparse_hccl.py ....                                           [100%]
+
+=============================== warnings summary ===============================
+../../../../usr/local/python3.12.13/lib/python3.12/site-packages/torch/jit/_script.py:362: 14 warnings
+  /usr/local/python3.12.13/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+<frozen importlib._bootstrap>:488
+  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type SwigPyPacked has no __module__ attribute
+
+<frozen importlib._bootstrap>:488
+  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type SwigPyObject has no __module__ attribute
+
+../../../../usr/local/python3.12.13/lib/python3.12/site-packages/torch_npu/contrib/transfer_to_npu.py:362
+  /usr/local/python3.12.13/lib/python3.12/site-packages/torch_npu/contrib/transfer_to_npu.py:362: ImportWarning: 
+      *************************************************************************************************************
+      The torch.Tensor.cuda and torch.nn.Module.cuda are replaced with torch.Tensor.npu and torch.nn.Module.npu now..
+      The torch.cuda.DoubleTensor is replaced with torch.npu.FloatTensor cause the double type is not supported now..
+      The backend in torch.distributed.init_process_group set to hccl now..
+      The torch.cuda.* and torch.cuda.amp.* are replaced with torch.npu.* and torch.npu.amp.* now..
+      The device parameters have been replaced with npu in the function below:
+      torch.logspace, torch.randint, torch.hann_window, torch.rand, torch.full_like, torch.ones_like, torch.rand_like, torch.randperm, torch.arange, torch.frombuffer, torch.normal, torch._empty_per_channel_affine_quantized, torch.empty_strided, torch.empty_like, torch.scalar_tensor, torch.tril_indices, torch.bartlett_window, torch.ones, torch.sparse_coo_tensor, torch.randn, torch.kaiser_window, torch.tensor, torch.triu_indices, torch.as_tensor, torch.zeros, torch.randint_like, torch.full, torch.eye, torch._sparse_csr_tensor_unsafe, torch.empty, torch._sparse_coo_tensor_unsafe, torch.blackman_window, torch.zeros_like, torch.range, torch.sparse_csr_tensor, torch.randn_like, torch.from_file, torch._cudnn_init_dropout_state, torch._empty_affine_quantized, torch.linspace, torch.hamming_window, torch.empty_quantized, torch._pin_memory, torch.load, torch.set_default_device, torch.get_device_module, torch.sparse_compressed_tensor, torch.Tensor.new_empty, torch.Tensor.new_empty_strided, torch.Tensor.new_full, torch.Tensor.new_ones, torch.Tensor.new_tensor, torch.Tensor.new_zeros, torch.Tensor.to, torch.Tensor.pin_memory, torch.nn.Module.to, torch.nn.Module.to_empty
+      *************************************************************************************************************
+      
+    warnings.warn(msg, ImportWarning)
+
+../../../../usr/local/python3.12.13/lib/python3.12/site-packages/torch_npu/contrib/transfer_to_npu.py:291
+  /usr/local/python3.12.13/lib/python3.12/site-packages/torch_npu/contrib/transfer_to_npu.py:291: RuntimeWarning: torch.jit.script and torch.jit.script_method will be disabled by transfer_to_npu, which currently does not support them, if you need to enable them, please do not use transfer_to_npu.
+    warnings.warn(msg, RuntimeWarning)
+
+../../../vllm/c00944022/vime-proj/MegatronAdaptor/megatron_adaptor/patches/patch_manager.py:97
+  /home/vllm/c00944022/vime-proj/MegatronAdaptor/megatron_adaptor/patches/patch_manager.py:97: DeprecationWarning: version is deprecated and will be removed in Python 3.14
+    if self.orig_func_name is not None and hasattr(value, self.orig_func_name) \
+
+../../../vllm/c00944022/0623/Megatron-LM/megatron/core/tensor_parallel/random.py:28
+  /home/vllm/c00944022/0623/Megatron-LM/megatron/core/tensor_parallel/random.py:28: DeprecationWarning: Using deprecated internal API from Transformer Engine. transformer_engine.pytorch.fp8 will be removed in a future release.
+    from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, fp8_autocast
+
+../../../vllm/c00944022/0623/Megatron-LM/megatron/core/inference/contexts/__init__.py:9
+  /home/vllm/c00944022/0623/Megatron-LM/megatron/core/inference/contexts/__init__.py:9: DeprecationWarning: The following imports from `dynamic_context.py` will be removed in this file in `megatron-core` 0.14. The imports here result in a cyclic import issue that causes rotary embeddings to import from Apex rather than Transformer Engine.
+    warnings.warn(
+
+../../../vllm/c00944022/0623/Megatron-LM/megatron/core/models/backends.py:21
+  /home/vllm/c00944022/0623/Megatron-LM/megatron/core/models/backends.py:21: UserWarning: Apex is not installed. Falling back to Torch Norm
+    warnings.warn("Apex is not installed. Falling back to Torch Norm")
+
+../../../../usr/local/python3.12.13/lib/python3.12/site-packages/fla/ops/nsa/naive.py:19
+  /usr/local/python3.12.13/lib/python3.12/site-packages/fla/ops/nsa/naive.py:19: ImportWarning: Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`
+    warnings.warn(
+
+../../../../usr/local/python3.12.13/lib/python3.12/site-packages/fla/ops/nsa/parallel.py:25
+  /usr/local/python3.12.13/lib/python3.12/site-packages/fla/ops/nsa/parallel.py:25: ImportWarning: Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`
+    warnings.warn(
+
+../../../../usr/local/python3.12.13/lib/python3.12/site-packages/fla/layers/attn.py:28
+  /usr/local/python3.12.13/lib/python3.12/site-packages/fla/layers/attn.py:28: ImportWarning: Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`
+    warnings.warn(
+
+../../../../usr/local/python3.12.13/lib/python3.12/site-packages/fla/layers/bitattn.py:29
+  /usr/local/python3.12.13/lib/python3.12/site-packages/fla/layers/bitattn.py:29: ImportWarning: Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`
+    warnings.warn(
+
+../../../../usr/local/python3.12.13/lib/python3.12/site-packages/fla/ops/deltaformer/parallel.py:20
+  /usr/local/python3.12.13/lib/python3.12/site-packages/fla/ops/deltaformer/parallel.py:20: ImportWarning: Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`
+    warnings.warn(
+
+../../../../usr/local/python3.12.13/lib/python3.12/site-packages/fla/layers/mla.py:35
+  /usr/local/python3.12.13/lib/python3.12/site-packages/fla/layers/mla.py:35: ImportWarning: Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`
+    warnings.warn(
+
+../../../../usr/local/python3.12.13/lib/python3.12/site-packages/fla/layers/rodimus.py:41
+  /usr/local/python3.12.13/lib/python3.12/site-packages/fla/layers/rodimus.py:41: ImportWarning: Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`
+    warnings.warn(
+
+../../../vllm/c00944022/0623/Megatron-LM/megatron/core/transformer/multi_latent_attention.py:38
+  /home/vllm/c00944022/0623/Megatron-LM/megatron/core/transformer/multi_latent_attention.py:38: DeprecationWarning: The 'megatron.core.transformer.custom_layers.transformer_engine' 
+      module is deprecated and will be removed in 0.10.0. Please use 
+      'megatron.core.extensions.transformer_engine' instead.
+    from megatron.core.transformer.custom_layers.transformer_engine import (
+
+../../../vllm/c00944022/0623/Megatron-LM/megatron/core/models/gpt/gpt_layer_specs.py:76
+  /home/vllm/c00944022/0623/Megatron-LM/megatron/core/models/gpt/gpt_layer_specs.py:76: UserWarning: Apex is not installed. Falling back to Torch Norm
+    warnings.warn("Apex is not installed. Falling back to Torch Norm")
+
+../../../vllm/c00944022/0623/Megatron-LM/megatron/core/models/retro/encoder_spec.py:49
+  /home/vllm/c00944022/0623/Megatron-LM/megatron/core/models/retro/encoder_spec.py:49: UserWarning: Apex is not installed. Falling back to Torch Norm
+    warnings.warn(f'Apex is not installed. Falling back to Torch Norm')
+
+../../../vllm/c00944022/0623/Megatron-LM/megatron/core/models/retro/decoder_spec.py:39
+  /home/vllm/c00944022/0623/Megatron-LM/megatron/core/models/retro/decoder_spec.py:39: UserWarning: Apex is not installed. Falling back to Torch Norm
+    warnings.warn(f"Apex is not installed. Falling back to Torch Norm")
+
+../../pr18162-vime.6FKtQc/deps/modelopt/torch/utils/logging.py:116
+  /home/w00899129/pr18162-vime.6FKtQc/deps/modelopt/torch/utils/logging.py:116: UserWarning: Failed to import modelopt vllm plugin due to: AttributeError("module 'vllm.model_executor.layers.fused_moe.layer' has no attribute 'FusedMoE'"). You may ignore this warning if you do not need this plugin.
+    warnings.warn(message, *args, **kwargs)
+
+../../pr18162-vime.6FKtQc/deps/modelopt/torch/__init__.py:53
+  /home/w00899129/pr18162-vime.6FKtQc/deps/modelopt/torch/__init__.py:53: UserWarning: transformers>=5.0 support is experimental. Unified Hugging Face checkpoint export for quantized checkpoints may not work for some models yet.
+    _warnings.warn(
+
+../../../vllm/c00944022/0623/Megatron-LM/megatron/rl/inference/inference_interface.py:30
+  /home/vllm/c00944022/0623/Megatron-LM/megatron/rl/inference/inference_interface.py:30: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class InferenceInterface(BaseModel):
+
+../../../vllm/c00944022/0623/Megatron-LM/megatron/rl/__init__.py:55
+  /home/vllm/c00944022/0623/Megatron-LM/megatron/rl/__init__.py:55: PydanticDeprecatedSince20: The `__fields__` attribute is deprecated, use the `model_fields` class property instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    cls.Library.type_names[register_type.__fields__['type_name'].default] = register_type
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+============================== slowest durations ===============================
+0.02s call     tests/test_sparse_hccl.py::test_native_full_index_seed_reconstructs_each_checkpoint_tensor
+
+(11 durations < 0.005s hidden.  Use -vv to show these durations.)
+================ 4 passed, 17 deselected, 37 warnings in 32.03s ================
+sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute

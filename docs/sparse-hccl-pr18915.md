@@ -50,11 +50,15 @@ The default `docker/Dockerfile.npu` dependency pins remain unchanged:
 vLLM `e6bfe03ad73a3330cb427885aa90d97a12e1c704` and Ascend
 `fd815467c221ee600137f6bdd53fe354d5e7c999`.
 
-Patch generation and changed-file Python syntax/style checks have been run
-locally. Container patch application, native sparse HCCL hardware correctness,
-and VIME full-versus-sparse end-to-end measurements are **pending**. Results from
-the earlier direct-write implementation are not evidence for this candidate.
-This PR remains a draft until the requested container and end-to-end checks
-are complete. The comparison must use the same image, model, TP2/PP2/EP2 layout,
-batch settings and three steady training rounds. Whole update timers include
-diff/export, gather, transfer, apply and finish; seed is reported separately.
+Both dependency patches pass pristine-source application checks and reverse-apply checks
+against the patched remote trees. Container imports and native sparse HCCL
+hardware correctness have passed. The native receiver TP2/PP2/EP2 test matches
+complete worker parameter hashes and generated tokens against dense loading.
+See [the functional logs and timing definitions](validation/pr18915/README.md).
+
+VIME full-versus-sparse 30B end-to-end measurements are still **pending**; the full
+baseline has started. Results from the earlier direct-write implementation do
+not validate this candidate. Keep the PR in draft until the comparison is done.
+The comparison uses the same container, model, TP2/PP2/EP2 layout, batch settings
+and three steady training rounds. Whole update timers include diff/export,
+gather, transfer, apply and finish; seed is reported separately.
