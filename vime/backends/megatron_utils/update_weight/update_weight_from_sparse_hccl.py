@@ -337,8 +337,9 @@ class UpdateWeightFromSparseHCCL:
                     end = min(start + count, flat.numel())
                     indices = torch.arange(start, end, dtype=torch.int32, device=flat.device)
                     bucket.add(name, tuple(tensor.shape), indices, flat[start:end])
-                # Do not retain an exported full tensor across Bridge chunks.
-                bucket.flush()
+            # Batch small tensors through the native list API while releasing
+            # all exported tensor references before the next Bridge chunk.
+            bucket.flush()
         return statistics["flushes"], statistics["wire_bytes"]
 
     def _send_sparse_delta(self) -> tuple[int, int, int]:

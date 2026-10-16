@@ -496,10 +496,11 @@ def test_native_bucket_preserves_checkpoint_coordinates_when_split():
 
 
 @pytest.mark.unit
-def test_native_full_index_seed_reconstructs_each_checkpoint_tensor(monkeypatch):
+@pytest.mark.parametrize("capacity,expected_flushes", [(16, 4), (64, 1)])
+def test_native_full_index_seed_reconstructs_each_checkpoint_tensor(monkeypatch, capacity, expected_flushes):
     instance = updater_module.UpdateWeightFromSparseHCCL.__new__(updater_module.UpdateWeightFromSparseHCCL)
     expected = {"weight": torch.arange(6, dtype=torch.float32).reshape(2, 3), "bias": torch.tensor([3.0, 5.0])}
-    instance.args = SimpleNamespace(update_weight_buffer_size=16)
+    instance.args = SimpleNamespace(update_weight_buffer_size=capacity)
     instance._iterator = SimpleNamespace(get_hf_weight_chunks=lambda *a, **kw: iter([list(expected.items())]))
     instance.weights_getter = lambda: {}
     sent = []
@@ -511,7 +512,7 @@ def test_native_full_index_seed_reconstructs_each_checkpoint_tensor(monkeypatch)
         for patch in chunk:
             assert patch.full_shape == tuple(expected[patch.name].shape)
             actual[patch.name].view(-1).index_copy_(0, patch.indices.long(), patch.values)
-    assert flushes == len(sent) and wire == 8 * (4 + 4)
+    assert flushes == len(sent) == expected_flushes and wire == 8 * (4 + 4)
     assert all(torch.equal(actual[name], tensor) for name, tensor in expected.items())
 
 
