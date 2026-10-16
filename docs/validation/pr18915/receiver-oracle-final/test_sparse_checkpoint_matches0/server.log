@@ -6,12 +6,12 @@ INFO 10-16 08:19:00 [platform.py:70] Breakable CUDAGraph on Ascend is opt-in; us
 2026-10-16 08:19:12,584 - 793245 - ServiceProfiler - INFO - VLLM_USE_V1 not set, auto-detected via vLLM 0.1.dev2+g7c6243ca2.empty: default 0
 INFO 10-16 08:19:13 [__init__.py:109] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
 INFO 10-16 08:19:13 [__init__.py:109] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
-(APIServer pid=793245) INFO 10-16 08:19:15 [api_utils.py:347] 
+(APIServer pid=793245) INFO 10-16 08:19:15 [api_utils.py:347]
 (APIServer pid=793245) INFO 10-16 08:19:15 [api_utils.py:347]        █     █     █▄   ▄█
 (APIServer pid=793245) INFO 10-16 08:19:15 [api_utils.py:347]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.1.dev2+g7c6243ca2
 (APIServer pid=793245) INFO 10-16 08:19:15 [api_utils.py:347]   █▄█▀ █     █     █     █  model   /home/w00899129/pr480-native.eJFlbD/receiver-oracle-final/test_sparse_checkpoint_matches0/checkpoint
 (APIServer pid=793245) INFO 10-16 08:19:15 [api_utils.py:347]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
-(APIServer pid=793245) INFO 10-16 08:19:15 [api_utils.py:347] 
+(APIServer pid=793245) INFO 10-16 08:19:15 [api_utils.py:347]
 (APIServer pid=793245) INFO 10-16 08:19:15 [api_utils.py:286] non-default args: {'model_tag': '/home/w00899129/pr480-native.eJFlbD/receiver-oracle-final/test_sparse_checkpoint_matches0/checkpoint', 'host': '127.0.0.1', 'port': 36263, 'model': '/home/w00899129/pr480-native.eJFlbD/receiver-oracle-final/test_sparse_checkpoint_matches0/checkpoint', 'dtype': 'bfloat16', 'max_model_len': 128, 'enforce_eager': True, 'skip_tokenizer_init': True, 'served_model_name': ['sparse-oracle'], 'distributed_executor_backend': 'mp', 'pipeline_parallel_size': 2, 'tensor_parallel_size': 2, 'enable_expert_parallel': True, 'worker_extension_cls': 'tests.e2e.pull_request.eight_card.test_sparse_hccl_checkpoint.SparseCheckpointOracle', 'gpu_memory_utilization': 0.15, 'enable_prefix_caching': False, 'max_num_batched_tokens': 128, 'max_num_seqs': 4, 'additional_config': {'weight_nz_mode': 0}, 'weight_transfer_config': WeightTransferConfig(backend='sparse_hccl')}
 (APIServer pid=793245) INFO 10-16 08:19:15 [model.py:684] Resolved architecture: Qwen3MoeForCausalLM
 (APIServer pid=793245) INFO 10-16 08:19:15 [model.py:2021] Using max model len 128
@@ -142,9 +142,11 @@ INFO 10-16 08:20:10 [ascend_config.py:162] The number of redundant experts is 0
 (Worker_PP0_TP0_EP0 pid=793373) INFO 10-16 08:20:22 [expert_map_manager.py:245] [EP Rank 0/2] Expert parallelism is enabled. Expert placement strategy: linear. Local/global number of experts: 4/8. Experts local to global index map: 0->0, 1->1, 2->2, 3->3.
 (Worker_PP0_TP0_EP0 pid=793373) INFO 10-16 08:20:23 [weight_utils.py:858] Filesystem type for checkpoints: EXT4. Checkpoint size: 0.06 GiB. Available RAM: 1330.56 GiB.
 (Worker_PP0_TP0_EP0 pid=793373) INFO 10-16 08:20:23 [weight_utils.py:881] Auto-prefetch is disabled because the filesystem (EXT4) is not a recognized network FS (NFS/Lustre). If you want to force prefetching, start vLLM with --safetensors-load-strategy=prefetch.
-(Worker_PP0_TP0_EP0 pid=793373) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
-(Worker_PP0_TP0_EP0 pid=793373) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00, 29.19it/s]
-(Worker_PP0_TP0_EP0 pid=793373) 
+(Worker_PP0_TP0_EP0 pid=793373)
+Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+(Worker_PP0_TP0_EP0 pid=793373)
+Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00, 29.19it/s]
+(Worker_PP0_TP0_EP0 pid=793373)
 (Worker_PP0_TP0_EP0 pid=793373) INFO 10-16 08:20:23 [default_loader.py:430] Loading weights took 0.04 seconds
 (Worker_PP1_TP0_EP0 pid=793375) INFO 10-16 08:20:24 [model_runner_v1.py:4027] Loading model weights took 0.0157 GB
 (Worker_PP1_TP0_EP0 pid=793375) INFO 10-16 08:20:24 [model_runner_v1.py:4080] Model runner load_model total time: 3.40 seconds

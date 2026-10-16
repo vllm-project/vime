@@ -19,3 +19,5 @@ Timing note: pytest durations are entire session times, not weight synchronizati
 Environment: host 192.168.13.190, container cjy-vime-0623, five selected NPUs 8–12 for the independent sender/receiver test. Complete pristine Python snapshots use the Dockerfile pins (vLLM e6bfe03a, Ascend fd815467) plus these patches. Installed native/CANN libraries are retained. Installed package version strings in the manifest describe existing metadata and must not be mistaken for the patched Python source revisions. The existing container is based on v0.21.0rc1-a3 and has been updated since creation; this is not a clean Dockerfile image build result.
 
 30B full/sparse VIME measurements are still pending and will be published separately. No earlier direct-write performance result is attributed to these patches.
+
+Published text logs normalize ANSI coloring, line endings and trailing whitespace only. `raw-log-sha256.json` identifies the original logs retained in the local evidence archive; event values and timestamps are unchanged.

@@ -20,7 +20,7 @@ tests/test_update_weight_factory.py ........                             [100%]
   <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type SwigPyObject has no __module__ attribute
 
 ../../../../usr/local/python3.12.13/lib/python3.12/site-packages/torch_npu/contrib/transfer_to_npu.py:362
-  /usr/local/python3.12.13/lib/python3.12/site-packages/torch_npu/contrib/transfer_to_npu.py:362: ImportWarning: 
+  /usr/local/python3.12.13/lib/python3.12/site-packages/torch_npu/contrib/transfer_to_npu.py:362: ImportWarning:
       *************************************************************************************************************
       The torch.Tensor.cuda and torch.nn.Module.cuda are replaced with torch.Tensor.npu and torch.nn.Module.npu now..
       The torch.cuda.DoubleTensor is replaced with torch.npu.FloatTensor cause the double type is not supported now..
@@ -29,7 +29,7 @@ tests/test_update_weight_factory.py ........                             [100%]
       The device parameters have been replaced with npu in the function below:
       torch.logspace, torch.randint, torch.hann_window, torch.rand, torch.full_like, torch.ones_like, torch.rand_like, torch.randperm, torch.arange, torch.frombuffer, torch.normal, torch._empty_per_channel_affine_quantized, torch.empty_strided, torch.empty_like, torch.scalar_tensor, torch.tril_indices, torch.bartlett_window, torch.ones, torch.sparse_coo_tensor, torch.randn, torch.kaiser_window, torch.tensor, torch.triu_indices, torch.as_tensor, torch.zeros, torch.randint_like, torch.full, torch.eye, torch._sparse_csr_tensor_unsafe, torch.empty, torch._sparse_coo_tensor_unsafe, torch.blackman_window, torch.zeros_like, torch.range, torch.sparse_csr_tensor, torch.randn_like, torch.from_file, torch._cudnn_init_dropout_state, torch._empty_affine_quantized, torch.linspace, torch.hamming_window, torch.empty_quantized, torch._pin_memory, torch.load, torch.set_default_device, torch.get_device_module, torch.sparse_compressed_tensor, torch.Tensor.new_empty, torch.Tensor.new_empty_strided, torch.Tensor.new_full, torch.Tensor.new_ones, torch.Tensor.new_tensor, torch.Tensor.new_zeros, torch.Tensor.to, torch.Tensor.pin_memory, torch.nn.Module.to, torch.nn.Module.to_empty
       *************************************************************************************************************
-      
+
     warnings.warn(msg, ImportWarning)
 
 ../../../../usr/local/python3.12.13/lib/python3.12/site-packages/torch_npu/contrib/transfer_to_npu.py:291
@@ -81,8 +81,8 @@ tests/test_update_weight_factory.py ........                             [100%]
     warnings.warn(
 
 ../../../vllm/c00944022/0623/Megatron-LM/megatron/core/transformer/multi_latent_attention.py:38
-  /home/vllm/c00944022/0623/Megatron-LM/megatron/core/transformer/multi_latent_attention.py:38: DeprecationWarning: The 'megatron.core.transformer.custom_layers.transformer_engine' 
-      module is deprecated and will be removed in 0.10.0. Please use 
+  /home/vllm/c00944022/0623/Megatron-LM/megatron/core/transformer/multi_latent_attention.py:38: DeprecationWarning: The 'megatron.core.transformer.custom_layers.transformer_engine'
+      module is deprecated and will be removed in 0.10.0. Please use
       'megatron.core.extensions.transformer_engine' instead.
     from megatron.core.transformer.custom_layers.transformer_engine import (
 

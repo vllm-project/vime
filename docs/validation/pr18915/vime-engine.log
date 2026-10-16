@@ -24,7 +24,7 @@ vllm_args = namespace(rollout_external=True, hf_checkpoint='/tmp/model', vllm_ro
         assert "weight_transfer_config" in check_fields
 >       assert sa["weight_transfer_config"] == {"backend": "nccl"}
 E       AssertionError: assert {'backend': 'hccl'} == {'backend': 'nccl'}
-E         
+E
 E         Differing items:
 E         {'backend': 'hccl'} != {'backend': 'nccl'}
 E         Use -v to get more diff
