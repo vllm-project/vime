@@ -3,8 +3,7 @@
 This guide provides instructions for installing Vime with NPU support, including the required dependencies and patches.
 
 Sparse HCCL uses the public trainer and checkpoint-loading APIs.
-See [the integration notes](../../docs/sparse-hccl.md) for public
-APIs, full-index seed overhead, supported layouts and pending validation.
+Initialization sends complete index/value patches before steady sparse updates.
 No packed sparse transport, MoE direct write or receiver checksum/verify extension
 is added; native sparse runs require `--update-weight-delta-verify-every 0`.
 
