@@ -7,8 +7,8 @@ every sync is the dominant cost.
 
 Two transports are available: `disk` for shared-storage and cross-cluster deployments, and
 `sparse_hccl` for online transfer between Ascend trainers and vLLM-Ascend rollout workers.
-Sparse HCCL uses a values-only dense seed on the first sync and int32 positions plus values on
-every later sync.
+Sparse HCCL sends complete int32 indices and values on the first sync, then only
+changed indices and values on later syncs through the same native protocol.
 
 ## Configuration
 
@@ -23,21 +23,22 @@ Sparse HCCL:
 
 This path requires non-colocated execution and unquantized rollout weights; TP2/PP2/EP2 requires the matching vLLM-Ascend sparse receiver.
 The gather trigger is based only on globally ordered parameter-row counts, keeping collective
-order identical on every Megatron rank. Set `verify-every` to a positive K to verify the locally applied sparse elements every K steady updates.
+order identical on every Megatron rank. Keep `verify-every` at zero: the native
+receiver does not expose a rank-local verification option, and nonzero values are rejected.
 
 Parallel rollout:
 
 The NPU image patch includes the `sparse_hccl` receiver registration and modules.
-The receiver filters PP-owned layers, maps global expert IDs through the Ascend EP map,
-and directly writes supported expert layouts using the actual MoE TP configuration.
-Other parameters use the native loader for TP slicing and fused-weight loading.
+All receivers consume every broadcast before filtering PP-owned layers. The native
+checkpoint loader handles TP slicing, fused parameters and expert placement; an
+exception-safe temporary view restores Ascend MoE checkpoint orientation while loading.
 Trainer payloads use actual-length P2P aggregation to rank zero; rollout payloads are still broadcast;
 PP/EP ownership filtering does not imply rank-targeted network traffic.
 
 For Qwen3-30B-A3B with training and rollout TP2/PP2/EP2, use
 `scripts/run-qwen3-30B-A3B-sparse-hccl.sh`. Set `MODEL_PATH`,
 `PROMPT_DATA_PATH`, and the dependency `PYTHONPATH` for your environment. The script
-uses four training and four rollout devices and enables sparse verification every update.
+uses four training and four rollout devices with native receiver verification disabled.
 
 Disk transport configuration:
 
@@ -65,11 +66,11 @@ Deltas are always zstd-compressed (level 1); profiling showed it dominates lz4 /
 
 ### Sparse HCCL
 
-1. The first sync streams VIME's existing full Megatron-to-HF export as a values-only dense seed. Each rank captures its local Megatron shard snapshot in host memory only after that seed completes.
+1. The first sync streams the full Megatron-to-HF export as bounded index/value patches. Every checkpoint position is included. Each rank captures its local Megatron shard snapshot in host memory only after initialization completes. BF16 initialization uses six payload bytes per element, so its cost is reported separately from steady updates.
 2. Later syncs bit-diff each current shard against its snapshot through an integer view, then advance the snapshot immediately.
 3. A NaN probe maps local changes to final HF names and global flat indices. PP non-owners, DP/CP replicas, and unchanged ranks retain zero-count lockstep directory rows.
-4. TP, EP/ETP, and PP/VPP ranks execute batched variable-length gathers over one common directory; the wire master assembles verl-compatible `DeltaParam`/`DeltaFlush` manifests.
-5. `SparseHCCLWeightTransferEngine` verifies the checksum. Dense seeds use normal `model.load_weights()`, while sparse deltas reuse vLLM-Ascend's TP-aware HF patch loader to update live weights in place.
+4. TP, EP/ETP, and PP/VPP ranks execute batched variable-length gathers over one common directory. The wire master constructs public `SparseWeightPatch` objects and sends bounded lists through `send_weight_chunk`.
+5. The receiver validates checkpoint patches and uses native weight loaders to update live weights in place. This protocol adds neither checksum metadata nor MoE direct writes. Independent correctness tests compare reconstructed/full exports and receiver parameter hashes against dense loading. A potentially partial update failure prevents updater reuse until recovery.
 
 ### Disk transport
 

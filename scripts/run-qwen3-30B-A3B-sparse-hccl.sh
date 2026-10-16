@@ -105,7 +105,7 @@ UPDATE_WEIGHT_ARGS=(
    --update-weight-delta-batch-gather "${UPDATE_WEIGHT_DELTA_BATCH_GATHER:-32}"
    --update-weight-mode delta
    --update-weight-transport sparse_hccl
-   --update-weight-delta-verify-every "${UPDATE_WEIGHT_DELTA_VERIFY_EVERY:-1}"
+   --update-weight-delta-verify-every "${UPDATE_WEIGHT_DELTA_VERIFY_EVERY:-0}"
 )
 
 MISC_ARGS=(
