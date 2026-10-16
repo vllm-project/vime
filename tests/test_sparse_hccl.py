@@ -482,6 +482,46 @@ def test_empty_hccl_peer_does_not_enqueue_p2p(monkeypatch):
 
 
 @pytest.mark.unit
+def test_native_bucket_preserves_checkpoint_coordinates_when_split():
+    sent = []
+    bucket = updater_module._SparseFlushBucket(16, lambda patches: sent.append(list(patches)))
+    bucket.add("weight", (2, 3), torch.tensor([0, 2, 3, 5], dtype=torch.int32), torch.tensor([1.0, 2.0, 3.0, 4.0]))
+    bucket.flush()
+    assert len(sent) == 2
+    assert all(sum(p.indices.numel() * (4 + p.values.element_size()) for p in chunk) <= 16 for chunk in sent)
+    patches = [patch for chunk in sent for patch in chunk]
+    assert all(patch.full_shape == (2, 3) and patch.indices.dtype == torch.int32 for patch in patches)
+    assert torch.equal(torch.cat([patch.indices for patch in patches]), torch.tensor([0, 2, 3, 5], dtype=torch.int32))
+    assert torch.equal(torch.cat([patch.values for patch in patches]), torch.tensor([1.0, 2.0, 3.0, 4.0]))
+
+
+@pytest.mark.unit
+def test_native_full_index_seed_reconstructs_each_checkpoint_tensor(monkeypatch):
+    instance = updater_module.UpdateWeightFromSparseHCCL.__new__(updater_module.UpdateWeightFromSparseHCCL)
+    expected = {"weight": torch.arange(6, dtype=torch.float32).reshape(2, 3), "bias": torch.tensor([3.0, 5.0])}
+    instance.args = SimpleNamespace(update_weight_buffer_size=16)
+    instance._iterator = SimpleNamespace(get_hf_weight_chunks=lambda *a, **kw: iter([list(expected.items())]))
+    instance.weights_getter = lambda: {}
+    sent = []
+    instance._publish_flush = lambda patches: sent.append(list(patches))
+    monkeypatch.setattr(updater_module.dist, "get_rank", lambda: 0)
+    flushes, wire = instance._send_dense()
+    actual = {name: torch.full_like(tensor, float("nan")) for name, tensor in expected.items()}
+    for chunk in sent:
+        for patch in chunk:
+            assert patch.full_shape == tuple(expected[patch.name].shape)
+            actual[patch.name].view(-1).index_copy_(0, patch.indices.long(), patch.values)
+    assert flushes == len(sent) and wire == 8 * (4 + 4)
+    assert all(torch.equal(actual[name], tensor) for name, tensor in expected.items())
+
+
+@pytest.mark.unit
+def test_native_receiver_verification_request_is_rejected():
+    with pytest.raises(ValueError, match="does not expose rank-local verify"):
+        updater_module.UpdateWeightFromSparseHCCL(SimpleNamespace(update_weight_delta_verify_every=1), [], lambda: {}, model_name="test", quantization_config=None)
+
+
+@pytest.mark.unit
 def test_native_sparse_updates_do_not_replay_dense_seed(updater):
     finishes = []
     updater._send_sparse_delta = lambda: (1, 24, 4)
