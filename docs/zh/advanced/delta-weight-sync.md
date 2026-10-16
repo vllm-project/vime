@@ -2,9 +2,39 @@
 
 Delta 权重同步只发送两次同步之间发生变化的字节，而不是每次都写一份完整 checkpoint，以此让非 colocate 的 rollout engine 保持最新。它面向大模型、跨集群或跨数据中心的训推解耦场景——这种场景下每次都写整份 actor 权重是主要开销。
 
-它**只支持 disk transport**。训练端把每次同步发布为一份 canonical HF checkpoint 目录；engine 的 `/pull_weights` 端点（随 vime 的 vllm patch 提供）把 apply 扇出到 **engine 覆盖的每一个 host** 并校验，随后 engine 通过**原生**的 `update_weights_from_disk` 端点 reload 打过补丁的本地 checkpoint。vime 对每个 engine 只与一个端点通信，所以多节点 serving 和外部 rollout engine 在 vime 侧都不需要任何额外支持。
+它支持两条传输路径：`disk` 面向跨集群共享存储，`sparse_hccl` 面向 Ascend
+训练和 vLLM-Ascend rollout 之间的在线传输。`sparse_hccl` 首次通过原生协议发送完整
+int32 索引和值，后续通过相同协议仅发送变化位置的索引和值。
 
 ## 配置
+
+Sparse HCCL：
+
+```bash
+--update-weight-mode delta
+--update-weight-transport sparse_hccl
+--update-weight-delta-batch-gather 32
+--update-weight-delta-verify-every 0
+```
+
+该路径要求非 colocate 和未量化 rollout 权重；TP2/PP2/EP2 需要匹配的 vLLM-Ascend sparse 接收端。`batch-gather` 只按全局
+参数目录的行数触发，保证所有 Megatron rank 的 collective 顺序一致。
+`verify-every` 必须为零：原生接收端不提供 rank-local 写入校验选项，非零值会被明确拒绝。
+
+并行 rollout：
+
+NPU 镜像补丁包含 `sparse_hccl` 接收端注册和模块。所有接收端先完成全部广播，再过滤
+当前 PP stage 所属参数。原生 checkpoint loader 负责 TP 切片、融合参数和 expert 放置；
+加载期间临时暴露 Ascend MoE 的 checkpoint 视图，并在异常或结束时恢复推理布局。
+训练侧 payload 按真实长度 P2P 汇聚到 rank0，推理侧仍采用广播；
+PP/EP 所属关系过滤不等于按 rank 定向传输。
+
+Qwen3-30B-A3B 训练和 rollout 均为 TP2/PP2/EP2 时，可使用
+`scripts/run-qwen3-30B-A3B-sparse-hccl.sh`。按环境设置 `MODEL_PATH`、
+`PROMPT_DATA_PATH` 及依赖的 `PYTHONPATH`。脚本使用四张训练卡和四张 rollout 卡，
+使用原生协议，不启用接收端 rank-local 校验。
+
+磁盘传输配置：
 
 ```bash
 --update-weight-mode delta
@@ -14,6 +44,8 @@ Delta 权重同步只发送两次同步之间发生变化的字节，而不是�
 --update-weight-delta-encoding xor          # 或: overwrite
 --update-weight-delta-checksum xxh3-128     # 或: blake3, adler32
 ```
+
+表 1：磁盘 delta 传输参数及其作用。
 
 | 参数 | 作用 |
 |---|---|
@@ -25,6 +57,16 @@ Delta 权重同步只发送两次同步之间发生变化的字节，而不是�
 delta 始终用 zstd（level 1）压缩；profiling 显示对这类数据它在 wire 大小和解压速度上都优于 lz4 / gzip / snappy / brotli，所以不做成可配置项。
 
 ## 工作原理
+
+### Sparse HCCL
+
+1. 首次通过 Megatron→HF 全量导出流发送有界的 index/value patch，覆盖 checkpoint 的所有位置。完成后才将各 rank 的本地 Megatron shard snapshot 保存在主机内存。BF16 初始化每个元素占六字节 payload，应与稳态同步分别计时。
+2. 后续同步在每个 rank 上对当前 shard 和 snapshot 做整数视图的 bit-exact diff，并立即推进 snapshot。
+3. NaN probe 把本地变化映射成最终 HF 参数名和全局 flat index。PP 非 owner、DP/CP 重复副本和无变化 rank 仍发送 count=0 的目录行。
+4. TP、EP/ETP、PP/VPP 按统一目录执行 batched variable-length gather；wire master 构造公共 `SparseWeightPatch`，通过 `send_weight_chunk` 发送有界列表。
+5. 接收端校验 checkpoint patch，并通过原生 weight loader 原地更新 live weights。该协议不增加 checksum 元数据或 MoE 直写；独立正确性测试将重建结果与 full export 比较，并将接收端完整参数摘要与 dense 加载比较。发生可能部分写入的失败后，updater 在恢复前不可复用。
+
+### 磁盘传输
 
 1. **Seed。** 第一次同步时，训练端为每个参数捕获一份 CPU snapshot——从 `--hf-checkpoint` seed，而这正是每个 rollout host 物化本地 checkpoint 的来源。此次不发布任何东西；这份 snapshot 就是下一次同步 diff 的基准。训练端同时发出 `target_version=0` 的 `/pull_weights`，让每个 host 现在就物化本地 base，与 snapshot 捕获重叠进行。
 2. **Publish。** 之后每次同步，训练端把每个 gather 出的 HF tensor 与 snapshot 做 diff，编码、压缩，写到 `--update-weight-disk-dir` 下的新版本目录 `weight_v{N:06d}/`。该目录是一份 canonical HF checkpoint——`model-NNNNN.safetensors` 文件装着压缩后的 diff tensor，外加 `model.safetensors.index.json`（tensor 名 → 文件）承载 apply 元数据——所以这个产物是可移植的，不绑定训练端的并行 layout。随后 snapshot 推进到新值，供下次 diff。
