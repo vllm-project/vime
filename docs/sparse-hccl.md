@@ -53,7 +53,7 @@ Both dependency patches pass pristine-source application checks and reverse-appl
 against the patched remote trees. Container imports and native sparse HCCL
 hardware correctness have passed. The native receiver TP2/PP2/EP2 test matches
 complete worker parameter hashes and generated tokens against dense loading.
-See [the functional logs and timing definitions](validation/sparse-hccl/README.md).
+Test results and timing definitions are reported in the pull request description.
 
 VIME full-versus-sparse 30B end-to-end measurements are still **pending**; the full
 baseline has started. Results from the earlier direct-write implementation do
