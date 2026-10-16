@@ -474,3 +474,37 @@ index 57b8efe93..e7376a7f8 100644
      torch_memory_saver.hook_mode = "torch"
      HAVE_TORCH_MEMORY_SAVER = True
  except ImportError:
+diff --git a/megatron/core/optimizer/distrib_optimizer.py b/megatron/core/optimizer/distrib_optimizer.py
+index a4364f5e9..a404ac248 100644
+--- a/megatron/core/optimizer/distrib_optimizer.py
++++ b/megatron/core/optimizer/distrib_optimizer.py
+@@ -396,6 +396,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+                                 shard_main_param = model_param.float().view(-1)[
+                                     param_range.start : param_range.end
+                                 ]
++                        elif config.defer_main_param_initialization:
++                            shard_main_param = torch.empty_like(
++                                shard_model_param, dtype=torch.float32
++                            )
++                            # Preserve tensor identity and metadata for the external backend.
++                            shard_main_param.untyped_storage().resize_(0)
+                         else:
+                             shard_main_param = shard_model_param.clone().float()
+
+diff --git a/megatron/core/optimizer/optimizer_config.py b/megatron/core/optimizer/optimizer_config.py
+index 24f9a03..ca26296 100644
+--- a/megatron/core/optimizer/optimizer_config.py
++++ b/megatron/core/optimizer/optimizer_config.py
+@@ -365,6 +365,12 @@ class OptimizerConfig:
+     pin_cpu_params: bool = True
+     """If True, pin the optimizer parameters to CPU memory."""
+
++    defer_main_param_initialization: bool = False
++    """Release each mixed-precision main shard's storage during construction.
++
++    An external backend must initialize the shards before use.
++    """
++
+     ################
+     # Miscellaneous
+     ################

@@ -8,8 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from vime.observability.metric_utils import compute_rollout_step
 from vime.utils.dp_schedule import build_dp_schedule
-
 
 NUM_GPUS = 0
 
@@ -36,6 +36,8 @@ def make_args(
         num_experts=None,
         num_layers=2,
         kv_channels=8,
+        variable_global_batch_size=False,
+        global_batch_size_schedule=None,
     )
 
 
@@ -320,6 +322,83 @@ def test_rejects_when_fewer_rollouts_than_gbs():
     tp = make_tp(dp_size=1)
     with pytest.raises(AssertionError, match="num_rollouts"):
         build_dp_schedule(args, tp, [3] * 6, global_batch_size=4, rollout_indices=[0, 0, 1, 1, 2, 2])
+
+
+@pytest.mark.unit
+def test_variable_global_batch_keeps_final_partial_group():
+    rollout_indices = list(range(6))
+    args = make_args(use_dynamic_batch_size=False, micro_batch_size=1)
+    args.variable_global_batch_size = True
+    partitions, mbi, nmb, gbs_per_step = build_dp_schedule(
+        args, make_tp(dp_size=2), [3] * 6, global_batch_size=4, rollout_indices=rollout_indices
+    )
+    assert gbs_per_step == [4, 2]
+    assert nmb == [2, 1]
+    assert_invariants(
+        partitions,
+        mbi,
+        nmb,
+        dp_size=2,
+        expected_global_sample_indices=range(6),
+        total_lengths=[3] * 6,
+    )
+
+
+@pytest.mark.unit
+def test_explicit_global_batch_schedule():
+    rollout_indices = list(range(6))
+    args = make_args(use_dynamic_batch_size=False, micro_batch_size=1)
+    args.global_batch_size_schedule = [2, 4]
+    partitions, mbi, nmb, gbs_per_step = build_dp_schedule(
+        args, make_tp(dp_size=2), [3] * 6, global_batch_size=4, rollout_indices=rollout_indices
+    )
+    assert gbs_per_step == [2, 4]
+    assert nmb == [1, 2]
+
+
+@pytest.mark.unit
+def test_explicit_schedule_counts_actual_rollout_groups():
+    rollout_indices = [rid for rid in range(6) for _ in range(2)]
+    args = make_args(use_dynamic_batch_size=False, micro_batch_size=1)
+    args.global_batch_size_schedule = [2, 4]
+
+    partitions, mbi, nmb, gbs_per_step = build_dp_schedule(
+        args, make_tp(dp_size=2), [3] * 12, global_batch_size=2, rollout_indices=rollout_indices
+    )
+    assert gbs_per_step == [2, 4]
+    assert_invariants(
+        partitions, mbi, nmb, dp_size=2, expected_global_sample_indices=range(12), total_lengths=[3] * 12
+    )
+
+    args.global_batch_size_schedule = [2, 3]
+    with pytest.raises(AssertionError, match="cover all rollout groups"):
+        build_dp_schedule(args, make_tp(dp_size=2), [3] * 12, global_batch_size=2, rollout_indices=rollout_indices)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "schedule,variable,rollout_batch_size,global_batch_size,expected",
+    [
+        (None, False, 8, 4, 16),
+        (None, False, 5, 4, 8),
+        (None, True, 5, 4, 10),
+        ([2, 4], True, 6, 2, 12),
+        ([1, 1, 1], True, 2, 1, 6),
+    ],
+)
+def test_rollout_metric_step(schedule, variable, rollout_batch_size, global_batch_size, expected):
+    args = SimpleNamespace(
+        wandb_always_use_train_step=True,
+        global_batch_size_schedule=schedule,
+        variable_global_batch_size=variable,
+        rollout_batch_size=rollout_batch_size,
+        n_samples_per_prompt=1,
+        global_batch_size=global_batch_size,
+    )
+
+    assert compute_rollout_step(args, 2) == expected
+    args.wandb_always_use_train_step = False
+    assert compute_rollout_step(args, 2) == 2
 
 
 if __name__ == "__main__":

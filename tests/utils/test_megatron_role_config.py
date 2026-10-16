@@ -102,6 +102,28 @@ class TestMegatronRoleConfig:
         assert critic_args.use_opd is False
 
     @pytest.mark.parametrize(
+        "role,key,value",
+        [
+            ("actor", "global_batch_size_schedule", [3, 5]),
+            ("actor", "global_batch_size_schedule", "3,5"),
+            ("critic", "global_batch_size", 3),
+            ("actor", "variable_global_batch_size", False),
+            ("actor", "rollout_batch_size", 5),
+            ("critic", "n_samples_per_prompt", 2),
+            ("actor", "num_rollout", 10),
+        ],
+    )
+    def test_role_batch_overrides_must_be_shared(self, role, key, value):
+        from vime.utils.arguments import parse_megatron_role_args
+
+        path = _write_yaml({"megatron": [{"role": role, "overrides": {key: value}}]})
+        args = _base_args(global_batch_size=8, global_batch_size_schedule=[8])
+
+        with pytest.raises(ValueError, match=f"{role} config cannot override '{key}'"):
+            parse_megatron_role_args(args, path, role=role)
+        assert args.global_batch_size_schedule == [8]
+
+    @pytest.mark.parametrize(
         "config",
         [
             {"critic": [{"name": "default", "overrides": {"lr": "1e-5"}}]},

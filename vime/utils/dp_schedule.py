@@ -132,22 +132,37 @@ def build_dp_schedule(
         rollout_id_to_samples.setdefault(rid, []).append(sample_pos)
     rollout_ids = list(rollout_id_to_samples.keys())
 
-    num_steps = len(rollout_ids) // global_batch_size
-    assert num_steps >= 1, (
-        f"num_rollouts ({len(rollout_ids)}) < global_batch_size ({global_batch_size}); "
-        f"need at least one rollout per step."
-    )
+    explicit_sizes = getattr(args, "global_batch_size_schedule", None)
+    if explicit_sizes is not None:
+        step_sizes = list(explicit_sizes)
+        assert sum(step_sizes) == len(rollout_ids), "global batch schedule must cover all rollout groups"
+    elif getattr(args, "variable_global_batch_size", False):
+        full_steps, remainder = divmod(len(rollout_ids), global_batch_size)
+        step_sizes = [global_batch_size] * full_steps
+        if remainder:
+            step_sizes.append(remainder)
+    else:
+        step_sizes = [global_batch_size] * (len(rollout_ids) // global_batch_size)
+
+    if not step_sizes:
+        raise AssertionError(
+            f"num_rollouts ({len(rollout_ids)}) < global_batch_size ({global_batch_size}); "
+            f"need at least one rollout per step."
+        )
+    assert all(step_size > 0 for step_size in step_sizes), "global batch sizes must be positive"
 
     partitions: list[list[int]] = [[] for _ in range(dp_size)]
     micro_batch_indices: list[list[list[int]]] = [[] for _ in range(dp_size)]
     num_microbatches: list[int] = []
     global_batch_sizes: list[int] = []
 
-    for step_i in range(num_steps):
-        step_rollouts = rollout_ids[step_i * global_batch_size : (step_i + 1) * global_batch_size]
+    rollout_cursor = 0
+    for step_i, step_global_batch_size in enumerate(step_sizes):
+        step_rollouts = rollout_ids[rollout_cursor : rollout_cursor + step_global_batch_size]
+        rollout_cursor += step_global_batch_size
         sample_indices = [pos for rid in step_rollouts for pos in rollout_id_to_samples[rid]]
         step_lengths = [total_lengths[i] for i in sample_indices]
-        global_batch_sizes.append(global_batch_size)
+        global_batch_sizes.append(step_global_batch_size)
         assert len(sample_indices) >= dp_size, (
             f"step {step_i}: {len(sample_indices)} samples < dp_size {dp_size}; "
             f"each step needs at least one sample per rank."

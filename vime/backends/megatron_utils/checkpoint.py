@@ -95,6 +95,46 @@ logger = logging.getLogger(__name__)
 __all__ = ["save_checkpoint"]
 
 
+def _nvme_stores(optimizer):
+    if optimizer is None:
+        return []
+    stores = []
+    for item in getattr(optimizer, "chained_optimizers", [optimizer]):
+        store = getattr(item, "_nvme_state_store", None)
+        if store is not None:
+            stores.append(store)
+    return stores
+
+
+def _checkpoint_base(path, iteration):
+    if path is None or iteration is None or iteration < 0:
+        return None
+    path = str(path)
+    if Path(path).name == f"iter_{iteration:07d}":
+        return path
+    try:
+        from megatron.training.checkpointing import get_checkpoint_name
+
+        return get_checkpoint_name(path, iteration, release=False, return_base_dir=True)
+    except (ImportError, TypeError):
+        return os.path.join(path, f"iter_{iteration:07d}")
+
+
+def _should_load_nvme_optimizer(args, load_path):
+    if getattr(args, "no_load_optim", False) or getattr(args, "finetune", False):
+        return False
+    # Megatron also skips optimizer state for a release checkpoint. Its returned
+    # iteration is zero, which alone cannot distinguish release from a valid
+    # iteration-zero training checkpoint.
+    load_path = Path(load_path)
+    # A direct release-directory load has no tracker file inside that
+    # directory. Treat it like Megatron's release checkpoint path explicitly.
+    if load_path.name == "release":
+        return False
+    tracker = load_path / "latest_checkpointed_iteration.txt"
+    return not (tracker.is_file() and tracker.read_text().strip() == "release")
+
+
 @contextmanager
 def _stage_async_save_on_cpu():
     from megatron.core.dist_checkpointing.strategies.filesystem_async import FileSystemWriterAsync
@@ -117,11 +157,45 @@ def _stage_async_save_on_cpu():
         FileSystemWriterAsync.get_save_function_and_args = get_save_function_and_args
 
 
-def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, **kwargs):
+def save_checkpoint(
+    iteration,
+    model,
+    optimizer,
+    opt_param_scheduler,
+    num_floating_point_operations_so_far=0,
+    checkpointing_context=None,
+    train_data_iterator=None,
+    preprocess_common_state_dict_fn=None,
+    **kwargs,
+):
     args = get_args()
-    stage_on_cpu = args.async_save and args.offload_train and getattr(args, "async_strategy", "mcore") == "mcore"
+    stores = _nvme_stores(optimizer)
+    # Megatron writes latest_checkpointed_iteration.txt inside this call.  Persist the
+    # streamed state first so that a published tracker can never point at an incomplete
+    # NVMe optimizer checkpoint.
+    if stores and not getattr(args, "no_save_optim", False):
+        base = _checkpoint_base(getattr(args, "save", None), iteration)
+        if base is None:
+            raise ValueError("NVMe optimizer streaming requires --save for optimizer checkpoints")
+        for store in stores:
+            store.save_to(base)
+    stage_on_cpu = (
+        getattr(args, "async_save", False)
+        and getattr(args, "offload_train", False)
+        and getattr(args, "async_strategy", "mcore") == "mcore"
+    )
     with _stage_async_save_on_cpu() if stage_on_cpu else nullcontext():
-        _save_checkpoint_megatron(iteration, model, optimizer, opt_param_scheduler, **kwargs)
+        result = _save_checkpoint_megatron(
+            iteration,
+            model,
+            optimizer,
+            opt_param_scheduler,
+            num_floating_point_operations_so_far=num_floating_point_operations_so_far,
+            checkpointing_context=checkpointing_context,
+            train_data_iterator=train_data_iterator,
+            preprocess_common_state_dict_fn=preprocess_common_state_dict_fn,
+            **kwargs,
+        )
     if getattr(args, "use_stateless_adam", False) and opt_param_scheduler is not None and dist.get_rank() == 0:
         # Megatron omits the scheduler together with --no-save-optim. Stateless
         # Adam needs no moments, but LR/WD progress must share the model's commit
@@ -131,6 +205,7 @@ def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, **kwargs):
         temporary = path.with_suffix(".tmp")
         torch.save(opt_param_scheduler.state_dict(), temporary)
         temporary.replace(path)
+    return result
 
 
 def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_context):
@@ -168,6 +243,20 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_con
             opt_param_scheduler.load_state_dict(
                 torch.load(checkpoint / "opt_param_scheduler.pt", map_location="cpu", weights_only=True)
             )
+        stores = _nvme_stores(optimizer)
+        # Respect Megatron's model-only loading modes, even when an old NVMe
+        # directory happens to exist beside the checkpoint.
+        if stores and result[0] is not None and _should_load_nvme_optimizer(args, load_path):
+            base = _checkpoint_base(load_path, result[0])
+            loaded = [store.load_from(base) for store in stores]
+            # Only stores with checkpoint data may overwrite the model buffer. A
+            # store returning False is intentionally starting fresh and its main
+            # storage is not initialized from this checkpoint.
+            for store, did_load in zip(stores, loaded, strict=True):
+                if did_load:
+                    # The model shard has already been restored by Megatron. Restore
+                    # checkpointed FP32 mains directly so their extra precision survives.
+                    store.restore_main_to_model_params()
         return result
     else:
         return _load_checkpoint_hf(

@@ -639,10 +639,21 @@ index 5b31ddedf..ead60f2dd 100644
                  )
                  if self.fuse_linear_cross_entropy:
 diff --git a/megatron/core/optimizer/distrib_optimizer.py b/megatron/core/optimizer/distrib_optimizer.py
-index a4364f5e9..c76f6daac 100644
+index a4364f5e9..9f034e9a28 100644
 --- a/megatron/core/optimizer/distrib_optimizer.py
 +++ b/megatron/core/optimizer/distrib_optimizer.py
-@@ -686,6 +686,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+@@ -396,5 +396,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+                                 shard_main_param = model_param.float().view(-1)[
+                                     param_range.start : param_range.end
+                                 ]
++                        elif config.defer_main_param_initialization:
++                            shard_main_param = torch.empty_like(
++                                shard_model_param, dtype=torch.float32
++                            )
++                            shard_main_param.untyped_storage().resize_(0)
+                         else:
+                             shard_main_param = shard_model_param.clone().float()
+@@ -686,6 +691,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                  # TE FusedAdam will not accumulate step for empty param groups, so we need to
                  # align the step across param groups.
                  param_group["step"] = int(step)
@@ -651,7 +662,7 @@ index a4364f5e9..c76f6daac 100644
 
          # Grad scaler state.
          if self.grad_scaler:
-@@ -969,7 +971,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+@@ -969,7 +976,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                  for bucket_idx, gbuf_range_map in enumerate(gbuf_range_map_for_all_buckets):
                      bucket_state = []
                      for model_param, param_range_map in gbuf_range_map["param_map"].items():
@@ -664,7 +675,7 @@ index a4364f5e9..c76f6daac 100644
                          tensors.update(
                              {
                                  "gbuf_local_start": param_range_map["gbuf_local"].start,
-@@ -1667,6 +1669,11 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+@@ -1667,6 +1674,11 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                              if key == 'padding':
                                  tensors[key] = LocalNonpersistentObject(tensors[key])
                                  continue
@@ -676,7 +687,7 @@ index a4364f5e9..c76f6daac 100644
                              assert tensors[key].shape == (gbuf_local_end - gbuf_local_start,), (
                                  tensors[key].shape,
                                  gbuf_local_start,
-@@ -1808,6 +1815,11 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+@@ -1808,6 +1820,11 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                      for src_tensors, (model_param, param_range_map) in zip(
                          bucket_state, gbuf_range_map["param_map"].items()
                      ):
@@ -688,6 +699,20 @@ index a4364f5e9..c76f6daac 100644
                          # Main param & optimizer states.
                          self._set_main_param_and_optimizer_states(model_param, src_tensors)
 
+diff --git a/megatron/core/optimizer/optimizer_config.py b/megatron/core/optimizer/optimizer_config.py
+index 9416310..aea8f994e2 100644
+--- a/megatron/core/optimizer/optimizer_config.py
++++ b/megatron/core/optimizer/optimizer_config.py
+@@ -333,3 +333,9 @@ class OptimizerConfig:
++    defer_main_param_initialization: bool = False
++    """Release FP32 main-shard storage during construction.
++
++    An external backend must initialize the shards before use.
++    """
++
+     ################
+     # Miscellaneous
+     ################
 diff --git a/megatron/core/parallel_state.py b/megatron/core/parallel_state.py
 index 7bb964078..2fe9a8cdc 100644
 --- a/megatron/core/parallel_state.py

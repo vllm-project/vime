@@ -12,4 +12,5 @@
    ../advanced/reproducibility.md
    ../advanced/on-policy-distillation.md
    ../advanced/megatron-config.md
+   ../advanced/nvme-optimizer.md
    ../advanced/arch-support-beyond-megatron.md
