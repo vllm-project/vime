@@ -13,7 +13,7 @@
 # limitations under the License.
 """Fixed Qwen3-MoE TP2/PP2/EP2 sparse HCCL regression (ETP1).
 
-pytest runs loader, dtype, NaN, checksum and failure-state checks, then launches
+pytest runs public loader, dtype, NaN and failure-state checks, then launches
 four workers for real HCCL gather and one sparse/full weight comparison.
 The distributed test requires four visible NPUs, CANN and Megatron-Bridge;
 without four available NPUs, pytest reports it as skipped.
@@ -36,10 +36,9 @@ import torch.multiprocessing as mp
 
 # Keep spawned workers on the checkout under test, not another editable installation.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from vllm_ascend.distributed.weight_transfer.sparse_hccl_engine import _verify_dense_load
-from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import (
-    SparseWeightPatch,
-    apply_sparse_hf_patches_with_loader,
+from vllm.model_executor.model_loader.checkpoint_weight_patch import (
+    CheckpointWeightPatch,
+    load_checkpoint_weight_patches,
 )
 
 import vime.backends.megatron_utils  # noqa: F401 - Bootstrap NPU before importing Megatron.
@@ -117,9 +116,7 @@ def _compare_sparse_with_full_weights(model, cfg_dir, rank):
     assert {record.dtype for record in index} == {torch.bfloat16, torch.float32}
 
     def export():
-        return {
-            name: weight.detach().cpu().clone() for chunk in iterator.get_hf_weight_chunks() for name, weight in chunk
-        }
+        return {name: weight.detach().cpu().clone() for chunk in iterator.get_hf_weight_chunks() for name, weight in chunk}
 
     accumulated = export()
     snapshots = {}
@@ -202,9 +199,7 @@ class _TPShardModel(torch.nn.Module):
     def __init__(self, rank):
         super().__init__()
         self.rank = rank
-        self.weight = torch.nn.Parameter(
-            torch.arange(8, dtype=torch.bfloat16).reshape(4, 2)[rank * 2 : rank * 2 + 2].clone()
-        )
+        self.weight = torch.nn.Parameter(torch.arange(8, dtype=torch.bfloat16).reshape(4, 2)[rank * 2 : rank * 2 + 2].clone())
 
     def load_weights(self, weights):
         for name, weight in dict(weights).items():
@@ -215,7 +210,7 @@ class _TPShardModel(torch.nn.Module):
 @pytest.fixture
 def updater(monkeypatch):
     instance = updater_module.UpdateWeightFromSparseHCCL.__new__(updater_module.UpdateWeightFromSparseHCCL)
-    instance.args = SimpleNamespace(update_weight_delta_verify_every=2)
+    instance.args = SimpleNamespace(update_weight_delta_verify_every=0)
     instance._client = object()
     instance._failed = False
     instance._seeded = True
@@ -246,10 +241,7 @@ def _run_gather_regression():
     ]
     for dtype in (torch.float32, torch.bfloat16):
         for counts in cases:
-            pieces = [
-                [torch.arange(size, dtype=torch.int32) + r * 100 + slot * 10 for slot, size in enumerate(row)]
-                for r, row in enumerate(counts)
-            ]
+            pieces = [[torch.arange(size, dtype=torch.int32) + r * 100 + slot * 10 for slot, size in enumerate(row)] for r, row in enumerate(counts)]
             indices = torch.cat(pieces[rank]).npu()
             values = torch.cat([piece.float().to(dtype) for piece in pieces[rank]]).npu()
             # Cover noncontiguous caller buffers as well as empty participants.
@@ -281,9 +273,7 @@ def _run_gather_regression():
 
 def _distributed_worker(rank, port, cfg_dir):
     """Initialize one rank and guarantee cleanup for success or failed assertions."""
-    os.environ.update(
-        RANK=str(rank), LOCAL_RANK=str(rank), WORLD_SIZE=str(TP * PP), MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port)
-    )
+    os.environ.update(RANK=str(rank), LOCAL_RANK=str(rank), WORLD_SIZE=str(TP * PP), MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
     torch.npu.set_device(rank)
     store = dist.TCPStore("127.0.0.1", port, is_master=False, timeout=timedelta(seconds=120))
     dist.init_process_group("hccl", store=store, rank=rank, world_size=TP * PP, timeout=timedelta(seconds=120))
@@ -329,25 +319,28 @@ def test_loader_preserves_full_state_across_split_updates(rank):
         indices = torch.tensor([round_id, 7 - round_id], dtype=torch.int32)
         values = torch.tensor([20 + round_id, 40 + round_id], dtype=torch.bfloat16)
         # Same HF name appears in two wire pieces. Both must be applied.
-        patches = [(SparseWeightPatch("weight", indices[i : i + 1], values[i : i + 1]), [4, 2]) for i in range(2)]
-        apply_sparse_hf_patches_with_loader(model, patches, chunk_bytes=16)
+        patches = [
+            CheckpointWeightPatch(
+                name="weight",
+                shape=(4, 2),
+                dtype=values.dtype,
+                indices=indices[i : i + 1],
+                values=values[i : i + 1],
+            )
+            for i in range(2)
+        ]
+        load_checkpoint_weight_patches(model, patches)
         expected.view(-1).index_copy_(0, indices.long(), values)
         assert torch.equal(model.weight.view(torch.int16), expected[rank * 2 : rank * 2 + 2].view(torch.int16))
-        _verify_dense_load(model, [("weight", expected)])
-    apply_sparse_hf_patches_with_loader(model, [])
-    missing = expected.clone()
-    missing[rank * 2, 0] += 1
-    with pytest.raises(RuntimeError, match="state verification failed"):
-        _verify_dense_load(model, [("weight", missing)])
+    load_checkpoint_weight_patches(model, [])
 
 
 def test_bad_wire_bounds_fail_before_mutation():
-    """Reject an out-of-bounds patch before any rank-local weight is changed."""
     model = _TPShardModel(0)
     before = model.weight.detach().clone()
-    patches = [(SparseWeightPatch("weight", torch.tensor([8], dtype=torch.int32), torch.ones(1)), [4, 2])]
-    with pytest.raises(IndexError):
-        apply_sparse_hf_patches_with_loader(model, patches)
+    patches = [CheckpointWeightPatch(name="weight", shape=(4, 2), dtype=torch.float32, indices=torch.tensor([8], dtype=torch.int32), values=torch.ones(1))]
+    with pytest.raises((IndexError, ValueError)):
+        load_checkpoint_weight_patches(model, patches)
     assert torch.equal(model.weight, before)
 
 
@@ -489,23 +482,18 @@ def test_empty_hccl_peer_does_not_enqueue_p2p(monkeypatch):
 
 
 @pytest.mark.unit
-def test_verify_schedule_checks_sparse_writes_without_dense_replay(updater):
-    """Honor the local verify interval without introducing a full-weight replay."""
-    verification = []
+def test_native_sparse_updates_do_not_replay_dense_seed(updater):
     finishes = []
-    updater._send_sparse_delta = lambda *, verify: (verification.append(verify) or (1, 24, 4))
-    updater._send_dense = lambda **kwargs: pytest.fail("steady verification must not replay dense weights")
+    updater._send_sparse_delta = lambda: (1, 24, 4)
+    updater._send_dense = lambda: pytest.fail("steady updates must not replay seed")
     updater._finish_update = lambda: finishes.append(updater.weight_version)
     for _ in range(3):
         updater.update_weights()
-    assert verification == [False, True, False]
     assert finishes == [2, 3, 4]
     assert updater._steady_updates == 3
 
 
-@pytest.mark.parametrize(
-    "local_nan,remote_nan,seeded", [(False, False, True), (True, False, False), (False, True, True)]
-)
+@pytest.mark.parametrize("local_nan,remote_nan,seeded", [(False, False, True), (True, False, False), (False, True, True)])
 def test_nan_guard_precedes_payload_and_snapshots(updater, monkeypatch, local_nan, remote_nan, seeded):
     """Exercise the real NaN guard with mocked reduction; fail before seed/delta writes."""
     updater._seeded = seeded
@@ -546,7 +534,7 @@ def test_update_failure_preserves_safe_state(updater, phase):
     def fail():
         raise RuntimeError(f"{phase} failed")
 
-    def send(*, verify):
+    def send():
         if phase == "payload":
             updater._payload_started = True
             fail()
@@ -555,9 +543,7 @@ def test_update_failure_preserves_safe_state(updater, phase):
     updater._send_sparse_delta = send
     updater._ensure_export_index = fail if phase == "prepare" else lambda: None
     updater._recover_before_payload = lambda: recovered.append(True)
-    updater._finish_update = (
-        fail if phase == "finish" else lambda: pytest.fail("failed update must not resume generation")
-    )
+    updater._finish_update = fail if phase == "finish" else lambda: pytest.fail("failed update must not resume generation")
     with pytest.raises(RuntimeError, match=f"{phase} failed"):
         updater.update_weights()
     assert recovered == ([True] if phase == "prepare" else [])

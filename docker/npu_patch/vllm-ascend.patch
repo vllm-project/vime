@@ -1,8 +1,49 @@
+diff --git a/vllm_ascend/device/device_op.py b/vllm_ascend/device/device_op.py
+index 7205dd172..f49be979b 100644
+--- a/vllm_ascend/device/device_op.py
++++ b/vllm_ascend/device/device_op.py
+@@ -40,12 +40,14 @@ else:
+ class BaseDeviceAdaptor:
+     @classmethod
+     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
++        if key.numel() == 0:
++            return
+         torch_npu.npu_scatter_pa_kv_cache(
+             key=key.contiguous(),
+             value=value.contiguous(),
+             key_cache=key_cache,
+             value_cache=value_cache,
+-            slot_mapping=slot_mapping.contiguous(),
++            slot_mapping=slot_mapping.to(dtype=torch.int32).contiguous(),
+             cache_mode="Norm",
+         )
+ 
+diff --git a/vllm_ascend/distributed/device_communicators/pyhccl.py b/vllm_ascend/distributed/device_communicators/pyhccl.py
+index 44d1b12fc..286a85394 100644
+--- a/vllm_ascend/distributed/device_communicators/pyhccl.py
++++ b/vllm_ascend/distributed/device_communicators/pyhccl.py
+@@ -127,6 +127,16 @@ class PyHcclCommunicator:
+             stream.synchronize()
+             del data
+ 
++    def close(self) -> None:
++        """Destroy the native communicator at most once."""
++        if not self.available:
++            return
++        self.available = False
++        with torch.npu.device(self.device):
++            # Collectives may have been submitted on an explicit stream.
++            torch.npu.synchronize(self.device)
++            self.hccl.hcclCommDestroy(self.comm)
++
+     def all_reduce(self, in_tensor: torch.Tensor, op: ReduceOp = ReduceOp.SUM, stream=None) -> torch.Tensor:
+         if self.disabled:
+             return None
 diff --git a/vllm_ascend/distributed/weight_transfer/__init__.py b/vllm_ascend/distributed/weight_transfer/__init__.py
-index d6434f05f..fd7223836 100644
+index d6434f05f..f73f913c1 100644
 --- a/vllm_ascend/distributed/weight_transfer/__init__.py
 +++ b/vllm_ascend/distributed/weight_transfer/__init__.py
-@@ -33,6 +33,16 @@ def register_engine():
+@@ -33,6 +33,21 @@ def register_engine():
          "vllm_ascend.distributed.weight_transfer.npu_ipc_engine",
          "NPUIPCWeightTransferEngine",
      )
@@ -10,6 +51,11 @@ index d6434f05f..fd7223836 100644
 +        "sparse_hccl",
 +        "vllm_ascend.distributed.weight_transfer.sparse_hccl_engine",
 +        "SparseHCCLWeightTransferEngine",
++    )
++    WeightTransferTrainerFactory.register_engine(
++        "sparse_hccl",
++        "vllm_ascend.distributed.weight_transfer.sparse_hccl_engine",
++        "SparseHCCLTrainerWeightTransferEngine",
 +    )
 +    WeightTransferTrainerFactory.register_engine(
 +        "hccl",
@@ -20,7 +66,7 @@ index d6434f05f..fd7223836 100644
          "npu_ipc",
          "vllm_ascend.distributed.weight_transfer.npu_ipc_engine",
 diff --git a/vllm_ascend/distributed/weight_transfer/hccl_engine.py b/vllm_ascend/distributed/weight_transfer/hccl_engine.py
-index 023ffd1ae..7b184e279 100644
+index 023ffd1ae..7be6edbc2 100644
 --- a/vllm_ascend/distributed/weight_transfer/hccl_engine.py
 +++ b/vllm_ascend/distributed/weight_transfer/hccl_engine.py
 @@ -3,8 +3,9 @@
@@ -296,6 +342,132 @@ index a35d9af8d..d55c988c3 100644
          yield {
              "names": names,
              "shapes": shapes,
+diff --git a/vllm_ascend/ops/causal_conv1d.py b/vllm_ascend/ops/causal_conv1d.py
+index bcfd117ec..ef8b151de 100644
+--- a/vllm_ascend/ops/causal_conv1d.py
++++ b/vllm_ascend/ops/causal_conv1d.py
+@@ -35,11 +35,14 @@ def causal_conv1d_ref(
+     seqlen = x.shape[-1]
+     dim, width = weight.shape
+ 
++    # F.conv1d performs cross-correlation; flip the kernel to get true
++    # causal convolution matching fla.ShortConvolution semantics.
++    flipped_weight = weight.flip(-1).unsqueeze(1)
+     if initial_states is None:
+-        out = F.conv1d(x, weight.unsqueeze(1), bias, padding=width - 1, groups=dim)
++        out = F.conv1d(x, flipped_weight, bias, padding=width - 1, groups=dim)
+     else:
+         x = torch.cat([initial_states, x], dim=-1)
+-        out = F.conv1d(x, weight.unsqueeze(1), bias, padding=0, groups=dim)
++        out = F.conv1d(x, flipped_weight, bias, padding=0, groups=dim)
+     out = out[..., :seqlen]
+ 
+     if return_final_states:
+diff --git a/vllm_ascend/ops/fused_moe/routed_experts.py b/vllm_ascend/ops/fused_moe/routed_experts.py
+index c328def60..a39926cb1 100644
+--- a/vllm_ascend/ops/fused_moe/routed_experts.py
++++ b/vllm_ascend/ops/fused_moe/routed_experts.py
+@@ -15,6 +15,7 @@
+ # limitations under the License.
+ #
+ from collections.abc import Iterable
++from contextlib import contextmanager
+ from copy import copy
+ from types import SimpleNamespace
+ 
+@@ -87,6 +88,34 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
+     def supports_fused_activation(self, activation) -> bool:
+         return False
+ 
++    @staticmethod
++    def validate_checkpoint_weight_loader_view(layer):
++        parameters = [getattr(layer, name, None) for name in ("w13_weight", "w2_weight")]
++        if any(parameter is None for parameter in parameters):
++            raise NotImplementedError("Checkpoint sparse updates require unsplit ND expert weights")
++        if any(torch_npu.get_npu_format(parameter) not in (0, 2) for parameter in parameters):
++            raise NotImplementedError("Checkpoint sparse updates require ND expert weights")
++
++    @contextmanager
++    def checkpoint_weight_loader_view(self, layer):
++        """Temporarily undo the inference transpose without replacing storage.
++
++        The upstream expert loader expects [expert, output, input], whereas
++        Ascend GMM consumes [expert, input, output]. Restoring the original
++        views in finally also preserves graph addresses and parameter loaders.
++        Split expert lists and NZ tensors need a different update mechanism.
++        """
++        self.validate_checkpoint_weight_loader_view(layer)
++        parameters = [layer.w13_weight, layer.w2_weight]
++        originals = [parameter.data for parameter in parameters]
++        try:
++            for parameter, original in zip(parameters, originals):
++                parameter.data = original.transpose(1, 2)
++            yield
++        finally:
++            for parameter, original in zip(parameters, originals):
++                parameter.data = original
++
+     def process_weights_after_loading(self, layer):
+         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
+ 
+diff --git a/vllm_ascend/ops/triton/v2/block_table/compute_slot_mappings.py b/vllm_ascend/ops/triton/v2/block_table/compute_slot_mappings.py
+index a9841741a..b73302ed9 100644
+--- a/vllm_ascend/ops/triton/v2/block_table/compute_slot_mappings.py
++++ b/vllm_ascend/ops/triton/v2/block_table/compute_slot_mappings.py
+@@ -14,6 +14,7 @@ def _compute_slot_mappings_kernel(
+     block_table_ptrs,
+     block_table_strides,
+     block_sizes,
++    kernel_block_sizes,
+     slot_mappings_ptr,
+     slot_mappings_stride,
+     cp_rank,
+@@ -37,6 +38,7 @@ def _compute_slot_mappings_kernel(
+     block_table_ptr = _load_ptr(block_table_ptrs + group_id, tl.int32)
+     block_table_stride = tl.load(block_table_strides + group_id)
+     block_size = tl.load(block_sizes + group_id)
++    kernel_block_size = tl.load(kernel_block_sizes + group_id)
+     req_state_idx = tl.load(idx_mapping + batch_idx)
+     start_idx = tl.load(query_start_loc + batch_idx)
+     end_idx = tl.load(query_start_loc + batch_idx + 1)
+@@ -55,20 +57,20 @@ def _compute_slot_mappings_kernel(
+         offset = i + lane_offsets
+         valid = offset < end_idx
+         positions = tl.load(pos + offset, mask=valid, other=0).to(tl.int32)
+-        block_indices = positions // (block_size * CP_SIZE)
+-        # block_offset = positions % (block_size * CP_SIZE). Replacing the
++        block_indices = positions // (kernel_block_size * CP_SIZE)
++        # block_offset = positions % (kernel_block_size * CP_SIZE). Replacing the
+         # remainder with multiply/subtract avoids scalar fallback on Ascend.
+-        block_offsets = positions - (block_size * CP_SIZE) * block_indices
++        block_offsets = positions - (kernel_block_size * CP_SIZE) * block_indices
+         block_numbers = tl.gather(block_table_values, block_indices, 0).to(tl.int32)
+ 
+         if CP_SIZE == 1:
+-            slot_ids = block_numbers * block_size + block_offsets
++            slot_ids = block_numbers * kernel_block_size + block_offsets
+         else:
+             is_local = block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
+             rounds = block_offsets // (CP_INTERLEAVE * CP_SIZE)
+             remainder = block_offsets % CP_INTERLEAVE
+             local_offsets = rounds * CP_INTERLEAVE + remainder
+-            slot_ids = block_numbers * block_size + local_offsets
++            slot_ids = block_numbers * kernel_block_size + local_offsets
+             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
+ 
+         tl.store(slot_mapping_ptr + offset, slot_ids, mask=valid)
+diff --git a/vllm_ascend/worker/v2/block_table.py b/vllm_ascend/worker/v2/block_table.py
+index dd559f33b..2e7ece11a 100644
+--- a/vllm_ascend/worker/v2/block_table.py
++++ b/vllm_ascend/worker/v2/block_table.py
+@@ -92,6 +92,7 @@ class AscendBlockTables(BlockTables):
+             self.block_table_ptrs,
+             self.block_table_strides,
+             self.block_sizes_tensor,
++            self.kernel_block_sizes_tensor,
+             slot_mappings,
+             slot_mappings.stride(0),
+             self.cp_rank,
 diff --git a/vllm_ascend/worker/v2/model_runner.py b/vllm_ascend/worker/v2/model_runner.py
 index c388619f2..38a7d2fb7 100644
 --- a/vllm_ascend/worker/v2/model_runner.py
@@ -326,11 +498,11 @@ index c388619f2..38a7d2fb7 100644
                  assert isinstance(self.pcp_manager, AscendPCPManager)
                  self.pcp_manager.vllm_config = self.vllm_config
 diff --git a/vllm_ascend/worker/worker.py b/vllm_ascend/worker/worker.py
-index 6d99ac76a..b7df4df22 100644
+index 6d99ac76a..b8b9cfbb1 100644
 --- a/vllm_ascend/worker/worker.py
 +++ b/vllm_ascend/worker/worker.py
 @@ -321,7 +321,48 @@ class NPUWorker(WorkerBase):
-
+ 
      def start_weight_update(self) -> None:
          """Begin a new weight update; prepares the model for layerwise reload."""
 +        with set_current_vllm_config(self.vllm_config):
@@ -375,13 +547,13 @@ index 6d99ac76a..b7df4df22 100644
 +            raise RuntimeError(
 +                f"{type(self.weight_transfer_engine).__name__} does not support draft model weight updates."
 +            )
-
+ 
          if self._weight_update_active:
              raise RuntimeError(
 @@ -330,11 +371,16 @@ class NPUWorker(WorkerBase):
-
+ 
          self._check_nz_disabled()
-
+ 
 -        assert self.weight_transfer_engine is not None
 -        self.weight_transfer_engine.start_weight_update()
 +        try:
@@ -392,7 +564,7 @@ index 6d99ac76a..b7df4df22 100644
 +            self.weight_transfer_engine.reset_weight_update_target()
 +            raise
          self._weight_update_active = True
-
+ 
 -    def update_weights(self, update_info: dict) -> None:
 +    def update_weights(self, update_info: dict | list[dict]) -> None:
          """Receive a chunk of weights from the trainer and load them in place."""
@@ -401,7 +573,7 @@ index 6d99ac76a..b7df4df22 100644
 @@ -343,11 +389,19 @@ class NPUWorker(WorkerBase):
          if not self._weight_update_active:
              raise RuntimeError("start_weight_update must be called before update_weights.")
-
+ 
 -        try:
 -            self.weight_transfer_engine.update_weights(update_info)
 -        except BaseException:
@@ -420,12 +592,12 @@ index 6d99ac76a..b7df4df22 100644
 +                self._weight_update_active = False
 +                self.weight_transfer_engine.reset_weight_update_target()
 +                raise
-
+ 
      def finish_weight_update(self) -> None:
          """Finish the current weight update; runs layerwise postprocessing."""
 @@ -357,8 +411,12 @@ class NPUWorker(WorkerBase):
              raise RuntimeError("start_weight_update must be called before finish_weight_update.")
-
+ 
          assert self.weight_transfer_engine is not None
 -        self.weight_transfer_engine.finish_weight_update()
 -        self._weight_update_active = False
@@ -435,7 +607,7 @@ index 6d99ac76a..b7df4df22 100644
 +            finally:
 +                self._weight_update_active = False
 +                self.weight_transfer_engine.reset_weight_update_target()
-
+ 
      def shutdown(self) -> None:
          if ensure_kv_transfer_shutdown is not None:
 @@ -448,7 +506,9 @@ class NPUWorker(WorkerBase):
@@ -451,7 +623,7 @@ index 6d99ac76a..b7df4df22 100644
                  f"Free memory on device "
 @@ -597,7 +657,9 @@ class NPUWorker(WorkerBase):
          self.non_torch_memory = profile_result.non_torch_increase
-
+ 
          free_gpu_memory = profile_result.after_profile.free_memory
 -        assert self.init_snapshot.free_memory > free_gpu_memory, (
 +        weight_transfer_config = self.vllm_config.weight_transfer_config
@@ -462,7 +634,7 @@ index 6d99ac76a..b7df4df22 100644
              f"current free memory {GiB(free_gpu_memory)} GiB. "
 @@ -1118,8 +1180,12 @@ class NPUWorker(WorkerBase):
              from contextlib import nullcontext
-
+ 
              context = nullcontext()  # type: ignore
 -        with context:
 -            self.model_runner.initialize_kv_cache(kv_cache_config)
@@ -472,1163 +644,13 @@ index 6d99ac76a..b7df4df22 100644
 +        else:
 +            with context:
 +                self.model_runner.initialize_kv_cache(kv_cache_config)
-
+ 
          # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
          # set, so its worker-side consumer must use the same condition. Keep the
-diff --git a/vllm_ascend/device/device_op.py b/vllm_ascend/device/device_op.py
-index 7205dd1..f49be97 100644
---- a/vllm_ascend/device/device_op.py
-+++ b/vllm_ascend/device/device_op.py
-@@ -40,12 +40,14 @@ else:
- class BaseDeviceAdaptor:
-     @classmethod
-     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
-+        if key.numel() == 0:
-+            return
-         torch_npu.npu_scatter_pa_kv_cache(
-             key=key.contiguous(),
-             value=value.contiguous(),
-             key_cache=key_cache,
-             value_cache=value_cache,
--            slot_mapping=slot_mapping.contiguous(),
-+            slot_mapping=slot_mapping.to(dtype=torch.int32).contiguous(),
-             cache_mode="Norm",
-         )
- 
-diff --git a/vllm_ascend/ops/causal_conv1d.py b/vllm_ascend/ops/causal_conv1d.py
-index bcfd117..ef8b151 100644
---- a/vllm_ascend/ops/causal_conv1d.py
-+++ b/vllm_ascend/ops/causal_conv1d.py
-@@ -35,11 +35,14 @@ def causal_conv1d_ref(
-     seqlen = x.shape[-1]
-     dim, width = weight.shape
- 
-+    # F.conv1d performs cross-correlation; flip the kernel to get true
-+    # causal convolution matching fla.ShortConvolution semantics.
-+    flipped_weight = weight.flip(-1).unsqueeze(1)
-     if initial_states is None:
--        out = F.conv1d(x, weight.unsqueeze(1), bias, padding=width - 1, groups=dim)
-+        out = F.conv1d(x, flipped_weight, bias, padding=width - 1, groups=dim)
-     else:
-         x = torch.cat([initial_states, x], dim=-1)
--        out = F.conv1d(x, weight.unsqueeze(1), bias, padding=0, groups=dim)
-+        out = F.conv1d(x, flipped_weight, bias, padding=0, groups=dim)
-     out = out[..., :seqlen]
- 
-     if return_final_states:
-diff --git a/vllm_ascend/ops/triton/v2/block_table/compute_slot_mappings.py b/vllm_ascend/ops/triton/v2/block_table/compute_slot_mappings.py
-index a984174..07a57ff 100644
---- a/vllm_ascend/ops/triton/v2/block_table/compute_slot_mappings.py
-+++ b/vllm_ascend/ops/triton/v2/block_table/compute_slot_mappings.py
-@@ -14,6 +14,7 @@ def _compute_slot_mappings_kernel(
-     block_table_ptrs,
-     block_table_strides,
-     block_sizes,
-+    kernel_block_sizes,
-     slot_mappings_ptr,
-     slot_mappings_stride,
-     cp_rank,
-@@ -37,6 +38,7 @@ def _compute_slot_mappings_kernel(
-     block_table_ptr = _load_ptr(block_table_ptrs + group_id, tl.int32)
-     block_table_stride = tl.load(block_table_strides + group_id)
-     block_size = tl.load(block_sizes + group_id)
-+    kernel_block_size = tl.load(kernel_block_sizes + group_id)
-     req_state_idx = tl.load(idx_mapping + batch_idx)
-     start_idx = tl.load(query_start_loc + batch_idx)
-     end_idx = tl.load(query_start_loc + batch_idx + 1)
-@@ -58,16 +60,16 @@ def _compute_slot_mappings_kernel(
-         positions = tl.load(pos + offset, mask=valid, other=0).to(tl.int32)
--        block_indices = positions // (block_size * CP_SIZE)
--        # block_offset = positions % (block_size * CP_SIZE). Replacing the
-+        block_indices = positions // (kernel_block_size * CP_SIZE)
-+        # block_offset = positions % (kernel_block_size * CP_SIZE). Replacing the
-         # remainder with multiply/subtract avoids scalar fallback on Ascend.
--        block_offsets = positions - (block_size * CP_SIZE) * block_indices
-+        block_offsets = positions - (kernel_block_size * CP_SIZE) * block_indices
-         block_numbers = tl.gather(block_table_values, block_indices, 0).to(tl.int32)
-
-         if CP_SIZE == 1:
--            slot_ids = block_numbers * block_size + block_offsets
-+            slot_ids = block_numbers * kernel_block_size + block_offsets
-         else:
-             is_local = block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
-             rounds = block_offsets // (CP_INTERLEAVE * CP_SIZE)
-             remainder = block_offsets % CP_INTERLEAVE
-             local_offsets = rounds * CP_INTERLEAVE + remainder
--            slot_ids = block_numbers * block_size + local_offsets
-+            slot_ids = block_numbers * kernel_block_size + local_offsets
-             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
- 
-         tl.store(slot_mapping_ptr + offset, slot_ids, mask=valid)
-diff --git a/vllm_ascend/worker/v2/block_table.py b/vllm_ascend/worker/v2/block_table.py
-index dd559f3..2e7ece1 100644
---- a/vllm_ascend/worker/v2/block_table.py
-+++ b/vllm_ascend/worker/v2/block_table.py
-@@ -92,6 +92,7 @@ class AscendBlockTables(BlockTables):
-             self.block_table_ptrs,
-             self.block_table_strides,
-             self.block_sizes_tensor,
-+            self.kernel_block_sizes_tensor,
-             slot_mappings,
-             slot_mappings.stride(0),
-             self.cp_rank,
-diff --git a/vllm_ascend/distributed/weight_transfer/sparse_hccl_engine.py b/vllm_ascend/distributed/weight_transfer/sparse_hccl_engine.py
-new file mode 100644
---- /dev/null
-+++ b/vllm_ascend/distributed/weight_transfer/sparse_hccl_engine.py
-@@ -0,0 +1,424 @@
-+# SPDX-License-Identifier: Apache-2.0
-+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-+"""Sparse HCCL weight transfer engine."""
-+
-+import logging
-+import re
-+from collections.abc import Iterator
-+from dataclasses import dataclass
-+from typing import TYPE_CHECKING, Any
-+
-+import torch
-+from vllm.config.weight_transfer import WeightTransferConfig
-+from vllm.distributed.weight_transfer.base import (
-+    WeightTransferEngine,
-+    WeightTransferUpdateInfo,
-+)
-+
-+from vllm_ascend.distributed.weight_transfer.hccl_engine import (
-+    HCCLTrainerSendWeightsArgs,
-+    HCCLWeightTransferEngine,
-+    HCCLWeightTransferInitInfo,
-+)
-+from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import (
-+    SparseWeightPatch,
-+    apply_sparse_hf_patches_with_loader,
-+)
-+
-+if TYPE_CHECKING:
-+    from vllm.config import VllmConfig
-+
-+    from vllm_ascend.distributed.device_communicators.pyhccl import (
-+        PyHcclCommunicator,
-+    )
-+
-+__all__ = [
-+    "SparseWeightPatch",
-+    "SparseHCCLTrainerSendWeightsArgs",
-+    "SparseHCCLWeightTransferUpdateInfo",
-+    "SparseHCCLWeightTransferEngine",
-+]
-+
-+
-+@dataclass
-+class SparseHCCLTrainerSendWeightsArgs(HCCLTrainerSendWeightsArgs):
-+    """Arguments for broadcasting packed sparse HCCL updates."""
-+
-+
-+@dataclass
-+class SparseHCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
-+    """Update info for the sparse HCCL weight transfer backend."""
-+
-+    names: list[str]
-+    dtype_names: list[str]
-+    shapes: list[list[int]]
-+    num_updates_list: list[int]
-+    """Number of sparse entries to receive for each parameter in ``names``."""
-+    encoding: str = "indices"
-+    """``dense`` for the values-only seed, ``indices`` for steady deltas."""
-+    checksum: int | None = None
-+    """verl-compatible checksum over positions bytes and values."""
-+    checksum_algorithm: str | None = None
-+    """Checksum implementation used by the sender."""
-+    verify: bool = False
-+    """Verify sparse local writes, or check dense live-model idempotence."""
-+    """Opt-in synchronized stage diagnostics; never synchronizes when false."""
-+
-+    def __post_init__(self) -> None:
-+        if self.encoding not in {"dense", "indices"}:
-+            raise ValueError(f"Unsupported sparse HCCL encoding: {self.encoding!r}")
-+        if self.checksum_algorithm not in {None, "torch_hash_v1"}:
-+            raise ValueError(f"Unsupported checksum algorithm: {self.checksum_algorithm!r}")
-+        num_params = len(self.names)
-+        if len(self.dtype_names) != num_params:
-+            raise ValueError(
-+                f"`dtype_names` should be of the same size as `names`: "
-+                f"got {len(self.dtype_names)} and {len(self.names)}"
-+            )
-+        if len(self.shapes) != num_params:
-+            raise ValueError(
-+                f"`shapes` should be of the same size as `names`: "
-+                f"got {len(self.shapes)} and {len(self.names)}"
-+            )
-+        if len(self.num_updates_list) == 0:
-+            raise ValueError("`num_updates_list` cannot be empty for sparse updates")
-+        if len(self.num_updates_list) != num_params:
-+            raise ValueError(
-+                f"`num_updates_list` should be of the same size as `names`: "
-+                f"got {len(self.num_updates_list)} and {len(self.names)}"
-+            )
-+        if any(num_updates < 0 for num_updates in self.num_updates_list):
-+            raise ValueError("Sparse `num_updates_list` entries must be non-negative")
-+
-+
-+class SparseHCCLWeightTransferEngine(
-+    WeightTransferEngine[
-+        HCCLWeightTransferInitInfo,
-+        SparseHCCLWeightTransferUpdateInfo,
-+    ]
-+):
-+    """Apply sparse, flat-index weight patches received through HCCL."""
-+
-+    init_info_cls = HCCLWeightTransferInitInfo
-+    update_info_cls = SparseHCCLWeightTransferUpdateInfo
-+    supports_draft_weight_update = False
-+
-+    def __init__(
-+        self,
-+        config: WeightTransferConfig,
-+        vllm_config: "VllmConfig",
-+        device: torch.device,
-+        model: torch.nn.Module,
-+    ) -> None:
-+        super().__init__(config, vllm_config, device, model)
-+        self.model_update_group: PyHcclCommunicator | None = None
-+
-+    def init_transfer_engine(self, init_info: HCCLWeightTransferInitInfo) -> None:
-+        """Initialize the HCCL process group with the trainer."""
-+        dp_rank = self.parallel_config.data_parallel_index
-+        world_size_per_dp = self.parallel_config.world_size
-+        rank_within_dp = self.parallel_config.rank
-+        worker_rank = dp_rank * world_size_per_dp + rank_within_dp
-+        self.model_update_group = HCCLWeightTransferEngine._stateless_init_process_group(
-+            init_info.master_address,
-+            init_info.master_port,
-+            worker_rank + init_info.rank_offset,
-+            init_info.world_size,
-+            device=torch.accelerator.current_device_index(),
-+        )
-+
-+    def start_weight_update(self) -> None:
-+        """Sparse patches use the model's TP/EP/PP-aware ownership rules."""
-+
-+    def finish_weight_update(self) -> None:
-+        """Sparse runtime-format patches need no layerwise finalization."""
-+        pass
-+
-+    def receive_weights(
-+        self,
-+        update_info: SparseHCCLWeightTransferUpdateInfo,
-+    ) -> None:
-+        """Receive sparse flat-index patches and apply them in place."""
-+        if self.model_update_group is None:
-+            raise RuntimeError(
-+                "HCCL weight transfer not initialized. "
-+                "Call init_transfer_engine() first."
-+            )
-+
-+        num_updates_list = update_info.num_updates_list
-+        total_updates = sum(num_updates_list)
-+        dense = update_info.encoding == "dense"
-+        packed_indices = torch.empty(
-+            0 if dense else total_updates,
-+            dtype=torch.int32,
-+            device=self.device,
-+        )
-+        if not dense and packed_indices.numel():
-+            self.model_update_group.broadcast(packed_indices, src=0, stream=torch.npu.current_stream())
-+
-+        # Values cannot be concatenated across different dtypes.  Keep one
-+        # packed buffer per dtype instead, preserving first-seen dtype order so
-+        # trainer and workers issue collectives in exactly the same sequence.
-+        dtype_order = list(dict.fromkeys(update_info.dtype_names))
-+        packed_values: dict[str, torch.Tensor] = {}
-+        for dtype_name in dtype_order:
-+            dtype_updates = sum(
-+                num_updates
-+                for patch_dtype, num_updates in zip(
-+                    update_info.dtype_names,
-+                    num_updates_list,
-+                    strict=True,
-+                )
-+                if patch_dtype == dtype_name
-+            )
-+            values = torch.empty(
-+                dtype_updates,
-+                dtype=getattr(torch, dtype_name),
-+                device=self.device,
-+            )
-+            if values.numel():
-+                self.model_update_group.broadcast(values, src=0, stream=torch.npu.current_stream())
-+            packed_values[dtype_name] = values
-+
-+        if update_info.checksum is not None:
-+            if len(dtype_order) != 1:
-+                raise ValueError("Checksummed sparse HCCL flushes must use one dtype")
-+            positions = packed_indices.contiguous().view(torch.uint8)
-+            values = packed_values[dtype_order[0]]
-+            got = _delta_checksum(
-+                positions,
-+                values,
-+                algorithm=update_info.checksum_algorithm or "torch_hash_v1",
-+            )
-+            if got != update_info.checksum:
-+                raise RuntimeError(
-+                    "Sparse HCCL checksum mismatch: "
-+                    f"got {got}, expected {update_info.checksum}"
-+                )
-+
-+        if dense:
-+            value_offsets = dict.fromkeys(dtype_order, 0)
-+            named_tensors = []
-+            for name, dtype_name, expected_shape, num_updates in zip(
-+                update_info.names,
-+                update_info.dtype_names,
-+                update_info.shapes,
-+                num_updates_list,
-+                strict=True,
-+            ):
-+                expected_numel = 1
-+                for dimension in expected_shape:
-+                    expected_numel *= dimension
-+                if num_updates != expected_numel:
-+                    raise ValueError(
-+                        f"Dense seed size mismatch for {name}: "
-+                        f"got {num_updates}, expected {expected_numel}"
-+                    )
-+                value_offset = value_offsets[dtype_name]
-+                tensor = packed_values[dtype_name][
-+                    value_offset : value_offset + num_updates
-+                ].view(expected_shape)
-+                value_offsets[dtype_name] = value_offset + num_updates
-+                named_tensors.append((name, tensor))
-+            if update_info.verify:
-+                _verify_dense_load(self.model, named_tensors)
-+            else:
-+                self.model.load_weights(named_tensors)
-+            return
-+
-+        index_offset = 0
-+        value_offsets = dict.fromkeys(dtype_order, 0)
-+        patches: list[tuple[SparseWeightPatch, list[int]]] = []
-+        for name, dtype_name, expected_shape, num_updates in zip(
-+            update_info.names,
-+            update_info.dtype_names,
-+            update_info.shapes,
-+            num_updates_list,
-+            strict=True,
-+        ):
-+            indices = packed_indices[index_offset : index_offset + num_updates]
-+            value_offset = value_offsets[dtype_name]
-+            values = packed_values[dtype_name][
-+                value_offset : value_offset + num_updates
-+            ]
-+            index_offset += num_updates
-+            value_offsets[dtype_name] = value_offset + num_updates
-+            if _is_pipeline_missing_weight(self.model, name):
-+                continue
-+            patches.append(
-+                (
-+                    SparseWeightPatch(
-+                        name=name,
-+                        indices=indices,
-+                        values=values,
-+                    ),
-+                    expected_shape,
-+                )
-+            )
-+        apply_sparse_hf_patches_with_loader(
-+            self.model,
-+            patches,
-+            direct_moe=True,
-+            verify=update_info.verify,
-+        )
-+        if update_info.verify:
-+            logging.getLogger(__name__).info(
-+                "SPARSE-VERIFY local_patches=%d mismatch_elems=0", len(patches)
-+            )
-+
-+    def shutdown(self) -> None:
-+        if self.model_update_group is not None:
-+            self.model_update_group = None
-+
-+    @staticmethod
-+    def trainer_send_packed(
-+        positions: torch.Tensor,
-+        values: torch.Tensor,
-+        args: HCCLTrainerSendWeightsArgs,
-+    ) -> None:
-+        """Send an assembled delta flush without another concatenation."""
-+        if positions.dtype != torch.int32 or positions.ndim != 1 or values.ndim != 1:
-+            raise ValueError("Packed delta requires flat int32 positions and flat values")
-+        if positions.device != values.device or values.device.type != "npu":
-+            raise ValueError("Packed HCCL buffers must reside on the same NPU")
-+        if not positions.is_contiguous() or not values.is_contiguous():
-+            raise ValueError("Packed HCCL buffers must be contiguous")
-+        stream = args.stream or torch.npu.current_stream()
-+        if positions.numel():
-+            args.group.broadcast(positions, src=args.src, stream=stream)
-+        if values.numel():
-+            args.group.broadcast(values, src=args.src, stream=stream)
-+        # The caller may release/reuse the buffers immediately after return.
-+        stream.synchronize()
-+
-+    @staticmethod
-+    def trainer_send_weights(
-+        iterator: Iterator[SparseWeightPatch],
-+        trainer_args: dict[str, Any] | HCCLTrainerSendWeightsArgs,
-+    ) -> None:
-+        """Broadcast sparse flat-index patches from trainer to workers."""
-+        if isinstance(trainer_args, dict):
-+            args = SparseHCCLTrainerSendWeightsArgs(**trainer_args)
-+        else:
-+            args = trainer_args
-+        if args.packed:
-+            raise ValueError(
-+                "Sparse HCCL updates cannot be combined with `packed=True`"
-+            )
-+
-+        patches = list(iterator)
-+        if not patches:
-+            return
-+
-+        stream = args.stream or torch.npu.current_stream()
-+        packed_indices = torch.cat([patch.indices for patch in patches])
-+        if packed_indices.numel():
-+            args.group.broadcast(packed_indices, src=args.src, stream=stream)
-+
-+        # One values collective per dtype amortizes HCCL launch latency while
-+        # retaining native parameter dtypes and avoiding byte-buffer alignment
-+        # constraints.
-+        dtype_order = list(dict.fromkeys(patch.values.dtype for patch in patches))
-+        for dtype in dtype_order:
-+            packed_values = torch.cat(
-+                [patch.values for patch in patches if patch.values.dtype == dtype]
-+            )
-+            if packed_values.numel():
-+                args.group.broadcast(packed_values, src=args.src, stream=stream)
-+
-+
-+    trainer_init = staticmethod(HCCLWeightTransferEngine.trainer_init)
-+
-+
-+def _delta_checksum(
-+    positions: torch.Tensor,
-+    values: torch.Tensor,
-+    *,
-+    algorithm: str = "torch_hash_v1",
-+) -> int:
-+    """Compute the negotiated payload checksum."""
-+    if algorithm != "torch_hash_v1":
-+        raise ValueError(f"Unsupported checksum algorithm: {algorithm!r}")
-+    p = int(torch.hash_tensor(positions).item()) if positions.numel() else 0
-+    v = int(torch.hash_tensor(values).item()) if values.numel() else 0
-+    return (p ^ (v << 1)) & ((1 << 64) - 1)
-+
-+
-+def _verify_dense_load(
-+    model: torch.nn.Module,
-+    named_tensors: list[tuple[str, torch.Tensor]],
-+) -> None:
-+    """Replay dense trainer state and require the live state to be unchanged."""
-+    original_copy = torch.Tensor.copy_
-+    mismatches: dict[str, int] = {}
-+    skipped_nonlocal_experts = 0
-+    skipped_nonlocal_pipeline = 0
-+    verified_params = 0
-+    for name, tensor in named_tensors:
-+        touched: dict[tuple[int, int, torch.dtype], tuple[torch.Tensor, torch.Tensor]] = {}
-+
-+        def snapshot_then_copy(destination, source, *args, _touched=touched, **kwargs):
-+            key = (destination.data_ptr(), destination.numel(), destination.dtype)
-+            if key not in _touched:
-+                _touched[key] = (destination, destination.detach().clone())
-+            return original_copy(destination, source, *args, **kwargs)
-+
-+        torch.Tensor.copy_ = snapshot_then_copy
-+        try:
-+            model.load_weights([(name, tensor)])
-+        finally:
-+            torch.Tensor.copy_ = original_copy
-+        if not touched and _is_pipeline_missing_weight(model, name):
-+            skipped_nonlocal_pipeline += 1
-+            continue
-+        if not touched and ".experts." in name:
-+            skipped_nonlocal_experts += 1
-+            continue
-+        if not touched:
-+            raise RuntimeError(f"Dense verification did not touch any weight for {name}")
-+        verified_params += 1
-+        mismatch_count = 0
-+        for destination, previous in touched.values():
-+            if destination.is_floating_point() and destination.element_size() == 2:
-+                mismatch_count += int(
-+                    (destination.view(torch.int16) != previous.view(torch.int16)).sum()
-+                )
-+            else:
-+                mismatch_count += int((destination != previous).sum())
-+        if mismatch_count:
-+            mismatches[name] = mismatch_count
-+    if mismatches:
-+        offenders = sorted(mismatches.items(), key=lambda item: -item[1])[:12]
-+        raise RuntimeError(
-+            "Sparse HCCL delta state verification failed: "
-+            f"{sum(mismatches.values())} elements differ; top offenders: {offenders}"
-+        )
-+
-+    logging.getLogger(__name__).warning(
-+        "DELTA-VERIFY params=%d skipped_nonlocal_experts=%d "
-+        "skipped_nonlocal_pipeline=%d mismatch_elems=0",
-+        verified_params,
-+        skipped_nonlocal_experts,
-+        skipped_nonlocal_pipeline,
-+    )
-+
-+
-+_LAYER_INDEX_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.")
-+
-+
-+def _is_pipeline_missing_weight(model: torch.nn.Module, name: str) -> bool:
-+    """Return whether an HF-global weight belongs to another PP stage."""
-+    core = getattr(model, "model", model)
-+    match = _LAYER_INDEX_RE.search(name)
-+    if match is not None:
-+        start_layer = getattr(core, "start_layer", None)
-+        end_layer = getattr(core, "end_layer", None)
-+        if start_layer is not None and end_layer is not None:
-+            layer_index = int(match.group(1))
-+            return not (start_layer <= layer_index < end_layer)
-+
-+    if "embed_tokens" in name:
-+        return type(getattr(core, "embed_tokens", None)).__name__ == "PPMissingLayer"
-+    if name.startswith("lm_head.") or ".lm_head." in name:
-+        return type(getattr(model, "lm_head", None)).__name__ == "PPMissingLayer"
-+    return False
-diff --git a/vllm_ascend/distributed/weight_transfer/sparse_weight_patch.py b/vllm_ascend/distributed/weight_transfer/sparse_weight_patch.py
-new file mode 100644
---- /dev/null
-+++ b/vllm_ascend/distributed/weight_transfer/sparse_weight_patch.py
-@@ -0,0 +1,250 @@
-+# SPDX-License-Identifier: Apache-2.0
-+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-+"""Transport-independent sparse runtime weight patch operations."""
-+
-+import logging
-+import re
-+from collections.abc import Iterator
-+from contextlib import contextmanager
-+from dataclasses import dataclass
-+from math import prod
-+
-+import torch
-+
-+
-+@dataclass
-+class SparseWeightPatch:
-+    """A sparse in-place patch for one existing runtime parameter."""
-+
-+    name: str
-+    indices: torch.Tensor
-+    values: torch.Tensor
-+
-+
-+def _validate_sparse_hf_patches(patches):
-+    """Validate before any write, batching equal bounds to avoid tiny kernels."""
-+    invalid = []
-+    groups = {}
-+
-+    def check(parts, bound):
-+        indices = torch.cat(parts) if len(parts) > 1 else parts[0]
-+        invalid.append(((indices < 0) | (indices >= bound)).any())
-+
-+    for patch, shape in patches:
-+        if patch.indices.dtype != torch.int32 or patch.indices.ndim != 1 or patch.values.ndim != 1:
-+            raise ValueError(f"Invalid sparse HF tensor metadata: {patch.name}")
-+        if patch.indices.numel() != patch.values.numel():
-+            raise ValueError(f"Sparse HF indices/value length mismatch: {patch.name}")
-+        if prod(shape) >= 2**31:
-+            raise OverflowError(f"Sparse HF int32 index limit exceeded: {patch.name}")
-+        if patch.indices.numel():
-+            key = (patch.indices.device, prod(shape))
-+            parts, count = groups.get(key, ([], 0))
-+            if parts and count + patch.indices.numel() > 4 * 1024 * 1024:
-+                check(parts, key[1])
-+                parts, count = [], 0
-+            parts.append(patch.indices)
-+            groups[key] = (parts, count + patch.indices.numel())
-+    for (_, bound), (parts, _) in groups.items():
-+        check(parts, bound)
-+    if invalid and bool(torch.stack(invalid).any()):
-+        raise IndexError("Sparse HF index out of bounds in received flush")
-+
-+
-+def apply_sparse_hf_patches_with_loader(
-+    model: torch.nn.Module,
-+    patches: list[tuple[SparseWeightPatch, list[int]]],
-+    *,
-+    chunk_bytes: int = 512 * 1024 * 1024,
-+    direct_moe: bool = False,
-+    verify: bool = False,
-+) -> None:
-+    """SGLang delta_loader semantics using vLLM's real TP-aware loader.
-+
-+    Validate bounds once per flush, then use on-stream NaN masked copies.
-+    Duplicate names (a parameter split across wire pieces) seal a load chunk
-+    because model loaders may group their input by parameter name.
-+    """
-+    _validate_sparse_hf_patches(patches)
-+    if direct_moe:
-+        patches = _apply_direct_moe_patches(model, patches, verify=verify)
-+
-+    with _masked_copy(verify=verify):
-+        chunk, names, nbytes = [], set(), 0
-+        for patch, shape in patches:
-+            size = prod(shape) * patch.values.element_size()
-+            if chunk and (nbytes + size > chunk_bytes or patch.name in names):
-+                model.load_weights(chunk)
-+                chunk, names, nbytes = [], set(), 0
-+            dense = torch.full(tuple(shape), float("nan"), dtype=patch.values.dtype, device=patch.values.device)
-+            dense.view(-1).index_copy_(0, patch.indices.to(torch.int64), patch.values)
-+            chunk.append((patch.name, dense))
-+            names.add(patch.name)
-+            nbytes += size
-+        if chunk:
-+            model.load_weights(chunk)
-+
-+
-+def _apply_moe_group(param, entries, shape, tp_rank, tp_size, down, *, verify=False):
-+    """Compact once per runtime weight, preserving HF absolute-copy semantics.
-+
-+    SGLang avoids per-expert dynamic boolean indexing in its masked loader.
-+    Here the same TP selection is performed for a whole runtime w13/w2 group.
-+    Explicit output_size prevents repeat_interleave from reading a device count.
-+    """
-+    lengths = [patch.indices.numel() for patch, _, _ in entries]
-+    total = sum(lengths)
-+    if not total:
-+        return
-+    device = entries[0][0].indices.device
-+    indices = torch.cat([patch.indices for patch, _, _ in entries]).long()
-+    values = torch.cat([patch.values for patch, _, _ in entries])
-+    width = shape[1 if down else 0] // tp_size
-+    descriptors = torch.tensor(
-+        [[local_expert, width if projection == "up_proj" else 0]
-+         for _, local_expert, projection in entries], dtype=torch.int64, device=device,
-+    )
-+    descriptors = torch.repeat_interleave(
-+        descriptors, torch.tensor(lengths, dtype=torch.int64, device=device),
-+        dim=0, output_size=total,
-+    )
-+    row, col = indices // shape[1], indices % shape[1]
-+    coordinate = col if down else row
-+    selected = ((coordinate >= tp_rank * width)
-+                & (coordinate < (tp_rank + 1) * width)
-+                & ~torch.isnan(values)).nonzero().view(-1)
-+    if down:
-+        target = descriptors[:, 0] * width * shape[0] + (col - tp_rank * width) * shape[0] + row
-+    else:
-+        target = (descriptors[:, 0] * shape[1] * (2 * width)
-+                  + col * (2 * width) + descriptors[:, 1] + row - tp_rank * width)
-+    local_indices = target.index_select(0, selected)
-+    local_values = values.index_select(0, selected)
-+    flat = param.data.view(-1)
-+    flat.index_copy_(0, local_indices, local_values)
-+    if verify:
-+        if not torch.equal(flat.index_select(0, local_indices), local_values):
-+            raise RuntimeError("Sparse MoE rank-local verification failed")
-+
-+
-+def _apply_direct_moe_patches(model, patches, *, verify=False,):
-+    # Exact implementation and layout guards: unfamiliar models, quantization,
-+    # EP/EPLB, padded or NZ storage retain the SGLang-style native loader.
-+    if getattr(getattr(model, "config", None), "model_type", None) != "qwen3_moe":
-+        return patches
-+    # Preserve ordered overwrite semantics for split/repeated parameter names.
-+    names = [patch.name for patch, _ in patches]
-+    if len(names) != len(set(names)):
-+        return patches
-+    from vllm_ascend.ops.fused_moe.routed_experts import (
-+        AscendRoutedExperts,
-+        AscendUnquantizedFusedMoEMethod,
-+    )
-+
-+    fallback, grouped = [], {}
-+    for patch, shape in patches:
-+        match = re.fullmatch(r"(.+\.experts)\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight", patch.name)
-+        if match is None or len(shape) != 2:
-+            fallback.append((patch, shape))
-+            continue
-+        prefix, expert_text, projection = match.groups()
-+        try:
-+            runner = model.get_submodule(prefix)
-+        except AttributeError:
-+            fallback.append((patch, shape))
-+            continue
-+        layer = getattr(runner, "routed_experts", runner)
-+        if type(layer) is not AscendRoutedExperts or type(layer.quant_method) is not AscendUnquantizedFusedMoEMethod:
-+            fallback.append((patch, shape))
-+            continue
-+        config = layer.moe_config
-+        parallel = config.moe_parallel_config
-+        expert = int(expert_text)
-+        tp_size, tp_rank = parallel.tp_size, config.tp_rank
-+        param = getattr(layer, "w2_weight" if projection == "down_proj" else "w13_weight", None)
-+        shard_dim = 1 if projection == "down_proj" else 0
-+        expected = ((shape[1] // tp_size, shape[0]) if projection == "down_proj"
-+                    else (shape[1], 2 * (shape[0] // tp_size)))
-+        expert_map = getattr(layer, "ascend_expert_map", None)
-+        eplb_enabled = (getattr(config, "enable_eplb", False)
-+                        or getattr(layer.quant_method, "dynamic_eplb", False))
-+        if parallel.ep_size == 1:
-+            local_expert = expert
-+        elif expert_map is not None and not eplb_enabled:
-+            cached_map = getattr(layer, "_sparse_expert_map_cpu", None)
-+            if cached_map is None:
-+                cached_map = expert_map.detach().cpu()
-+                setattr(layer, "_sparse_expert_map_cpu", cached_map)
-+            if not 0 <= expert < cached_map.numel():
-+                raise IndexError(f"Global expert {expert} outside expert map")
-+            local_expert = int(cached_map[expert])
-+            if local_expert < 0:
-+                # The expert belongs to another EP rank.  Drop it before any
-+                # full-shape temporary is allocated by the native loader.
-+                continue
-+        else:
-+            local_expert = -1
-+        if (local_expert < 0 or eplb_enabled
-+                or not config.is_act_and_mul or param is None
-+                or getattr(param, "is_transposed", False)
-+                or shape[shard_dim] % tp_size or param.ndim != 3
-+                or tuple(param.shape[1:]) != expected
-+                or param.dtype != patch.values.dtype or not param.is_contiguous()
-+                or not _supports_logical_flat_index_copy(param)
-+                or not 0 <= local_expert < param.shape[0]):
-+            fallback.append((patch, shape))
-+            continue
-+        group = grouped.setdefault(
-+            id(param), (param, [], tuple(shape), tp_rank, tp_size, projection == "down_proj"),
-+        )
-+        if group[2:] != (tuple(shape), tp_rank, tp_size, projection == "down_proj"):
-+            fallback.append((patch, shape))
-+            continue
-+        group[1].append((patch, local_expert, projection))
-+    for param, entries, shape, tp_rank, tp_size, down in grouped.values():
-+        _apply_moe_group(
-+            param, entries, shape, tp_rank, tp_size, down, verify=verify
-+        )
-+    logging.getLogger(__name__).info(
-+        "Sparse MoE apply: direct_patches=%d runtime_parameters=%d fallback_patches=%d",
-+        len(patches) - len(fallback), len(grouped), len(fallback),
-+    )
-+    return fallback
-+
-+
-+def _supports_logical_flat_index_copy(tensor: torch.Tensor) -> bool:
-+    """Reject transformed Ascend layouts until physical mapping is defined."""
-+    if tensor.device.type != "npu":
-+        return True
-+    try:
-+        import torch_npu
-+    except ImportError:
-+        return False
-+    npu_format = str(torch_npu.get_npu_format(tensor)).upper()
-+    return npu_format in {"ND", "2"}
-+
-+
-+@contextmanager
-+def _masked_copy(*, verify: bool = False) -> Iterator[None]:
-+    original_copy = torch.Tensor.copy_
-+
-+    def masked_copy(self: torch.Tensor, src: torch.Tensor, *args, **kwargs):
-+        if (
-+            isinstance(src, torch.Tensor)
-+            and src.is_floating_point()
-+            and self.shape == src.shape
-+        ):
-+            cast = src.to(self.dtype)
-+            mask = ~torch.isnan(cast)
-+            result = original_copy(self, torch.where(mask, cast, self))
-+            if verify:
-+                if bool(mask.any()) and not torch.equal(self[mask], cast[mask]):
-+                    raise RuntimeError("Sparse loader rank-local verification failed")
-+            return result
-+        return original_copy(self, src, *args, **kwargs)
-+
-+    torch.Tensor.copy_ = masked_copy
-+    try:
-+        yield
-+    finally:
-+        torch.Tensor.copy_ = original_copy
-diff --git a/tests/ut/distributed/weight_transfer/test_sparse_weight_patch.py b/tests/ut/distributed/weight_transfer/test_sparse_weight_patch.py
-new file mode 100644
---- /dev/null
-+++ b/tests/ut/distributed/weight_transfer/test_sparse_weight_patch.py
-@@ -0,0 +1,148 @@
-+# SPDX-License-Identifier: Apache-2.0
-+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-+
-+from types import SimpleNamespace
-+
-+import pytest
-+import torch
-+
-+from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import (
-+    SparseWeightPatch,
-+)
-+
-+
-+@pytest.mark.parametrize("projection", ["gate_proj", "up_proj", "down_proj"])
-+@pytest.mark.parametrize("expert", [0, 2, 3, 4])
-+@pytest.mark.parametrize("device", ["cpu", "npu"])
-+@pytest.mark.parametrize("tp_size,tp_rank", [(1, 0), (2, 0), (2, 1)])
-+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-+def test_ep_high_global_expert_uses_local_slot_without_fallback(monkeypatch, projection, expert, device, tp_size, tp_rank, dtype):
-+    if device == "npu" and (not hasattr(torch, "npu") or not torch.npu.is_available()):
-+        pytest.skip("NPU regression requires available NPU hardware")
-+    from vllm_ascend.distributed.weight_transfer import sparse_weight_patch as patcher
-+    from vllm_ascend.ops.fused_moe import routed_experts
-+
-+    class FakeMethod:
-+        pass
-+
-+    class FakeExperts:
-+        pass
-+
-+    monkeypatch.setattr(routed_experts, "AscendRoutedExperts", FakeExperts)
-+    monkeypatch.setattr(routed_experts, "AscendUnquantizedFusedMoEMethod", FakeMethod)
-+    monkeypatch.setattr(patcher, "_supports_logical_flat_index_copy", lambda tensor: True)
-+    layer = FakeExperts()
-+    layer.quant_method = FakeMethod()
-+    layer.moe_config = SimpleNamespace(
-+        moe_parallel_config=SimpleNamespace(tp_size=tp_size, ep_size=2),
-+        tp_rank=tp_rank, enable_eplb=False, is_act_and_mul=True,
-+    )
-+    layer.ascend_expert_map = torch.tensor([-1, -1, 0, 1])
-+    layer.w13_weight = torch.nn.Parameter(torch.arange(32., device=device, dtype=dtype).reshape(2, 4, 4))
-+    layer.w2_weight = torch.nn.Parameter(torch.arange(16., device=device, dtype=dtype).reshape(2, 2, 4))
-+    model = SimpleNamespace(config=SimpleNamespace(model_type="qwen3_moe"),
-+                            get_submodule=lambda name: layer)
-+    down = projection == "down_proj"
-+    shape = [4, 2 * tp_size] if down else [2 * tp_size, 4]
-+    param = layer.w2_weight if down else layer.w13_weight
-+    expected = param.detach().clone()
-+    # HF row 0, column 1 maps to local expert 0 in transposed runtime storage.
-+    target = 4 if down else (6 if projection == "up_proj" else 4)
-+    if expert in (2, 3) and tp_rank == 0:
-+        target += (expert - 2) * param[0].numel()
-+        expected.view(-1)[target] = 99.
-+    patch = SparseWeightPatch(f"model.layers.0.mlp.experts.{expert}.{projection}.weight",
-+                             torch.tensor([1], dtype=torch.int32, device=device), torch.tensor([99.], device=device, dtype=dtype))
-+    if expert == 4:
-+        with pytest.raises(IndexError, match="outside expert map"):
-+            patcher._apply_direct_moe_patches(model, [(patch, shape)], verify=True)
-+    else:
-+        assert patcher._apply_direct_moe_patches(model, [(patch, shape)], verify=True) == []
-+    # Full comparison covers changed and unchanged elements, including other expert.
-+    assert torch.equal(param, expected)
-+
-+
-+@pytest.mark.parametrize("bad_index", [-1, 8])
-+def test_batched_bounds_validates_entire_flush_before_loading(bad_index):
-+    from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import apply_sparse_hf_patches_with_loader
-+    class NeverLoad:
-+        def load_weights(self, weights):
-+            pytest.fail("A malformed flush must not partially apply")
-+    patches = [(SparseWeightPatch(str(i), torch.tensor([0, 7], dtype=torch.int32), torch.ones(2)), [2, 4])
-+               for i in range(20)]
-+    patches.append((SparseWeightPatch("invalid", torch.tensor([bad_index], dtype=torch.int32), torch.ones(1)), [4, 2]))
-+    with pytest.raises(IndexError):
-+        apply_sparse_hf_patches_with_loader(NeverLoad(), patches)
-+
-+
-+def test_dynamic_eplb_falls_back_before_cached_nonlocal_filter(monkeypatch):
-+    from vllm_ascend.distributed.weight_transfer import sparse_weight_patch as patcher
-+    from vllm_ascend.ops.fused_moe import routed_experts
-+
-+    class FakeMethod:
-+        dynamic_eplb = True
-+
-+    class FakeExperts:
-+        pass
-+
-+    monkeypatch.setattr(routed_experts, "AscendRoutedExperts", FakeExperts)
-+    monkeypatch.setattr(routed_experts, "AscendUnquantizedFusedMoEMethod", FakeMethod)
-+    layer = FakeExperts()
-+    layer.quant_method = FakeMethod()
-+    layer.moe_config = SimpleNamespace(
-+        moe_parallel_config=SimpleNamespace(tp_size=1, ep_size=2),
-+        tp_rank=0, enable_eplb=False, is_act_and_mul=True,
-+    )
-+    layer.ascend_expert_map = torch.tensor([-1, 0])
-+    layer.w13_weight = torch.nn.Parameter(torch.arange(16.).reshape(1, 4, 4))
-+    original = layer.w13_weight.detach().clone()
-+    model = SimpleNamespace(config=SimpleNamespace(model_type="qwen3_moe"),
-+                            get_submodule=lambda name: layer)
-+    patch = SparseWeightPatch("model.layers.0.mlp.experts.0.gate_proj.weight",
-+                             torch.tensor([0], dtype=torch.int32), torch.tensor([99.]))
-+    patches = [(patch, [2, 4])]
-+    assert patcher._apply_direct_moe_patches(model, patches) == patches
-+    assert not hasattr(layer, "_sparse_expert_map_cpu")
-+    assert torch.equal(layer.w13_weight, original)
-+
-+
-+def test_batched_bounds_keeps_distinct_shape_limits():
-+    from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import _validate_sparse_hf_patches
-+    patches = [(SparseWeightPatch("valid", torch.tensor([15], dtype=torch.int32), torch.ones(1)), [4, 4]),
-+               (SparseWeightPatch("invalid", torch.tensor([8], dtype=torch.int32), torch.ones(1)), [2, 4])]
-+    with pytest.raises(IndexError):
-+        _validate_sparse_hf_patches(patches)
-+
-+
-+@pytest.mark.parametrize("down", [False, True])
-+@pytest.mark.parametrize("tp_rank", [0, 1, 2, 3])
-+def test_batched_moe_group_matches_nan_masked_tp_loader(down, tp_rank):
-+    from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import _apply_moe_group
-+    tp, experts, hidden, intermediate = 4, 3, 8, 12
-+    shape = (hidden, intermediate) if down else (intermediate, hidden)
-+    runtime_shape = ((experts, intermediate // tp, hidden) if down
-+                     else (experts, hidden, 2 * intermediate // tp))
-+    actual = torch.randn(runtime_shape, dtype=torch.bfloat16)
-+    expected = actual.clone()
-+    entries = []
-+    for expert in range(experts):
-+        for projection in (["down_proj"] if down else ["gate_proj", "up_proj"]):
-+            indices = torch.arange(expert, shape[0] * shape[1], 7, dtype=torch.int32)
-+            values = torch.arange(indices.numel(), dtype=torch.bfloat16) - 5
-+            values[::5] = float("nan")  # SGLang treats NaN as an unchanged slot.
-+            values[1::5] = -0.0
-+            patch = SparseWeightPatch(f"{expert}.{projection}", indices, values)
-+            entries.append((patch, expert, projection))
-+            dense = torch.full(shape, float("nan"), dtype=torch.bfloat16)
-+            dense.view(-1)[indices.long()] = values
-+            width = intermediate // tp
-+            if down:
-+                source = dense[:, tp_rank * width:(tp_rank + 1) * width].t()
-+                destination = expected[expert]
-+            else:
-+                source = dense[tp_rank * width:(tp_rank + 1) * width].t()
-+                offset = width if projection == "up_proj" else 0
-+                destination = expected[expert, :, offset:offset + width]
-+            destination.copy_(torch.where(torch.isnan(source), destination, source))
-+    _apply_moe_group(actual, entries, shape, tp_rank, tp, down)
-+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
-diff --git a/tests/ut/distributed/weight_transfer/test_sparse_hccl_engine.py b/tests/ut/distributed/weight_transfer/test_sparse_hccl_engine.py
-new file mode 100644
---- /dev/null
-+++ b/tests/ut/distributed/weight_transfer/test_sparse_hccl_engine.py
-@@ -0,0 +1,206 @@
-+# SPDX-License-Identifier: Apache-2.0
-+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-+
-+from types import SimpleNamespace
-+from unittest.mock import MagicMock, call
-+
-+import pytest
-+import torch
-+
-+from vllm_ascend.distributed.weight_transfer.hccl_engine import (
-+    HCCLTrainerSendWeightsArgs,
-+)
-+from vllm_ascend.distributed.weight_transfer.sparse_hccl_engine import (
-+    SparseHCCLWeightTransferEngine,
-+    SparseHCCLWeightTransferUpdateInfo,
-+    SparseWeightPatch,
-+    _delta_checksum,
-+    _verify_dense_load,
-+)
-+
-+
-+class DummyModel(torch.nn.Module):
-+    def __init__(self):
-+        super().__init__()
-+        self.weight = torch.nn.Parameter(
-+            torch.tensor([10.0, 20.0, 30.0, 40.0])
-+        )
-+
-+    def load_weights(self, weights):
-+        for name, tensor in weights:
-+            if name == "weight":
-+                self.weight.data.copy_(tensor)
-+
-+
-+class EPLocalModel(DummyModel):
-+    def load_weights(self, weights):
-+        for name, tensor in weights:
-+            if name == "model.layers.0.mlp.experts.0.gate_proj.weight":
-+                self.weight.data.copy_(tensor)
-+
-+
-+class PipelineLocalModel(DummyModel):
-+    def __init__(self):
-+        super().__init__()
-+        self.model = SimpleNamespace(start_layer=24, end_layer=48)
-+
-+    def load_weights(self, weights):
-+        for name, tensor in weights:
-+            if name == "model.layers.24.self_attn.q_proj.weight":
-+                self.weight.data.copy_(tensor)
-+
-+
-+def make_info(**overrides):
-+    values = {
-+        "names": ["weight"],
-+        "dtype_names": ["float32"],
-+        "shapes": [[4]],
-+        "num_updates_list": [2],
-+    }
-+    values.update(overrides)
-+    return SparseHCCLWeightTransferUpdateInfo(**values)
-+
-+
-+def make_engine(model=None):
-+    engine = object.__new__(SparseHCCLWeightTransferEngine)
-+    engine.model = model or DummyModel()
-+    return engine
-+
-+
-+def test_dense_verify_skips_experts_not_owned_by_local_ep_rank():
-+    model = EPLocalModel()
-+    current = model.weight.detach().clone()
-+    _verify_dense_load(
-+        model,
-+        [
-+            ("model.layers.0.mlp.experts.0.gate_proj.weight", current),
-+            ("model.layers.0.mlp.experts.32.gate_proj.weight", current),
-+        ],
-+    )
-+
-+
-+def test_dense_verify_keeps_non_expert_noop_strict():
-+    model = EPLocalModel()
-+    with pytest.raises(RuntimeError, match="did not touch any weight"):
-+        _verify_dense_load(model, [("model.layers.0.self_attn.bad.weight", model.weight)])
-+
-+
-+def test_dense_verify_skips_layers_owned_by_another_pipeline_stage():
-+    model = PipelineLocalModel()
-+    current = model.weight.detach().clone()
-+    _verify_dense_load(
-+        model,
-+        [
-+            ("model.layers.0.self_attn.q_proj.weight", current),
-+            ("model.layers.24.self_attn.q_proj.weight", current),
-+        ],
-+    )
-+
-+
-+def test_update_info_accepts_zero_updates():
-+    assert make_info(num_updates_list=[0]).num_updates_list == [0]
-+
-+
-+def test_update_info_accepts_dense_seed():
-+    info = make_info(encoding="dense", num_updates_list=[4])
-+    assert info.encoding == "dense"
-+
-+
-+def test_update_info_rejects_unknown_encoding():
-+    with pytest.raises(ValueError, match="encoding"):
-+        make_info(encoding="xor")
-+
-+
-+def test_update_info_rejects_unknown_checksum_algorithm():
-+    with pytest.raises(ValueError, match="checksum algorithm"):
-+        make_info(checksum_algorithm="unknown")
-+
-+
-+@pytest.mark.parametrize(
-+    ("overrides", "message"),
-+    [
-+        ({"dtype_names": []}, "`dtype_names` should be"),
-+        ({"shapes": []}, "`shapes` should be"),
-+        ({"num_updates_list": []}, "cannot be empty"),
-+        ({"num_updates_list": [1, 2]}, "`num_updates_list` should be"),
-+        ({"num_updates_list": [-1]}, "must be non-negative"),
-+    ],
-+)
-+def test_update_info_rejects_invalid_metadata(overrides, message):
-+    with pytest.raises(ValueError, match=message):
-+        make_info(**overrides)
-+
-+
-+def test_start_allows_pipeline_parallelism():
-+    engine = make_engine()
-+    engine.parallel_config = SimpleNamespace(
-+        world_size=2, pipeline_parallel_size=2
-+    )
-+    engine.start_weight_update()
-+
-+
-+@pytest.mark.parametrize("world_size", [1, 4])
-+def test_start_and_finish_allow_tp(world_size):
-+    engine = make_engine()
-+    engine.parallel_config = SimpleNamespace(
-+        world_size=world_size, pipeline_parallel_size=1
-+    )
-+    engine.start_weight_update()
-+    engine.finish_weight_update()
-+
-+
-+def test_sparse_engine_does_not_support_draft_update():
-+    assert SparseHCCLWeightTransferEngine.supports_draft_weight_update is False
-+
-+
-+def test_receive_requires_initialized_group():
-+    engine = make_engine()
-+    engine.model_update_group = None
-+    with pytest.raises(RuntimeError, match="not initialized"):
-+        engine.receive_weights(make_info())
-+
-+
-+def test_trainer_send_rejects_packed():
-+    args = HCCLTrainerSendWeightsArgs(group=MagicMock(), packed=True)
-+    with pytest.raises(ValueError, match="cannot be combined"):
-+        SparseHCCLWeightTransferEngine.trainer_send_weights(iter(()), args)
-+
-+
-+def test_trainer_send_packs_indices_and_values_by_dtype():
-+    group = MagicMock()
-+    stream = MagicMock()
-+    args = HCCLTrainerSendWeightsArgs(group=group, stream=stream)
-+    float_patch = SparseWeightPatch(
-+        "weight",
-+        torch.tensor([1, 3], dtype=torch.int32),
-+        torch.tensor([2.0, 4.0]),
-+    )
-+    bf16_patch = SparseWeightPatch(
-+        "other_weight",
-+        torch.tensor([0], dtype=torch.int32),
-+        torch.tensor([5.0], dtype=torch.bfloat16),
-+    )
-+
-+    SparseHCCLWeightTransferEngine.trainer_send_weights(
-+        iter([float_patch, bf16_patch]), args
-+    )
-+
-+    assert len(group.broadcast.call_args_list) == 3
-+    indices, float_values, bf16_values = [
-+        broadcast.args[0] for broadcast in group.broadcast.call_args_list
-+    ]
-+    assert indices.tolist() == [1, 3, 0]
-+    assert float_values.tolist() == [2.0, 4.0]
-+    assert bf16_values.tolist() == [5.0]
-+    assert group.broadcast.call_args_list == [
-+        call(indices, src=0, stream=stream),
-+        call(float_values, src=0, stream=stream),
-+        call(bf16_values, src=0, stream=stream),
-+    ]
-+
-+
-+def test_shutdown_clears_group():
-+    engine = make_engine()
-+    engine.model_update_group = MagicMock()
-+    engine.shutdown()
-+    assert engine.model_update_group is None
-
-diff --git a/vllm_ascend/worker/worker.py b/vllm_ascend/worker/worker.py
-index b7df4df22..b8b9cfbb1 100644
---- a/vllm_ascend/worker/worker.py
-+++ b/vllm_ascend/worker/worker.py
-@@ -1287,5 +1287,24 @@ class NPUWorker(WorkerBase):
+@@ -1221,6 +1287,25 @@ class NPUWorker(WorkerBase):
      def reload_weights(self, *args, **kwargs) -> None:
          self.model_runner.reload_weights(*args, **kwargs)
-
+ 
 +    def pull_weights(
 +        self,
 +        local_checkpoint_dir: str,
@@ -1650,3 +672,1193 @@ index b7df4df22..b8b9cfbb1 100644
 +
      def check_health(self) -> None:
          import subprocess
+ 
+diff --git a/examples/rl/rlhf_sparse_hccl.py b/examples/rl/rlhf_sparse_hccl.py
+new file mode 100644
+--- /dev/null
++++ b/examples/rl/rlhf_sparse_hccl.py
+@@ -0,0 +1,125 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++r"""Checkpoint-coordinate sparse HCCL updates, adapted from vLLM's
++examples/rl/rlhf_sparse_nccl.py.
++
++Start trainer and server from the SAME unquantized Qwen3 MoE checkpoint.
++Example with one trainer NPU and TP2/PP2 inference on four separate NPUs:
++
++    ASCEND_RT_VISIBLE_DEVICES=1,2,3,4 VLLM_SERVER_DEV_MODE=1 \
++      vllm serve /path/to/checkpoint --tensor-parallel-size 2 \
++      --pipeline-parallel-size 2 --enable-expert-parallel --enforce-eager \
++      --additional-config '{"weight_nz_mode":0}' \
++      --weight-transfer-config '{"backend":"sparse_hccl"}'
++    ASCEND_RT_VISIBLE_DEVICES=0 python examples/rl/rlhf_sparse_hccl.py \
++      --model /path/to/checkpoint --tp 2 --pp 2
++
++The trainer swaps two gate-projection rows in two global experts in both the
++first and last layer, covering different PP stages. Full checkpoint names and
++shapes are sent; TP/EP mapping is delegated to the native loader. The trainer
++needs enough memory for the full BF16 model. Updates are nontransactional:
++generation remains paused if initialization or transfer fails.
++"""
++
++import argparse
++
++import requests
++import torch
++from vllm.distributed.weight_transfer import HTTPVLLMWeightSyncClient, WeightTransferTrainerFactory
++from vllm.utils.network_utils import get_ip, get_open_port
++
++from vllm_ascend.distributed.weight_transfer import register_engine
++from vllm_ascend.distributed.weight_transfer.sparse_hccl_engine import SparseHCCLTrainerInitInfo, SparseWeightPatch
++
++
++@torch.no_grad()
++def make_patches(model: torch.nn.Module) -> list[SparseWeightPatch]:
++    """Convert HF fused/per-expert storage to full checkpoint gate coordinates."""
++    config = model.config
++    if config.model_type != "qwen3_moe" or config.num_experts < 2 or config.moe_intermediate_size < 2:
++        raise ValueError("Requires Qwen3 MoE with at least two experts and two intermediate rows")
++    patches = []
++    for layer in sorted({0, config.num_hidden_layers - 1}):
++        prefix = f"model.layers.{layer}.mlp.experts"
++        for expert in (0, config.num_experts // 2):
++            name = f"{prefix}.{expert}.gate_proj.weight"
++            try:
++                weight = model.get_parameter(name)
++            except AttributeError:
++                fused = model.get_parameter(f"{prefix}.gate_up_proj")
++                expected = (config.num_experts, 2 * config.moe_intermediate_size, config.hidden_size)
++                if tuple(fused.shape) != expected:
++                    raise ValueError(f"Unexpected fused expert shape: {tuple(fused.shape)} != {expected}") from None
++                weight = fused[expert, : config.moe_intermediate_size]
++            if tuple(weight.shape) != (config.moe_intermediate_size, config.hidden_size):
++                raise ValueError(f"Unexpected checkpoint shape for {name}: {tuple(weight.shape)}")
++            replacement = weight[:2].clone().flip(0)
++            if torch.equal(weight[:2], replacement):
++                raise ValueError(f"Row swap would be a no-op: {name}")
++            weight[:2].copy_(replacement)
++            patches.append(
++                SparseWeightPatch(
++                    name=name,
++                    full_shape=tuple(weight.shape),
++                    indices=torch.arange(replacement.numel(), dtype=torch.int32, device=weight.device),
++                    values=replacement.flatten().contiguous(),
++                )
++            )
++    return patches
++
++
++def generate(url: str, model: str) -> list[int]:
++    response = requests.post(
++        f"{url}/v1/completions",
++        json={"model": model, "prompt": [1, 13, 42, 77], "max_tokens": 4, "temperature": 0, "return_token_ids": True},
++        timeout=180,
++    )
++    response.raise_for_status()
++    return response.json()["choices"][0]["token_ids"]
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    parser.add_argument("--model", required=True, help="Same checkpoint path/model ID as the server")
++    parser.add_argument("--served-model-name", help="Server model alias; defaults to --model")
++    parser.add_argument("--url", default="http://127.0.0.1:8000")
++    parser.add_argument("--tp", type=int, default=2)
++    parser.add_argument("--pp", type=int, default=2)
++    parser.add_argument("--dp", type=int, default=1)
++    args = parser.parse_args()
++    if min(args.tp, args.pp, args.dp) < 1:
++        parser.error("--tp, --pp and --dp must be positive and match the server")
++
++    import torch_npu  # noqa: F401
++    from transformers import AutoModelForCausalLM
++
++    torch.npu.set_device(0)
++    register_engine()
++    model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=torch.bfloat16).to("npu:0")
++    model.eval()
++    url = args.url.rstrip("/")
++    served_model = args.served_model_name or args.model
++    print("before_token_ids=", generate(url, served_model))
++    patches = make_patches(model)
++    response = requests.post(f"{url}/pause", timeout=60)
++    response.raise_for_status()
++    engine = None
++    try:
++        engine = WeightTransferTrainerFactory.trainer_init(
++            init_info=SparseHCCLTrainerInitInfo(get_ip(), get_open_port(), 1 + args.tp * args.pp * args.dp, rank=0),
++            client=HTTPVLLMWeightSyncClient(url),
++        )
++        engine.send_weights(patches)
++    finally:
++        if engine is not None:
++            engine.shutdown()
++    # Reached only on success: failed updates must remain paused for recovery.
++    response = requests.post(f"{url}/resume", timeout=60)
++    response.raise_for_status()
++    print("patched_checkpoint_names=", [patch.name for patch in patches])
++    print("num_sparse_values=", sum(patch.indices.numel() for patch in patches))
++    print("after_token_ids=", generate(url, served_model))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/e2e/pull_request/eight_card/test_sparse_hccl_checkpoint.py b/tests/e2e/pull_request/eight_card/test_sparse_hccl_checkpoint.py
+new file mode 100644
+--- /dev/null
++++ b/tests/e2e/pull_request/eight_card/test_sparse_hccl_checkpoint.py
+@@ -0,0 +1,367 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Real Qwen3 MoE loader oracle for checkpoint sparse HCCL (3/5 NPUs).
++
++The checkpoint is deliberately small and synthetic. This checks native TP/EP
++mapping and generation equivalence, not pretrained-model accuracy/performance.
++"""
++
++import hashlib
++import importlib.util
++import json
++import os
++import socket
++import subprocess
++import sys
++import time
++from pathlib import Path
++from types import SimpleNamespace
++from typing import TYPE_CHECKING
++
++if TYPE_CHECKING:
++    from collections.abc import Callable
++
++import pytest
++import requests
++import torch
++from safetensors.torch import load_file, save_file
++from transformers import Qwen3MoeConfig
++from vllm.distributed import get_dp_group
++from vllm.distributed.weight_transfer import HTTPVLLMWeightSyncClient, WeightTransferTrainerFactory
++
++from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import register_engines_once
++from vllm_ascend.distributed.weight_transfer.sparse_hccl_engine import (
++    SparseHCCLTrainerInitInfo,
++    checkpoint_loader_views,
++)
++from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import SparseWeightPatch
++
++TP_SIZE = 4
++NUM_EXPERTS = 8
++HIDDEN_SIZE = 1024
++HEAD_SIZE = 128
++MOE_SIZE = 512
++VOCAB_SIZE = 512
++
++
++def free_port():
++    with socket.socket() as sock:
++        sock.bind(("127.0.0.1", 0))
++        return sock.getsockname()[1]
++
++
++def write_checkpoint(path, num_layers=1):
++    path.mkdir()
++    config = Qwen3MoeConfig(
++        vocab_size=VOCAB_SIZE,
++        hidden_size=HIDDEN_SIZE,
++        intermediate_size=MOE_SIZE,
++        moe_intermediate_size=MOE_SIZE,
++        num_hidden_layers=num_layers,
++        num_attention_heads=8,
++        num_key_value_heads=4,
++        head_dim=HEAD_SIZE,
++        num_experts=NUM_EXPERTS,
++        num_experts_per_tok=2,
++        max_position_embeddings=128,
++        architectures=["Qwen3MoeForCausalLM"],
++        tie_word_embeddings=False,
++        bos_token_id=1,
++        eos_token_id=2,
++    )
++    config.save_pretrained(path)
++    shapes = {
++        "model.embed_tokens.weight": (VOCAB_SIZE, HIDDEN_SIZE),
++        "lm_head.weight": (VOCAB_SIZE, HIDDEN_SIZE),
++        "model.norm.weight": (HIDDEN_SIZE,),
++        "model.layers.0.input_layernorm.weight": (HIDDEN_SIZE,),
++        "model.layers.0.post_attention_layernorm.weight": (HIDDEN_SIZE,),
++        "model.layers.0.self_attn.q_proj.weight": (HIDDEN_SIZE, HIDDEN_SIZE),
++        "model.layers.0.self_attn.k_proj.weight": (HIDDEN_SIZE // 2, HIDDEN_SIZE),
++        "model.layers.0.self_attn.v_proj.weight": (HIDDEN_SIZE // 2, HIDDEN_SIZE),
++        "model.layers.0.self_attn.o_proj.weight": (HIDDEN_SIZE, HIDDEN_SIZE),
++        "model.layers.0.self_attn.q_norm.weight": (HEAD_SIZE,),
++        "model.layers.0.self_attn.k_norm.weight": (HEAD_SIZE,),
++        "model.layers.0.mlp.gate.weight": (NUM_EXPERTS, HIDDEN_SIZE),
++    }
++    for expert in range(NUM_EXPERTS):
++        prefix = f"model.layers.0.mlp.experts.{expert}"
++        shapes[f"{prefix}.gate_proj.weight"] = (MOE_SIZE, HIDDEN_SIZE)
++        shapes[f"{prefix}.up_proj.weight"] = (MOE_SIZE, HIDDEN_SIZE)
++        shapes[f"{prefix}.down_proj.weight"] = (HIDDEN_SIZE, MOE_SIZE)
++    shapes = {
++        name.replace("model.layers.0.", f"model.layers.{layer}."): shape
++        for name, shape in shapes.items()
++        for layer in (range(num_layers) if name.startswith("model.layers.0.") else [0])
++    }
++    generator = torch.Generator().manual_seed(1234)
++    weights = {
++        name: torch.ones(shape, dtype=torch.bfloat16)
++        if "norm" in name
++        else (torch.randn(shape, generator=generator) * 0.02).to(torch.bfloat16)
++        for name, shape in shapes.items()
++    }
++    save_file(weights, path / "model.safetensors")
++    records = []
++    for name, weight in weights.items():
++        # Touch each quarter and both ends, including every global expert owner.
++        indices = torch.tensor(
++            sorted({0, weight.numel() - 1, *(weight.numel() * n // TP_SIZE for n in range(TP_SIZE))}), dtype=torch.int32
++        )
++        records.append(
++            dict(
++                name=name,
++                full_shape=tuple(weight.shape),
++                indices=indices,
++                values=weight.flatten()[indices.long()] + 0.0625,
++            )
++        )
++    repeated = next(record for record in records if record["name"].endswith("q_proj.weight"))
++    records.append({**repeated, "values": repeated["values"] + 0.0625})
++    torch.save(records, path / "patches.pt")
++
++
++class SparseCheckpointOracle:
++    """Test-only worker extension comparing complete runtime parameter state."""
++
++    if TYPE_CHECKING:
++        # vLLM mixes this extension into its worker class at runtime.
++        get_model: Callable[[], torch.nn.Module]
++
++    def sparse_digest(self):
++        hashes = {}
++        for name, parameter in self.get_model().named_parameters():
++            raw = parameter.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
++            hashes[name] = hashlib.sha256(raw).hexdigest()
++        # The HTTP utility API broadcasts to all DP engines but returns only
++        # DP0's results. Gather matching TP ranks across DP to verify every owner.
++        group = get_dp_group()
++        gathered = [None] * group.world_size
++        torch.distributed.all_gather_object(gathered, hashes, group=group.cpu_group)
++        return gathered
++
++    def sparse_capture_baseline(self):
++        self.sparse_baseline = {name: p.detach().cpu().clone() for name, p in self.get_model().named_parameters()}
++        return self.sparse_digest()
++
++    @torch.no_grad()
++    def sparse_restore_baseline(self):
++        for name, parameter in self.get_model().named_parameters():
++            parameter.copy_(self.sparse_baseline[name])
++        return self.sparse_digest()
++
++    @torch.no_grad()
++    def sparse_dense_reference(self, model_path):
++        weights = load_file(str(Path(model_path) / "model.safetensors"))
++        records = torch.load(Path(model_path) / "patches.pt", weights_only=True)
++        for record in records:
++            weights[record["name"]].view(-1).index_copy_(0, record["indices"].long(), record["values"])
++        with checkpoint_loader_views(self.get_model()):
++            self.get_model().load_weights(weights.items())
++        return self.sparse_digest()
++
++
++def rpc(url, method, args=()):
++    response = requests.post(f"{url}/collective_rpc", json={"method": method, "args": list(args)}, timeout=180)
++    response.raise_for_status()
++    return [hashes for tp_results in response.json()["results"] for hashes in tp_results]
++
++
++def generate(url):
++    response = requests.post(
++        f"{url}/v1/completions",
++        json={
++            "model": "sparse-oracle",
++            "prompt": [1, 13, 42, 77],
++            "max_tokens": 4,
++            "temperature": 0,
++            "seed": 1234,
++            "return_token_ids": True,
++        },
++        timeout=120,
++    )
++    response.raise_for_status()
++    return response.json()["choices"]
++
++
++@pytest.mark.parametrize(
++    "tp_size,pp_size,dp_size",
++    [(4, 1, 1), (2, 1, 2), (1, 2, 1), (2, 2, 1)],
++    ids=["tp4-ep4", "tp2-dp2-ep4", "tp1-pp2-ep1", "tp2-pp2-ep2"],
++)
++def test_sparse_checkpoint_matches_native_dense(tmp_path, tp_size, pp_size, dp_size):
++    """Compare every worker parameter and generated token with dense loading."""
++    workers = tp_size * pp_size * dp_size
++    if torch.npu.device_count() < workers + 1:
++        pytest.skip(f"requires {workers + 1} NPUs (including a distinct trainer)")
++    model_path = tmp_path / "checkpoint"
++    write_checkpoint(model_path, num_layers=pp_size)
++    port = free_port()
++    url = f"http://127.0.0.1:{port}"
++    environment = os.environ.copy()
++    visible_devices = os.environ.get("ASCEND_RT_VISIBLE_DEVICES")
++    device_ids = visible_devices.split(",") if visible_devices else [str(i) for i in range(workers + 1)]
++    if len(device_ids) < workers + 1:
++        pytest.skip(f"requires {workers + 1} selected NPUs (including a distinct trainer)")
++    environment["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(device_ids[1 : workers + 1])
++    environment["VLLM_SERVER_DEV_MODE"] = "1"
++    environment["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
++    args = [
++        sys.executable,
++        "-m",
++        "vllm.entrypoints.cli.main",
++        "serve",
++        str(model_path),
++        "--port",
++        str(port),
++        "--host",
++        "127.0.0.1",
++        "--served-model-name",
++        "sparse-oracle",
++        "--skip-tokenizer-init",
++        "--dtype",
++        "bfloat16",
++        "--enforce-eager",
++        "--tensor-parallel-size",
++        str(tp_size),
++        "--pipeline-parallel-size",
++        str(pp_size),
++        "--data-parallel-size",
++        str(dp_size),
++        "--enable-expert-parallel",
++        "--distributed-executor-backend",
++        "mp",
++        "--gpu-memory-utilization",
++        "0.15",
++        "--max-model-len",
++        "128",
++        "--max-num-seqs",
++        "4",
++        "--max-num-batched-tokens",
++        "128",
++        "--no-enable-prefix-caching",
++        "--additional-config",
++        '{"weight_nz_mode":0}',
++        "--weight-transfer-config",
++        '{"backend":"sparse_hccl"}',
++        "--worker-extension-cls",
++        __name__ + ".SparseCheckpointOracle",
++    ]
++    engine = None
++    with (tmp_path / "server.log").open("w") as log:
++        process = subprocess.Popen(args, env=environment, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
++        try:
++            deadline = time.monotonic() + 600
++            while time.monotonic() < deadline:
++                if process.poll() is not None:
++                    pytest.fail((tmp_path / "server.log").read_text()[-10000:])
++                try:
++                    if requests.get(f"{url}/health", timeout=2).ok:
++                        break
++                except requests.RequestException:
++                    pass
++                time.sleep(2)
++            else:
++                pytest.fail("server did not become ready")
++            baseline = rpc(url, "sparse_capture_baseline")
++            reference = rpc(url, "sparse_dense_reference", [str(model_path)])
++            assert len(reference) == workers
++            assert all(before != after for before, after in zip(baseline, reference, strict=True))
++            expected = generate(url)
++            assert rpc(url, "sparse_restore_baseline") == baseline
++            torch.npu.set_device(0)
++            register_engines_once()
++            client = HTTPVLLMWeightSyncClient(url)
++            requests.post(f"{url}/pause", timeout=60).raise_for_status()
++            engine = WeightTransferTrainerFactory.trainer_init(
++                init_info=SparseHCCLTrainerInitInfo("127.0.0.1", free_port(), workers + 1, rank=0), client=client
++            )
++            records = torch.load(model_path / "patches.pt", weights_only=True)
++            client.start_weight_update()
++            for offset in range(0, len(records), 4):
++                engine.send_weight_chunk(SparseWeightPatch(**r) for r in records[offset : offset + 4])
++            client.finish_weight_update()
++            assert rpc(url, "sparse_digest") == reference
++            requests.post(f"{url}/resume", timeout=60).raise_for_status()
++            actual = generate(url)
++            assert all(len(c["token_ids"]) == 4 for c in actual)
++            assert [(c["token_ids"], c["finish_reason"]) for c in actual] == [
++                (c["token_ids"], c["finish_reason"]) for c in expected
++            ]
++            (tmp_path / "validation.json").write_text(
++                json.dumps(
++                    {
++                        "tp": tp_size,
++                        "pp": pp_size,
++                        "dp": dp_size,
++                        "ep": tp_size * dp_size,
++                        "checkpoint_tensors": len(records),
++                        "runtime_hashes": reference,
++                        "generation": [(c["token_ids"], c["finish_reason"]) for c in actual],
++                        "all_rank_hashes_equal": True,
++                    },
++                    indent=2,
++                )
++            )
++        finally:
++            if engine is not None:
++                engine.shutdown()
++            process.terminate()
++            try:
++                process.wait(timeout=30)
++            except subprocess.TimeoutExpired:
++                process.kill()
++                process.wait(timeout=30)
++
++
++@pytest.mark.parametrize("fused", [False, True])
++def test_example_patches_both_pipeline_ends_and_experts(fused):
++    path = Path(__file__).resolve().parents[4] / "examples/rl/rlhf_sparse_hccl.py"
++    spec = importlib.util.spec_from_file_location("sparse_hccl_example", path)
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    model = torch.nn.Module()
++    model.config = SimpleNamespace(
++        model_type="qwen3_moe", num_experts=4, moe_intermediate_size=4, hidden_size=3, num_hidden_layers=4
++    )
++    weights = {}
++    for layer in (0, 3):
++        prefix = f"model.layers.{layer}.mlp.experts"
++        if fused:
++            weights[f"{prefix}.gate_up_proj"] = torch.arange(4 * 8 * 3, dtype=torch.float32).reshape(4, 8, 3)
++        else:
++            for expert in (0, 2):
++                weights[f"{prefix}.{expert}.gate_proj.weight"] = torch.arange(12, dtype=torch.float32).reshape(4, 3)
++
++    def get_parameter(name):
++        if name not in weights:
++            raise AttributeError(name)
++        return weights[name]
++
++    model.get_parameter = get_parameter
++    before = {name: value.clone() for name, value in weights.items()}
++    patches = module.make_patches(model)
++    assert len(patches) == 4
++    for weight_patch in patches:
++        assert weight_patch.full_shape == (4, 3)
++        assert weight_patch.indices.dtype == torch.int32
++        assert torch.equal(weight_patch.indices, torch.arange(6, dtype=torch.int32))
++        prefix = weight_patch.name.rsplit(".", 3)[0]
++        expert = int(weight_patch.name.split(".")[-3])
++        if fused:
++            reference = before[f"{prefix}.gate_up_proj"][expert, :4].clone()
++            actual = weights[f"{prefix}.gate_up_proj"][expert, :4]
++            assert torch.equal(
++                weights[f"{prefix}.gate_up_proj"][expert, 4:], before[f"{prefix}.gate_up_proj"][expert, 4:]
++            )
++        else:
++            reference = before[weight_patch.name].clone()
++            actual = weights[weight_patch.name]
++        reference.flatten().index_copy_(0, weight_patch.indices.long(), weight_patch.values)
++        assert torch.equal(actual, reference)
++        assert torch.equal(
++            weight_patch.values,
++            before[f"{prefix}.gate_up_proj"][expert, :2].flip(0).flatten()
++            if fused
++            else before[weight_patch.name][:2].flip(0).flatten(),
++        )
+diff --git a/tests/ut/distributed/weight_transfer/test_sparse_hccl_engine.py b/tests/ut/distributed/weight_transfer/test_sparse_hccl_engine.py
+new file mode 100644
+--- /dev/null
++++ b/tests/ut/distributed/weight_transfer/test_sparse_hccl_engine.py
+@@ -0,0 +1,277 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Sparse HCCL validation, rank calculation, and lifecycle tests."""
++
++from contextlib import nullcontext
++from types import SimpleNamespace
++from unittest.mock import MagicMock, patch
++
++import pytest
++import torch
++
++from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLWeightTransferEngine, HCCLWeightTransferInitInfo
++from vllm_ascend.distributed.weight_transfer.sparse_hccl_engine import (
++    SparseHCCLTrainerWeightTransferEngine,
++    SparseHCCLWeightTransferEngine,
++    SparseHCCLWeightTransferUpdateInfo,
++)
++from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import SparseWeightPatch, validate_sparse_patch
++
++
++def make_patch(**kwargs):
++    fields = dict(
++        name="checkpoint.weight",
++        full_shape=(4, 4),
++        indices=torch.tensor([0, 15], dtype=torch.int32),
++        values=torch.tensor([2.0, 3.0]),
++    )
++    return SparseWeightPatch(**(fields | kwargs))
++
++
++def test_sparse_public_types_and_lifecycle_are_reused():
++    from vllm.distributed.weight_transfer.sparse_nccl_engine import (
++        SparseNCCLTrainerInitInfo,
++        SparseNCCLTrainerWeightTransferEngine,
++        SparseNCCLWeightTransferUpdateInfo,
++    )
++    from vllm.distributed.weight_transfer.sparse_nccl_engine import (
++        SparseWeightPatch as CommonSparseWeightPatch,
++    )
++
++    from vllm_ascend.distributed.weight_transfer.sparse_hccl_engine import SparseHCCLTrainerInitInfo
++
++    assert SparseWeightPatch is CommonSparseWeightPatch
++    assert issubclass(SparseHCCLTrainerInitInfo, SparseNCCLTrainerInitInfo)
++    assert issubclass(SparseHCCLWeightTransferUpdateInfo, SparseNCCLWeightTransferUpdateInfo)
++    for name in ("__init__", "send_weights", "send_weight_chunk"):
++        assert getattr(SparseHCCLTrainerWeightTransferEngine, name) is getattr(
++            SparseNCCLTrainerWeightTransferEngine, name
++        )
++
++
++@pytest.mark.parametrize(
++    "kwargs",
++    [
++        {"name": ""},
++        {"name": 1},
++        {"full_shape": None},
++        {"full_shape": (-1,)},
++        {"full_shape": (1.5,)},
++        {"full_shape": (True, 16)},
++        {"indices": torch.tensor([0], dtype=torch.int64)},
++        {"indices": torch.tensor([-1, 15], dtype=torch.int32)},
++        {"indices": torch.tensor([0, 16], dtype=torch.int32)},
++        {"indices": torch.tensor([0, 0], dtype=torch.int32)},
++        {"indices": torch.tensor([[0, 15]], dtype=torch.int32)},
++        {"values": torch.tensor([float("nan"), 3.0])},
++        {"values": torch.tensor([2, 3])},
++        {"values": torch.tensor([2.0])},
++        {"values": torch.tensor([[2.0, 3.0]])},
++    ],
++)
++def test_bad_patch_rejected_before_start(kwargs):
++    with pytest.raises(ValueError):
++        validate_sparse_patch(make_patch(**kwargs))
++    engine = SparseHCCLTrainerWeightTransferEngine(client=MagicMock())
++    engine.model_update_group = MagicMock(device=torch.device("cpu"))
++    with pytest.raises(ValueError):
++        engine.send_weights([make_patch(**kwargs)])
++    engine.client.start_weight_update.assert_not_called()
++    engine.model_update_group.broadcast.assert_not_called()
++
++
++def test_valid_and_empty_patch():
++    validate_sparse_patch(make_patch())
++    validate_sparse_patch(make_patch(indices=torch.empty(0, dtype=torch.int32), values=torch.empty(0)))
++
++
++def test_large_checkpoint_bounds_do_not_wrap_int32():
++    validate_sparse_patch(
++        make_patch(
++            full_shape=(65536, 32768),
++            indices=torch.tensor([0, 2147483647], dtype=torch.int32),
++        )
++    )
++    with pytest.raises(ValueError, match="int64"):
++        validate_sparse_patch(make_patch(full_shape=(1 << 63,)))
++
++
++@pytest.mark.parametrize(
++    "kwargs",
++    [
++        {"dtype_names": []},
++        {"shapes": []},
++        {"num_updates_list": []},
++        {"num_updates_list": [-1]},
++        {"num_updates_list": [1.5]},
++        {"dtype_names": ["int32"]},
++        {"dtype_names": ["invalid"]},
++        {"shapes": [[-1]]},
++        {"names": [""]},
++    ],
++)
++def test_invalid_metadata(kwargs):
++    fields = dict(names=["checkpoint.weight"], dtype_names=["float32"], shapes=[[4, 4]], num_updates_list=[2])
++    with pytest.raises(ValueError):
++        SparseHCCLWeightTransferUpdateInfo(**(fields | kwargs))
++
++
++def make_worker(tp=4, pp=1, dp=1, dp_rank=0, rank=0):
++    engine = object.__new__(SparseHCCLWeightTransferEngine)
++    engine.parallel_config = SimpleNamespace(
++        world_size=tp * pp,
++        data_parallel_size=dp,
++        data_parallel_index=dp_rank,
++        rank=rank,
++        pipeline_parallel_size=pp,
++        enable_eplb=False,
++    )
++    engine.model_config = SimpleNamespace(quantization=None)
++    engine.model = torch.nn.Module()
++    engine.model_update_group = None
++    return engine
++
++
++@pytest.mark.parametrize("dp,dp_rank,rank,expected", [(1, 0, 3, 4), (2, 0, 3, 4), (2, 1, 0, 5), (2, 1, 3, 8)])
++def test_tp_dp_ranks(dp, dp_rank, rank, expected):
++    engine = make_worker(dp=dp, dp_rank=dp_rank, rank=rank)
++    info = HCCLWeightTransferInitInfo("127.0.0.1", 12345, 1, 4 * dp + 1)
++    with (
++        patch("torch.accelerator.current_device_index", return_value=0),
++        patch.object(HCCLWeightTransferEngine, "_stateless_init_process_group") as create,
++    ):
++        engine.init_transfer_engine(info)
++    create.assert_called_once_with("127.0.0.1", 12345, expected, 4 * dp + 1, device=0)
++
++
++def test_invalid_world_size_rejected_before_rendezvous():
++    engine = make_worker(dp=2)
++    with patch.object(HCCLWeightTransferEngine, "_stateless_init_process_group") as create, pytest.raises(ValueError):
++        engine.init_transfer_engine(HCCLWeightTransferInitInfo("127.0.0.1", 12345, 1, 5))
++    create.assert_not_called()
++
++
++@pytest.mark.parametrize("field,value", [("enable_eplb", True), ("quantization", "awq")])
++def test_unsupported_configuration(field, value):
++    engine = make_worker()
++    setattr(engine.model_config if field == "quantization" else engine.parallel_config, field, value)
++    with pytest.raises(NotImplementedError):
++        engine.start_weight_update()
++
++
++@pytest.mark.parametrize("dp,dp_rank,rank,expected", [(1, 0, 3, 4), (2, 1, 0, 5), (2, 1, 3, 8)])
++def test_tp_pp_dp_ranks(dp, dp_rank, rank, expected):
++    engine = make_worker(tp=2, pp=2, dp=dp, dp_rank=dp_rank, rank=rank)
++    info = HCCLWeightTransferInitInfo("127.0.0.1", 12345, 1, 4 * dp + 1)
++    with (
++        patch("torch.accelerator.current_device_index", return_value=0),
++        patch.object(HCCLWeightTransferEngine, "_stateless_init_process_group") as create,
++    ):
++        engine.init_transfer_engine(info)
++    create.assert_called_once_with("127.0.0.1", 12345, expected, 4 * dp + 1, device=0)
++
++
++def test_caller_owned_chunks_and_one_shot_lifecycle():
++    client = MagicMock()
++    engine = SparseHCCLTrainerWeightTransferEngine(client=client)
++    with (
++        patch.object(engine, "_prepare_patches", side_effect=lambda p: list(p)),
++        patch.object(engine, "_broadcast_chunk") as send,
++    ):
++        engine.send_weight_chunk([make_patch()])
++        client.start_weight_update.assert_not_called()
++        client.finish_weight_update.assert_not_called()
++        engine.send_weights([make_patch()])
++    assert send.call_count == 2
++    client.start_weight_update.assert_called_once()
++    client.finish_weight_update.assert_called_once()
++
++
++def test_empty_and_non_sender_noop():
++    for sender in (True, False):
++        engine = SparseHCCLTrainerWeightTransferEngine(client=MagicMock(), is_sender=sender)
++        engine.send_weights([])
++        engine.send_weight_chunk([])
++        engine.client.start_weight_update.assert_not_called()
++
++
++def test_failure_does_not_finish_partial_update():
++    engine = SparseHCCLTrainerWeightTransferEngine(client=MagicMock())
++    with (
++        patch.object(engine, "_prepare_patches", return_value=[make_patch()]),
++        patch.object(engine, "_broadcast_chunk", side_effect=RuntimeError("failed")),
++        pytest.raises(RuntimeError),
++    ):
++        engine.send_weights([make_patch()])
++    engine.client.finish_weight_update.assert_not_called()
++
++
++def test_receive_on_communicator_device():
++    engine = make_worker()
++    engine.model = MagicMock()
++    engine.model_update_group = MagicMock(device=torch.device("cpu"))
++    info = SparseHCCLWeightTransferUpdateInfo(["checkpoint.weight"], ["float32"], [[4, 4]], [0])
++    with (
++        patch("torch.npu.device", return_value=nullcontext()),
++        patch("torch.npu.current_stream"),
++        patch("vllm_ascend.distributed.weight_transfer.sparse_hccl_engine.load_checkpoint_weight_patches") as load,
++    ):
++        engine.receive_weights(info)
++    payload = load.call_args.args[1][0]
++    assert payload.name == "checkpoint.weight"
++    assert payload.shape == (4, 4)
++    assert payload.values.device.type == "cpu"
++    engine.model_update_group.broadcast.assert_not_called()
++
++
++def test_shutdown_closes_once():
++    engine = make_worker()
++    group = MagicMock()
++    engine.model_update_group = group
++    engine.shutdown()
++    engine.shutdown()
++    group.close.assert_called_once()
++
++
++def test_pp_selection_happens_after_all_broadcasts():
++    engine = make_worker(tp=2, pp=2)
++    engine.model_update_group = MagicMock(device=torch.device("cpu"))
++    info = SparseHCCLWeightTransferUpdateInfo(
++        ["model.layers.0.weight", "model.layers.1.weight"],
++        ["float32", "float32"],
++        [[4, 4], [4, 4]],
++        [2, 2],
++    )
++
++    def missing(name, model):
++        assert engine.model_update_group.broadcast.call_count == 4
++        return name.startswith("model.layers.0.")
++
++    with (
++        patch("torch.npu.device", return_value=nullcontext()),
++        patch("torch.npu.current_stream"),
++        patch(
++            "vllm_ascend.distributed.weight_transfer.sparse_hccl_engine.is_pp_missing_parameter", side_effect=missing
++        ),
++        patch("vllm_ascend.distributed.weight_transfer.sparse_hccl_engine.load_checkpoint_weight_patches") as load,
++    ):
++        engine.receive_weights(info)
++    assert [p.name for p in load.call_args.args[1]] == ["model.layers.1.weight"]
++
++
++def test_prepare_moves_cpu_views_to_communicator_device():
++    engine = SparseHCCLTrainerWeightTransferEngine(client=MagicMock())
++    engine.model_update_group = MagicMock(device=torch.device("cpu"))
++    indices = torch.tensor([0, 1, 15, 2], dtype=torch.int32)[::2]
++    values = torch.tensor([2.0, 0.0, 3.0, 0.0])[::2]
++    assert not values.is_contiguous()
++    with patch("torch.npu.device", return_value=nullcontext()):
++        prepared = engine._prepare_patches([make_patch(indices=indices, values=values)])
++    assert prepared[0].indices.is_contiguous()
++    assert prepared[0].values.is_contiguous()
++    assert torch.equal(prepared[0].values, values)
++
++
++def test_source_is_rejected():
++    with pytest.raises(ValueError, match="WeightSource"):
++        SparseHCCLTrainerWeightTransferEngine(client=MagicMock(), source=MagicMock())
+diff --git a/vllm_ascend/distributed/weight_transfer/sparse_hccl_engine.py b/vllm_ascend/distributed/weight_transfer/sparse_hccl_engine.py
+new file mode 100644
+--- /dev/null
++++ b/vllm_ascend/distributed/weight_transfer/sparse_hccl_engine.py
+@@ -0,0 +1,350 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Sparse HCCL weight transfer engine.
++
++Sparse patches use checkpoint names, shapes, and flat indices. The model's native
++weight loader maps them to rank-local runtime parameters, including TP shards and
++packed parameters.
++"""
++
++from collections.abc import Iterable
++from concurrent.futures import ThreadPoolExecutor
++from contextlib import ExitStack
++from dataclasses import asdict, dataclass
++from typing import TYPE_CHECKING, ClassVar
++
++import torch
++
++if TYPE_CHECKING:
++    from vllm.config import VllmConfig
++
++    from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
++
++from vllm.config.weight_transfer import WeightTransferConfig
++from vllm.distributed.weight_transfer.base import (
++    VLLMWeightSyncClient,
++    WeightSource,
++    WeightTransferEngine,
++)
++from vllm.distributed.weight_transfer.sparse_nccl_engine import (
++    SparseNCCLTrainerInitInfo,
++    SparseNCCLTrainerWeightTransferEngine,
++    SparseNCCLWeightTransferUpdateInfo,
++)
++from vllm.model_executor.model_loader.checkpoint_weight_patch import (
++    CheckpointWeightPatch,
++    load_checkpoint_weight_patches,
++)
++from vllm.model_executor.models.utils import is_pp_missing_parameter
++
++from vllm_ascend.distributed.weight_transfer.hccl_engine import (
++    HCCLWeightTransferEngine,
++    HCCLWeightTransferInitInfo,
++)
++from vllm_ascend.distributed.weight_transfer.sparse_weight_patch import (
++    SPARSE_HCCL_VALUE_DTYPES,
++    SparseWeightPatch,
++    validate_sparse_patch,
++)
++
++__all__ = [
++    "SparseWeightPatch",
++    "SparseHCCLTrainerInitInfo",
++    "SparseHCCLWeightTransferUpdateInfo",
++    "SparseHCCLWeightTransferEngine",
++    "SparseHCCLTrainerWeightTransferEngine",
++]
++
++
++def checkpoint_loader_views(model: torch.nn.Module) -> ExitStack:
++    """Expose loader layouts while preserving the inference tensor storage."""
++    stack = ExitStack()
++    try:
++        for layer in model.modules():
++            method = getattr(layer, "quant_method", None)
++            view = getattr(method, "checkpoint_weight_loader_view", None)
++            if view is not None:
++                stack.enter_context(view(layer))
++    except BaseException:
++        stack.close()
++        raise
++    return stack
++
++
++@dataclass
++class SparseHCCLTrainerInitInfo(SparseNCCLTrainerInitInfo):
++    """Trainer-side init info for the sparse HCCL weight transfer backend.
++
++    Same rendezvous shape as the dense HCCL backend (the sender opens its
++    endpoint as HCCL rank 0), but with no packed wire params: sparse transfers
++    are never packed. `backend` is the factory dispatch key."""
++
++    backend: ClassVar[str] = "sparse_hccl"
++
++
++@dataclass
++class SparseHCCLWeightTransferUpdateInfo(SparseNCCLWeightTransferUpdateInfo):
++    """Update info for the sparse HCCL weight transfer backend."""
++
++    def __post_init__(self) -> None:
++        num_params = len(self.names)
++        if len(self.dtype_names) != num_params:
++            raise ValueError(
++                f"`dtype_names` should be of the same size as `names`: "
++                f"got {len(self.dtype_names)} and {len(self.names)}"
++            )
++        if len(self.shapes) != num_params:
++            raise ValueError(
++                f"`shapes` should be of the same size as `names`: got {len(self.shapes)} and {len(self.names)}"
++            )
++        if len(self.num_updates_list) == 0:
++            raise ValueError("`num_updates_list` cannot be empty for sparse updates")
++        if len(self.num_updates_list) != num_params:
++            raise ValueError(
++                f"`num_updates_list` should be of the same size as `names`: "
++                f"got {len(self.num_updates_list)} and {len(self.names)}"
++            )
++        if any(num_updates < 0 for num_updates in self.num_updates_list):
++            raise ValueError("Sparse `num_updates_list` entries must be non-negative")
++        for name, dtype_name, shape, count in zip(
++            self.names, self.dtype_names, self.shapes, self.num_updates_list, strict=True
++        ):
++            dtype = getattr(torch, dtype_name, None)
++            if not isinstance(name, str) or not name:
++                raise ValueError("Sparse checkpoint name must be non-empty")
++            if dtype not in SPARSE_HCCL_VALUE_DTYPES:
++                raise ValueError(f"Sparse checkpoint dtype must be floating: {name}")
++            if any(type(dim) is not int or dim < 0 for dim in shape):
++                raise ValueError(f"Invalid checkpoint shape: {name}")
++            if type(count) is not int:
++                raise ValueError(f"Sparse update count must be an integer: {name}")
++
++
++class SparseHCCLWeightTransferEngine(
++    WeightTransferEngine[HCCLWeightTransferInitInfo, SparseHCCLWeightTransferUpdateInfo]
++):
++    """
++    Sparse weight transfer engine using HCCL.
++
++    Receives checkpoint-coordinate patches broadcast from the trainer and applies
++    them through the model's native weight loader. Sparse updates modify initialized
++    model tensors in place, so the layerwise reload lifecycle is not used.
++    """
++
++    init_info_cls = HCCLWeightTransferInitInfo
++    update_info_cls = SparseHCCLWeightTransferUpdateInfo
++    supports_draft_weight_update = False
++
++    def __init__(
++        self,
++        config: WeightTransferConfig,
++        vllm_config: "VllmConfig",
++        device: torch.device,
++        model: torch.nn.Module,
++    ) -> None:
++        super().__init__(config, vllm_config, device, model)
++        self.model_update_group: PyHcclCommunicator | None = None
++
++    def init_transfer_engine(self, init_info: HCCLWeightTransferInitInfo) -> None:
++        """Initialize the HCCL process group with the trainer."""
++        self.start_weight_update()
++        workers = self.parallel_config.world_size * self.parallel_config.data_parallel_size
++        if init_info.rank_offset != 1 or init_info.world_size != workers + 1:
++            raise ValueError(
++                "Sparse HCCL requires one trainer and all TP/PP/DP workers: world_size=1+TP*PP*DP, rank_offset=1"
++            )
++        HCCLWeightTransferEngine.init_transfer_engine(self, init_info)
++
++    def start_weight_update(self) -> None:
++        """Validate support without reinitializing the existing model weights."""
++        if self.parallel_config.enable_eplb:
++            raise NotImplementedError("Sparse HCCL does not support EPLB")
++        if self.model_config.quantization is not None:
++            raise NotImplementedError("Sparse HCCL requires unquantized floating-point weights")
++        for layer in self.model.modules():
++            method = getattr(layer, "quant_method", None)
++            validate = getattr(method, "validate_checkpoint_weight_loader_view", None)
++            if validate is not None:
++                validate(layer)
++        for parameter in self.model.parameters():
++            if parameter.device.type == "npu":
++                import torch_npu
++
++                if torch_npu.get_npu_format(parameter) not in (0, 2):
++                    raise NotImplementedError("Sparse HCCL requires ND model weights (weight_nz_mode=0)")
++
++    def finish_weight_update(self) -> None:
++        """No-op: sparse patches are applied in place, no layerwise reload."""
++        pass
++
++    def receive_weights(self, update_info: SparseHCCLWeightTransferUpdateInfo) -> None:
++        """Receive sparse flat-index patches from the trainer and apply them."""
++        if self.model_update_group is None:
++            raise RuntimeError("HCCL weight transfer not initialized. Call init_transfer_engine() first.")
++
++        # Receive on the communicator's device rather than relying on the
++        # ambient current device in the RPC thread.
++        device = self.model_update_group.device
++        with torch.npu.device(device):
++            stream = torch.npu.current_stream(device=device)
++            patches = []
++            for name, dtype_name, shape, num_updates in zip(
++                update_info.names,
++                update_info.dtype_names,
++                update_info.shapes,
++                update_info.num_updates_list,
++                strict=True,
++            ):
++                dtype = getattr(torch, dtype_name)
++                indices = torch.empty(num_updates, dtype=torch.int32, device=device)
++                values = torch.empty(num_updates, dtype=dtype, device=device)
++                if num_updates:
++                    self.model_update_group.broadcast(indices, src=0, stream=stream)
++                    self.model_update_group.broadcast(values, src=0, stream=stream)
++                patches.append(
++                    CheckpointWeightPatch(
++                        name=name,
++                        shape=tuple(shape),
++                        dtype=dtype,
++                        values=values,
++                        indices=indices,
++                    )
++                )
++            # Every rank must consume every broadcast before selecting its PP
++            # weights. Reuse the native model's missing-stage ownership rules.
++            patches = [patch for patch in patches if not is_pp_missing_parameter(patch.name, self.model)]
++            with checkpoint_loader_views(self.model):
++                load_checkpoint_weight_patches(self.model, patches)
++
++    def shutdown(self) -> None:
++        if self.model_update_group is not None:
++            self.model_update_group.close()
++            self.model_update_group = None
++
++
++class SparseHCCLTrainerWeightTransferEngine(SparseNCCLTrainerWeightTransferEngine):
++    """Trainer-side sparse HCCL weight transfer engine.
++
++    Broadcasts flat-index (indices, values) patches from HCCL rank 0 while the
++    inference-side `update_weights` runs concurrently on a side thread (the
++    worker's recvs rendezvous inside the same HCCL broadcasts). `send_weights`
++    owns a complete one-shot lifecycle. RL infrastructure that owns the generic
++    client lifecycle can call `send_weight_chunk` between one start and finish.
++
++    Sparse patches differ every round, so they are not a stable `WeightSource`:
++    the engine takes no `source`, and patches are passed directly to the send
++    methods. An empty patch list is a no-op.
++
++    Only the designated trainer sender joins the transfer group; other trainer
++    ranks skip sparse sends.
++    """
++
++    init_info_cls = SparseHCCLTrainerInitInfo
++    model_update_group: "PyHcclCommunicator | None"
++
++    @classmethod
++    def trainer_init(
++        cls,
++        init_info: SparseHCCLTrainerInitInfo,
++        *,
++        client: VLLMWeightSyncClient,
++        source: WeightSource | None = None,
++    ) -> "SparseHCCLTrainerWeightTransferEngine":
++        engine = cls(client=client, source=source, is_sender=init_info.is_sender)
++        if not engine.is_sender:
++            return engine
++        if init_info.world_size < 2:
++            raise ValueError("Sparse HCCL needs a trainer and at least one worker")
++
++        # Workers sit at rank_offset 1, after the single trainer sender rank 0.
++        # Sparse transfers are never packed, so the worker keeps the unpacked
++        # defaults on its init info.
++        worker_init_info = HCCLWeightTransferInitInfo(
++            master_address=init_info.master_address,
++            master_port=init_info.master_port,
++            rank_offset=1,
++            world_size=init_info.world_size,
++        )
++
++        # The inference workers block inside init_weight_transfer_engine waiting
++        # for the HCCL rendezvous, so we kick that off on a side thread while we
++        # open the trainer endpoint (rank 0); both sides must rendezvous together.
++        with ThreadPoolExecutor(max_workers=1) as exe:
++            future = exe.submit(
++                engine.client.init_weight_transfer_engine,
++                asdict(worker_init_info),
++            )
++            # Open the trainer endpoint as HCCL rank 0 on the current device
++            # (the init info satisfies the helper's rendezvous protocol).
++            engine.model_update_group = HCCLWeightTransferEngine.trainer_init(asdict(init_info))
++            future.result()  # surface any inference-side init error
++
++        return engine
++
++    def _prepare_patches(self, patches: Iterable[SparseWeightPatch] | None) -> list[SparseWeightPatch]:
++        prepared = super()._prepare_patches(patches)
++        if not prepared:
++            return []
++        assert self.model_update_group is not None
++        device = self.model_update_group.device
++        # Normalize views and CPU payloads before workers enter collectives.
++        with torch.npu.device(device):
++            return [
++                SparseWeightPatch(
++                    name=patch.name,
++                    full_shape=tuple(patch.full_shape),
++                    indices=patch.indices.to(device=device).contiguous(),
++                    values=patch.values.to(device=device).contiguous(),
++                )
++                for patch in prepared
++            ]
++
++    def _broadcast_chunk(self, patches: list[SparseWeightPatch]) -> None:
++        assert self.model_update_group is not None
++        device = self.model_update_group.device
++        with torch.npu.device(device):
++            update_info = SparseHCCLWeightTransferUpdateInfo(
++                names=[patch.name for patch in patches],
++                dtype_names=[str(patch.values.dtype).split(".")[-1] for patch in patches],
++                shapes=[list(patch.full_shape) for patch in patches],
++                num_updates_list=[patch.indices.numel() for patch in patches],
++            )
++
++            # update_weights (workers receive) must run concurrently with the
++            # trainer-side broadcasts — both rendezvous inside the same HCCL calls.
++            executor = ThreadPoolExecutor(max_workers=1)
++            try:
++                future = executor.submit(self.client.update_weights, asdict(update_info))
++                # Surface an RPC that failed before the worker entered HCCL rather
++                # than broadcasting to a peer that will never receive.
++                if future.done():
++                    future.result()
++                stream = torch.npu.current_stream()
++                for patch in patches:
++                    if not patch.indices.numel():
++                        continue
++                    self.model_update_group.broadcast(patch.indices, src=0, stream=stream)
++                    self.model_update_group.broadcast(patch.values, src=0, stream=stream)
++                future.result()  # surface inference-side errors
++            finally:
++                # A failed broadcast can leave the RPC blocked in the matching
++                # receive. Waiting for that thread would hide the original error.
++                executor.shutdown(wait=False, cancel_futures=True)
++            self._post_send_sync()
++
++    @staticmethod
++    def _validate_patch(patch: SparseWeightPatch) -> None:
++        """Reject a malformed patch before starting the HCCL transfer."""
++        validate_sparse_patch(patch)
++
++    def _post_send_sync(self) -> None:
++        """Wait for the broadcasts to land before returning, so a caller may
++        rebuild or free the patch tensors as soon as a send method returns rather
++        than relying on same-stream ordering."""
++        if torch.npu.is_available():
++            torch.npu.current_stream().synchronize()
++
++    def shutdown(self) -> None:
++        if self.model_update_group is not None:
++            self.model_update_group.close()
++            self.model_update_group = None
+diff --git a/vllm_ascend/distributed/weight_transfer/sparse_weight_patch.py b/vllm_ascend/distributed/weight_transfer/sparse_weight_patch.py
+new file mode 100644
+--- /dev/null
++++ b/vllm_ascend/distributed/weight_transfer/sparse_weight_patch.py
+@@ -0,0 +1,45 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Checkpoint-coordinate sparse patches for the HCCL transport."""
++
++import math
++
++import torch
++from vllm.distributed.weight_transfer.sparse_nccl_engine import SparseNCCLTrainerWeightTransferEngine
++from vllm.distributed.weight_transfer.sparse_nccl_engine import SparseWeightPatch as SparseWeightPatch
++
++SPARSE_HCCL_VALUE_DTYPES = (torch.float16, torch.bfloat16, torch.float32, torch.float64)
++
++
++def validate_sparse_patch(patch: SparseWeightPatch) -> None:
++    """Reject invalid payloads before starting a worker lifecycle or collective."""
++    # Keep this standalone validator complete while sharing the trainer's
++    # structural checks for shape presence, int32 indices and flattened payloads.
++    SparseNCCLTrainerWeightTransferEngine._validate_patch(patch)
++    if not isinstance(patch.name, str) or not patch.name:
++        raise ValueError("Sparse checkpoint name must be non-empty")
++    if any(type(dim) is not int or dim < 0 for dim in patch.full_shape):
++        raise ValueError(f"Invalid checkpoint full_shape for {patch.name}")
++    if patch.values.dtype not in SPARSE_HCCL_VALUE_DTYPES:
++        raise ValueError(f"Sparse values require an HCCL-supported floating dtype: {patch.name}")
++    numel = math.prod(patch.full_shape)
++    if numel > torch.iinfo(torch.int64).max:
++        raise ValueError(f"Checkpoint shape exceeds int64 indexing: {patch.name}")
++    # Host reads are required before workers enter HCCL.
++    # Keep the bounds/duplicate checks together instead of reading each index.
++    indices = patch.indices
++    if indices.numel():
++        ordered = indices.sort().values
++        # Comparing an int32 tensor with a larger Python scalar wraps the
++        # scalar into int32. Keep the wire dtype, but widen bounds arithmetic.
++        wide_indices = indices.to(dtype=torch.int64)
++        invalid = torch.stack(
++            [
++                ((wide_indices < 0) | (wide_indices >= numel)).any(),
++                (ordered[1:] == ordered[:-1]).any(),
++            ]
++        ).any()
++        if invalid.item():
++            raise ValueError(f"Sparse indices out of range or duplicated: {patch.name}")
++    if torch.isnan(patch.values).any().item():
++        raise ValueError(f"Sparse values cannot contain NaN: {patch.name}")

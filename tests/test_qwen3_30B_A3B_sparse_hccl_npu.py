@@ -92,7 +92,7 @@ def execute():
         "--update-weight-transport sparse_hccl "
         "--update-weight-delta-batch-diff 32 "
         "--update-weight-delta-batch-gather 32 "
-        "--update-weight-delta-verify-every 1 "
+        "--update-weight-delta-verify-every 0 "
     )
 
     model_args = (

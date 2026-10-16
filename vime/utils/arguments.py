@@ -579,8 +579,8 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 type=int,
                 default=0,
                 help=(
-                    "For sparse_hccl, verify rank-local sparse writes every K steady "
-                    "delta updates. Zero disables verification."
+                    "Reserved for sparse receiver verification extensions. Native PR #18915 "
+                    "sparse_hccl requires zero; use the dedicated correctness E2E oracle."
                 ),
             )
             parser.add_argument(
