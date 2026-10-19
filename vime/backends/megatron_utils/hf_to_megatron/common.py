@@ -153,11 +153,20 @@ def load_model_hf_weights(
     from vime.backends.megatron_utils.update_weight.common import named_params_and_buffers
 
     reader = SafetensorReader(path)
+    is_critic = getattr(model[0], "role", None) == "critic"
     with torch.no_grad():
         for name, parameter in named_params_and_buffers(args, model):
-            tensor = get_hf_tensor(name, reader, config)
-            if name.endswith("output_layer.weight") and parameter.shape[0] == 1 and tensor.shape[0] != 1:
+            # HF LM checkpoints initialize the critic backbone. Its scalar value
+            # head (including bias) keeps the initialization from model_provider;
+            # neither parameter should be looked up in the LM checkpoint.
+            # Resuming a Megatron critic checkpoint uses a separate loader.
+            if (
+                is_critic
+                and strip_mcore_wrappers(name) in {"output_layer.weight", "output_layer.bias"}
+                and parameter.shape[0] == 1
+            ):
                 continue
+            tensor = get_hf_tensor(name, reader, config)
             tensor = shard_mcore_tensor(name, _pad_vocab(args, name, tensor), parameter)
             if tensor.shape != parameter.shape:
                 raise ValueError(
