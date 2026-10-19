@@ -1,6 +1,7 @@
 """E2E smoke test for non-colocated PP distributed weight updates."""
 
 import os
+from shlex import quote
 
 import vime.utils.external_utils.command_utils as U
 
@@ -8,24 +9,27 @@ import vime.utils.external_utils.command_utils as U
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
 NUM_GPUS = 4
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/gsm8k")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/gsm8k", dir_dst=DATASET_DIR)
 
     U.convert_checkpoint(
         model_name=MODEL_NAME,
         megatron_model_type=MODEL_TYPE,
         num_gpus_per_node=NUM_GPUS,
-        dir_dst="/root/models",
+        dir_dst=str(TEST_ROOT / "models"),
+        hf_checkpoint=str(MODEL_DIR),
     )
 
 
 def execute():
     rollout_args = (
-        "--prompt-data /root/datasets/gsm8k/train.parquet "
+        f"--prompt-data {quote(str(DATASET_DIR / 'gsm8k/train.parquet'))} "
         "--input-key messages "
         "--label-key label "
         "--apply-chat-template "
@@ -77,6 +81,14 @@ def execute():
         "--vllm-gpu-memory-utilization 0.7 "
         "--vllm-max-cudagraph-capture-size 16 "
     )
+    if U.current_platform().name == "npu":
+        # Keep graph execution; bound serving memory for the CI request load.
+        vllm_args = (
+            "--rollout-num-gpus 2 --rollout-num-gpus-per-engine 1 "
+            "--vllm-gpu-memory-utilization 0.5 --vllm-max-num-seqs 16 "
+            "--vllm-max-cudagraph-capture-size 8 "
+            "--vllm-max-model-len 8192 "
+        )
 
     ci_args = "--ci-test "
 
@@ -90,12 +102,13 @@ def execute():
         "--actor-num-gpus-per-node 2 "
     )
 
-    torch_dist_checkpoint = f"/root/models/{MODEL_NAME}_torch_dist"
-    ckpt_args = (
-        f"--hf-checkpoint /root/models/{MODEL_NAME}/ "
-        f"--load {torch_dist_checkpoint} "
-        f"--ref-load {torch_dist_checkpoint} "
-    )
+    ckpt_args = f"--hf-checkpoint {quote(str(MODEL_DIR))} "
+    if U.current_platform().torch_dist_convert:
+        checkpoint = str(TEST_ROOT / "models" / f"{MODEL_NAME}_torch_dist")
+        ckpt_args += f"--load {quote(checkpoint)} --ref-load {quote(checkpoint)} "
+    else:
+        # Native HF loading is the NPU baseline; this case tests PP weight sync.
+        ckpt_args += f"--ref-load {quote(str(MODEL_DIR))} "
     train_args = (
         f"{ckpt_args} "
         f"{rollout_args} "
@@ -106,6 +119,8 @@ def execute():
         f"{vllm_args} "
         f"{ci_args} "
         f"{misc_args} "
+        f"{U.get_test_platform_args()} "
+        f"{'--log-probs-chunk-size 128 ' if U.current_platform().name == 'npu' else ''}"
     )
 
     U.execute_train(

@@ -22,6 +22,7 @@ def collect_environment():
                 "BUILDKITE_JOB_ID",
                 "BUILDKITE_LABEL",
                 "VIME_IMAGE_TAG",
+                "VIME_TEST_IMAGE",
                 "VIME_TEST_RESOURCE_CLASS",
                 "VIME_PLATFORM",
                 "ASCEND_VISIBLE_DEVICES",

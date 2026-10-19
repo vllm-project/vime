@@ -19,6 +19,7 @@ REPO = Path(__file__).resolve().parents[2]
 def suites(monkeypatch):
     monkeypatch.setenv("BUILDKITE_COMMIT", "test-pr-commit")
     monkeypatch.setenv("BUILDKITE_SOURCE", "webhook")
+    monkeypatch.delenv("NPU_CI_IMAGE", raising=False)
     spec = importlib.util.spec_from_file_location("npu_suites_under_test", REPO / ".buildkite/npu_suites.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -69,7 +70,10 @@ def test_invalid_or_empty_selection_fails_before_emitting_json(monkeypatch, sele
     assert result.returncode != 0
     assert not result.stdout
     if selection in ("", "smk", "image-build", "nightly"):
-        assert "select a non-empty suite (currently: migration-basic)" in result.stderr
+        assert (
+            "select a non-empty suite (currently: migration-basic, migration-parallel, migration-full-disk)"
+            in result.stderr
+        )
 
 
 def test_image_build_auto_includes_smoke_when_restored(suites, monkeypatch):
@@ -92,6 +96,46 @@ def test_migration_does_not_require_image_build(suites, monkeypatch):
     assert all(step["image"].endswith(":test-pr-commit") for step in suites.build_steps())
 
 
+def test_batch_two_and_full_disk_retry_are_independent(suites, monkeypatch):
+    monkeypatch.setenv("NPU_SUITES", "migration-parallel,migration-full-disk")
+    steps = suites.build_steps()
+    assert len(steps) == 10
+    assert len({step["key"] for step in steps}) == 10
+    assert sum(step["agents"]["resource_class"] == "npu-8" for step in steps) == 7
+    for step in steps:
+        assert step["concurrency"] == 4
+        assert step["concurrency_group"] == "vime-npu-migration-basic"
+        assert "python tests/ci/npu_test_environment.py" in step["command"]
+        assert step["depends_on"] == "image-build-npu"
+        assert step["timeout_in_minutes"] == (360 if "parallel_check" in step["command"] else 180)
+    ppo = [step for step in steps if "ppo" in step["command"]]
+    assert len(ppo) == 3
+    assert all(step["env"]["VIME_TEST_ENABLE_EVAL"] == "0" for step in ppo)
+    disaggregate = next(step for step in ppo if "disaggregate" in step["command"])
+    assert "--transport object-store" in disaggregate["command"]
+    disk = steps[-1]
+    assert "test_full_disk_weight_update.py" in disk["command"]
+    assert disk["env"]["VIME_TEST_NUM_ROLLOUT"] == "2"
+    monkeypatch.setenv("NPU_SUITES", "migration-basic,migration-parallel,migration-full-disk")
+    steps = suites.build_steps()
+    assert len(steps) == 16  # full disk is not repeated when its retry suite is also selected
+    assert sum("test_full_disk_weight_update.py" in step["command"] for step in steps) == 1
+
+
+def test_existing_image_is_explicit_and_schedule_still_builds(suites, monkeypatch):
+    monkeypatch.setenv("NPU_SUITES", "migration-parallel")
+    monkeypatch.setenv("NPU_CI_IMAGE", "registry.example/vime:previous-commit")
+    steps = suites.build_steps()
+    assert all(step["image"] == "registry.example/vime:previous-commit" for step in steps)
+    assert all(step["env"]["VIME_TEST_IMAGE"] == step["image"] for step in steps)
+    assert all(step["env"]["BUILDKITE_COMMIT"] == "test-pr-commit" for step in steps)
+    monkeypatch.setenv("NPU_SUITES", "image-build,migration-parallel")
+    with pytest.raises(SystemExit, match="not both"):
+        suites.build_steps()
+    monkeypatch.setattr(suites, "BUILDKITE_SOURCE", "schedule")
+    assert all(step["image"].endswith(":test-pr-commit") for step in suites.build_steps())
+
+
 def test_gate_exposes_every_suite(suites):
     pipeline = yaml.safe_load((REPO / ".buildkite/pipeline-npu.yaml").read_text())
     gate = next(step for step in pipeline["steps"][0]["steps"] if step.get("key") == "npu-gate")
@@ -99,7 +143,16 @@ def test_gate_exposes_every_suite(suites):
 
 
 @pytest.mark.parametrize("from_env", [True, False])
-@pytest.mark.parametrize("selection", ["image-build,migration-basic", "image-build", "image-build,unknown", "nightly"])
+@pytest.mark.parametrize(
+    "selection",
+    [
+        "image-build,migration-basic",
+        "migration-parallel,migration-full-disk",
+        "image-build",
+        "image-build,unknown",
+        "nightly",
+    ],
+)
 def test_upload_uses_same_selection_for_image_and_tests(tmp_path, from_env, selection):
     pipeline = yaml.safe_load((REPO / ".buildkite/pipeline-npu.yaml").read_text())
     upload = next(step for step in pipeline["steps"][0]["steps"] if step.get("key") == "upload-npu-suites")
@@ -112,7 +165,7 @@ def test_upload_uses_same_selection_for_image_and_tests(tmp_path, from_env, sele
         f"#!{sys.executable}\n"
         "import os, pathlib, sys\n"
         "if sys.argv[1:3] == ['meta-data', 'get']:\n"
-        " print(os.environ['TEST_SUITE_METADATA'])\n"
+        " print(os.environ['TEST_SUITE_METADATA'] if sys.argv[3] == 'npu-suites' else os.environ['TEST_IMAGE_METADATA'])\n"
         "elif sys.argv[1:3] == ['pipeline', 'upload']:\n"
         " data = pathlib.Path(sys.argv[3]).read_text() if len(sys.argv) > 3 else sys.stdin.read()\n"
         " with open(os.environ['TEST_UPLOAD_LOG'], 'a') as f: f.write(data + '\\n---UPLOAD---\\n')\n"
@@ -126,12 +179,18 @@ def test_upload_uses_same_selection_for_image_and_tests(tmp_path, from_env, sele
         "BUILDKITE_SOURCE": "webhook",
         "BUILDKITE_COMMIT": "test-pr-commit",
         "TEST_SUITE_METADATA": selection,
+        "TEST_IMAGE_METADATA": (
+            "registry.example/vime:previous-commit" if selection.startswith("migration-parallel") else ""
+        ),
         "TEST_UPLOAD_LOG": str(log),
     }
     env.pop("NPU_SUITES", None)
+    env.pop("NPU_CI_IMAGE", None)
     if from_env:
         env["NPU_SUITES"] = selection
         env["TEST_SUITE_METADATA"] = "unknown"  # metadata must not override the explicit environment
+        env["NPU_CI_IMAGE"] = env["TEST_IMAGE_METADATA"]
+        env["TEST_IMAGE_METADATA"] = ""  # explicit image must also take precedence
     result = subprocess.run(
         ["bash", "-c", upload["command"].replace("$$", "$")],
         cwd=REPO,
@@ -140,14 +199,15 @@ def test_upload_uses_same_selection_for_image_and_tests(tmp_path, from_env, sele
         text=True,
         timeout=15,
     )
-    if selection != "image-build,migration-basic":
+    if selection not in ("image-build,migration-basic", "migration-parallel,migration-full-disk"):
         assert result.returncode != 0
         assert not log.exists(), "Invalid selection must fail before uploading the image build"
         return
     assert result.returncode == 0, result.stderr
     image_yaml, test_json, _ = log.read_text().split("\n---UPLOAD---\n")
-    assert yaml.safe_load(image_yaml)["steps"][0]["skip"] is False
+    building = selection.startswith("image-build")
+    assert yaml.safe_load(image_yaml)["steps"][0]["skip"] is not building
     generated = json.loads(test_json)["steps"]
-    assert len(generated) == 7
-    assert all(step["key"].startswith("npu-migration-basic-") for step in generated)
-    assert all(step["image"].endswith(":test-pr-commit") for step in generated)
+    assert len(generated) == (7 if building else 10)
+    expected_image = ":test-pr-commit" if building else "registry.example/vime:previous-commit"
+    assert all(step["image"].endswith(expected_image) for step in generated)

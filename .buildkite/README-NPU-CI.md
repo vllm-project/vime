@@ -20,16 +20,31 @@ NPU suites to run via a multi-select field:
 - **`image-build`** — triggers a fresh image build in the `image-build-npu` step;
   all test steps use the newly built image instead of the pre-built default.
   The automatic `smk` inclusion policy remains, but its six entries are currently
-  commented out for this migration PR. Select `migration-basic` as well.
+  commented out for this migration PR. Select a non-empty migration suite as well.
 - **`smk`** — temporarily paused: its six cases were already validated.
 - **`migration-basic`** — runs seven shared GPU test scenarios with NPU launch
   settings. Select it together with **`image-build`** to test a new PR image;
   `image-build` does not automatically select `migration-basic`.
+- **`migration-parallel`** — second batch: nine shared layout, PP/CP, gradient
+  comparison, debug-dump and PPO scenarios.
+- **`migration-full-disk`** — reruns only full-disk with two rollouts, to verify
+  the training-memory fix after build #383. Selecting this together with
+  `migration-basic` runs full-disk only once.
 - **`nightly`** — reserved for future coverage; currently empty. Selecting only
   this suite fails with an explicit error rather than uploading zero tests.
 
 With `smk` paused, selecting only `image-build` or `smk` also fails before
 uploading the image build because no tests are selected.
+
+The optional **Existing NPU image** field (`npu-ci-image` metadata, or
+`NPU_CI_IMAGE` environment variable) accepts a full image reference. Leave
+`image-build` unselected when supplying it. Tests reuse that image's dependencies;
+`update-npu-environment.sh` still checks out **this build's commit**, installs vime
+and reconciles its patches. The log's `VIME_TEST_IMAGE` records the actual image,
+separately from `BUILDKITE_COMMIT` / `VIME_IMAGE_TAG`. Without an explicit image or
+`image-build`, the default is `quay.io/ascend/vime:vime-latest`; it does **not**
+automatically select the previous build's image. Conflicting PR image choices
+fail before any upload. Scheduled builds continue to build a fresh image.
 
 **`image-build-npu`** the `image-build-npu` step will build and
 push a fresh NPU test image tagged with the current commit. When `image-build` 
@@ -74,9 +89,10 @@ request. No change to the default image is needed.
 | `test_qwen2.5_0.5B_fanout_short.py` | Multiple training samples per prompt; exact helper invocation count | `npu-4` |
 | `test_qwen2.5_0.5B_score_centering.py` | Top-k 128 and top-p 1.0/0.95 metadata and finite gradients | `npu-4` |
 
-Migration jobs use a concurrency group with limit four, shared across builds.
-Each job still requests four NPUs, allowing up to 16 requested NPUs in this group
-when four migration jobs run concurrently.
+All migration suites use the existing `vime-npu-migration-basic` concurrency
+group with limit four, shared across builds. Batch one alone requests at most
+16 NPUs concurrently; batch two introduces eight-NPU jobs, so the shared limit
+can request up to 32 NPUs. Actual scheduling depends on queue availability.
 Failure of one scenario does not skip the remaining scenarios. The commented
 smoke entries retain their original resource classes and timeouts for restoration.
 The score-centering test
@@ -91,7 +107,8 @@ system temporary directory. The full-disk case uses native HF reference loading
 on NPU because the common converter skips that platform; it does not claim
 torch_dist conversion coverage. NPU launch flags select flash attention, disable
 CUDA gradient-accumulation fusion and set `weight_nz_mode=0`, while retaining
-the tests' parallelism, optimizer settings and assertions.
+the tests' parallelism and assertions. The second batch uses NPU Adam CPU
+offload for the actor/critic pair, as detailed below.
 
 Before each migration test, the log section **NPU migration environment** records
 the commit/image tag, visible-device variables, Ray-independent device count,
@@ -201,3 +218,69 @@ The initial rollout of this mechanism requires publishing a new default image
 that contains `/opt/npu_patch/series.conf`, then updating
 `DEFAULT_CI_IMAGE` in `npu_suites.py`. The legacy default image contains patch
 bytes under `/tmp/npu_patch` but not the OLD series required by this reconciler.
+
+## Second batch and full-disk retry
+
+For the next run after #383, select **`migration-parallel` +
+`migration-full-disk`**: ten jobs, without repeating the other six passing
+batch-one scenarios. The original six `smk` entries remain commented out.
+
+This change updates tests and CI configuration, with no image dependencies or
+vendor patch changes. To reuse #383, leave `image-build` unselected and paste
+this into **Existing NPU image**:
+
+```text
+swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/vime-ci-npu:d314eacb8256a6fd19b5a3aaebc46def027be1bf
+```
+
+Alternatively, leave that field empty and select `image-build` with the same
+suites to build a new image. Reuse requires the referenced image to remain
+available in the registry. Future base-dependency changes require a new image.
+
+| Inventory / shared test | Model | Training dataset | Preserved feature / layout | NPUs / timeout |
+| --- | --- | --- | --- | --- |
+| G03 `test_qwen2.5_0.5B_vllm_config.py` | Qwen2.5-0.5B-Instruct | GSM8K `train.parquet` | Colocated actor 8; TP2 and TP1 serving groups plus 2 placeholders | 8 / 180 min |
+| G04 `test_qwen2.5_0.5B_vllm_config_distributed.py` | Qwen2.5-0.5B-Instruct | GSM8K `train.parquet` | Actor 4 + rollout 4; mixed TP and placeholder; straw transport | 8 / 180 min |
+| G43 `test_qwen2_5_0_5B_non_colocate_pp.py` | Qwen2.5-0.5B-Instruct | GSM8K `train.parquet` | Actor PP2 on 2 devices + rollout 2; distributed weight sync | 4 / 180 min |
+| G47 `test_qwen3_5_0_8B_top_p_cp2.py` | Qwen3.5-0.8B | GSM8K `train.parquet` | CP2, top-p 0.95 / top-k 20, Qwen3.5 loss mask | 4 / 180 min |
+| G48 `test_qwen3_0.6B_parallel_check.py` | Qwen3-0.6B | DAPO `dapo-math-17k.jsonl` | Two loss modes, DP scaling / TP4 / PP4 / CP4 / TP2+PP2+CP2, 12 launches | 8 / 360 min |
+| G40 `test_qwen2.5_0.5B_debug_train_dump_e2e.py` | Qwen2.5-0.5B-Instruct | GSM8K `train.parquet` | TP2+PP2+CP2; compare train/rollout log-probs by sample position | 8 / 180 min |
+| G14 `test_qwen3_4B_ppo.py` | Qwen3-4B actor and critic | DAPO `dapo-math-17k.jsonl` | TP2+CP2, colocated, straw; critic-only then actor+critic | 8 / 180 min |
+| G16 `test_qwen3_4B_ppo_train_critic_only.py` | Qwen3-4B actor and critic | DAPO `dapo-math-17k.jsonl` | TP2+CP2, colocated; both steps critic-only | 8 / 180 min |
+| G15 `test_qwen3_4B_ppo_disaggregate.py --transport object-store` | Qwen3-4B actor and critic | DAPO `dapo-math-17k.jsonl` | Training 4 + rollout 4, TP2+CP2; basic PPO **without NIXL coverage** | 8 / 180 min |
+| G07 `test_full_disk_weight_update.py` (retry suite) | Qwen3.5-0.8B | GSM8K `train.parquet` | Two rollouts and initial + two full checkpoint publications | 4 / 180 min |
+
+Model repositories are under `Qwen/`; dataset repositories are `zhuzilin/gsm8k`
+and `zhuzilin/dapo-math-17k`. Optional GSM8K/AIME evaluation is disabled in this
+batch (`VIME_TEST_ENABLE_EVAL=0`). PPO no longer downloads AIME when disabled.
+
+NPU cases use native HF reference loading when automatic torch_dist conversion
+is disabled; conversion support is not implied. All second-batch NPU cases
+chunk log-prob calculations at 128 tokens and bound vLLM to 16 simultaneous
+sequences, capture size 8 and memory utilization 0.5, retaining graph execution.
+The serving context is 8192 for GSM8K and 32768 for DAPO; original response
+limits and rollout counts remain. G03/G04 use a 2048-token training microbatch
+budget. PPO uses 8192 per device plus full recomputation and Adam CPU offload
+(`optimizer-cpu-offload`, `overlap-cpu-optimizer-d2h-h2d`,
+`use-precision-aware-optimizer`), preserving TP2/CP2 and both role learning rates.
+Host memory and the actor/critic offload combination still need CI evidence.
+
+G48 saves one rollout and uses it for all subsequent comparisons, with unique
+scratch paths per run. Loading that rollout already bypasses vLLM in the
+framework. NPU runs the individual dimensions before their combination; it does
+not request the CUDA batch-invariant inference option or `FULL_DECODE_ONLY`.
+The existing gradient-norm tolerance remains `rel_tol=abs_tol=0.01`; the dump
+alignment tolerance remains `rtol=atol=1e-3`. A failing dimension is not silently
+replaced with size 1. This is training parallelism coverage, not a deterministic
+Ascend serving test.
+
+G15 defaults to NIXL on GPU and object-store on NPU, with an explicit
+`--transport nixl` available for a separate capability probe. This suite
+registers the object-store variant only; **NIXL support remains unverified**.
+
+Full-disk's #383 OOM occurred in the second training step after Adam state was
+allocated. On NPU its dynamic microbatch budget is now 2048 (GPU remains 9216),
+with `--log-probs-chunk-size 128`. The two NPU rollouts, response limit 1024,
+entropy coefficient 0.01, serving settings and publication assertions remain.
+Passing CPU launch tests does not establish that the NPU OOM is resolved;
+completion of both training steps and the final publication checks is required.

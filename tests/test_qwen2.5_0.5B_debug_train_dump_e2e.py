@@ -17,6 +17,7 @@ Uses Qwen2.5-0.5B-Instruct with 8 GPUs: TP=2, PP=2, CP=2 (DP=1).
 
 import os
 import tempfile
+from shlex import quote
 
 import torch
 
@@ -25,20 +26,22 @@ import vime.utils.external_utils.command_utils as U
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
 NUM_GPUS = 8
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 NUM_ROLLOUT = 1
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/gsm8k")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/gsm8k", dir_dst=DATASET_DIR)
 
 
 def _train_args(dump_dir: str) -> str:
-    ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ --ref-load /root/models/{MODEL_NAME}/ "
+    ckpt_args = f"--hf-checkpoint {quote(str(MODEL_DIR))} --ref-load {quote(str(MODEL_DIR))} "
 
     rollout_args = (
-        "--prompt-data /root/datasets/gsm8k/train.parquet "
+        f"--prompt-data {quote(str(DATASET_DIR / 'gsm8k/train.parquet'))} "
         "--input-key messages "
         "--label-key label "
         "--apply-chat-template "
@@ -91,11 +94,21 @@ def _train_args(dump_dir: str) -> str:
     vllm_args = (
         "--rollout-num-gpus-per-engine 2 " "--vllm-gpu-memory-utilization 0.7 " "--vllm-max-cudagraph-capture-size 16 "
     )
+    if U.current_platform().name == "npu":
+        # Keep graph execution; bound serving memory for the CI request load.
+        vllm_args = (
+            "--rollout-num-gpus-per-engine 2 "
+            "--vllm-gpu-memory-utilization 0.5 --vllm-max-num-seqs 16 "
+            "--vllm-max-cudagraph-capture-size 8 "
+            "--vllm-max-model-len 8192 "
+        )
 
     return (
         f"{ckpt_args} {rollout_args} {optimizer_args} {grpo_args} "
         f"{parallel_args} {misc_args} {vllm_args} "
-        f"--dump-details {dump_dir} "
+        f"--dump-details {quote(dump_dir)} "
+        f"{U.get_test_platform_args()} "
+        f"{'--log-probs-chunk-size 128 ' if U.current_platform().name == 'npu' else ''}"
     )
 
 
@@ -146,7 +159,7 @@ def _verify(dump_dir: str):
 
 
 def execute():
-    dump_dir = tempfile.mkdtemp(prefix="vime_dump_details_")
+    dump_dir = tempfile.mkdtemp(prefix="vime_dump_details_", dir=U.get_test_tmp_dir())
     print(f"Using dump-details dir: {dump_dir}")
 
     U.execute_train(

@@ -119,6 +119,14 @@ def test_shared_cases_keep_their_assertions_and_use_platform_paths(monkeypatch, 
             checkpoint.mkdir(parents=True)
             (checkpoint / "committed_2.json").write_text("{}")
         elif "full_disk" in filename:
+            assert option("--max-tokens-per-gpu") == ("2048" if platform == "npu" else "9216")
+            assert option("--rollout-max-response-len") == "1024"
+            assert option("--entropy-coef") == "0.01"
+            if platform == "npu":
+                assert option("--log-probs-chunk-size") == "128"
+                assert option("--num-rollout") == "2"
+            else:
+                assert "--log-probs-chunk-size" not in args
             write_full_checkpoints(option("--update-weight-disk-dir"), int(option("--num-rollout")))
         elif "fanout" in filename:
             assert option("--n-samples-per-prompt") == "1"

@@ -1,6 +1,7 @@
 """Four-GPU Qwen3.5 top-p replay E2E with context parallelism."""
 
 import os
+from shlex import quote
 
 import vime.utils.external_utils.command_utils as U
 
@@ -11,26 +12,30 @@ os.environ.setdefault("NCCL_NVLS_ENABLE", "0")
 MODEL_NAME = "Qwen3.5-0.8B"
 MODEL_TYPE = "qwen3.5-0.8B"
 NUM_GPUS = 4
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 TORCH_DIST_CKPT = f"/dev/shm/{MODEL_NAME}_torch_dist"
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/gsm8k")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/gsm8k", dir_dst=DATASET_DIR)
     U.convert_checkpoint(
         model_name=MODEL_NAME,
         megatron_model_type=MODEL_TYPE,
         num_gpus_per_node=NUM_GPUS,
         dir_dst="/dev/shm",
+        hf_checkpoint=str(MODEL_DIR),
     )
 
 
 def execute():
-    ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME} " f"--ref-load {TORCH_DIST_CKPT} "
+    ref_load = TORCH_DIST_CKPT if U.current_platform().torch_dist_convert else str(MODEL_DIR)
+    ckpt_args = f"--hf-checkpoint {quote(str(MODEL_DIR))} --ref-load {quote(ref_load)} "
 
     rollout_args = (
-        "--prompt-data /root/datasets/gsm8k/train.parquet "
+        f"--prompt-data {quote(str(DATASET_DIR / 'gsm8k/train.parquet'))} "
         "--input-key messages "
         "--label-key label "
         "--apply-chat-template "
@@ -79,6 +84,14 @@ def execute():
     vllm_args = (
         "--rollout-num-gpus-per-engine 1 " "--vllm-gpu-memory-utilization 0.7 " "--vllm-max-cudagraph-capture-size 16 "
     )
+    if U.current_platform().name == "npu":
+        # Keep graph execution; bound serving memory for the CI request load.
+        vllm_args = (
+            "--rollout-num-gpus-per-engine 1 "
+            "--vllm-gpu-memory-utilization 0.5 --vllm-max-num-seqs 16 "
+            "--vllm-max-cudagraph-capture-size 8 "
+            "--vllm-max-model-len 8192 "
+        )
 
     misc_args = (
         "--attention-dropout 0.0 "
@@ -102,6 +115,8 @@ def execute():
             f"{perf_args} "
             f"{vllm_args} "
             f"{misc_args} "
+            f"{U.get_test_platform_args()} "
+            f"{'--log-probs-chunk-size 128 ' if U.current_platform().name == 'npu' else ''}"
         ),
         num_gpus_per_node=NUM_GPUS,
         megatron_model_type=MODEL_TYPE,

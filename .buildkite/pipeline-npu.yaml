@@ -2,7 +2,8 @@
 #
 # This pipeline is for running NPU tests on PRs.
 # Scheduled builds always build a fresh image. PR builds reuse DEFAULT_CI_IMAGE
-# unless image-build is selected; patch-only changes are reconciled at runtime.
+# unless an existing image is supplied or image-build is selected.
+# The requested checkout and patch-only changes are reconciled at runtime.
 
 steps:
   - group: ":pipeline: Run NPU test"
@@ -40,14 +41,22 @@ steps:
             multiple: true
             required: true
             options:
-              - label: "run-npu-ci-image-build (select migration-basic too; smk paused)"
+              - label: "run-npu-ci-image-build (also select a migration suite; smk paused)"
                 value: image-build
               - label: "run-npu-ci-smk (temporarily disabled)"
                 value: smk
               - label: "run-npu-ci-migration-basic (7 shared GPU scenarios on NPU)"
                 value: migration-basic
+              - label: "run-npu-ci-migration-parallel (batch 2: 9 layout/parallel/PPO scenarios)"
+                value: migration-parallel
+              - label: "run-npu-ci-migration-full-disk (retry only: 2 rollouts)"
+                value: migration-full-disk
               - label: "run-npu-ci-nightly"
                 value: nightly
+          - text: "Existing NPU image (optional; leave image-build unselected)"
+            key: npu-ci-image
+            required: false
+            hint: "Full registry/name:tag or digest. Reuses dependencies and checks out this build's commit. Empty uses the default image."
 
       - label: ":pipeline: upload NPU suites"
         key: upload-npu-suites
@@ -61,6 +70,7 @@ steps:
           set -eo pipefail
           # Export the resolved value so image selection and the generator agree.
           export NPU_SUITES="$${NPU_SUITES:-$$(buildkite-agent meta-data get "npu-suites" --default "")}"
+          export NPU_CI_IMAGE="$${NPU_CI_IMAGE:-$$(buildkite-agent meta-data get "npu-ci-image" --default "")}"
           # Validate before uploading any steps, including the image build.
           PIPELINE_JSON=$$(mktemp)
           trap 'rm -f "$$PIPELINE_JSON"' EXIT

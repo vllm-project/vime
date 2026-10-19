@@ -82,8 +82,14 @@ def execute():
             "--expert-model-parallel-size 1 "
             "--expert-tensor-parallel-size 1 "
             "--use-dynamic-batch-size "
-            "--max-tokens-per-gpu 9216 "
+            f"--max-tokens-per-gpu {2048 if U.current_platform().name == 'npu' else 9216} "
         )
+
+        if U.current_platform().name == "npu":
+            # After the first optimizer step, Adam state remains resident.
+            # Chunk full-vocabulary FP32 log-prob/entropy temporaries as well as
+            # reducing the training microbatch; retain both rollouts and entropy.
+            perf_args += "--log-probs-chunk-size 128 "
 
         grpo_args = (
             "--advantage-estimator grpo "

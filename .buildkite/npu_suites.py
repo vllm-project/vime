@@ -8,7 +8,7 @@ NPU jobs run on the ascend-a3 queue with resource_class determining NPU count
 (e.g., "npu-8" means 8 NPUs).
 
 The selection is read from the NPU_SUITES environment variable. For local
-testing, set NPU_SUITES=smk,nightly instead of having a buildkite-agent on PATH.
+testing, set NPU_SUITES=migration-parallel instead of having an agent on PATH.
 
 stdlib only — runs with the agent host's python3.
 """
@@ -49,6 +49,24 @@ SUITES = {
         ("test_qwen2.5_0.5B_fanout_short.py", "npu-4", "", {}),
         ("test_qwen2.5_0.5B_score_centering.py", "npu-4", "", {}),
     ],
+    # Second batch: preserve the GPU layouts and correctness checks. Disable
+    # optional evaluation, not training, and allow the 12-launch matrix 6 hours.
+    "migration-parallel": [
+        ("test_qwen2.5_0.5B_vllm_config.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}),
+        ("test_qwen2.5_0.5B_vllm_config_distributed.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}),
+        ("test_qwen2_5_0_5B_non_colocate_pp.py", "npu-4", "", {}),
+        ("test_qwen3_5_0_8B_top_p_cp2.py", "npu-4", "", {}),
+        ("test_qwen3_0.6B_parallel_check.py", "npu-8", "", {}, 360),
+        ("test_qwen2.5_0.5B_debug_train_dump_e2e.py", "npu-8", "", {}),
+        ("test_qwen3_4B_ppo.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}),
+        ("test_qwen3_4B_ppo_train_critic_only.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}),
+        # Basic disaggregated PPO coverage; this does not validate Ray NIXL.
+        ("test_qwen3_4B_ppo_disaggregate.py", "npu-8", "--transport object-store", {"VIME_TEST_ENABLE_EVAL": "0"}),
+    ],
+    # Rerun the #383 failure without repeating the other six passing cases.
+    "migration-full-disk": [
+        ("test_full_disk_weight_update.py", "npu-4", "", {"VIME_TEST_NUM_ROLLOUT": "2"}),
+    ],
     "nightly": [],
 }
 
@@ -70,9 +88,14 @@ def _read_suite_values() -> list[str]:
 
 def _ci_image() -> str:
     values = _read_suite_values()
-    if ("image-build" in values) or (BUILDKITE_SOURCE == "schedule"):
+    existing_image = os.environ.get("NPU_CI_IMAGE", "").strip()
+    if BUILDKITE_SOURCE == "schedule":
         return f"{IMAGE_REGISTRY}/{IMAGE_NAME}:{VIME_IMAGE_TAG}"
-    return DEFAULT_CI_IMAGE
+    if "image-build" in values:
+        if existing_image:
+            raise SystemExit("Select image-build OR supply NPU_CI_IMAGE / Existing NPU image, not both")
+        return f"{IMAGE_REGISTRY}/{IMAGE_NAME}:{VIME_IMAGE_TAG}"
+    return existing_image or DEFAULT_CI_IMAGE
 
 
 def selected_suites() -> list:
@@ -98,6 +121,7 @@ def npu_step(
     env: dict,
     timeout_in_minutes: int = 180,
 ) -> dict:
+    ci_image = _ci_image()
     step_env = {
         "VIME_PLATFORM": "npu",
         "VIME_TEST_ENABLE_INFINITE_RUN": "false",
@@ -109,6 +133,7 @@ def npu_step(
         "IMAGE_REGISTRY": IMAGE_REGISTRY,
         "IMAGE_NAME": IMAGE_NAME,
         "VIME_IMAGE_TAG": VIME_IMAGE_TAG,
+        "VIME_TEST_IMAGE": ci_image,
         "HF_HOME": "/root/.cache/huggingface",
         **env,
     }
@@ -123,7 +148,7 @@ def npu_step(
         # Cover checkpoint conversion before the training launcher runs.
         'export HCCL_CONNECT_TIMEOUT="$${HCCL_CONNECT_TIMEOUT:-600}"',
     ]
-    if suite == "migration-basic":
+    if suite.startswith("migration-"):
         step_env["VIME_TEST_RESOURCE_CLASS"] = resource_class
         commands.append("python tests/ci/npu_test_environment.py")
     commands.append(f"python tests/{test_name}{' ' + extra_args if extra_args else ''}")
@@ -140,7 +165,7 @@ def npu_step(
             "resource_class": resource_class,
         },
         "timeout_in_minutes": timeout_in_minutes,
-        "image": _ci_image(),
+        "image": ci_image,
         "plugins": [
             {
                 "kubernetes": {
@@ -152,9 +177,10 @@ def npu_step(
         ],
         "env": step_env,
     }
-    if suite == "migration-basic":
+    if suite.startswith("migration-"):
         # Allow up to four migration jobs at once, including across builds. A failed case
-        # releases its slot so the other capability probes can still run.
+        # releases its slot. Share the existing group across all migration suites
+        # so selecting multiple batches does not multiply their concurrency.
         step["concurrency"] = 4
         step["concurrency_group"] = "vime-npu-migration-basic"
     return step
@@ -162,8 +188,13 @@ def npu_step(
 
 def build_steps() -> list[dict]:
     steps = []
+    seen = set()
     for suite in selected_suites():
         for index, entry in enumerate(SUITES[suite], start=1):
+            identity = json.dumps(entry, sort_keys=True)
+            if identity in seen:
+                continue
+            seen.add(identity)
             step = npu_step(suite, *entry)
             step["key"] = f"npu-{suite}-{index}"
             steps.append(step)
