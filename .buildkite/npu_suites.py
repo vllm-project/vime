@@ -153,9 +153,9 @@ def npu_step(
         "env": step_env,
     }
     if suite == "migration-basic":
-        # Serialize migration jobs, including across builds. A failed case
+        # Allow up to four migration jobs at once, including across builds. A failed case
         # releases its slot so the other capability probes can still run.
-        step["concurrency"] = 1
+        step["concurrency"] = 4
         step["concurrency_group"] = "vime-npu-migration-basic"
     return step
 

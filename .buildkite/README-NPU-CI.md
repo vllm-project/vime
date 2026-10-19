@@ -74,7 +74,9 @@ request. No change to the default image is needed.
 | `test_qwen2.5_0.5B_fanout_short.py` | Multiple training samples per prompt; exact helper invocation count | `npu-4` |
 | `test_qwen2.5_0.5B_score_centering.py` | Top-k 128 and top-p 1.0/0.95 metadata and finite gradients | `npu-4` |
 
-Migration jobs use a concurrency group with limit one, including across builds.
+Migration jobs use a concurrency group with limit four, shared across builds.
+Each job still requests four NPUs, allowing up to 16 requested NPUs in this group
+when four migration jobs run concurrently.
 Failure of one scenario does not skip the remaining scenarios. The commented
 smoke entries retain their original resource classes and timeouts for restoration.
 The score-centering test

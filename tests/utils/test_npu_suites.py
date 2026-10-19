@@ -42,7 +42,7 @@ def test_image_build_runs_selected_migration_with_smoke_paused(suites, monkeypat
     assert len(migration) == 7
     for step in migration:
         assert step["agents"] == {"queue": "ascend-a3", "resource_class": "npu-4"}
-        assert step["concurrency"] == 1
+        assert step["concurrency"] == 4
         assert step["concurrency_group"] == "vime-npu-migration-basic"
         assert step["timeout_in_minutes"] == 180
         assert "python tests/ci/npu_test_environment.py" in step["command"]
