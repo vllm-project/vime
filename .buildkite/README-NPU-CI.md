@@ -109,6 +109,23 @@ weight/version checks and checkpoint assertion. Numerical tolerances are not
 relaxed for this migration. NPU hardware results must come from CI; command
 generation and CPU fixture tests only validate the harness.
 
+Following build [#382](https://buildkite.com/vllm/vime-npu-ci/builds/382/list),
+Pipeline-RL on NPU limits background generation to eight requests per engine
+(`--vllm-server-concurrency 8`), leaving room for the live probes in engines with
+`max_num_seqs=16`. `rollout-io-concurrency` only limits file I/O; it does not limit
+generation. Probe logs include request IDs, response-header and first-stream-line
+times, the first parsed event, and failure/closure details. The 180-second wait
+and continuity/abort assertions remain unchanged. Buildkite job concurrency
+remains four, independently of this serving request limit.
+
+The NPU full-disk case uses `max_model_len=8192`, `max_num_seqs=16`, memory
+utilization `0.5`, and graph capture size `8` to leave space for Ascend attention
+workspaces. Graph execution stays enabled. A check of all 7,473 GSM8K training
+prompts with the Qwen3.5-0.8B chat template found a maximum of 243 prompt tokens;
+adding the unchanged 1,024-token response budget requires only 1,267 tokens.
+No samples or responses are shortened. GPU serving settings retain their
+previous values. These resource adjustments still require an NPU CI rerun.
+
 To inspect generated steps locally without uploading or running jobs:
 
 ```bash

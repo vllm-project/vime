@@ -65,6 +65,10 @@ def train_args(
     )
     if transport == "disk":
         args += f"--update-weight-transport disk --update-weight-disk-dir {quote(str(directory / 'weights'))} "
+    if U.current_platform().name == "npu":
+        # Bound background generation so the live probes can enter the 16-sequence
+        # engines. rollout-io-concurrency only controls checkpoint/queue file I/O.
+        args += "--vllm-server-concurrency 8 "
     return args + U.get_test_platform_args()
 
 

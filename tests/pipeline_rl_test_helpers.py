@@ -1,4 +1,4 @@
-"""Live-request probes used by the PipelineRL GPU e2e test."""
+"""Live-request probes used by the shared PipelineRL e2e test."""
 
 import json
 import os
@@ -48,9 +48,29 @@ class GenerationProbe:
         self.condition = threading.Condition()
         self.error = None
         self.done = False
+        self.started_at = time.monotonic()
         self.thread = threading.Thread(target=self.run, daemon=True)
 
+    def log(self, event, **details):
+        print(
+            "PipelineRL probe: "
+            + json.dumps(
+                {
+                    "event": event,
+                    "time": time.time(),
+                    "elapsed_s": round(time.monotonic() - self.started_at, 3),
+                    "url": self.url,
+                    "request_id": self.rid,
+                    "engine_request_id": self.engine_request_id,
+                    **details,
+                }
+            ),
+            flush=True,
+        )
+
     def run(self):
+        self.started_at = time.monotonic()
+        self.log("request_started")
         try:
             with requests.post(
                 f"{self.url}/inference/v1/generate",
@@ -64,8 +84,13 @@ class GenerationProbe:
                 stream=True,
                 timeout=(10, 300),
             ) as response:
+                self.log("response_headers", status_code=response.status_code)
                 response.raise_for_status()
+                first_line = True
                 for line in response.iter_lines(chunk_size=4096):
+                    if first_line:
+                        self.log("first_stream_line", size_bytes=len(line))
+                        first_line = False
                     if not line.startswith(b"data: ") or line == b"data: [DONE]":
                         continue
                     data = json.loads(line[6:])
@@ -83,12 +108,16 @@ class GenerationProbe:
                                     "time": time.time(),
                                 }
                             )
+                            if len(self.events) == 1:
+                                self.log("first_event", **self.events[-1])
                             self.condition.notify_all()
         except Exception as error:
             self.error = error
+            self.log("request_error", error=repr(error))
         finally:
             with self.condition:
                 self.done = True
+                self.log("stream_closed", event_count=len(self.events))
                 self.condition.notify_all()
 
     def wait(self, predicate):
@@ -96,7 +125,9 @@ class GenerationProbe:
             ready = self.condition.wait_for(lambda: self.error or self.done or predicate(self.events), timeout=180)
             if self.error:
                 raise self.error
-            assert ready and predicate(self.events), f"Probe failed on {self.url}: {self.events[-3:]}"
+            if not (ready and predicate(self.events)):
+                self.log("wait_failed", done=self.done, recent_events=self.events[-3:])
+                raise AssertionError(f"Probe failed on {self.url}, request_id={self.rid}: {self.events[-3:]}")
 
     def verify(self):
         first = self.events[0]

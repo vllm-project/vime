@@ -104,12 +104,17 @@ def execute():
             "--adam-beta2 0.98 "
         )
 
-        vllm_args = (
-            "--rollout-num-gpus-per-engine 1 "
-            "--rollout-num-gpus 3 "
-            "--vllm-gpu-memory-utilization 0.7 "
-            "--vllm-max-cudagraph-capture-size 32 "
-        )
+        vllm_args = "--rollout-num-gpus-per-engine 1 --rollout-num-gpus 3 "
+        if U.current_platform().name == "npu":
+            # This tests full weight reload, not the model's 262144-token context.
+            # GSM8K prompts plus 1024 response tokens fit within 8192. Reserve
+            # memory for Ascend attention graph capture while keeping graph mode.
+            vllm_args += (
+                "--vllm-max-model-len 8192 --vllm-max-num-seqs 16 "
+                "--vllm-gpu-memory-utilization 0.5 --vllm-max-cudagraph-capture-size 8 "
+            )
+        else:
+            vllm_args += "--vllm-gpu-memory-utilization 0.7 --vllm-max-cudagraph-capture-size 32 "
 
         disk_update_args = (
             "--update-weight-mode full "
