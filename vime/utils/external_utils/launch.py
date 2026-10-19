@@ -10,6 +10,7 @@ the actual `exec_command` calls live in `command_utils`.
 """
 
 import json
+import os
 import shlex
 from dataclasses import dataclass, field
 
@@ -110,6 +111,12 @@ def launch_commands(
     """
     extra_env = extra_env or {}
     all_env = {**platform.env, **extra_env}
+    # Test helpers prepend their import paths without hiding the platform's
+    # adaptor/CANN modules or shared libraries from the raylet and its workers.
+    for key in ("PYTHONPATH", "LD_LIBRARY_PATH"):
+        if key in platform.env and key in extra_env:
+            paths = str(extra_env[key]).split(os.pathsep) + str(platform.env[key]).split(os.pathsep)
+            all_env[key] = os.pathsep.join(dict.fromkeys(path for path in paths if path))
     all_env["VIME_PLATFORM"] = platform.name
     cmds: list = []
     if not external_ray and not ray_running:

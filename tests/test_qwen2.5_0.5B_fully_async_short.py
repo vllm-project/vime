@@ -20,12 +20,14 @@ import vime.utils.external_utils.command_utils as U
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
 NUM_GPUS = 4
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/dapo-math-17k")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/dapo-math-17k", dir_dst=DATASET_DIR)
     if torch.version.hip is not None:
         # ROCm image has no modelopt bridge: convert HF->Megatron into a container-local dir.
         U.convert_checkpoint(
@@ -34,21 +36,23 @@ def prepare():
             num_gpus_per_node=1,
             extra_args="--no-gradient-accumulation-fusion --attention-backend flash",
             dir_dst="/tmp",
+            hf_checkpoint=str(MODEL_DIR),
         )
 
 
 def execute():
     if torch.version.hip is not None:
-        ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ --ref-load /tmp/{MODEL_NAME}_torch_dist/ "
+        ref_load = f"/tmp/{MODEL_NAME}_torch_dist"
     else:
-        ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load /root/models/{MODEL_NAME}/ "
+        ref_load = str(MODEL_DIR)
+    ckpt_args = f"--hf-checkpoint {quote(str(MODEL_DIR))} --ref-load {quote(ref_load)} "
 
     rollout_args = (
         # Select the public fully-async rollout function.
         "--rollout-function-path vime.rollout.fully_async_rollout.generate_rollout_fully_async "
         "--rollout-data-transport straw "
         "--rollout-queue-online-gc "
-        "--prompt-data /root/datasets/dapo-math-17k/dapo-math-17k.jsonl "
+        f"--prompt-data {quote(str(DATASET_DIR / 'dapo-math-17k/dapo-math-17k.jsonl'))} "
         "--input-key prompt "
         "--label-key label "
         "--apply-chat-template "
@@ -131,9 +135,10 @@ def execute():
         f"{ci_args} "
         f"{fault_tolerance_args} "
         f"{misc_args} "
+        f"{U.get_test_platform_args()} "
     )
 
-    with tempfile.TemporaryDirectory(prefix="vime_straw_") as rollout_dir:
+    with tempfile.TemporaryDirectory(prefix="vime_straw_", dir=U.get_test_tmp_dir()) as rollout_dir:
         train_args += f"--rollout-data-dir {quote(rollout_dir)} "
         U.execute_train(
             train_args=train_args,

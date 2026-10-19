@@ -48,6 +48,9 @@ import vime.utils.external_utils.command_utils as U
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
 NUM_GPUS = 4
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Counter file used by the compact_generate helper. We pass its path
@@ -60,9 +63,8 @@ FANOUT_COUNTER_FILE = os.environ.get(
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/dapo-math-17k")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/dapo-math-17k", dir_dst=DATASET_DIR)
     # Clear the counter so a previous run's invocations don't bleed in.
     try:
         os.remove(FANOUT_COUNTER_FILE)
@@ -71,7 +73,7 @@ def prepare():
 
 
 def execute():
-    ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load /root/models/{MODEL_NAME}/ "
+    ckpt_args = f"--hf-checkpoint {quote(str(MODEL_DIR))} --ref-load {quote(str(MODEL_DIR))} "
 
     # Shape: rollout_batch_size=4 prompts, n_samples_per_prompt=1 (all
     # fan-out is owned by compact_generate; this knob stays at 1 so a
@@ -89,7 +91,7 @@ def execute():
     # (`'list' object has no attribute 'metadata'`).
     rollout_args = (
         "--rollout-data-transport straw "
-        "--prompt-data /root/datasets/dapo-math-17k/dapo-math-17k.jsonl "
+        f"--prompt-data {quote(str(DATASET_DIR / 'dapo-math-17k/dapo-math-17k.jsonl'))} "
         "--input-key prompt "
         "--label-key label "
         "--apply-chat-template "
@@ -170,9 +172,10 @@ def execute():
         f"{ci_args} "
         f"{fault_tolerance_args} "
         f"{misc_args} "
+        f"{U.get_test_platform_args()} "
     )
 
-    with tempfile.TemporaryDirectory(prefix="vime_straw_") as rollout_dir:
+    with tempfile.TemporaryDirectory(prefix="vime_straw_", dir=U.get_test_tmp_dir()) as rollout_dir:
         train_args += f"--rollout-data-dir {quote(rollout_dir)} "
         U.execute_train(
             train_args=train_args,

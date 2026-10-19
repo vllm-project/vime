@@ -18,11 +18,14 @@ import vime.utils.external_utils.command_utils as U
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
 NUM_GPUS = 4
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 
 
 def prepare():
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/gsm8k")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/gsm8k", dir_dst=DATASET_DIR)
 
 
 def train_args(
@@ -37,8 +40,8 @@ def train_args(
     model_path=None,
     dataset_path=None,
 ):
-    model_path = model_path or f"/root/models/{MODEL_NAME}"
-    dataset_path = dataset_path or "/root/datasets/gsm8k/train.parquet"
+    model_path = str(model_path or MODEL_DIR)
+    dataset_path = str(dataset_path or DATASET_DIR / "gsm8k/train.parquet")
     args = (
         f"--hf-checkpoint {quote(model_path)} --ref-load {quote(model_path)} "
         f"--flush-cache-interval {flush_cache_interval} --rollout-data-transport straw --rollout-queue-online-gc "
@@ -62,7 +65,7 @@ def train_args(
     )
     if transport == "disk":
         args += f"--update-weight-transport disk --update-weight-disk-dir {quote(str(directory / 'weights'))} "
-    return args
+    return args + U.get_test_platform_args()
 
 
 def verify(directory, expected_engines, flush_cache_interval=0):
@@ -89,7 +92,7 @@ def verify(directory, expected_engines, flush_cache_interval=0):
 
 
 def execute(transport, flush_cache_interval):
-    with tempfile.TemporaryDirectory(prefix="vime_pipeline_rl_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="vime_pipeline_rl_", dir=U.get_test_tmp_dir()) as tmp:
         directory = Path(tmp)
         U.execute_train(
             train_args=train_args(directory, transport=transport, flush_cache_interval=flush_cache_interval),

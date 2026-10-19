@@ -8,7 +8,8 @@ click it in the Buildkite UI like GPU CI test suites.
 
 ## Pipeline steps
 
-Three steps run in order:
+The pipeline validates the checkout, asks for suites, then uploads the image
+build and test steps. Tests depend on `image-build-npu`.
 
 **`pre-commit-npu`** runs the pre-commit gate on all files, always.
 
@@ -17,10 +18,18 @@ It appears only on PR triggers (`build.source != "schedule"`).  You select which
 NPU suites to run via a multi-select field:
 
 - **`image-build`** — triggers a fresh image build in the `image-build-npu` step;
-  when selected, `smk` is automatically included and all test steps use the newly
-  built image instead of the pre-built default.
-- **`smk`** — runs the smoke test suite.
-- **`nightly`** — runs the nightly test suite.
+  all test steps use the newly built image instead of the pre-built default.
+  The automatic `smk` inclusion policy remains, but its six entries are currently
+  commented out for this migration PR. Select `migration-basic` as well.
+- **`smk`** — temporarily paused: its six cases were already validated.
+- **`migration-basic`** — runs seven shared GPU test scenarios with NPU launch
+  settings. Select it together with **`image-build`** to test a new PR image;
+  `image-build` does not automatically select `migration-basic`.
+- **`nightly`** — reserved for future coverage; currently empty. Selecting only
+  this suite fails with an explicit error rather than uploading zero tests.
+
+With `smk` paused, selecting only `image-build` or `smk` also fails before
+uploading the image build because no tests are selected.
 
 **`image-build-npu`** the `image-build-npu` step will build and
 push a fresh NPU test image tagged with the current commit. When `image-build` 
@@ -47,33 +56,92 @@ entirely. A new image is **always** built, and the suites are determined by the
 `NPU_SUITES` environment variable (set in the scheduled build's pipeline
 configuration), which lists suite names from the `SUITES` dict.
 
+## GPU test migration: first batch
+
+For a PR containing the sync-s10 baseline and test changes, select
+**`image-build` + `migration-basic`** in the NPU gate. CI builds the image tagged
+with that PR's commit, then runs only these seven migration scenarios. The six
+previously validated smoke cases are temporarily commented out at the user's
+request. No change to the default image is needed.
+
+| Shared test | Scenario | Resource class |
+| --- | --- | --- |
+| `test_qwen2.5_0.5B_fully_async_short.py` | Fully asynchronous rollout, straw and online GC | `npu-4` |
+| `test_qwen2.5_0.5B_pipeline_rl.py --transport nccl` | Live requests span collective weight updates (HCCL on NPU) | `npu-4` |
+| `test_qwen2.5_0.5B_pipeline_rl.py --transport disk` | Live requests span full disk reloads | `npu-4` |
+| `test_qwen2.5_0.5B_pipeline_rl.py --transport nccl --flush-cache-interval 2` | Periodic refresh aborts the probe at the expected version | `npu-4` |
+| `test_full_disk_weight_update.py` | Qwen3.5-0.8B full disk publication; two rollouts exercise inference after an update | `npu-4` |
+| `test_qwen2.5_0.5B_fanout_short.py` | Multiple training samples per prompt; exact helper invocation count | `npu-4` |
+| `test_qwen2.5_0.5B_score_centering.py` | Top-k 128 and top-p 1.0/0.95 metadata and finite gradients | `npu-4` |
+
+Migration jobs use a concurrency group with limit one, including across builds.
+Failure of one scenario does not skip the remaining scenarios. The commented
+smoke entries retain their original resource classes and timeouts for restoration.
+The score-centering test
+uses two logical devices inside a four-NPU pod. Each migration job has a
+180-minute timeout; image building retains its 240-minute timeout.
+
+These are shared test scripts, not copied NPU variants. Opt-in helpers in
+`command_utils` use `VIME_TEST_ROOT`, or `HF_HOME` on NPU, for model/data paths.
+NPU temporary checkpoints and straw directories go under that root's `tmp`
+directory, with a unique directory per run. GPU defaults remain `/root` and the
+system temporary directory. The full-disk case uses native HF reference loading
+on NPU because the common converter skips that platform; it does not claim
+torch_dist conversion coverage. NPU launch flags select flash attention, disable
+CUDA gradient-accumulation fusion and set `weight_nz_mode=0`, while retaining
+the tests' parallelism, optimizer settings and assertions.
+
+Before each migration test, the log section **NPU migration environment** records
+the commit/image tag, visible-device variables, Ray-independent device count,
+installed package versions, CPU affinity, cgroup limits, filesystem capacity
+and `npu-smi info` when available. Missing diagnostic fields are reported as
+unavailable. The test still runs and its failures remain failures. Ray's actual
+resource declaration and training memory snapshots appear in the test log.
+Do not interpret host-visible totals as container quotas or infer queue limits
+from an individual job.
+
+The fully-async case retains two rollouts and the original response length; it
+does not reach the framework's later fault-injection gate and is not a recovery
+test. Pipeline-RL keeps all three rollouts, three engines, the long live probes,
+weight/version checks and checkpoint assertion. Numerical tolerances are not
+relaxed for this migration. NPU hardware results must come from CI; command
+generation and CPU fixture tests only validate the harness.
+
+To inspect generated steps locally without uploading or running jobs:
+
+```bash
+NPU_SUITES=image-build,migration-basic BUILDKITE_COMMIT="$(git rev-parse HEAD)" \
+  python .buildkite/npu_suites.py > /tmp/npu-steps.json
+```
+
 ## Adding a test
 
-Suites and test mappings are defined in [`npu_suites.py`](./npu_suites.py). Two
-suites are predefined — `smk` (runs with the `run-ci-npu-smk` label) and `nightly`
-(runs on schedule or with the `run-ci-npu-nightly` label).
+Suites and test mappings are defined in [`npu_suites.py`](./npu_suites.py):
+the temporarily paused `smk`, active `migration-basic`, and empty `nightly`.
 
-Each entry is a 4-tuple:
+Each entry is a 4-tuple, with an optional fifth item for the timeout in minutes:
 
 ```python
-("test-qwen3-4B-npu.py", "npu-8", "", {})
+("test_qwen3_4B_npu.py", "npu-8", "", {})
 # (test_name, resource_class, extra_args, env_overrides)
 ```
 
-- **`test_name`** — the test script under `tests/`, e.g. `test-qwen3-4B-npu.py`.
+- **`test_name`** — the test script under `tests/`, e.g. `test_qwen3_4B_npu.py`.
 - **`resource_class`** — NPU count for the pod (`npu-2`, `npu-4`, `npu-8`,
   `npu-16`). 
 - **`extra_args`** — extra CLI arguments passed to the test script.
 - **`env_overrides`** — extra environment variables for the test step, e.g.
-  `{"USE_DEEPEP": "1"}`.
+  `{"VIME_TEST_NUM_ROLLOUT": "2"}`. Use the names read by the test; the NPU
+  generator does not translate GPU-suite environment aliases.
 
 A test script should:
 
 1. **Download models and datasets to `HF_HOME`** before training so subsequent
    steps reuse the cache. The CI sets `HF_HOME=/root/.cache/huggingface`.
 
-2. **Run training** via `train.py` or `train_async.py` with the appropriate
-   NPU-specific arguments.
+2. **Run training** via `command_utils.execute_train()` and the shared `train.py`
+   entry point with the appropriate NPU arguments. Fully asynchronous rollout
+   also uses this entry point.
 
 To register a new suite, add a key to the `SUITES` dict and update
 `selected_suites()` if it should run conditionally. Also add a corresponding

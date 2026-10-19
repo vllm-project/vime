@@ -40,10 +40,12 @@ steps:
             multiple: true
             required: true
             options:
-              - label: "run-npu-ci-image-build (test new image, auto include smk)"
+              - label: "run-npu-ci-image-build (select migration-basic too; smk paused)"
                 value: image-build
-              - label: "run-npu-ci-smk"
+              - label: "run-npu-ci-smk (temporarily disabled)"
                 value: smk
+              - label: "run-npu-ci-migration-basic (7 shared GPU scenarios on NPU)"
+                value: migration-basic
               - label: "run-npu-ci-nightly"
                 value: nightly
 
@@ -56,7 +58,13 @@ steps:
           resource_class: "npu-2"
         timeout_in_minutes: 180
         command:  |
-          NPU_SUITES=$$(buildkite-agent meta-data get "npu-suites" --default "")
+          set -eo pipefail
+          # Export the resolved value so image selection and the generator agree.
+          export NPU_SUITES="$${NPU_SUITES:-$$(buildkite-agent meta-data get "npu-suites" --default "")}"
+          # Validate before uploading any steps, including the image build.
+          PIPELINE_JSON=$$(mktemp)
+          trap 'rm -f "$$PIPELINE_JSON"' EXIT
+          python .buildkite/npu_suites.py > "$$PIPELINE_JSON"
           if [[ "$$BUILDKITE_SOURCE" == "schedule" ]]; then
             echo "Scheduled build — building the image."
             echo "BUILDKITE_SOURCE: $$BUILDKITE_SOURCE"
@@ -70,4 +78,4 @@ steps:
             SKIP_IMAGE_BUILD=true
           fi
           sed -e "s/__SKIP_IMAGE_BUILD__/$${SKIP_IMAGE_BUILD}/g" .buildkite/pipeline-npu-image.yaml | buildkite-agent pipeline upload
-          python .buildkite/npu_suites.py | buildkite-agent pipeline upload
+          buildkite-agent pipeline upload "$$PIPELINE_JSON"

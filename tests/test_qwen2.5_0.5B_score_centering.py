@@ -14,19 +14,21 @@ from vime.utils.types import Sample
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
 NUM_GPUS = 2
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/gsm8k")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/gsm8k", dir_dst=DATASET_DIR)
 
 
 def execute(top_p=1.0):
-    with tempfile.TemporaryDirectory(prefix="vime-score-centering-") as directory:
+    with tempfile.TemporaryDirectory(prefix="vime-score-centering-", dir=U.get_test_tmp_dir()) as directory:
         train_args = (
-            f"--hf-checkpoint /root/models/{MODEL_NAME} --ref-load /root/models/{MODEL_NAME} "
-            "--prompt-data /root/datasets/gsm8k/train.parquet "
+            f"--hf-checkpoint {quote(str(MODEL_DIR))} --ref-load {quote(str(MODEL_DIR))} "
+            f"--prompt-data {quote(str(DATASET_DIR / 'gsm8k/train.parquet'))} "
             "--input-key messages --label-key label --apply-chat-template --rm-type math "
             "--num-rollout 2 --rollout-batch-size 2 --n-samples-per-prompt 4 "
             f"--rollout-max-response-len 256 --rollout-temperature 0.8 --rollout-top-p {top_p} --rollout-top-k -1 "
@@ -44,8 +46,9 @@ def execute(top_p=1.0):
             "--attention-dropout 0 --hidden-dropout 0 --attention-backend flash "
             "--accumulate-allreduce-grads-in-fp32 --attention-softmax-in-fp32 "
             "--actor-num-nodes 1 --actor-num-gpus-per-node 2 --colocate --ci-test "
-            f"--save-debug-rollout-data {directory}/rollout_{{rollout_id}}.pt "
-            f"--ci-save-grad-norm {directory}/grad_{{rollout_id}}_{{step_id}}.pt "
+            f"--save-debug-rollout-data {quote(f'{directory}/rollout_{{rollout_id}}.pt')} "
+            f"--ci-save-grad-norm {quote(f'{directory}/grad_{{rollout_id}}_{{step_id}}.pt')} "
+            f"{U.get_test_platform_args()} "
         )
         U.execute_train(
             train_args=train_args,

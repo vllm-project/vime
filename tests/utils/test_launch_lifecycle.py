@@ -11,9 +11,35 @@ from unittest.mock import Mock
 import pytest
 
 from vime.utils.external_utils import command_utils
-from vime.utils.external_utils.launch import PLATFORMS
+from vime.utils.external_utils.launch import PLATFORMS, launch_commands
 
 NUM_GPUS = 0
+
+
+def test_npu_helper_paths_preserve_adaptor_and_cann_environment():
+    platform = PLATFORMS["npu"]
+    commands = launch_commands(
+        platform,
+        train_args="--num-rollout 3",
+        num_devices=4,
+        megatron_model_type="qwen2.5-0.5B",
+        repo_base_dir="/root/vime",
+        extra_env={
+            "PYTHONPATH": "/root/vime/tests:/root/vime:/root/Megatron-LM",
+            "LD_LIBRARY_PATH": "/custom/lib",
+            "no_proxy": "*",
+        },
+    )
+    runtime_arg = next(arg for arg in shlex.split(commands[-1]) if arg.startswith("--runtime-env-json="))
+    env = json.loads(runtime_arg.split("=", 1)[1])["env_vars"]
+    assert env["PYTHONPATH"].split(":")[0] == "/root/vime/tests"
+    for key in ("PYTHONPATH", "LD_LIBRARY_PATH"):
+        paths = env[key].split(":")
+        assert set(platform.env[key].split(":")) <= set(paths)
+        assert len(paths) == len(set(paths))
+        assert f"export {key}={shlex.quote(env[key])} && " in commands[0]
+    assert env["LD_LIBRARY_PATH"].startswith("/custom/lib:")
+    assert env["no_proxy"] == "*"
 
 
 @pytest.mark.parametrize("platform_name", ["cuda", "npu"])

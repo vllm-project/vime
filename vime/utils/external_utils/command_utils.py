@@ -6,6 +6,7 @@ import datetime
 import json
 import os
 import random
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -18,6 +19,33 @@ from vime.utils.misc import exec_command
 _ = exec_command, dataclass_cli
 
 repo_base_dir = Path(os.path.abspath(__file__)).resolve().parents[3]
+
+
+def get_test_root() -> Path:
+    """Keep GPU paths unchanged; let shared NPU tests use the CI asset cache."""
+    root = os.environ.get("VIME_TEST_ROOT")
+    if not root and current_platform().name == "npu":
+        root = os.environ.get("HF_HOME")
+    return Path(root or "/root")
+
+
+def get_test_tmp_dir() -> str | None:
+    """Keep NPU checkpoint/queue scratch under the test root in per-case directories."""
+    if current_platform().name != "npu":
+        return None
+    directory = get_test_root() / "tmp"
+    directory.mkdir(parents=True, exist_ok=True)
+    return str(directory)
+
+
+def get_test_platform_args() -> str:
+    """Opt-in launch flags for shared smoke tests; preserve their parallel/optimizer choices."""
+    if current_platform().name != "npu":
+        return ""
+    return (
+        "--use-flash-attn --no-gradient-accumulation-fusion "
+        f"--vllm-additional-config {shlex.quote(json.dumps({'weight_nz_mode': 0}))} "
+    )
 
 
 def convert_checkpoint(
@@ -53,15 +81,15 @@ def convert_checkpoint(
         )
 
     exec_command(
-        f"source {repo_base_dir}/scripts/models/{megatron_model_type}.sh && "
+        f"source {shlex.quote(str(repo_base_dir / 'scripts/models' / (megatron_model_type + '.sh')))} && "
         f"PYTHONPATH={repo_base_dir}:/root/Megatron-LM:${{PYTHONPATH:-}} "
         f"torchrun "
         f"--nproc-per-node {num_gpus_per_node} "
         f"{multinode_args}"
         f"tools/convert_hf_to_torch_dist.py "
         "${MODEL_ARGS[@]} "
-        f"--hf-checkpoint {hf_checkpoint} "
-        f"--save {path_dst}"
+        f"--hf-checkpoint {shlex.quote(str(hf_checkpoint))} "
+        f"--save {shlex.quote(path_dst)}"
         f"{normalized_extra_args}"
     )
 
@@ -70,9 +98,12 @@ def rsync_simple(path_src: str, path_dst: str):
     exec_command(f"mkdir -p {path_dst} && rsync -a --info=progress2 {path_src}/ {path_dst}")
 
 
-def hf_download_dataset(full_name: str):
+def hf_download_dataset(full_name: str, *, dir_dst: str | Path = "/root/datasets"):
     _, partial_name = full_name.split("/")
-    exec_command(f"hf download --repo-type dataset {full_name} --local-dir /root/datasets/{partial_name}")
+    exec_command(
+        f"hf download --repo-type dataset {shlex.quote(full_name)} "
+        f"--local-dir {shlex.quote(str(Path(dir_dst) / partial_name))}"
+    )
 
 
 def fp8_cast_bf16(path_src, path_dst):
