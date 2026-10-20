@@ -55,12 +55,27 @@ steps:
                 value: migration-recovery
               - label: "run-npu-ci-migration-checkpoint (batch 3: 5 optimizer/async checkpoint scenarios)"
                 value: migration-checkpoint
+              - label: "run-npu-ci-migration-moe (batch 4: 4 BF16/alltoall/R3/MLA scenarios)"
+                value: migration-moe
+              - label: "run-npu-ci-migration-moe-recovery (batch 4: Qwen30B OOM/manager/R3 recovery)"
+                value: migration-moe-recovery
+              - label: "run-npu-ci-migration-models (batch 4: GLM9B, MiMo MTP, streaming partial rollout)"
+                value: migration-models
               - label: "run-npu-ci-nightly"
                 value: nightly
           - text: "Existing NPU image (optional; leave image-build unselected)"
             key: npu-ci-image
             required: false
             hint: "Full registry/name:tag or digest. Reuses dependencies and checks out this build's commit. Empty uses the default image."
+          - select: "Batch 3/4 intermediate artifacts"
+            key: npu-keep-artifacts
+            required: true
+            default: "0"
+            options:
+              - label: "Delete on exit, including failed tests"
+                value: "0"
+              - label: "Keep for debugging"
+                value: "1"
 
       - label: ":pipeline: upload NPU suites"
         key: upload-npu-suites
@@ -75,6 +90,7 @@ steps:
           # Export the resolved value so image selection and the generator agree.
           export NPU_SUITES="$${NPU_SUITES:-$$(buildkite-agent meta-data get "npu-suites" --default "")}"
           export NPU_CI_IMAGE="$${NPU_CI_IMAGE:-$$(buildkite-agent meta-data get "npu-ci-image" --default "")}"
+          export NPU_KEEP_ARTIFACTS="$${NPU_KEEP_ARTIFACTS:-$$(buildkite-agent meta-data get "npu-keep-artifacts" --default "0")}"
           # Validate before uploading any steps, including the image build.
           PIPELINE_JSON=$$(mktemp)
           trap 'rm -f "$$PIPELINE_JSON"' EXIT

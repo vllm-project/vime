@@ -10,7 +10,6 @@ Uses Qwen2.5-0.5B-Instruct (smallest supported model) with 8 GPUs.
 """
 
 import os
-import tempfile
 from shlex import quote
 
 import vime.utils.external_utils.command_utils as U
@@ -150,7 +149,7 @@ def execute_train_only(debug_data_dir: str, extension: str):
 
 
 def execute():
-    with tempfile.TemporaryDirectory(prefix="vime_debug_rollout_", dir=U.get_test_tmp_dir()) as debug_data_dir:
+    with U.test_work_directory("vime_debug_rollout_") as debug_data_dir:
         print(f"Using temp dir for rollout data: {debug_data_dir}")
         execute_rollout_only(debug_data_dir)
         from vime.data.archive import RolloutArchive

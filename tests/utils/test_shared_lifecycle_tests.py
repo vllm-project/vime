@@ -34,6 +34,7 @@ def platform_case(request, monkeypatch, tmp_path):
     monkeypatch.setattr(U, "current_platform", lambda: PLATFORMS[request.param])
     monkeypatch.setenv("VIME_TEST_ROOT", str(tmp_path / "assets with spaces"))
     monkeypatch.setenv("VIME_TEST_ENABLE_EVAL", "0")
+    monkeypatch.delenv("VIME_TEST_KEEP_ARTIFACTS", raising=False)
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
     monkeypatch.syspath_prepend(str(TESTS))
     monkeypatch.setattr(U, "exec_command", lambda command: None)
@@ -52,10 +53,16 @@ def assert_common(args, module, platform):
 
 
 @pytest.mark.parametrize("fault_tolerance", [False, True])
-def test_mixed_offload_keeps_frozen_group_and_config_lifetime(platform_case, fault_tolerance, monkeypatch):
+@pytest.mark.parametrize("keep", [False, True])
+def test_mixed_offload_keeps_frozen_group_and_config_lifetime(
+    platform_case, fault_tolerance, keep, monkeypatch, tmp_path
+):
     module = load_case(
         "test_vllm_config_mixed_offload_ft.py" if fault_tolerance else "test_vllm_config_mixed_offload.py"
     )
+    monkeypatch.setenv("VIME_TEST_KEEP_ARTIFACTS", "1" if keep else "0")
+    parent = Path(U.get_test_tmp_dir() or tmp_path)
+    monkeypatch.setattr(U, "get_test_tmp_dir", lambda: str(parent))
     configs = []
 
     def record(**kwargs):
@@ -67,6 +74,8 @@ def test_mixed_offload_keeps_frozen_group_and_config_lifetime(platform_case, fau
         assert "--eval-interval" not in args
         path = Path(option(args, "--vllm-config"))
         configs.append(path)
+        if fault_tolerance:
+            configs.append(Path(option(args, "--rollout-data-dir")))
         content = yaml.safe_load(path.read_text())["vllm"]
         assert [(m["name"], m["update_weights"]) for m in content] == [("actor", True), ("ref", False)]
         assert [m["server_groups"][0]["num_gpus"] for m in content] == [4, 4]
@@ -76,7 +85,7 @@ def test_mixed_offload_keeps_frozen_group_and_config_lifetime(platform_case, fau
 
     monkeypatch.setattr(U, "execute_train", record)
     module.execute()
-    assert configs and all(not path.exists() for path in configs)
+    assert configs and all(path.exists() is keep for path in configs)
 
 
 def test_release_train_keeps_two_real_checkpoint_cycles(platform_case, monkeypatch):
@@ -236,6 +245,79 @@ def test_checkpoint_does_not_delete_an_existing_user_directory(monkeypatch, tmp_
     with pytest.raises(FileExistsError):
         module.prepare(str(tmp_path))
     assert sentinel.read_text() == "preserve"
+
+
+@pytest.mark.parametrize("keep", [False, True])
+@pytest.mark.parametrize("case", ["checkpoint", "recovery", "health", "delta"])
+def test_failure_cleans_automatic_directories_unless_keep_requested(platform_case, monkeypatch, tmp_path, case, keep):
+    monkeypatch.setattr(U, "get_test_tmp_dir", lambda: str(tmp_path))
+    directories = []
+    if case == "checkpoint":
+        module = load_case("test_qwen3_4B_ckpt.py")
+
+        def fail_prepare(directory):
+            directories.append(Path(directory).parent)
+            raise LaunchRecorded
+
+        monkeypatch.setattr(module, "prepare", fail_prepare)
+
+        def call():
+            module.run_roundtrip(
+                SimpleNamespace(
+                    async_save=False,
+                    save_optimizer="gpu",
+                    load_optimizer="cpu",
+                    checkpoint_dir=None,
+                    keep_artifacts=keep,
+                )
+            )
+
+    elif case in ("recovery", "delta"):
+        module = load_case("test_qwen2.5_0.5B_training_recovery.py")
+        monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: None)
+        temporary = U.test_work_directory
+
+        def fixture_directory(prefix, **kwargs):
+            if prefix == "vime_delta_local_":
+                assert kwargs["parent"] == "/tmp"
+                kwargs["parent"] = str(tmp_path)
+            return temporary(prefix, **kwargs)
+
+        monkeypatch.setattr(U, "test_work_directory", fixture_directory)
+
+        def fail_client(*args, **kwargs):
+            directories.extend(tmp_path.glob("vime_training_recovery_*"))
+            directories.extend(tmp_path.glob("vime_delta_local_*"))
+            raise LaunchRecorded
+
+        monkeypatch.setattr(module, "JobSubmissionClient", fail_client)
+
+        def call():
+            module.execute(keep_artifacts=keep, weight_sync="disk-delta" if case == "delta" else "nccl")
+
+    else:
+        module = load_case("test_qwen2.5_0.5B_rollout_health.py")
+
+        def fail_train(**kwargs):
+            directories.append(Path(kwargs["extra_env_vars"]["VIME_HEALTH_TEST_DIR"]))
+            raise LaunchRecorded
+
+        def no_actor(*args, **kwargs):
+            raise ValueError("fixture")
+
+        monkeypatch.setattr(U, "execute_train", fail_train)
+        monkeypatch.setattr(module.ray, "init", lambda **kwargs: None)
+        monkeypatch.setattr(module.ray, "shutdown", lambda: None)
+        monkeypatch.setattr(module.ray, "get_actor", no_actor)
+        monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: None)
+
+        def call():
+            module.execute("server", keep_artifacts=keep)
+
+    with pytest.raises(LaunchRecorded):
+        call()
+    assert directories and all(path.exists() is keep for path in directories)
+    assert len(directories) == (2 if case == "delta" else 1)
 
 
 def test_recovery_head_advertises_selected_resource_and_vendor_environment(platform_case, monkeypatch, tmp_path):

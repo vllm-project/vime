@@ -118,6 +118,28 @@ SUITES = {
         ("test_qwen3_4B_ckpt.py", "npu-8", "--save-optimizer cpu --load-optimizer gpu", {}, 360),
         ("test_qwen3_4B_ckpt.py", "npu-8", "--async-save", {}, 360),
     ],
+    # Batch 4: preserve BF16/alltoall MoE/R3 layouts and full-size model boundaries.
+    # The original DeepEP/FP8 and PD combinations are separate, unvalidated cases.
+    "migration-moe": [
+        (
+            "test_qwen3_30B_A3B_r3.py",
+            "npu-8",
+            "",
+            {"VIME_TEST_ENABLE_EVAL": "0", "VIME_TEST_USE_DEEPEP": "0", "VIME_TEST_USE_FP8_ROLLOUT": "0"},
+            360,
+        ),
+        ("test_moonlight_16B_A3B_non_colocate_nccl.py", "npu-8", "", {}, 360),
+        ("test_moonlight_16B_A3B.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}, 360),
+        ("test_moonlight_16B_A3B_r3.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}, 360),
+    ],
+    "migration-moe-recovery": [
+        ("test_qwen3_30B_A3B_training_recovery.py", "npu-8", "", {}, 360),
+    ],
+    "migration-models": [
+        ("test_quick_start_glm4_9B.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}, 360),
+        ("test_mimo_7B_mtp_only_grad.py", "npu-8", "", {}, 360),
+        ("test_qwen3_4B_streaming_partial_rollout.py", "npu-8", "", {}, 360),
+    ],
     "nightly": [],
 }
 
@@ -188,6 +210,19 @@ def npu_step(
         "HF_HOME": "/root/.cache/huggingface",
         **env,
     }
+    managed_scratch = suite in (
+        "migration-lifecycle",
+        "migration-recovery",
+        "migration-checkpoint",
+        "migration-moe",
+        "migration-moe-recovery",
+        "migration-models",
+    )
+    if managed_scratch:
+        keep = os.environ.get("NPU_KEEP_ARTIFACTS", "0")
+        if keep not in ("0", "1"):
+            raise SystemExit("NPU_KEEP_ARTIFACTS must be 0 (delete) or 1 (keep)")
+        step_env["VIME_TEST_KEEP_ARTIFACTS"] = keep
 
     commands = [
         "set -eo pipefail",
@@ -201,6 +236,9 @@ def npu_step(
     ]
     if suite.startswith("migration-"):
         step_env["VIME_TEST_RESOURCE_CLASS"] = resource_class
+        # All migration jobs must finish the one-time sweep before using tmp;
+        # otherwise an earlier basic/parallel job could lose its live scratch.
+        commands.append("python tests/ci/cleanup_npu_batch3.py")
         commands.append("python tests/ci/npu_test_environment.py")
     commands.append(f"python tests/{test_name}{' ' + extra_args if extra_args else ''}")
     script = "\n".join(commands)

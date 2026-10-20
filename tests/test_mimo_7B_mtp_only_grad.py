@@ -9,7 +9,6 @@ to only the MTP layers when the main model loss is zero (due to truncation).
 """
 
 import os
-import tempfile
 from shlex import quote
 
 import vime.utils.external_utils.command_utils as U
@@ -18,13 +17,16 @@ import vime.utils.external_utils.command_utils as U
 MODEL_NAME = "MiMo-7B-RL"
 MODEL_TYPE = "mimo-7B-rl"
 NUM_GPUS = 8
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 
 
 def prepare():
     """Download model and convert checkpoint with MTP layers."""
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download XiaomiMiMo/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/dapo-math-17k")
+    U.exec_command(f"mkdir -p {quote(str(MODEL_DIR.parent))} {quote(str(DATASET_DIR))}")
+    U.exec_command(f"hf download XiaomiMiMo/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/dapo-math-17k", dir_dst=DATASET_DIR)
 
     # Convert checkpoint with MTP layers enabled
     U.convert_checkpoint(
@@ -32,19 +34,21 @@ def prepare():
         megatron_model_type=MODEL_TYPE,
         num_gpus_per_node=NUM_GPUS,
         extra_args=" --mtp-num-layers 1",
-        dir_dst="/root/models",
+        dir_dst=str(MODEL_DIR.parent),
+        hf_checkpoint=str(MODEL_DIR),
     )
 
 
 def execute():
     """Run training with MTP enabled and very short output length to cause truncation."""
-    ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load /root/models/{MODEL_NAME}_torch_dist "
+    ref_load = MODEL_DIR.parent / f"{MODEL_NAME}_torch_dist" if U.current_platform().torch_dist_convert else MODEL_DIR
+    ckpt_args = f"--hf-checkpoint {quote(str(MODEL_DIR))} --ref-load {quote(str(ref_load))} "
 
-    # Use very short rollout-max-response-len to ensure all outputs are truncated
-    # This should result in zero loss for the main model, leaving only MTP loss
+    # Very short responses force truncation: main-model gradients must remain
+    # zero while the MTP loss still produces non-zero MTP gradients.
     rollout_args = (
         "--rollout-data-transport straw "
-        "--prompt-data /root/datasets/dapo-math-17k/dapo-math-17k.jsonl "
+        f"--prompt-data {quote(str(DATASET_DIR / 'dapo-math-17k/dapo-math-17k.jsonl'))} "
         "--input-key prompt "
         "--label-key label "
         "--apply-chat-template "
@@ -130,10 +134,11 @@ def execute():
         f"{mtp_args} "
         f"{ci_args} "
         f"{misc_args} "
+        f"{U.get_test_npu_model_args(offload_optimizer=True)} "
     )
 
-    with tempfile.TemporaryDirectory(prefix="vime_straw_") as rollout_dir:
-        train_args += f"--rollout-data-dir {quote(rollout_dir)} "
+    with U.test_work_directory("vime_mimo_mtp_") as rollout_dir:
+        train_args += f"--rollout-data-dir {quote(str(rollout_dir))} "
         U.execute_train(
             train_args=train_args,
             num_gpus_per_node=NUM_GPUS,

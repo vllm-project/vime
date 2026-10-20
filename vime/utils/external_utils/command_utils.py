@@ -8,7 +8,9 @@ import os
 import random
 import shlex
 import subprocess
+import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +40,31 @@ def get_test_tmp_dir() -> str | None:
     return str(directory)
 
 
+def keep_test_artifacts() -> bool:
+    return get_bool_env_var("VIME_TEST_KEEP_ARTIFACTS", "0")
+
+
+@contextmanager
+def test_work_directory(prefix: str, directory=None, keep: bool | None = None, parent=None):
+    """Clean owned scratch even on failure; explicit directories remain caller-owned."""
+    if directory is not None:
+        path = Path(directory)
+        path.mkdir(parents=True, exist_ok=True)
+        print(f"Test artifacts: {path} (explicit directory, preserved)", flush=True)
+        yield path
+        return
+    parent = parent or get_test_tmp_dir()
+    preserve = keep if keep is not None else keep_test_artifacts()
+    if preserve:
+        path = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+        print(f"Test artifacts: {path} (preserved)", flush=True)
+        yield path
+    else:
+        with tempfile.TemporaryDirectory(prefix=prefix, dir=parent) as directory:
+            print(f"Test artifacts: {directory} (removed on exit, including failure)", flush=True)
+            yield Path(directory)
+
+
 def get_test_platform_args() -> str:
     """Opt-in launch flags for shared smoke tests; preserve their parallel/optimizer choices."""
     if current_platform().name != "npu":
@@ -46,6 +73,23 @@ def get_test_platform_args() -> str:
         "--use-flash-attn --no-gradient-accumulation-fusion "
         f"--vllm-additional-config {shlex.quote(json.dumps({'weight_nz_mode': 0}))} "
     )
+
+
+def get_test_npu_model_args(
+    *, max_model_len: int = 32768, max_num_seqs: int = 16, offload_optimizer: bool = False
+) -> str:
+    """Bound NPU test memory without changing parallelism, rollout lengths or assertions."""
+    if current_platform().name != "npu":
+        return ""
+    args = (
+        f"{get_test_platform_args()} "
+        "--max-tokens-per-gpu 2048 --log-probs-chunk-size 128 "
+        f"--vllm-gpu-memory-utilization 0.5 --vllm-max-num-seqs {max_num_seqs} "
+        f"--vllm-max-cudagraph-capture-size 8 --vllm-max-model-len {max_model_len} "
+    )
+    if offload_optimizer:
+        args += "--optimizer-cpu-offload --overlap-cpu-optimizer-d2h-h2d --use-precision-aware-optimizer "
+    return args
 
 
 def convert_checkpoint(

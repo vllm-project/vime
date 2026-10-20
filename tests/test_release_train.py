@@ -6,7 +6,6 @@ training step.
 """
 
 import os
-import tempfile
 from pathlib import Path
 from shlex import quote
 
@@ -37,7 +36,7 @@ def prepare():
 
 
 def execute():
-    with tempfile.TemporaryDirectory(prefix="vime_release_train_", dir=U.get_test_tmp_dir()) as work_dir:
+    with U.test_work_directory("vime_release_train_") as work_dir:
         save_dir = Path(work_dir) / "mcore"
         update_weight_dir = Path(work_dir) / "update_weight"
 

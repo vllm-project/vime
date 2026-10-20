@@ -53,7 +53,11 @@ def prepare():
 
 def execute():
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yaml", prefix="vllm_mixed_offload_", dir=U.get_test_tmp_dir()
+        mode="w",
+        suffix=".yaml",
+        prefix="vllm_mixed_offload_",
+        dir=U.get_test_tmp_dir(),
+        delete=not U.keep_test_artifacts(),
     ) as config_file:
         config_file.write(VLLM_CONFIG_YAML)
         config_file.flush()

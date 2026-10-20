@@ -1,7 +1,5 @@
 import json
 import os
-import shutil
-import tempfile
 from argparse import ArgumentParser
 from pathlib import Path
 from shlex import quote
@@ -18,17 +16,25 @@ DATASET_DIR = TEST_ROOT / "datasets"
 
 parser = ArgumentParser()
 parser.add_argument("--async-save", action="store_true", help="Whether to test async save/load.")
-parser.add_argument("--save-optimizer", choices=["cpu", "gpu"], default="cpu", help="Optimizer placement for save.")
-parser.add_argument("--load-optimizer", choices=["cpu", "gpu"], default="cpu", help="Optimizer placement for load.")
-parser.add_argument("--checkpoint-dir", default=None, help="Directory used for the save/load checkpoint roundtrip.")
-
-
-def default_checkpoint_dir(args):
-    save_mode = "async" if args.async_save else "sync"
-    directory = tempfile.mkdtemp(
-        prefix=f"vime_ckpt_{save_mode}_{args.save_optimizer}_{args.load_optimizer}_", dir=U.get_test_tmp_dir()
-    )
-    return str(Path(directory) / "checkpoint")
+parser.add_argument(
+    "--save-optimizer",
+    choices=["cpu", "gpu"],
+    default="cpu",
+    help="Optimizer placement for save; gpu means the current accelerator (NPU on Ascend).",
+)
+parser.add_argument(
+    "--load-optimizer",
+    choices=["cpu", "gpu"],
+    default="cpu",
+    help="Optimizer placement for load; gpu means the current accelerator (NPU on Ascend).",
+)
+parser.add_argument("--checkpoint-dir", default=None, help="Explicit checkpoint directory; always preserved.")
+parser.add_argument(
+    "--keep-artifacts",
+    action="store_true",
+    default=None,
+    help="Preserve automatic scratch; also VIME_TEST_KEEP_ARTIFACTS=1.",
+)
 
 
 def prepare(checkpoint_dir: str):
@@ -49,6 +55,7 @@ def prepare(checkpoint_dir: str):
 
 
 def optimizer_args(optimizer: str):
+    # Historical CLI spelling: gpu disables CPU offload; it never selects CUDA.
     args = (
         "--optimizer adam "
         "--lr 1e-6 "
@@ -192,24 +199,25 @@ def verify_phase(checkpoint_dir, phase, expected_rollouts, optimizer=None):
 
 
 def run_roundtrip(args):
-    checkpoint_dir = args.checkpoint_dir or default_checkpoint_dir(args)
-    prepare(checkpoint_dir)
-    for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
-        os.environ.pop(proxy_var, None)
-    execute("async_save" if args.async_save else "save", args.save_optimizer, checkpoint_dir)
-    for filename in ("queue_state_1.json", "builder_state_1.json"):
-        assert (Path(checkpoint_dir) / "rollout" / filename).is_file(), f"Missing straw checkpoint: {filename}"
-    verify_phase(checkpoint_dir, "save", (0, 1), args.save_optimizer)
-    # Loading checkpoint 1 resumes at rollout 2; a horizon of 2 would train zero steps.
-    execute("load", args.load_optimizer, checkpoint_dir)
-    verify_phase(checkpoint_dir, "load", (2,), args.load_optimizer)
-    print(
-        f"Checkpoint roundtrip passed: save optimizer={args.save_optimizer}, load optimizer={args.load_optimizer}, async={args.async_save}"
-    )
-    if args.checkpoint_dir is None:
-        # Only remove the unique temporary directory owned by this invocation,
-        # after all assertions passed. Explicit paths and failures retain evidence.
-        shutil.rmtree(Path(checkpoint_dir).parent)
+    save_mode = "async" if args.async_save else "sync"
+    prefix = f"vime_ckpt_{save_mode}_{args.save_optimizer}_{args.load_optimizer}_"
+    with U.test_work_directory(
+        prefix, directory=args.checkpoint_dir, keep=getattr(args, "keep_artifacts", None)
+    ) as work_dir:
+        checkpoint_dir = str(work_dir if args.checkpoint_dir is not None else work_dir / "checkpoint")
+        prepare(checkpoint_dir)
+        for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+            os.environ.pop(proxy_var, None)
+        execute("async_save" if args.async_save else "save", args.save_optimizer, checkpoint_dir)
+        for filename in ("queue_state_1.json", "builder_state_1.json"):
+            assert (Path(checkpoint_dir) / "rollout" / filename).is_file(), f"Missing straw checkpoint: {filename}"
+        verify_phase(checkpoint_dir, "save", (0, 1), args.save_optimizer)
+        # Loading checkpoint 1 resumes at rollout 2; a horizon of 2 would train zero steps.
+        execute("load", args.load_optimizer, checkpoint_dir)
+        verify_phase(checkpoint_dir, "load", (2,), args.load_optimizer)
+        print(
+            f"Checkpoint roundtrip passed: save optimizer={args.save_optimizer}, load optimizer={args.load_optimizer}, async={args.async_save}"
+        )
 
 
 if __name__ == "__main__":

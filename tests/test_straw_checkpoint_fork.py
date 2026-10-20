@@ -9,7 +9,6 @@ import argparse
 import hashlib
 import json
 import os
-import tempfile
 from pathlib import Path
 from shlex import quote
 
@@ -142,7 +141,7 @@ def execute(*, model_path=None, prompt_data=None, work_dir=None, num_gpus_per_no
     model_path = model_path or str(MODEL_DIR)
     prompt_data = prompt_data or str(DATASET_DIR / "gsm8k/train.parquet")
     # work_dir must be shared when the four GPUs live on different hosts.
-    with tempfile.TemporaryDirectory(prefix="vime_straw_fork_", dir=work_dir or U.get_test_tmp_dir()) as directory:
+    with U.test_work_directory("vime_straw_fork_", parent=work_dir) as directory:
         root = Path(directory)
         common = (
             f"--hf-checkpoint {quote(str(model_path))} --ref-load {quote(str(model_path))} "

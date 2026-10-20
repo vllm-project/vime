@@ -50,7 +50,11 @@ def prepare():
 
 def execute():
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yaml", prefix="vllm_mixed_offload_ft_", dir=U.get_test_tmp_dir()
+        mode="w",
+        suffix=".yaml",
+        prefix="vllm_mixed_offload_ft_",
+        dir=U.get_test_tmp_dir(),
+        delete=not U.keep_test_artifacts(),
     ) as config_file:
         config_file.write(VLLM_CONFIG_YAML)
         config_file.flush()
@@ -165,8 +169,8 @@ def execute():
             f"{'--log-probs-chunk-size 128 ' if U.current_platform().name == 'npu' else ''}"
         )
 
-        with tempfile.TemporaryDirectory(prefix="vime_straw_", dir=U.get_test_tmp_dir()) as rollout_dir:
-            train_args += f"--rollout-data-dir {quote(rollout_dir)} "
+        with U.test_work_directory("vime_straw_") as rollout_dir:
+            train_args += f"--rollout-data-dir {quote(str(rollout_dir))} "
             U.execute_train(
                 train_args=train_args,
                 num_gpus_per_node=NUM_GPUS,

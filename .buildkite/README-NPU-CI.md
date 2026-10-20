@@ -33,6 +33,12 @@ NPU suites to run via a multi-select field:
   allocator OOM recovery scenarios.
 - **`migration-checkpoint`** — batch three: five optimizer placement and
   asynchronous checkpoint roundtrips, each training after restore.
+- **`migration-moe`** — batch four: Qwen30B R3, Moonlight colocated training,
+  Moonlight R3 and non-colocated inference EP / collective weight updates.
+- **`migration-moe-recovery`** — batch four: Qwen30B R3 with real OOM,
+  manager loss and TP resharding under stateless Adam.
+- **`migration-models`** — batch four: GLM-Z1-9B, MiMo MTP-only gradients and
+  Qwen3-4B streaming partial rollout.
 - **`nightly`** — reserved for future coverage; currently empty. Selecting only
   this suite fails with an explicit error rather than uploading zero tests.
 
@@ -155,8 +161,9 @@ NPU_SUITES=image-build,migration-basic BUILDKITE_COMMIT="$(git rev-parse HEAD)" 
 
 ## Adding a test
 
-Suites and test mappings are defined in [`npu_suites.py`](./npu_suites.py):
-the temporarily paused `smk`, active `migration-basic`, and empty `nightly`.
+Suites and test mappings are defined in [`npu_suites.py`](./npu_suites.py).
+The eight active migration groups contain 41 scenarios; `smk` remains temporarily
+paused and `nightly` remains empty.
 
 Each entry is a 4-tuple, with an optional fifth item for the timeout in minutes:
 
@@ -333,10 +340,118 @@ then train rollout 2 with `num-rollout=3`, retaining the saved scheduler horizon
 The earlier horizon of two allowed loading without a subsequent training step.
 Both platforms now check scheduler progress, optimizer-load flags/placement,
 finite per-rollout gradients and the straw queue/builder snapshots. Custom
-nonempty checkpoint paths are rejected rather than cleared. Successful default
-temporary checkpoints are removed; explicit paths and failures retain evidence.
+nonempty checkpoint paths are rejected rather than cleared. The historical CLI
+value `gpu` only disables CPU offload; it does not select a CUDA device. Thus the
+four placement pairs mean NPU→NPU, NPU→CPU, CPU→CPU and CPU→NPU on Ascend.
+
+**Batch 3/4 intermediate artifacts** in the gate defaults to **Delete on exit,
+including failed tests**. All eight shared scripts use `TemporaryDirectory` (or
+temporary files) for automatic scratch, including the disk-delta local staging
+directory. Select **Keep for debugging** to preserve it instead. Local runs use
+`VIME_TEST_KEEP_ARTIFACTS=1`; checkpoint/recovery/health scripts also accept
+`--keep-artifacts`. Explicit `--checkpoint-dir`/`--directory` remain caller-owned
+and are always preserved. A forced process/container kill can bypass Python's
+cleanup. Model/dataset caches are retained in either mode.
+
+Every migration job runs `tests/ci/cleanup_npu_batch3.py` before its environment
+probe and test. Once per cache root, it removes **all contents** of
+`$VIME_TEST_ROOT/tmp` (or `$HF_HOME/tmp`, normally
+`/root/.cache/huggingface/tmp`): files, directories, hidden entries and symlinks,
+without filename or modification-time restrictions. Symlinks are unlinked
+without following their targets. The `tmp` directory itself and sibling
+model/dataset/hub caches remain. A symlinked scratch directory and system
+temporary directories are rejected.
+
+The shared lock and marker `.vime-ci-tmp-cleanup-72026cf1-v2.json` live directly
+under the cache root, **outside `tmp`**. Concurrent jobs wait for the first sweep
+and then observe the marker; they do not sweep away each other's new outputs.
+All 41 migration jobs use this entry point, including basic/parallel. The old
+v1 marker inside `tmp` is also removed and cannot bypass this wider cleanup.
+The new marker records removed names and is written only after all deletions
+succeed. Later builds skip the sweep, so new outputs deliberately kept for
+debugging survive. The Keep option does not disable this initial removal of
+existing contents. Finish older builds before the first sweep: their code does
+not participate in this lock. The first CI run is still needed to perform and
+verify the actual deletion.
 
 G05/G06 exercise frozen-model sleep/wakeup, but the original tests do not
 compare frozen weights element by element. `VLLMEngine.check_weights()` is a
 `supported=False` stub, so completion must not be reported as frozen-weight
 numerical equivalence. Other hardware outcomes require the new CI logs.
+
+## Fourth batch: MoE, routing replay and model-specific boundaries
+
+This batch adds eight shared GPU scenarios, taking the migration registry from
+33 to 41. Their NPU hardware results are pending. Select the following groups
+independently; all eight jobs request `npu-8` with a 360-minute timeout. They
+share the existing concurrency group and limit of four, so their maximum
+simultaneous request is 32 NPUs, subject to queue availability. No multi-node
+scenario is introduced.
+
+| Suite / GPU inventory | Shared test | Model / dataset | Preserved boundary |
+| --- | --- | --- | --- |
+| `migration-moe` / G13 | `test_qwen3_30B_A3B_r3.py` | Qwen/Qwen3-30B-A3B / DAPO math-17k | BF16/alltoall R3, TP4/CP2/EP8, colocated, two rollouts, response 8192 |
+| `migration-moe` / G46 | `test_moonlight_16B_A3B_non_colocate_nccl.py` | moonshotai/Moonlight-16B-A3B-Instruct / DAPO math-17k | Actor 4 TP1/EP4 + rollout 4 DP4/EP, naive all-to-all, collective weight updates, two rollouts |
+| `migration-moe` / G20 | `test_moonlight_16B_A3B.py` | moonshotai/Moonlight-16B-A3B-Instruct / DAPO math-17k | MLA/MoE, TP2/CP2/EP8, colocated, two rollouts |
+| `migration-moe` / G21 | `test_moonlight_16B_A3B_r3.py` | moonshotai/Moonlight-16B-A3B-Instruct / DAPO math-17k | G20 topology plus R3, straw and online GC |
+| `migration-moe-recovery` / G37 | `test_qwen3_30B_A3B_training_recovery.py` | Qwen/Qwen3-30B-A3B / GSM8K | Actor 4 + rollout 4, EP4, real OOM, manager loss during training, TP1→TP2, route identity, stateless Adam |
+| `migration-models` / G08 | `test_quick_start_glm4_9B.py` | zai-org/GLM-Z1-9B-0414 / DAPO math-17k | Actor 4 TP2/CP2 + rollout 4 TP2, two rollouts, response 8192 |
+| `migration-models` / G22 | `test_mimo_7B_mtp_only_grad.py` | XiaomiMiMo/MiMo-7B-RL / DAPO math-17k | TP2, one rollout, training MTP loss and vLLM MTP draft with three speculative tokens; main-model zero / MTP positive gradient checks |
+| `migration-models` / G19 | `test_qwen3_4B_streaming_partial_rollout.py` | Qwen/Qwen3-4B / DAPO math-17k | TP2/CP2, two rollouts, SSE generation, oversampling, partial reuse and off-policy masking |
+
+DAPO is `zhuzilin/dapo-math-17k/dapo-math-17k.jsonl`; G37 uses
+`zhuzilin/gsm8k/train.parquet`. Assets use the shared configurable test root.
+On NPU, disabled automatic torch_dist conversion selects native HF reference
+loading. Original CUDA conversion destinations and GPU feature choices remain.
+Optional AIME evaluation is disabled for G13/G20/G21/G08 and is not downloaded.
+
+The shared `get_test_npu_model_args()` helper applies the existing NPU flash
+attention / fusion policy, a 2048-token training microbatch budget, log-prob
+chunks of 128, serving memory utilization 0.5, capture size 8 and at most
+16 sequences. G46 retains its original eight-sequence limit and 4096 context;
+the other six direct launch cases use context 32768 without shortening their
+responses or changing rollout counts or parallel topology. Moonlight colocated,
+GLM, MiMo and streaming cases use the existing NPU Adam CPU-offload policy;
+Qwen R3 and non-colocated Moonlight already requested it on GPU. G37 inherits
+the recovery harness memory policy. MiMo and G46 retain their original eager
+mode; other cases retain graph execution. Hardware and host-memory capacity
+still require CI evidence.
+
+G13 explicitly sets `VIME_TEST_USE_DEEPEP=0` and
+`VIME_TEST_USE_FP8_ROLLOUT=0`, matching the GPU suite's effective BF16 variant.
+Selecting either option on NPU fails before downloading or launching; G12
+(DeepEP plus FP8) remains a separate, unadapted scenario. R3 flags, route capture
+and replay remain enabled. G37 retains the original failure and resume checks
+and deliberately does not save Adam moments. Its per-Ray-job deadline is
+10800 seconds on NPU (3600 on CUDA), overridable with `--job-timeout-seconds`;
+the Buildkite timeout covers the complete multi-phase job and remains 360
+minutes. On an internal deadline the harness prints the log tail, stops only
+its submitted job and fails.
+
+Automatic R3/MTP/recovery scratch uses `test_work_directory()` and the same
+**Batch 3/4 intermediate artifacts** option described above. The one-time legacy
+cleanup also runs when selecting only fourth-batch groups. As requested, it
+now empties all existing `tmp` contents once, without filename or timestamp
+filters; its lock and marker live outside `tmp`. Model and dataset caches
+outside `tmp` remain reusable.
+
+For the first hardware run, start with `migration-moe`, then
+`migration-moe-recovery` and `migration-models` to distinguish model/communication
+failures from recovery, MTP or streaming failures. Selecting all three runs all
+eight independently. Check actual routed-expert payloads for R3, the existing
+MTP gradient assertions, and SSE abort/reuse evidence for streaming. The
+original streaming smoke has no strict aborted/reused-sample count assertion;
+an exit code alone does not establish that all those branches executed.
+
+No vendor patch or image dependency changes are introduced. To reuse the
+verified #386 environment, leave `image-build` unselected and set **Existing NPU
+image** to:
+
+```text
+swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/vime-ci-npu:72026cf14032d63ff455d3505f2fee40bb35a8ad
+```
+
+Runtime setup still checks out the new build's commit. Alternatively leave the
+image field empty and select `image-build` with the desired migration groups.
+Local CPU checks validate launch/configuration contracts and shared logic;
+they do not establish support for MLA, routed-expert replay or MiMo MTP on NPU.

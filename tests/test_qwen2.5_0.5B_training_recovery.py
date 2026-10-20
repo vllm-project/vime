@@ -5,8 +5,8 @@ import json
 import os
 import re
 import subprocess
-import tempfile
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from shlex import quote, split
 from types import SimpleNamespace
@@ -73,9 +73,9 @@ def train_args(directory, mode, tp_size, model_path, dataset_path, save_interval
     return arguments
 
 
-def wait_job(client, submission_id, path):
+def wait_job(client, submission_id, path, timeout_seconds=3600):
     # Large models also save and reload checkpoints on shared storage.
-    deadline = time.monotonic() + 3600
+    deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         status = client.get_job_status(submission_id)
         if status.is_terminal():
@@ -83,7 +83,10 @@ def wait_job(client, submission_id, path):
             return status
         print(f"{submission_id}: {status}", flush=True)
         time.sleep(10)
-    raise TimeoutError(f"Training job did not finish: {submission_id}")
+    path.write_text(client.get_job_logs(submission_id))
+    print(f"Ray job timed out; log tail:\n{path.read_text()[-16000:]}", flush=True)
+    client.stop_job(submission_id)
+    raise TimeoutError(f"Training job did not finish within {timeout_seconds}s: {submission_id}")
 
 
 def verify(directory, mode, failure_rollout, save_interval, kill_manager, wedge_engine=False, train_gpus=2):
@@ -169,234 +172,271 @@ def execute(
     train_gpus=2,
     rollout_gpus=2,
     extra_args="",
+    keep_artifacts=None,
+    job_timeout_seconds=3600,
 ):
-    directory = Path(directory or tempfile.mkdtemp(prefix="vime_training_recovery_", dir=U.get_test_tmp_dir()))
-    directory.mkdir(parents=True, exist_ok=True)
-    save_interval = save_interval or (1 if failure_rollout else 3)
-    # prepare() may need the download proxy; the driver and Ray head must then
-    # contact cluster services directly, before any job runtime_env is applied.
-    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
-        os.environ.pop(name, None)
-    external_ray = os.environ.get("VIME_SCRIPT_EXTERNAL_RAY") == "1"
-    platform = U.current_platform()
-    runtime_env = {
-        "env_vars": runtime_env_vars(
-            platform,
-            {
-                "PYTHONPATH": f"{REPO}/tests:{REPO}:/root/Megatron-LM",
-                "VIME_RECOVERY_TEST_DIR": str(directory),
-                "VIME_RECOVERY_TEST_FAILURE_ROLLOUT": str(failure_rollout),
-                "VIME_RECOVERY_TEST_KILL_MANAGER": str(int(kill_manager and manager_crash_phase == "training")),
-                "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-                "RAY_USE_UVLOOP": "0",
-                "PYTHONUNBUFFERED": "1",
-                "OMP_NUM_THREADS": "1",
-                "NO_PROXY": "*",
-                "no_proxy": "*",
-                **{
-                    name: os.environ[name]
-                    for name in ("NCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME", "NCCL_NVLS_ENABLE")
-                    if name in os.environ
-                },
-                **{
-                    name: ""
-                    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
-                },
-            },
-        )
-    }
-    if not external_ray:
-        subprocess.run(
-            ["ray", "start", "--head", "--node-ip-address", "127.0.0.1"]
-            + split(platform.ray_start_args(train_gpus + rollout_gpus))
-            + ["--disable-usage-stats"],
-            env={**os.environ, **runtime_env["env_vars"]},
-            check=True,
-        )
-    client = JobSubmissionClient(os.environ.get("VIME_TEST_RAY_DASHBOARD", "http://127.0.0.1:8265"))
-    model_path = model_path or str(MODEL_DIR)
-    dataset_path = dataset_path or str(DATASET_DIR / "gsm8k/train.parquet")
-    session_args = SimpleNamespace(
-        rollout_data_transport="straw" if mode == "straw" else "object-store",
-        rollout_data_dir=str(directory / "queue"),
-        rollout_queue_run_id="rollout",
-        save_debug_rollout_data=str(directory / "rollout_{rollout_id}.pt"),
-    )
-    manager = None
-    try:
-        for tp_size in (1, 2):
-            cluster_address = os.environ.get("VIME_TEST_RAY_ADDRESS", "127.0.0.1:6379")
-            command = (
-                f"cd {quote(str(REPO))} && source scripts/models/{model_type}.sh "
-                f'&& export RAY_ADDRESS={quote(cluster_address)} && python train.py "${{MODEL_ARGS[@]}}" '
+    if job_timeout_seconds <= 0:
+        raise ValueError("job_timeout_seconds must be positive")
+    with (
+        U.test_work_directory("vime_training_recovery_", directory=directory, keep=keep_artifacts) as directory,
+        ExitStack() as local_scratch,
+    ):
+        if weight_sync == "disk-delta":
+            local_checkpoint = local_scratch.enter_context(
+                U.test_work_directory("vime_delta_local_", keep=keep_artifacts, parent="/tmp")
             )
-            command += train_args(directory, mode, tp_size, model_path, dataset_path, save_interval, fault_tolerance)
-            command += f"--actor-num-gpus-per-node {train_gpus} --rollout-num-gpus {rollout_gpus} " + extra_args + " "
-            if pd:
-                config = directory / "serving.json"
-                config.write_text(
-                    json.dumps(
-                        {
-                            "vllm": [
-                                {
-                                    "name": "default",
-                                    "server_groups": [
-                                        {
-                                            "worker_type": side,
-                                            "num_gpus": rollout_gpus // 2,
-                                            "num_gpus_per_engine": rollout_gpus // 2,
-                                            "overrides": {
-                                                "kv_transfer_config": {
-                                                    "kv_connector": "NixlConnector",
-                                                    "kv_role": "kv_both",
-                                                }
-                                            },
-                                        }
-                                        for side in ("prefill", "decode")
-                                    ],
-                                }
-                            ]
-                        }
-                    )
-                )
-                command += f"--vllm-config {quote(str(config))} "
-
-            if weight_sync == "disk-delta":
-                command += (
-                    "--update-weight-mode delta --update-weight-transport disk "
-                    f"--update-weight-disk-dir {quote(str(directory / 'weights'))} "
-                    f"--update-weight-local-checkpoint-dir {quote('/tmp/vime-delta-' + directory.name)} "
-                )
-            if wedge_engine:
-                command += "--rollout-health-check-timeout 5 "
-            if role_config:
-                path = directory / f"megatron_tp{tp_size}.json"
-                path.write_text(
-                    json.dumps(
-                        {
-                            "megatron": [
-                                {
-                                    "name": "actor",
-                                    "role": "actor",
-                                    "overrides": {
-                                        "load": model_path,
-                                        "save": str(directory / "checkpoint"),
-                                        "tensor_model_parallel_size": tp_size,
-                                        "sequence_parallel": tp_size > 1,
-                                        "update_weight_start_version": 0,
-                                    },
-                                }
-                            ]
-                        }
-                    )
-                )
-                command += "--megatron-config-path " + quote(str(path))
-            submission_id = client.submit_job(entrypoint="bash -c " + quote(command), runtime_env=runtime_env)
-            (directory / f"submission_tp{tp_size}.json").write_text(
-                json.dumps(
-                    {"submission_id": submission_id, "entrypoint": command, "runtime_env": runtime_env}, indent=2
-                )
+        save_interval = save_interval or (1 if failure_rollout else 3)
+        # prepare() may need the download proxy; the driver and Ray head must then
+        # contact cluster services directly, before any job runtime_env is applied.
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            os.environ.pop(name, None)
+        external_ray = os.environ.get("VIME_SCRIPT_EXTERNAL_RAY") == "1"
+        platform = U.current_platform()
+        runtime_env = {
+            "env_vars": runtime_env_vars(
+                platform,
+                {
+                    "PYTHONPATH": f"{REPO}/tests:{REPO}:/root/Megatron-LM",
+                    "VIME_RECOVERY_TEST_DIR": str(directory),
+                    "VIME_RECOVERY_TEST_FAILURE_ROLLOUT": str(failure_rollout),
+                    "VIME_RECOVERY_TEST_KILL_MANAGER": str(int(kill_manager and manager_crash_phase == "training")),
+                    "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+                    "RAY_USE_UVLOOP": "0",
+                    "PYTHONUNBUFFERED": "1",
+                    "OMP_NUM_THREADS": "1",
+                    "NO_PROXY": "*",
+                    "no_proxy": "*",
+                    **{
+                        name: os.environ[name]
+                        for name in ("NCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME", "NCCL_NVLS_ENABLE")
+                        if name in os.environ
+                    },
+                    **{
+                        name: ""
+                        for name in (
+                            "HTTP_PROXY",
+                            "HTTPS_PROXY",
+                            "ALL_PROXY",
+                            "http_proxy",
+                            "https_proxy",
+                            "all_proxy",
+                        )
+                    },
+                },
             )
-            status = wait_job(client, submission_id, directory / ("failed.log" if tp_size == 1 else "resumed.log"))
-            expected = JobStatus.FAILED if tp_size == 1 else JobStatus.SUCCEEDED
-            assert status == expected, (status, directory)
-            if tp_size == 1:
-                # Fail at the actual injection boundary, rather than accepting
-                # an unrelated initialization failure as the expected OOM.
-                assert (directory / "before.json").exists(), directory / "failed.log"
-                ray.init(
-                    address=os.environ.get("VIME_TEST_RAY_ADDRESS", "127.0.0.1:6379"),
-                    namespace=RECOVERY_NAMESPACE,
-                    ignore_reinit_error=True,
-                )
-                serving = ray.get_actor(training_session_name(session_args) + ":serving", namespace=RECOVERY_NAMESPACE)
-                assert ray.get(serving.get_updatable_engines_and_lock.remote())[0]
-                if kill_manager and manager_crash_phase == "training":
-                    try:
-                        manager = ray.get_actor(training_session_name(session_args), namespace=RECOVERY_NAMESPACE)
-                    except ValueError:
-                        pass
-                    else:
-                        with pytest.raises(ray.exceptions.RayActorError):
-                            ray.get(manager.get_updatable_engines_and_lock.remote())
-                else:
-                    manager = ray.get_actor(training_session_name(session_args), namespace=RECOVERY_NAMESPACE)
-                    assert ray.get(manager.get_updatable_engines_and_lock.remote())[0]
-                before = json.loads((directory / "before.json").read_text())
-                if kill_manager and manager_crash_phase == "after-failure":
-                    ray.kill(manager, no_restart=True)
-                    assert ray.get(serving.get_updatable_engines_and_lock.remote())[0]
-                with requests.Session() as http:
-                    http.trust_env = False
-                    response = http.post(
-                        f"http://{before['router'][0]}:{before['router'][1]}/v1/completions",
-                        json={
-                            "model": model_path,
-                            "prompt": "The result of 1 + 1 is",
-                            "max_tokens": 8,
-                            "temperature": 0,
-                        },
-                        timeout=60,
-                    )
-                    response.raise_for_status()
-                    (directory / "serving_after_failure.json").write_text(json.dumps(response.json()))
-                if wedge_engine:
-                    # Queue an RPC that never reaches reset/shutdown. The next
-                    # attachment must time out, kill this actor and its vLLM
-                    # children, then allocate a healthy replacement on its GPUs.
-                    engine = ray.get(serving.get_updatable_engines_and_lock.remote())[0][0]
-                    started = directory / "wedged_engine.pid"
-
-                    def block(actor, started=started):
-                        started.write_text(str(os.getpid()))
-                        time.sleep(300)
-
-                    engine.__ray_call__.remote(block)
-                    deadline = time.monotonic() + 10
-                    while not started.exists():
-                        assert time.monotonic() < deadline
-                        time.sleep(0.1)
-
-            else:
-                before = json.loads((directory / "before.json").read_text())
-                # Successful completion must release retained serving resources,
-                # without depending on the runner's final ray stop cleanup.
-                with requests.Session() as http:
-                    http.trust_env = False
-                    for engine in before["engines"]:
-                        deadline = time.monotonic() + 20
-                        while True:
-                            try:
-                                http.get(engine["url"] + "/health", timeout=2)
-                            except requests.ConnectionError:
-                                break
-                            assert time.monotonic() < deadline, engine
-                            time.sleep(1)
-        verify(directory, mode, failure_rollout, save_interval, kill_manager, wedge_engine, train_gpus)
-    finally:
-        if not ray.is_initialized():
-            ray.init(address=os.environ.get("VIME_TEST_RAY_ADDRESS", "127.0.0.1:6379"), namespace=RECOVERY_NAMESPACE)
-        for suffix in ("", ":serving"):
-            try:
-                retained = ray.get_actor(training_session_name(session_args) + suffix, namespace=RECOVERY_NAMESPACE)
-            except ValueError:
-                continue
-            try:
-                ray.get(retained.dispose.remote(), timeout=60)
-            except ray.exceptions.RayActorError:
-                pass
-            finally:
-                ray.kill(retained, no_restart=True)
-        ray.shutdown()
+        }
         if not external_ray:
-            subprocess.run(["ray", "stop", "--force"], check=True)
+            subprocess.run(
+                ["ray", "start", "--head", "--node-ip-address", "127.0.0.1"]
+                + split(platform.ray_start_args(train_gpus + rollout_gpus))
+                + ["--disable-usage-stats"],
+                env={**os.environ, **runtime_env["env_vars"]},
+                check=True,
+            )
+        client = JobSubmissionClient(os.environ.get("VIME_TEST_RAY_DASHBOARD", "http://127.0.0.1:8265"))
+        model_path = model_path or str(MODEL_DIR)
+        dataset_path = dataset_path or str(DATASET_DIR / "gsm8k/train.parquet")
+        session_args = SimpleNamespace(
+            rollout_data_transport="straw" if mode == "straw" else "object-store",
+            rollout_data_dir=str(directory / "queue"),
+            rollout_queue_run_id="rollout",
+            save_debug_rollout_data=str(directory / "rollout_{rollout_id}.pt"),
+        )
+        manager = None
+        try:
+            for tp_size in (1, 2):
+                cluster_address = os.environ.get("VIME_TEST_RAY_ADDRESS", "127.0.0.1:6379")
+                command = (
+                    f"cd {quote(str(REPO))} && source scripts/models/{model_type}.sh "
+                    f'&& export RAY_ADDRESS={quote(cluster_address)} && python train.py "${{MODEL_ARGS[@]}}" '
+                )
+                command += train_args(
+                    directory, mode, tp_size, model_path, dataset_path, save_interval, fault_tolerance
+                )
+                command += (
+                    f"--actor-num-gpus-per-node {train_gpus} --rollout-num-gpus {rollout_gpus} " + extra_args + " "
+                )
+                if pd:
+                    config = directory / "serving.json"
+                    config.write_text(
+                        json.dumps(
+                            {
+                                "vllm": [
+                                    {
+                                        "name": "default",
+                                        "server_groups": [
+                                            {
+                                                "worker_type": side,
+                                                "num_gpus": rollout_gpus // 2,
+                                                "num_gpus_per_engine": rollout_gpus // 2,
+                                                "overrides": {
+                                                    "kv_transfer_config": {
+                                                        "kv_connector": "NixlConnector",
+                                                        "kv_role": "kv_both",
+                                                    }
+                                                },
+                                            }
+                                            for side in ("prefill", "decode")
+                                        ],
+                                    }
+                                ]
+                            }
+                        )
+                    )
+                    command += f"--vllm-config {quote(str(config))} "
+
+                if weight_sync == "disk-delta":
+                    command += (
+                        "--update-weight-mode delta --update-weight-transport disk "
+                        f"--update-weight-disk-dir {quote(str(directory / 'weights'))} "
+                        f"--update-weight-local-checkpoint-dir {quote(str(local_checkpoint))} "
+                    )
+                if wedge_engine:
+                    command += "--rollout-health-check-timeout 5 "
+                if role_config:
+                    path = directory / f"megatron_tp{tp_size}.json"
+                    path.write_text(
+                        json.dumps(
+                            {
+                                "megatron": [
+                                    {
+                                        "name": "actor",
+                                        "role": "actor",
+                                        "overrides": {
+                                            "load": model_path,
+                                            "save": str(directory / "checkpoint"),
+                                            "tensor_model_parallel_size": tp_size,
+                                            "sequence_parallel": tp_size > 1,
+                                            "update_weight_start_version": 0,
+                                        },
+                                    }
+                                ]
+                            }
+                        )
+                    )
+                    command += "--megatron-config-path " + quote(str(path))
+                submission_id = client.submit_job(entrypoint="bash -c " + quote(command), runtime_env=runtime_env)
+                (directory / f"submission_tp{tp_size}.json").write_text(
+                    json.dumps(
+                        {"submission_id": submission_id, "entrypoint": command, "runtime_env": runtime_env}, indent=2
+                    )
+                )
+                job_log = directory / ("failed.log" if tp_size == 1 else "resumed.log")
+                status = wait_job(client, submission_id, job_log, timeout_seconds=job_timeout_seconds)
+                expected = JobStatus.FAILED if tp_size == 1 else JobStatus.SUCCEEDED
+                if status != expected:
+                    # Keep the failure visible in Buildkite even when scratch is removed.
+                    print(f"Unexpected Ray job status {status}; log tail:\n{job_log.read_text()[-16000:]}", flush=True)
+                assert status == expected, (status, directory)
+                if tp_size == 1:
+                    # Fail at the actual injection boundary, rather than accepting
+                    # an unrelated initialization failure as the expected OOM.
+                    assert (directory / "before.json").exists(), directory / "failed.log"
+                    ray.init(
+                        address=os.environ.get("VIME_TEST_RAY_ADDRESS", "127.0.0.1:6379"),
+                        namespace=RECOVERY_NAMESPACE,
+                        ignore_reinit_error=True,
+                    )
+                    serving = ray.get_actor(
+                        training_session_name(session_args) + ":serving", namespace=RECOVERY_NAMESPACE
+                    )
+                    assert ray.get(serving.get_updatable_engines_and_lock.remote())[0]
+                    if kill_manager and manager_crash_phase == "training":
+                        try:
+                            manager = ray.get_actor(training_session_name(session_args), namespace=RECOVERY_NAMESPACE)
+                        except ValueError:
+                            pass
+                        else:
+                            with pytest.raises(ray.exceptions.RayActorError):
+                                ray.get(manager.get_updatable_engines_and_lock.remote())
+                    else:
+                        manager = ray.get_actor(training_session_name(session_args), namespace=RECOVERY_NAMESPACE)
+                        assert ray.get(manager.get_updatable_engines_and_lock.remote())[0]
+                    before = json.loads((directory / "before.json").read_text())
+                    if kill_manager and manager_crash_phase == "after-failure":
+                        ray.kill(manager, no_restart=True)
+                        assert ray.get(serving.get_updatable_engines_and_lock.remote())[0]
+                    with requests.Session() as http:
+                        http.trust_env = False
+                        response = http.post(
+                            f"http://{before['router'][0]}:{before['router'][1]}/v1/completions",
+                            json={
+                                "model": model_path,
+                                "prompt": "The result of 1 + 1 is",
+                                "max_tokens": 8,
+                                "temperature": 0,
+                            },
+                            timeout=60,
+                        )
+                        response.raise_for_status()
+                        (directory / "serving_after_failure.json").write_text(json.dumps(response.json()))
+                    if wedge_engine:
+                        # Queue an RPC that never reaches reset/shutdown. The next
+                        # attachment must time out, kill this actor and its vLLM
+                        # children, then allocate a healthy replacement on its GPUs.
+                        engine = ray.get(serving.get_updatable_engines_and_lock.remote())[0][0]
+                        started = directory / "wedged_engine.pid"
+
+                        def block(actor, started=started):
+                            started.write_text(str(os.getpid()))
+                            time.sleep(300)
+
+                        engine.__ray_call__.remote(block)
+                        deadline = time.monotonic() + 10
+                        while not started.exists():
+                            assert time.monotonic() < deadline
+                            time.sleep(0.1)
+
+                else:
+                    before = json.loads((directory / "before.json").read_text())
+                    # Successful completion must release retained serving resources,
+                    # without depending on the runner's final ray stop cleanup.
+                    with requests.Session() as http:
+                        http.trust_env = False
+                        for engine in before["engines"]:
+                            deadline = time.monotonic() + 20
+                            while True:
+                                try:
+                                    http.get(engine["url"] + "/health", timeout=2)
+                                except requests.ConnectionError:
+                                    break
+                                assert time.monotonic() < deadline, engine
+                                time.sleep(1)
+            verify(directory, mode, failure_rollout, save_interval, kill_manager, wedge_engine, train_gpus)
+        finally:
+            if not ray.is_initialized():
+                ray.init(
+                    address=os.environ.get("VIME_TEST_RAY_ADDRESS", "127.0.0.1:6379"), namespace=RECOVERY_NAMESPACE
+                )
+            for suffix in ("", ":serving"):
+                try:
+                    retained = ray.get_actor(
+                        training_session_name(session_args) + suffix, namespace=RECOVERY_NAMESPACE
+                    )
+                except ValueError:
+                    continue
+                try:
+                    ray.get(retained.dispose.remote(), timeout=60)
+                except ray.exceptions.RayActorError:
+                    pass
+                finally:
+                    ray.kill(retained, no_restart=True)
+            ray.shutdown()
+            if not external_ray:
+                subprocess.run(["ray", "stop", "--force"], check=True)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["straw", "debug"], default="straw")
     parser.add_argument("--failure-rollout", type=int, choices=[0, 1], default=0)
-    parser.add_argument("--directory")
+    parser.add_argument("--directory", help="Explicit artifact directory; always preserved.")
+    parser.add_argument(
+        "--keep-artifacts",
+        action="store_true",
+        default=None,
+        help="Preserve automatic scratch; also VIME_TEST_KEEP_ARTIFACTS=1.",
+    )
     parser.add_argument("--model-path")
     parser.add_argument("--dataset-path")
     parser.add_argument("--no-prepare", action="store_true")
@@ -425,4 +465,5 @@ if __name__ == "__main__":
         cli.weight_sync,
         cli.wedge_engine,
         cli.pd,
+        keep_artifacts=cli.keep_artifacts,
     )

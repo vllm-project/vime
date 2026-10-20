@@ -1,4 +1,5 @@
 import os
+from shlex import quote
 import vime.utils.external_utils.command_utils as U
 
 ENABLE_EVAL = U.get_bool_env_var("VIME_TEST_ENABLE_EVAL", "1")
@@ -6,22 +7,33 @@ ENABLE_EVAL = U.get_bool_env_var("VIME_TEST_ENABLE_EVAL", "1")
 MODEL_NAME = "GLM-Z1-9B-0414"
 MODEL_TYPE = "glm4-9B"
 NUM_GPUS = 8
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command("hf download zai-org/GLM-Z1-9B-0414 --local-dir /root/models/GLM-Z1-9B-0414")
-    U.hf_download_dataset("zhuzilin/dapo-math-17k")
-    U.hf_download_dataset("zhuzilin/aime-2024")
+    U.exec_command(f"mkdir -p {quote(str(MODEL_DIR.parent))} {quote(str(DATASET_DIR))}")
+    U.exec_command(f"hf download zai-org/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/dapo-math-17k", dir_dst=DATASET_DIR)
+    if ENABLE_EVAL:
+        U.hf_download_dataset("zhuzilin/aime-2024", dir_dst=DATASET_DIR)
 
-    U.convert_checkpoint(model_name=MODEL_NAME, megatron_model_type=MODEL_TYPE, num_gpus_per_node=NUM_GPUS)
+    U.convert_checkpoint(
+        model_name=MODEL_NAME,
+        megatron_model_type=MODEL_TYPE,
+        num_gpus_per_node=NUM_GPUS,
+        dir_dst=str(TEST_ROOT),
+        hf_checkpoint=str(MODEL_DIR),
+    )
 
 
 def execute():
-    ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load /root/{MODEL_NAME}_torch_dist "
+    ref_load = TEST_ROOT / f"{MODEL_NAME}_torch_dist" if U.current_platform().torch_dist_convert else MODEL_DIR
+    ckpt_args = f"--hf-checkpoint {quote(str(MODEL_DIR))} --ref-load {quote(str(ref_load))} "
 
     rollout_args = (
-        "--prompt-data /root/datasets/dapo-math-17k/dapo-math-17k.jsonl "
+        f"--prompt-data {quote(str(DATASET_DIR / 'dapo-math-17k/dapo-math-17k.jsonl'))} "
         "--input-key prompt "
         "--label-key label "
         "--apply-chat-template "
@@ -37,11 +49,15 @@ def execute():
     )
 
     eval_args = (
-        f"{'--eval-interval 20 ' if ENABLE_EVAL else ''}"
-        "--eval-prompt-data aime24 /root/datasets/aime-2024/aime-2024.jsonl "
-        "--n-samples-per-eval-prompt 1 "
-        "--eval-max-response-len 16384 "
-        "--eval-top-k 1 "
+        (
+            "--eval-interval 20 "
+            f"--eval-prompt-data aime24 {quote(str(DATASET_DIR / 'aime-2024/aime-2024.jsonl'))} "
+            "--n-samples-per-eval-prompt 1 "
+            "--eval-max-response-len 16384 "
+            "--eval-top-k 1 "
+        )
+        if ENABLE_EVAL
+        else ""
     )
 
     perf_args = (
@@ -108,6 +124,7 @@ def execute():
         f"{vllm_args} "
         f"{ci_args} "
         f"{misc_args} "
+        f"{U.get_test_npu_model_args(offload_optimizer=True)} "
     )
 
     U.execute_train(

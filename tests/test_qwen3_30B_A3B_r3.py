@@ -1,5 +1,4 @@
 import os
-import tempfile
 from shlex import quote
 
 import vime.utils.external_utils.command_utils as U
@@ -12,28 +11,47 @@ USE_FP8_ROLLOUT = bool(int(os.environ.get("VIME_TEST_USE_FP8_ROLLOUT", "1")))
 MODEL_NAME = "Qwen3-30B-A3B"
 MODEL_TYPE = "qwen3-30B-A3B"
 NUM_GPUS = 8
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
+
+
+def validate_backend_options():
+    if U.current_platform().name == "npu" and (USE_DEEPEP or USE_FP8_ROLLOUT):
+        raise ValueError(
+            "This NPU R3 case covers BF16/alltoall; set VIME_TEST_USE_DEEPEP=0 and VIME_TEST_USE_FP8_ROLLOUT=0. DeepEP/FP8 require separate adaptation."
+        )
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command("hf download Qwen/Qwen3-30B-A3B --local-dir /root/models/Qwen3-30B-A3B")
-    U.exec_command("hf download Qwen/Qwen3-30B-A3B-FP8 --local-dir /root/models/Qwen3-30B-A3B-FP8")
-    U.hf_download_dataset("zhuzilin/dapo-math-17k")
-    U.hf_download_dataset("zhuzilin/aime-2024")
+    validate_backend_options()
+    U.exec_command(f"mkdir -p {quote(str(MODEL_DIR.parent))} {quote(str(DATASET_DIR))}")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    if USE_FP8_ROLLOUT:
+        U.exec_command(f"hf download Qwen/{MODEL_NAME}-FP8 --local-dir {quote(str(MODEL_DIR) + '-FP8')}")
+    U.hf_download_dataset("zhuzilin/dapo-math-17k", dir_dst=DATASET_DIR)
+    if ENABLE_EVAL:
+        U.hf_download_dataset("zhuzilin/aime-2024", dir_dst=DATASET_DIR)
 
-    U.convert_checkpoint(model_name=MODEL_NAME, megatron_model_type=MODEL_TYPE, num_gpus_per_node=NUM_GPUS)
+    U.convert_checkpoint(
+        model_name=MODEL_NAME,
+        megatron_model_type=MODEL_TYPE,
+        num_gpus_per_node=NUM_GPUS,
+        dir_dst=str(TEST_ROOT),
+        hf_checkpoint=str(MODEL_DIR),
+    )
 
 
 def execute():
-    if USE_FP8_ROLLOUT:
-        ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}-FP8 " f"--ref-load /root/{MODEL_NAME}_torch_dist "
-    else:
-        ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME} " f"--ref-load /root/{MODEL_NAME}_torch_dist "
+    validate_backend_options()
+    ref_load = TEST_ROOT / f"{MODEL_NAME}_torch_dist" if U.current_platform().torch_dist_convert else MODEL_DIR
+    hf_checkpoint = str(MODEL_DIR) + ("-FP8" if USE_FP8_ROLLOUT else "")
+    ckpt_args = f"--hf-checkpoint {quote(hf_checkpoint)} --ref-load {quote(str(ref_load))} "
 
     rollout_args = (
         "--rollout-data-transport straw "
         "--rollout-queue-online-gc "
-        "--prompt-data /root/datasets/dapo-math-17k/dapo-math-17k.jsonl "
+        f"--prompt-data {quote(str(DATASET_DIR / 'dapo-math-17k/dapo-math-17k.jsonl'))} "
         "--input-key prompt "
         "--label-key label "
         "--apply-chat-template "
@@ -49,11 +67,15 @@ def execute():
     )
 
     eval_args = (
-        f"{'--eval-interval 20 ' if ENABLE_EVAL else ''}"
-        "--eval-prompt-data aime24 /root/datasets/aime-2024/aime-2024.jsonl "
-        "--n-samples-per-eval-prompt 1 "
-        "--eval-max-response-len 16384 "
-        "--eval-top-k 1 "
+        (
+            "--eval-interval 20 "
+            f"--eval-prompt-data aime24 {quote(str(DATASET_DIR / 'aime-2024/aime-2024.jsonl'))} "
+            "--n-samples-per-eval-prompt 1 "
+            "--eval-max-response-len 16384 "
+            "--eval-top-k 1 "
+        )
+        if ENABLE_EVAL
+        else ""
     )
 
     perf_args = (
@@ -133,10 +155,11 @@ def execute():
         f"{vllm_args} "
         f"{ci_args} "
         f"{misc_args} "
+        f"{U.get_test_npu_model_args()} "
     )
 
-    with tempfile.TemporaryDirectory(prefix="vime_straw_") as rollout_dir:
-        train_args += f"--rollout-data-dir {quote(rollout_dir)} "
+    with U.test_work_directory("vime_qwen3_r3_") as rollout_dir:
+        train_args += f"--rollout-data-dir {quote(str(rollout_dir))} "
         U.execute_train(
             train_args=train_args,
             num_gpus_per_node=NUM_GPUS,

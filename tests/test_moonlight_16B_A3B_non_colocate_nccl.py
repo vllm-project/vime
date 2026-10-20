@@ -1,6 +1,8 @@
 """Eight-GPU non-colocated MoE E2E for native vLLM NCCL updates."""
 
 import os
+from pathlib import Path
+from shlex import quote
 
 import vime.utils.external_utils.command_utils as U
 
@@ -11,30 +13,33 @@ os.environ.setdefault("NCCL_NVLS_ENABLE", "0")
 MODEL_NAME = "Moonlight-16B-A3B-Instruct"
 MODEL_TYPE = "moonlight"
 NUM_GPUS = 8
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 TRAIN_GPUS = 4
 ROLLOUT_GPUS = 4
 TORCH_DIST_CKPT = f"/dev/shm/{MODEL_NAME}_torch_dist"
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(
-        "hf download moonshotai/Moonlight-16B-A3B-Instruct " "--local-dir /root/models/Moonlight-16B-A3B-Instruct"
-    )
-    U.hf_download_dataset("zhuzilin/dapo-math-17k")
+    U.exec_command(f"mkdir -p {quote(str(MODEL_DIR.parent))} {quote(str(DATASET_DIR))}")
+    U.exec_command(f"hf download moonshotai/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/dapo-math-17k", dir_dst=DATASET_DIR)
     U.convert_checkpoint(
         model_name=MODEL_NAME,
         megatron_model_type=MODEL_TYPE,
         num_gpus_per_node=TRAIN_GPUS,
         dir_dst="/dev/shm",
+        hf_checkpoint=str(MODEL_DIR),
     )
 
 
 def execute():
-    ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME} " f"--ref-load {TORCH_DIST_CKPT} "
+    ref_load = Path(TORCH_DIST_CKPT) if U.current_platform().torch_dist_convert else MODEL_DIR
+    ckpt_args = f"--hf-checkpoint {quote(str(MODEL_DIR))} --ref-load {quote(str(ref_load))} "
 
     rollout_args = (
-        "--prompt-data /root/datasets/dapo-math-17k/dapo-math-17k.jsonl "
+        f"--prompt-data {quote(str(DATASET_DIR / 'dapo-math-17k/dapo-math-17k.jsonl'))} "
         "--input-key prompt "
         "--label-key label "
         "--apply-chat-template "
@@ -114,6 +119,7 @@ def execute():
             f"{perf_args} "
             f"{vllm_args} "
             f"{misc_args} "
+            f"{U.get_test_npu_model_args(max_model_len=4096, max_num_seqs=8)} "
         ),
         num_gpus_per_node=NUM_GPUS,
         megatron_model_type=MODEL_TYPE,

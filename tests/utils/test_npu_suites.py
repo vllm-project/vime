@@ -20,6 +20,7 @@ def suites(monkeypatch):
     monkeypatch.setenv("BUILDKITE_COMMIT", "test-pr-commit")
     monkeypatch.setenv("BUILDKITE_SOURCE", "webhook")
     monkeypatch.delenv("NPU_CI_IMAGE", raising=False)
+    monkeypatch.delenv("NPU_KEEP_ARTIFACTS", raising=False)
     spec = importlib.util.spec_from_file_location("npu_suites_under_test", REPO / ".buildkite/npu_suites.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -71,7 +72,7 @@ def test_invalid_or_empty_selection_fails_before_emitting_json(monkeypatch, sele
     assert not result.stdout
     if selection in ("", "smk", "image-build", "nightly"):
         assert (
-            "select a non-empty suite (currently: migration-basic, migration-parallel, migration-lifecycle, migration-recovery, migration-checkpoint)"
+            "select a non-empty suite (currently: migration-basic, migration-parallel, migration-lifecycle, migration-recovery, migration-checkpoint, migration-moe, migration-moe-recovery, migration-models)"
             in result.stderr
         )
 
@@ -133,6 +134,11 @@ def test_batch_three_keeps_all_gpu_variants_and_shared_resource_limit(suites, mo
         assert step["concurrency"] == 4 and step["concurrency_group"] == "vime-npu-migration-basic"
         assert step["agents"]["resource_class"] in ("npu-4", "npu-8")
         assert "python tests/ci/npu_test_environment.py" in step["command"]
+        assert step["env"]["VIME_TEST_KEEP_ARTIFACTS"] == "0"
+        script = shlex.split(step["command"])[2]
+        assert script.index("python tests/ci/cleanup_npu_batch3.py") < script.index(
+            "python tests/ci/npu_test_environment.py"
+        )
     spec = importlib.util.spec_from_file_location("gpu_suites_reference", REPO / ".buildkite/gpu_suites.py")
     gpu = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gpu)
@@ -169,6 +175,8 @@ def test_gate_exposes_every_suite(suites):
     pipeline = yaml.safe_load((REPO / ".buildkite/pipeline-npu.yaml").read_text())
     gate = next(step for step in pipeline["steps"][0]["steps"] if step.get("key") == "npu-gate")
     assert {option["value"] for option in gate["fields"][0]["options"]} == set(suites.SUITES) | {"image-build"}
+    keep = next(field for field in gate["fields"] if field["key"] == "npu-keep-artifacts")
+    assert keep["default"] == "0" and {item["value"] for item in keep["options"]} == {"0", "1"}
 
 
 @pytest.mark.parametrize("from_env", [True, False])
@@ -178,6 +186,7 @@ def test_gate_exposes_every_suite(suites):
         "image-build,migration-basic",
         "migration-parallel",
         "migration-lifecycle,migration-recovery,migration-checkpoint",
+        "migration-moe,migration-moe-recovery,migration-models",
         "image-build",
         "image-build,unknown",
         "nightly",
@@ -195,7 +204,7 @@ def test_upload_uses_same_selection_for_image_and_tests(tmp_path, from_env, sele
         f"#!{sys.executable}\n"
         "import os, pathlib, sys\n"
         "if sys.argv[1:3] == ['meta-data', 'get']:\n"
-        " print(os.environ['TEST_SUITE_METADATA'] if sys.argv[3] == 'npu-suites' else os.environ['TEST_IMAGE_METADATA'])\n"
+        " print(os.environ[{'npu-suites': 'TEST_SUITE_METADATA', 'npu-ci-image': 'TEST_IMAGE_METADATA', 'npu-keep-artifacts': 'TEST_KEEP_METADATA'}[sys.argv[3]]])\n"
         "elif sys.argv[1:3] == ['pipeline', 'upload']:\n"
         " data = pathlib.Path(sys.argv[3]).read_text() if len(sys.argv) > 3 else sys.stdin.read()\n"
         " with open(os.environ['TEST_UPLOAD_LOG'], 'a') as f: f.write(data + '\\n---UPLOAD---\\n')\n"
@@ -211,14 +220,17 @@ def test_upload_uses_same_selection_for_image_and_tests(tmp_path, from_env, sele
         "TEST_SUITE_METADATA": selection,
         "TEST_IMAGE_METADATA": ("registry.example/vime:previous-commit" if selection.startswith("migration-") else ""),
         "TEST_UPLOAD_LOG": str(log),
+        "TEST_KEEP_METADATA": "1",
     }
     env.pop("NPU_SUITES", None)
     env.pop("NPU_CI_IMAGE", None)
+    env.pop("NPU_KEEP_ARTIFACTS", None)
     if from_env:
         env["NPU_SUITES"] = selection
         env["TEST_SUITE_METADATA"] = "unknown"  # metadata must not override the explicit environment
         env["NPU_CI_IMAGE"] = env["TEST_IMAGE_METADATA"]
         env["TEST_IMAGE_METADATA"] = ""  # explicit image must also take precedence
+        env["NPU_KEEP_ARTIFACTS"] = "0"
     result = subprocess.run(
         ["bash", "-c", upload["command"].replace("$$", "$")],
         cwd=REPO,
@@ -231,6 +243,7 @@ def test_upload_uses_same_selection_for_image_and_tests(tmp_path, from_env, sele
         "image-build,migration-basic",
         "migration-parallel",
         "migration-lifecycle,migration-recovery,migration-checkpoint",
+        "migration-moe,migration-moe-recovery,migration-models",
     ):
         assert result.returncode != 0
         assert not log.exists(), "Invalid selection must fail before uploading the image build"
@@ -240,6 +253,75 @@ def test_upload_uses_same_selection_for_image_and_tests(tmp_path, from_env, sele
     building = selection.startswith("image-build")
     assert yaml.safe_load(image_yaml)["steps"][0]["skip"] is not building
     generated = json.loads(test_json)["steps"]
-    assert len(generated) == (7 if building else 9 if selection == "migration-parallel" else 17)
+    assert len(generated) == (
+        7 if building else 9 if selection == "migration-parallel" else 8 if "migration-models" in selection else 17
+    )
     expected_image = ":test-pr-commit" if building else "registry.example/vime:previous-commit"
     assert all(step["image"].endswith(expected_image) for step in generated)
+    if "migration-checkpoint" in selection or "migration-models" in selection:
+        assert all(step["env"]["VIME_TEST_KEEP_ARTIFACTS"] == ("0" if from_env else "1") for step in generated)
+
+
+@pytest.mark.parametrize("keep", ["0", "1", "invalid"])
+def test_batch_three_retention_selection(suites, monkeypatch, keep):
+    monkeypatch.setenv("NPU_SUITES", "migration-lifecycle,migration-recovery,migration-checkpoint")
+    monkeypatch.setenv("NPU_KEEP_ARTIFACTS", keep)
+    if keep == "invalid":
+        with pytest.raises(SystemExit, match="NPU_KEEP_ARTIFACTS"):
+            suites.build_steps()
+    else:
+        assert all(step["env"]["VIME_TEST_KEEP_ARTIFACTS"] == keep for step in suites.build_steps())
+
+
+def test_batch_four_preserves_eight_gpu_scenarios_and_cleanup_policy(suites, monkeypatch):
+    groups = ("migration-moe", "migration-moe-recovery", "migration-models")
+    monkeypatch.setenv("NPU_SUITES", ",".join(groups))
+    steps = suites.build_steps()
+    assert [len(suites.SUITES[name]) for name in groups] == [4, 1, 3]
+    assert len(steps) == 8 and len({step["key"] for step in steps}) == 8
+    spec = importlib.util.spec_from_file_location("gpu_reference", REPO / ".buildkite/gpu_suites.py")
+    gpu = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gpu)
+    original_files = {entry[0] for entries in gpu.SUITES.values() for entry in entries}
+    for group in groups:
+        assert all(entry[0] in original_files for entry in suites.SUITES[group])
+    for step in steps:
+        assert step["agents"] == {"queue": "ascend-a3", "resource_class": "npu-8"}
+        assert step["concurrency"] == 4 and step["concurrency_group"] == "vime-npu-migration-basic"
+        assert step["timeout_in_minutes"] == 360 and step["depends_on"] == "image-build-npu"
+        assert step["env"]["VIME_TEST_KEEP_ARTIFACTS"] == "0"
+        script = shlex.split(step["command"])[2]
+        assert script.index("cleanup_npu_batch3.py") < script.index("npu_test_environment.py")
+    r3 = next(step for step in steps if "test_qwen3_30B_A3B_r3.py" in step["command"])
+    assert r3["env"]["VIME_TEST_USE_DEEPEP"] == r3["env"]["VIME_TEST_USE_FP8_ROLLOUT"] == "0"
+    assert r3["env"]["VIME_TEST_ENABLE_EVAL"] == "0"
+    gpu_r3 = next(
+        entry
+        for entries in gpu.SUITES.values()
+        for entry in entries
+        if entry[0] == "test_qwen3_30B_A3B_r3.py" and entry[3] == {"ENABLE_EVAL": "0"}
+    )
+    assert {name: gpu_r3[3].get(name, "0") for name in ("USE_DEEPEP", "USE_FP8_ROLLOUT", "ENABLE_EVAL")} == {
+        "USE_DEEPEP": "0",
+        "USE_FP8_ROLLOUT": "0",
+        "ENABLE_EVAL": "0",
+    }
+    assert not any("--pd" in step["command"] for step in steps)
+    monkeypatch.setenv("NPU_KEEP_ARTIFACTS", "1")
+    assert all(step["env"]["VIME_TEST_KEEP_ARTIFACTS"] == "1" for step in suites.build_steps())
+    monkeypatch.setenv("NPU_SUITES", ",".join(name for name, entries in suites.SUITES.items() if entries))
+    assert len(suites.build_steps()) == 41
+
+
+def test_all_migration_jobs_sweep_tmp_before_probe_and_training(suites, monkeypatch):
+    monkeypatch.setenv("NPU_SUITES", ",".join(name for name in suites.SUITES if name.startswith("migration-")))
+    steps = suites.build_steps()
+    assert len(steps) == 41
+    for step in steps:
+        script = shlex.split(step["command"])[2]
+        assert script.count("python tests/ci/cleanup_npu_batch3.py") == 1
+        assert (
+            script.index("python tests/ci/cleanup_npu_batch3.py")
+            < script.index("python tests/ci/npu_test_environment.py")
+            < script.index("python tests/test_")
+        )
