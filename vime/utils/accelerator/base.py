@@ -157,6 +157,40 @@ class Accelerator(abc.ABC):
     def weight_update_backend(self, default: str = "nccl") -> str:
         return self.communication_backend(default)
 
+    # The two weight-transfer lookups below are classmethods on purpose: they
+    # answer what a transport is called and which class implements it, which
+    # needs no device. A trainer that only has to recognize a peer's backend
+    # name, and a CPU-only tool, must not be made to select a runtime for it.
+
+    @classmethod
+    def weight_transfer_backend(cls, transport: str) -> str:
+        """Map a logical weight transport onto the serving backend's name for it.
+
+        ``ipc`` is a colocated handoff between processes sharing one device;
+        ``distributed`` is a collective between separate trainer and engine
+        groups. A backend that registers different names overrides this.
+        """
+        names = {"ipc": "ipc", "distributed": "nccl"}
+        if transport not in names:
+            raise ValueError(f"Unknown weight transport: {transport!r}")
+        return names[transport]
+
+    @classmethod
+    def weight_transfer_init_info_qualname(cls, transport: str) -> str:
+        """Name the trainer init-info class for ``transport``.
+
+        Returned as a qualified name rather than a class so that describing a
+        transport never imports a serving runtime, and so a backend can name
+        classes in its own vendor package without this module knowing it.
+        """
+        names = {
+            "ipc": "vllm.distributed.weight_transfer.ipc_engine.IPCTrainerInitInfo",
+            "distributed": "vllm.distributed.weight_transfer.nccl_engine.NCCLTrainerInitInfo",
+        }
+        if transport not in names:
+            raise ValueError(f"Unknown weight transport: {transport!r}")
+        return names[transport]
+
     ray_device_key = "GPU"
     """The Ray resource name this accelerator is advertised and scheduled under.
 

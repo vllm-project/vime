@@ -23,6 +23,7 @@ from vime.backends.vllm_utils.runtime import (
 )
 from vime.backends.vllm_utils.server_control import register_worker, unregister_worker
 from vime.ray.ray_actor import RayActor
+from vime.utils import accelerator
 from vime.utils.http_utils import _wrap_ipv6, get_host_info
 from vime.utils.model_config import vllm_model_config_overrides
 
@@ -804,7 +805,9 @@ def _compute_server_args(
     ):
         kwargs["max_model_len"] = args.rollout_max_context_len
 
-    kwargs["weight_transfer_config"] = {"backend": "ipc" if args.colocate else "nccl"}
+    kwargs["weight_transfer_config"] = {
+        "backend": accelerator.weight_transfer_backend("ipc" if args.colocate else "distributed")
+    }
 
     if worker_type == "encoder":
         # vLLM EPD producers have no language-model KV cache groups. Prefix

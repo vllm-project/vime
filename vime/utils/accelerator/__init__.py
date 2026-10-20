@@ -441,6 +441,17 @@ def device_uuid() -> str:
     return _backend().device_uuid()
 
 
+def weight_transfer_backend(transport: str) -> str:
+    return _describing_backend().weight_transfer_backend(transport)
+
+
+def weight_transfer_init_info(transport: str, **kwargs: Any) -> Any:
+    """Build the trainer init info for ``transport`` on this job's backend."""
+    from vime.utils.misc import load_function
+
+    return load_function(_describing_backend().weight_transfer_init_info_qualname(transport))(**kwargs)
+
+
 def memory_module() -> Any:
     return _backend().memory_module()
 
