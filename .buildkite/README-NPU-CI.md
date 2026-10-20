@@ -39,6 +39,9 @@ NPU suites to run via a multi-select field:
   manager loss and TP resharding under stateless Adam.
 - **`migration-models`** — batch four: GLM-Z1-9B, MiMo MTP-only gradients and
   Qwen3-4B streaming partial rollout.
+- **`migration-foundation`** — batch five: Qwen3.5 basic GRPO (object-store
+  variant), NPU TP1/TP2 numerical reference, external vLLM teacher OPD and
+  Geo3K two-turn VLM protocol.
 - **`nightly`** — reserved for future coverage; currently empty. Selecting only
   this suite fails with an explicit error rather than uploading zero tests.
 
@@ -162,7 +165,7 @@ NPU_SUITES=image-build,migration-basic BUILDKITE_COMMIT="$(git rev-parse HEAD)" 
 ## Adding a test
 
 Suites and test mappings are defined in [`npu_suites.py`](./npu_suites.py).
-The eight active migration groups contain 41 scenarios; `smk` remains temporarily
+The nine active migration groups contain 45 scenarios; `smk` remains temporarily
 paused and `nightly` remains empty.
 
 Each entry is a 4-tuple, with an optional fifth item for the timeout in minutes:
@@ -344,7 +347,7 @@ nonempty checkpoint paths are rejected rather than cleared. The historical CLI
 value `gpu` only disables CPU offload; it does not select a CUDA device. Thus the
 four placement pairs mean NPU→NPU, NPU→CPU, CPU→CPU and CPU→NPU on Ascend.
 
-**Batch 3/4 intermediate artifacts** in the gate defaults to **Delete on exit,
+**Migration intermediate artifacts** in the gate defaults to **Delete on exit,
 including failed tests**. All eight shared scripts use `TemporaryDirectory` (or
 temporary files) for automatic scratch, including the disk-delta local staging
 directory. Select **Keep for debugging** to preserve it instead. Local runs use
@@ -428,7 +431,7 @@ minutes. On an internal deadline the harness prints the log tail, stops only
 its submitted job and fails.
 
 Automatic R3/MTP/recovery scratch uses `test_work_directory()` and the same
-**Batch 3/4 intermediate artifacts** option described above. The completed legacy
+**Migration intermediate artifacts** option described above. The completed legacy
 sweep is retired; only each run's owned temporary directories are removed.
 
 For the first hardware run, start with `migration-moe`, then
@@ -451,3 +454,54 @@ Runtime setup still checks out the new build's commit. Alternatively leave the
 image field empty and select `image-build` with the desired migration groups.
 Local CPU checks validate launch/configuration contracts and shared logic;
 they do not establish support for MLA, routed-expert replay or MiMo MTP on NPU.
+
+
+## Batch five: foundation and external services
+
+Select `migration-foundation` for four independent jobs, sharing the existing
+concurrency group with a maximum of four. The NPU hardware outcomes are pending.
+
+| GPU ID | Test | Model / data | Allocation / logical use | Limit |
+| --- | --- | --- | --- | --- |
+| G01 variant | `test_qwen3.5_0.8B_gsm8k_short.py --transport object-store` | Qwen3.5-0.8B / GSM8K | npu-4 / 4 colocated | 180 min |
+| G17 variant | `test_ppo_logprob_entropy_npu.py` | Shared synthetic 4x6 logits, no model/dataset | npu-4 / TP1 then TP2 | 180 min |
+| G25 | `test_qwen2.5_0.5B_opd_vllm.py` | Qwen2.5-0.5B-Instruct student + teacher / GSM8K | npu-8 / train 4 + external teacher 1 | 180 min |
+| G44 | `test_geo3k_vlm_multi_turn_e2e.py` | Qwen3-VL-2B-Instruct / VeraIsHere/geo3k_imgurl_processed | npu-4 / serving 1 | 180 min |
+
+G01 retains three rollouts, dynamic reward filtering, top-p 0.95, Qwen3.5 loss
+mask and health/fault-tolerance configuration. NPU reads native HF weights; the
+GPU default remains NIXL with the original conversion. Object-store is explicit
+in the NPU registration and does not validate Ray NIXL or guarantee a specific
+fault injection occurred. Optional evaluation is disabled in CI.
+
+G17 shares all 12 input scenarios with the CUDA test, but compares NPU FP32
+forward values and separate log-probability/entropy gradients with independent
+FP64 **CPU** log-softmax/autograd math (`atol=rtol=1e-6`). With a replay mask,
+log-probability includes the target while entropy still uses the full vocabulary.
+TP2 uses HCCL and checks each vocabulary shard; missing NPU/HCCL fails the job.
+The original CUDA legacy-kernel reference and tolerances remain unchanged. This
+variant cannot establish CUDA kernel parity. Local CPU/Gloo checks validate the
+oracle and sharding harness only, not NPU/HCCL execution.
+
+G25 selects `ASCEND_RT_VISIBLE_DEVICES` on NPU, masks the four training devices
+before starting its isolated Ray head, and launches the teacher on a separate
+physical device using the platform subprocess environment and V2 runner. It
+preserves the OPD reward endpoint, loss hooks and two training rollouts. Teacher
+health/startup failures print logs; teardown kills only its process tree and
+restores the driver's visibility. Run it in a fresh CI pod with no pre-existing
+Ray head. Native teacher prompt-logprob support remains a hardware acceptance
+item; no fake teacher or reward bypass is introduced.
+
+G44 retains pinned model/data revisions, render-once/generate-twice, image
+features and token/context alignment assertions. It uses one NPU in eager mode;
+the CUDA-only batch-invariant setting is omitted on NPU. Backend determinism or
+convergence is not asserted. Both external-service tests use unique managed log
+directories, print tails on failure and stop owned processes before directory
+cleanup. The gate's **Migration intermediate artifacts** option preserves logs
+when requested; model/dataset caches remain reusable.
+
+This batch changes runtime code only and can reuse the build #389 image via
+**Existing NPU image**, without selecting `image-build`. An older image with
+different dependencies is not equivalent. To rerun #389 failures as well, also
+select `migration-moe` and `migration-moe-recovery` (nine jobs in total). No CI
+build is triggered by generating or reviewing these configurations.

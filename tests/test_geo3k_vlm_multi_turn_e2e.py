@@ -23,13 +23,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vllm.utils.system_utils import kill_process_tree
 
 import vime.utils.external_utils.command_utils as U
+from vime.platforms import current_platform
 from vime.utils.http_utils import is_port_available
 from vime.utils.misc import load_function
 
 NUM_GPUS = 1
 MODEL_NAME = "Qwen3-VL-2B-Instruct"
 MODEL_REVISION = "89644892e4d85e24eaac8bacfd4f463576704203"
-TEST_ROOT = Path(os.environ.get("VIME_TEST_ROOT", "/root"))
+TEST_ROOT = U.get_test_root()
 MODEL_PATH = TEST_ROOT / "models" / MODEL_NAME
 DATASET_NAME = "VeraIsHere/geo3k_imgurl_processed"
 DATASET_REVISION = "53ff8fbb1f9758b9efbc005e9487e1fdd874364a"
@@ -56,13 +57,11 @@ MAX_MODEL_LEN = 4096
 MAX_NUM_SEQS = 1
 ROUTER_REQUEST_TIMEOUT_S = 600
 HTTP_MAX_RETRIES = 60
-SERVICE_START_TIMEOUT_S = 180
+SERVICE_START_TIMEOUT_S = 600 if U.current_platform().name == "npu" else 180
 SERVICE_POLL_INTERVAL_S = 2
 PROCESS_STOP_TIMEOUT_S = 30
-WORKER_LOG = Path("/tmp/geo3k-vllm-worker.log")
-ROUTER_LOG = Path("/tmp/geo3k-vllm-router.log")
 WORKER_COMMAND = shlex.split(
-    f"vllm serve {MODEL_PATH} --host {HOST} --port {WORKER_PORT} --dtype bfloat16 "
+    f"vllm serve {shlex.quote(str(MODEL_PATH))} --host {HOST} --port {WORKER_PORT} --dtype bfloat16 "
     f"--tensor-parallel-size {NUM_GPUS} --gpu-memory-utilization {GPU_MEMORY_UTILIZATION} "
     f"--max-model-len {MAX_MODEL_LEN} --max-num-seqs {MAX_NUM_SEQS} --enforce-eager "
     "--enable-scale-out "
@@ -105,9 +104,11 @@ def build_env(*, sample: Any, args: Namespace) -> TwoTurnEnvironment:
 def prepare() -> None:
     MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     DATA_ROOT.parent.mkdir(parents=True, exist_ok=True)
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --revision {MODEL_REVISION} --local-dir {MODEL_PATH}")
     U.exec_command(
-        f"hf download --repo-type dataset {DATASET_NAME} --revision {DATASET_REVISION} --local-dir {DATA_ROOT}"
+        f"hf download Qwen/{MODEL_NAME} --revision {MODEL_REVISION} --local-dir {shlex.quote(str(MODEL_PATH))}"
+    )
+    U.exec_command(
+        f"hf download --repo-type dataset {DATASET_NAME} --revision {DATASET_REVISION} --local-dir {shlex.quote(str(DATA_ROOT))}"
     )
     if not TRAIN_DATA_PATH.is_file():
         raise FileNotFoundError(f"Dataset not found at {TRAIN_DATA_PATH}")
@@ -151,23 +152,48 @@ def _start_process(
     return process
 
 
+def _worker_environment():
+    platform = current_platform()
+    env = os.environ.copy()
+    visible = env.get(platform.ray.visible_devices_env, "0").split(",")[0].strip()
+    if not visible:
+        raise ValueError("No visible device for Geo3K worker")
+    env[platform.ray.visible_devices_env] = visible
+    env = platform.vllm.subprocess_env(env, visible_devices=visible, colocate=False)
+    env.update(VLLM_SERVER_DEV_MODE="1", VLLM_USE_V2_MODEL_RUNNER="1")
+    if platform.is_npu:
+        # CUDA batch-invariant kernels are not part of this protocol test.
+        env.pop("VLLM_BATCH_INVARIANT", None)
+    else:
+        env["VLLM_BATCH_INVARIANT"] = "1"
+    return env
+
+
 @contextmanager
 def _vllm_services() -> Iterator[None]:
     ports = (WORKER_PORT, ROUTER_PORT, PROMETHEUS_PORT)
     if unavailable := [port for port in ports if not is_port_available(port)]:
         raise RuntimeError(f"Required test ports are already in use: {unavailable}")
-    worker_env = os.environ.copy()
-    worker_env.update(VLLM_SERVER_DEV_MODE="1", VLLM_BATCH_INVARIANT="1")
-    worker = _start_process(WORKER_COMMAND, WORKER_URL, log_path=WORKER_LOG, env=worker_env)
-    router: subprocess.Popen | None = None
-    try:
-        router = _start_process(ROUTER_COMMAND, ROUTER_URL, log_path=ROUTER_LOG)
-        yield
-    finally:
+    with U.test_work_directory("vime_geo3k_") as directory:
+        worker_log, router_log = directory / "worker.log", directory / "router.log"
+        worker = router = None
         try:
-            _stop_process(router)
+            command = list(WORKER_COMMAND)
+            if current_platform().is_npu:
+                command += ["--additional-config", '{"weight_nz_mode": 0}']
+            worker = _start_process(command, WORKER_URL, log_path=worker_log, env=_worker_environment())
+            router = _start_process(ROUTER_COMMAND, ROUTER_URL, log_path=router_log)
+            yield
+        except BaseException:
+            for log in (worker_log, router_log):
+                if log.exists():
+                    print(f"Geo3K failure; {log.name} tail:\n{log.read_text(errors='replace')[-16000:]}", flush=True)
+            raise
         finally:
-            _stop_process(worker)
+            try:
+                _stop_process(router)
+            finally:
+                _stop_process(worker)
 
 
 @contextmanager
@@ -274,7 +300,7 @@ def _validate_result(sample: Any, events: list[RequestEvent]) -> None:
 def execute() -> None:
     with _vllm_services():
         sample, events = asyncio.run(_run_rollout())
-    _validate_result(sample, events)
+        _validate_result(sample, events)
 
 
 if __name__ == "__main__":

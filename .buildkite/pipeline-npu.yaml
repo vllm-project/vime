@@ -61,13 +61,15 @@ steps:
                 value: migration-moe-recovery
               - label: "run-npu-ci-migration-models (batch 4: GLM9B, MiMo MTP, streaming partial rollout)"
                 value: migration-models
+              - label: "run-npu-ci-migration-foundation (batch 5: GRPO, NPU math, OPD teacher, multi-turn VLM)"
+                value: migration-foundation
               - label: "run-npu-ci-nightly"
                 value: nightly
           - text: "Existing NPU image (optional; leave image-build unselected)"
             key: npu-ci-image
             required: false
             hint: "Full registry/name:tag or digest. Reuses dependencies and checks out this build's commit. Empty uses the default image."
-          - select: "Batch 3/4 intermediate artifacts"
+          - select: "Migration intermediate artifacts"
             key: npu-keep-artifacts
             required: true
             default: "0"

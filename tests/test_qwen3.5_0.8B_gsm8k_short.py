@@ -1,4 +1,5 @@
 import os
+from shlex import quote
 
 import vime.utils.external_utils.command_utils as U
 
@@ -6,26 +7,33 @@ import vime.utils.external_utils.command_utils as U
 MODEL_NAME = "Qwen3.5-0.8B"
 MODEL_TYPE = "qwen3.5-0.8B"
 NUM_GPUS = 4
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 TORCH_DIST_CKPT = f"/dev/shm/{MODEL_NAME}_torch_dist"
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/gsm8k")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/gsm8k", dir_dst=DATASET_DIR)
     U.convert_checkpoint(
         model_name=MODEL_NAME,
         megatron_model_type=MODEL_TYPE,
         num_gpus_per_node=NUM_GPUS,
         dir_dst="/dev/shm",
+        hf_checkpoint=str(MODEL_DIR),
     )
 
 
-def execute():
-    ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load {TORCH_DIST_CKPT} "
+def execute(transport: str = "nixl"):
+    if transport not in ("nixl", "object-store"):
+        raise ValueError(f"Unsupported transport: {transport}")
+    # object-store covers basic training; it does not establish NIXL support.
+    ref = MODEL_DIR if U.current_platform().name == "npu" else TORCH_DIST_CKPT
+    ckpt_args = f"--hf-checkpoint {quote(str(MODEL_DIR))} --ref-load {quote(str(ref))} "
 
     rollout_args = (
-        "--prompt-data /root/datasets/gsm8k/train.parquet "
+        f"--prompt-data {quote(str(DATASET_DIR / 'gsm8k/train.parquet'))} "
         "--input-key messages "
         "--label-key label "
         "--apply-chat-template "
@@ -37,7 +45,7 @@ def execute():
         "--rollout-max-response-len 1024 "
         "--rollout-temperature 0.8 "
         "--rollout-top-p 0.95 "
-        "--rollout-data-transport nixl "
+        f"--rollout-data-transport {transport} "
         "--over-sampling-batch-size 8 "
         "--dynamic-sampling-filter-path vime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std "
         "--global-batch-size 16 "
@@ -45,11 +53,14 @@ def execute():
 
     eval_args = (
         "--eval-interval 20 "
-        "--eval-prompt-data gsm8k /root/datasets/gsm8k/test.parquet "
+        f"--eval-prompt-data gsm8k {quote(str(DATASET_DIR / 'gsm8k/test.parquet'))} "
         "--n-samples-per-eval-prompt 1 "
         "--eval-max-response-len 1024 "
         "--eval-top-k 1 "
     )
+
+    if not U.get_bool_env_var("VIME_TEST_ENABLE_EVAL", "1"):
+        eval_args = ""
 
     perf_args = (
         "--tensor-model-parallel-size 1 "
@@ -118,6 +129,7 @@ def execute():
         f"{ci_args} "
         f"{fault_tolerance_args} "
         f"{misc_args} "
+        f"{U.get_test_npu_model_args(max_model_len=8192)} "
     )
 
     U.execute_train(
@@ -131,4 +143,8 @@ if __name__ == "__main__":
     prepare()
     for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         os.environ.pop(proxy_var, None)
-    execute()
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--transport", choices=("nixl", "object-store"), default="nixl")
+    execute(**vars(parser.parse_args()))

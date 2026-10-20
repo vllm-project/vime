@@ -140,6 +140,14 @@ SUITES = {
         ("test_mimo_7B_mtp_only_grad.py", "npu-8", "", {}, 360),
         ("test_qwen3_4B_streaming_partial_rollout.py", "npu-8", "", {}, 360),
     ],
+    # Batch 5: two shared training cases, a mathematical-reference variant,
+    # and multi-turn VLM protocol validation. GPU kernel/NIXL parity is separate.
+    "migration-foundation": [
+        ("test_qwen3.5_0.8B_gsm8k_short.py", "npu-4", "--transport object-store", {"VIME_TEST_ENABLE_EVAL": "0"}),
+        ("test_ppo_logprob_entropy_npu.py", "npu-4", "", {}),
+        ("test_qwen2.5_0.5B_opd_vllm.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}),
+        ("test_geo3k_vlm_multi_turn_e2e.py", "npu-4", "", {}),
+    ],
     "nightly": [],
 }
 
@@ -218,6 +226,7 @@ def npu_step(
         "migration-moe",
         "migration-moe-recovery",
         "migration-models",
+        "migration-foundation",
     )
     if managed_scratch:
         keep = os.environ.get("NPU_KEEP_ARTIFACTS", "0")

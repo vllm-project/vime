@@ -72,7 +72,7 @@ def test_invalid_or_empty_selection_fails_before_emitting_json(monkeypatch, sele
     assert not result.stdout
     if selection in ("", "smk", "image-build", "nightly"):
         assert (
-            "select a non-empty suite (currently: migration-basic, migration-parallel, migration-lifecycle, migration-recovery, migration-checkpoint, migration-moe, migration-moe-recovery, migration-models)"
+            "select a non-empty suite (currently: migration-basic, migration-parallel, migration-lifecycle, migration-recovery, migration-checkpoint, migration-moe, migration-moe-recovery, migration-models, migration-foundation)"
             in result.stderr
         )
 
@@ -185,6 +185,7 @@ def test_gate_exposes_every_suite(suites):
         "migration-parallel",
         "migration-lifecycle,migration-recovery,migration-checkpoint",
         "migration-moe,migration-moe-recovery,migration-models",
+        "migration-foundation",
         "image-build",
         "image-build,unknown",
         "nightly",
@@ -242,6 +243,7 @@ def test_upload_uses_same_selection_for_image_and_tests(tmp_path, from_env, sele
         "migration-parallel",
         "migration-lifecycle,migration-recovery,migration-checkpoint",
         "migration-moe,migration-moe-recovery,migration-models",
+        "migration-foundation",
     ):
         assert result.returncode != 0
         assert not log.exists(), "Invalid selection must fail before uploading the image build"
@@ -252,11 +254,17 @@ def test_upload_uses_same_selection_for_image_and_tests(tmp_path, from_env, sele
     assert yaml.safe_load(image_yaml)["steps"][0]["skip"] is not building
     generated = json.loads(test_json)["steps"]
     assert len(generated) == (
-        7 if building else 9 if selection == "migration-parallel" else 8 if "migration-models" in selection else 17
+        7
+        if building
+        else (
+            9
+            if selection == "migration-parallel"
+            else 8 if "migration-models" in selection else 4 if selection == "migration-foundation" else 17
+        )
     )
     expected_image = ":test-pr-commit" if building else "registry.example/vime:previous-commit"
     assert all(step["image"].endswith(expected_image) for step in generated)
-    if "migration-checkpoint" in selection or "migration-models" in selection:
+    if any(group in selection for group in ("migration-checkpoint", "migration-models", "migration-foundation")):
         assert all(step["env"]["VIME_TEST_KEEP_ARTIFACTS"] == ("0" if from_env else "1") for step in generated)
 
 
@@ -308,15 +316,30 @@ def test_batch_four_preserves_eight_gpu_scenarios_and_cleanup_policy(suites, mon
     monkeypatch.setenv("NPU_KEEP_ARTIFACTS", "1")
     assert all(step["env"]["VIME_TEST_KEEP_ARTIFACTS"] == "1" for step in suites.build_steps())
     monkeypatch.setenv("NPU_SUITES", ",".join(name for name, entries in suites.SUITES.items() if entries))
-    assert len(suites.build_steps()) == 41
+    assert len(suites.build_steps()) == 45
 
 
 def test_all_migration_jobs_dispose_failed_sessions_without_global_sweeps(suites, monkeypatch):
     monkeypatch.setenv("NPU_SUITES", ",".join(name for name in suites.SUITES if name.startswith("migration-")))
     steps = suites.build_steps()
-    assert len(steps) == 41
+    assert len(steps) == 45
     for step in steps:
         script = shlex.split(step["command"])[2]
         assert "cleanup_npu_batch3.py" not in script
         assert step["env"]["VIME_TEST_DISPOSE_ON_FAILURE"] == "1"
         assert script.index("python tests/ci/npu_test_environment.py") < script.index("python tests/test_")
+
+
+def test_batch_five_keeps_variants_explicit_and_shares_concurrency(suites, monkeypatch):
+    monkeypatch.setenv("NPU_SUITES", "migration-foundation")
+    steps = suites.build_steps()
+    assert len(steps) == 4
+    assert [step["agents"]["resource_class"] for step in steps] == ["npu-4", "npu-4", "npu-8", "npu-4"]
+    for step in steps:
+        assert step["concurrency"] == 4 and step["concurrency_group"] == "vime-npu-migration-basic"
+        assert step["timeout_in_minutes"] == 180
+        assert step["env"]["VIME_TEST_KEEP_ARTIFACTS"] == "0"
+    assert "--transport object-store" in steps[0]["command"]
+    assert "test_ppo_logprob_entropy_npu.py" in steps[1]["command"]
+    monkeypatch.setenv("NPU_KEEP_ARTIFACTS", "1")
+    assert all(step["env"]["VIME_TEST_KEEP_ARTIFACTS"] == "1" for step in suites.build_steps())
