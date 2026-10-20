@@ -353,26 +353,25 @@ directory. Select **Keep for debugging** to preserve it instead. Local runs use
 and are always preserved. A forced process/container kill can bypass Python's
 cleanup. Model/dataset caches are retained in either mode.
 
-Every migration job runs `tests/ci/cleanup_npu_batch3.py` before its environment
-probe and test. Once per cache root, it removes **all contents** of
-`$VIME_TEST_ROOT/tmp` (or `$HF_HOME/tmp`, normally
-`/root/.cache/huggingface/tmp`): files, directories, hidden entries and symlinks,
-without filename or modification-time restrictions. Symlinks are unlinked
-without following their targets. The `tmp` directory itself and sibling
-model/dataset/hub caches remain. A symlinked scratch directory and system
-temporary directories are rejected.
+The one-time legacy sweep completed in build #389 (16 entries removed). Its
+script and CI invocation are retired; migration jobs no longer sweep shared
+`tmp`. The old completion marker can remain outside `tmp`. Automatic scratch
+uses a unique per-test directory. CI sets `VIME_TEST_DISPOSE_ON_FAILURE=1`, and
+`test_work_directory()` requests `--dispose-rollout-on-failure` for disposable
+runs, releasing owned rollout actors/processes before removing scratch. Keep or
+explicit-directory runs retain the normal recoverable failure behavior. Recovery
+scenarios submit their deliberate failure phases directly and retain serving
+until their own final teardown. Forced kills can still leave scratch behind.
+The train/rollout debug dump (G40) also uses this policy.
 
-The shared lock and marker `.vime-ci-tmp-cleanup-72026cf1-v2.json` live directly
-under the cache root, **outside `tmp`**. Concurrent jobs wait for the first sweep
-and then observe the marker; they do not sweep away each other's new outputs.
-All 41 migration jobs use this entry point, including basic/parallel. The old
-v1 marker inside `tmp` is also removed and cannot bypass this wider cleanup.
-The new marker records removed names and is written only after all deletions
-succeed. Later builds skip the sweep, so new outputs deliberately kept for
-debugging survive. The Keep option does not disable this initial removal of
-existing contents. Finish older builds before the first sweep: their code does
-not participate in this lock. The first CI run is still needed to perform and
-verify the actual deletion.
+Build #389 fixes retain R3 and the original PipelineRL abort semantics: R3 cache
+reset additionally pauses in place (`keep`) before resetting AuxOutput state.
+The NPU image's vLLM scheduler requires a fully paused engine for that reset;
+this is an API/version contract difference from the GPU image pin. Moonlight
+colocate variants explicitly use their supported context length of 8192 instead
+of the generic 32768 default. Recovery verification failures print saved child
+log tails before scratch removal; the G37 initialization error in #389 still
+needs a hardware rerun to establish its underlying cause.
 
 G05/G06 exercise frozen-model sleep/wakeup, but the original tests do not
 compare frozen weights element by element. `VLLMEngine.check_weights()` is a
@@ -429,11 +428,8 @@ minutes. On an internal deadline the harness prints the log tail, stops only
 its submitted job and fails.
 
 Automatic R3/MTP/recovery scratch uses `test_work_directory()` and the same
-**Batch 3/4 intermediate artifacts** option described above. The one-time legacy
-cleanup also runs when selecting only fourth-batch groups. As requested, it
-now empties all existing `tmp` contents once, without filename or timestamp
-filters; its lock and marker live outside `tmp`. Model and dataset caches
-outside `tmp` remain reusable.
+**Batch 3/4 intermediate artifacts** option described above. The completed legacy
+sweep is retired; only each run's owned temporary directories are removed.
 
 For the first hardware run, start with `migration-moe`, then
 `migration-moe-recovery` and `migration-models` to distinguish model/communication

@@ -687,6 +687,11 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 default=60.0,
                 help="Total time budget in seconds for detaching or disposing a training attempt.",
             )
+            parser.add_argument(
+                "--dispose-rollout-on-failure",
+                action="store_true",
+                help="Release this attempt's rollout session on failure, for disposable test runs.",
+            )
             return parser
 
         # data

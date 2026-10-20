@@ -208,6 +208,7 @@ def npu_step(
         "VIME_IMAGE_TAG": VIME_IMAGE_TAG,
         "VIME_TEST_IMAGE": ci_image,
         "HF_HOME": "/root/.cache/huggingface",
+        "VIME_TEST_DISPOSE_ON_FAILURE": "1",
         **env,
     }
     managed_scratch = suite in (
@@ -236,9 +237,6 @@ def npu_step(
     ]
     if suite.startswith("migration-"):
         step_env["VIME_TEST_RESOURCE_CLASS"] = resource_class
-        # All migration jobs must finish the one-time sweep before using tmp;
-        # otherwise an earlier basic/parallel job could lose its live scratch.
-        commands.append("python tests/ci/cleanup_npu_batch3.py")
         commands.append("python tests/ci/npu_test_environment.py")
     commands.append(f"python tests/{test_name}{' ' + extra_args if extra_args else ''}")
     script = "\n".join(commands)

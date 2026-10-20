@@ -126,7 +126,7 @@ def execute():
         f"{vllm_args} "
         f"{ci_args} "
         f"{misc_args} "
-        f"{U.get_test_npu_model_args(offload_optimizer=True)} "
+        f"{U.get_test_npu_model_args(max_model_len=8192, offload_optimizer=True)} "
     )
 
     with U.test_work_directory("vime_moonlight_r3_") as rollout_dir:

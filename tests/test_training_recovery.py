@@ -656,13 +656,15 @@ def test_failed_attempt_releases_trainers_despite_manager_failure(args, monkeypa
     assert len(waits) == 2 and all(0 < wait <= 2 for wait in waits)
 
 
+@pytest.mark.parametrize("failed", [False, True])
 @pytest.mark.parametrize("broken_owner", ["manager", "serving"])
-def test_successful_attempt_cleans_both_owners_after_dispose_error(args, monkeypatch, broken_owner):
+def test_disposable_attempt_cleans_both_owners_after_dispose_error(args, monkeypatch, broken_owner, failed):
     from unittest.mock import Mock
 
     from vime.ray import placement_group
 
     args.rollout_cleanup_timeout = 2
+    args.dispose_rollout_on_failure = failed
     owners = {name: Mock() for name in ("manager", "serving")}
 
     def get(ref, *, timeout):
@@ -674,7 +676,7 @@ def test_successful_attempt_cleans_both_owners_after_dispose_error(args, monkeyp
     monkeypatch.setattr(placement_group.ray, "kill", Mock())
     startup = placement_group.RolloutStartup(args, **owners)
     with pytest.raises(RuntimeError, match="dispose failed"):
-        startup.close(failed=False)
+        startup.close(failed=failed)
     for owner in owners.values():
         owner.dispose.remote.assert_called_once()
         placement_group.ray.kill.assert_any_call(owner, no_restart=True)
@@ -821,3 +823,9 @@ def test_driver_preserves_training_or_cleanup_failure_and_finishes_tracking(args
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
+
+
+def test_failure_exit_policy_does_not_change_retained_session_identity(args):
+    before = retained_rollout_configuration(args)
+    args.dispose_rollout_on_failure = True
+    assert retained_rollout_configuration(args) == before

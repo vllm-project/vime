@@ -84,6 +84,8 @@ def test_model_cases_preserve_topology_and_feature_checks(platform, filename, mo
             assert option(args, "--max-tokens-per-gpu") == "2048"
             assert option(args, "--log-probs-chunk-size") == "128"
             assert option(args, "--vllm-gpu-memory-utilization") == "0.5"
+            context = 4096 if "non_colocate" in filename else 8192 if "moonlight" in filename else 32768
+            assert option(args, "--vllm-max-model-len") == str(context)
             assert option(args, "--vllm-max-num-seqs") == ("8" if "non_colocate" in filename else "16")
             assert "--no-gradient-accumulation-fusion" in args
             assert "--optimizer-cpu-offload" in args and "--use-precision-aware-optimizer" in args

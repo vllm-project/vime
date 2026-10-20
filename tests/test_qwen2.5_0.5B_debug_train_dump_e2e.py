@@ -16,7 +16,6 @@ Uses Qwen2.5-0.5B-Instruct with 8 GPUs: TP=2, PP=2, CP=2 (DP=1).
 """
 
 import os
-import tempfile
 from shlex import quote
 
 import torch
@@ -159,20 +158,17 @@ def _verify(dump_dir: str):
 
 
 def execute():
-    dump_dir = tempfile.mkdtemp(prefix="vime_dump_details_", dir=U.get_test_tmp_dir())
-    print(f"Using dump-details dir: {dump_dir}")
-
-    U.execute_train(
-        train_args=_train_args(dump_dir),
-        num_gpus_per_node=NUM_GPUS,
-        megatron_model_type=MODEL_TYPE,
-    )
-
-    print("=" * 60)
-    print("Verifying train dump aligns with rollout dump (join by rollout_position)")
-    print("=" * 60)
-    _verify(dump_dir)
-    print("Train/rollout debug-dump alignment verified.")
+    with U.test_work_directory("vime_dump_details_") as directory:
+        dump_dir = str(directory)
+        print(f"Using dump-details dir: {dump_dir}")
+        U.execute_train(
+            train_args=_train_args(dump_dir),
+            num_gpus_per_node=NUM_GPUS,
+            megatron_model_type=MODEL_TYPE,
+        )
+        print("Verifying train dump aligns with rollout dump (join by rollout_position)")
+        _verify(dump_dir)
+        print("Train/rollout debug-dump alignment verified.")
 
 
 if __name__ == "__main__":

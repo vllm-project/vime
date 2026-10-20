@@ -136,9 +136,7 @@ def test_batch_three_keeps_all_gpu_variants_and_shared_resource_limit(suites, mo
         assert "python tests/ci/npu_test_environment.py" in step["command"]
         assert step["env"]["VIME_TEST_KEEP_ARTIFACTS"] == "0"
         script = shlex.split(step["command"])[2]
-        assert script.index("python tests/ci/cleanup_npu_batch3.py") < script.index(
-            "python tests/ci/npu_test_environment.py"
-        )
+        assert "cleanup_npu_batch3.py" not in script
     spec = importlib.util.spec_from_file_location("gpu_suites_reference", REPO / ".buildkite/gpu_suites.py")
     gpu = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gpu)
@@ -291,7 +289,7 @@ def test_batch_four_preserves_eight_gpu_scenarios_and_cleanup_policy(suites, mon
         assert step["timeout_in_minutes"] == 360 and step["depends_on"] == "image-build-npu"
         assert step["env"]["VIME_TEST_KEEP_ARTIFACTS"] == "0"
         script = shlex.split(step["command"])[2]
-        assert script.index("cleanup_npu_batch3.py") < script.index("npu_test_environment.py")
+        assert "cleanup_npu_batch3.py" not in script
     r3 = next(step for step in steps if "test_qwen3_30B_A3B_r3.py" in step["command"])
     assert r3["env"]["VIME_TEST_USE_DEEPEP"] == r3["env"]["VIME_TEST_USE_FP8_ROLLOUT"] == "0"
     assert r3["env"]["VIME_TEST_ENABLE_EVAL"] == "0"
@@ -313,15 +311,12 @@ def test_batch_four_preserves_eight_gpu_scenarios_and_cleanup_policy(suites, mon
     assert len(suites.build_steps()) == 41
 
 
-def test_all_migration_jobs_sweep_tmp_before_probe_and_training(suites, monkeypatch):
+def test_all_migration_jobs_dispose_failed_sessions_without_global_sweeps(suites, monkeypatch):
     monkeypatch.setenv("NPU_SUITES", ",".join(name for name in suites.SUITES if name.startswith("migration-")))
     steps = suites.build_steps()
     assert len(steps) == 41
     for step in steps:
         script = shlex.split(step["command"])[2]
-        assert script.count("python tests/ci/cleanup_npu_batch3.py") == 1
-        assert (
-            script.index("python tests/ci/cleanup_npu_batch3.py")
-            < script.index("python tests/ci/npu_test_environment.py")
-            < script.index("python tests/test_")
-        )
+        assert "cleanup_npu_batch3.py" not in script
+        assert step["env"]["VIME_TEST_DISPOSE_ON_FAILURE"] == "1"
+        assert script.index("python tests/ci/npu_test_environment.py") < script.index("python tests/test_")

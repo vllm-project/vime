@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from vime.utils.misc import exec_command
 _ = exec_command, dataclass_cli
 
 repo_base_dir = Path(os.path.abspath(__file__)).resolve().parents[3]
+_dispose_failed_test_session = ContextVar("dispose_failed_test_session", default=None)
 
 
 def get_test_root() -> Path:
@@ -51,18 +53,30 @@ def test_work_directory(prefix: str, directory=None, keep: bool | None = None, p
         path = Path(directory)
         path.mkdir(parents=True, exist_ok=True)
         print(f"Test artifacts: {path} (explicit directory, preserved)", flush=True)
-        yield path
+        token = _dispose_failed_test_session.set(False)
+        try:
+            yield path
+        finally:
+            _dispose_failed_test_session.reset(token)
         return
     parent = parent or get_test_tmp_dir()
     preserve = keep if keep is not None else keep_test_artifacts()
     if preserve:
         path = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
         print(f"Test artifacts: {path} (preserved)", flush=True)
-        yield path
+        token = _dispose_failed_test_session.set(False)
+        try:
+            yield path
+        finally:
+            _dispose_failed_test_session.reset(token)
     else:
         with tempfile.TemporaryDirectory(prefix=prefix, dir=parent) as directory:
             print(f"Test artifacts: {directory} (removed on exit, including failure)", flush=True)
-            yield Path(directory)
+            token = _dispose_failed_test_session.set(True)
+            try:
+                yield Path(directory)
+            finally:
+                _dispose_failed_test_session.reset(token)
 
 
 def get_test_platform_args() -> str:
@@ -180,6 +194,12 @@ def execute_train(
         extra_env_vars = {}
     if config is None:
         config = ExecuteTrainConfig()
+
+    dispose_failed = _dispose_failed_test_session.get()
+    if dispose_failed is None:
+        dispose_failed = get_bool_env_var("VIME_TEST_DISPOSE_ON_FAILURE", "0") and not keep_test_artifacts()
+    if dispose_failed:
+        train_args += " --dispose-rollout-on-failure "
 
     platform = current_platform()
     external_ray = get_bool_env_var("VIME_SCRIPT_EXTERNAL_RAY")

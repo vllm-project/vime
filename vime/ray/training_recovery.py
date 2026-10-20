@@ -115,6 +115,7 @@ def retained_rollout_configuration(args):
         "use_fault_tolerance",
         "distributed_backend",
         "distributed_timeout_minutes",
+        "dispose_rollout_on_failure",
         "rank",
         "local_rank",
         "world_size",

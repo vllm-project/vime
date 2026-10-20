@@ -403,6 +403,17 @@ def execute(
                                 assert time.monotonic() < deadline, engine
                                 time.sleep(1)
             verify(directory, mode, failure_rollout, save_interval, kill_manager, wedge_engine, train_gpus)
+        except BaseException:
+            # A FAILED first job is expected only at our injection boundary.
+            # Dump its actual error even when that status matched but a later
+            # snapshot/identity/OOM assertion failed, before scratch is removed.
+            for log_path in (directory / "failed.log", directory / "resumed.log"):
+                if log_path.exists():
+                    print(
+                        f"Recovery verification failed; {log_path.name} tail:\n{log_path.read_text()[-16000:]}",
+                        flush=True,
+                    )
+            raise
         finally:
             if not ray.is_initialized():
                 ray.init(

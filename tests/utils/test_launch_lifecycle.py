@@ -203,3 +203,30 @@ def test_fully_async_npu_example_preserves_cluster(tmp_path, external_ray, live_
     assert calls[-1][entrypoint + 1 : entrypoint + 3] == [b"python3", b"train.py"]
     rollout = calls[-1].index(b"--rollout-function-path")
     assert calls[-1][rollout + 1] == b"vime.rollout.fully_async_rollout.generate_rollout_fully_async"
+
+
+@pytest.mark.parametrize("policy", ["default", "ci", "automatic", "keep", "explicit"])
+def test_disposable_scratch_requests_cleanup_before_training_returns(monkeypatch, tmp_path, policy):
+    from contextlib import nullcontext
+
+    events = []
+    monkeypatch.setattr(command_utils, "current_platform", lambda: PLATFORMS["npu"])
+    monkeypatch.setattr(command_utils, "get_test_tmp_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(command_utils, "exec_command", events.append)
+    monkeypatch.setenv("VIME_SCRIPT_EXTERNAL_RAY", "1")
+    monkeypatch.setenv("VIME_SCRIPT_ENABLE_RAY_SUBMIT", "1")
+    monkeypatch.setenv("VIME_TEST_KEEP_ARTIFACTS", "0")
+    monkeypatch.setenv("VIME_TEST_DISPOSE_ON_FAILURE", "0" if policy == "default" else "1")
+    context = nullcontext(None)
+    if policy in ("automatic", "keep", "explicit"):
+        context = command_utils.test_work_directory(
+            "fixture_", keep=policy == "keep", directory=tmp_path / "explicit" if policy == "explicit" else None
+        )
+    with context as directory:
+        command_utils.execute_train("--num-rollout 2", 4, None)
+        if directory is not None:
+            assert directory.exists()
+    submission = next(event for event in events if "ray job submit" in event)
+    assert ("--dispose-rollout-on-failure" in submission) == (policy in ("ci", "automatic"))
+    if directory is not None:
+        assert directory.exists() == (policy != "automatic")

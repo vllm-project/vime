@@ -308,6 +308,11 @@ class VLLMEngine(RayActor):
     def flush_cache(self):
         if self.node_rank != 0:
             return
+        if getattr(self.args, "use_rollout_routing_replay", False):
+            # AuxOutput must be fully paused before requests and route buffers
+            # are reset. An updater's preceding abort still aborts its requests;
+            # this additional fence moves the scheduler to PAUSED_ALL.
+            self.pause_generation(mode="in_place")
         params = {"reset_running_requests": "true", "reset_external": "true"}
         for _ in range(60):
             try:

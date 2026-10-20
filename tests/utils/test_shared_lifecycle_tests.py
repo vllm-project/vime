@@ -423,3 +423,32 @@ def test_real_oom_injection_targets_the_selected_allocator(monkeypatch, device):
 def test_oom_recognition_rejects_unrelated_initialization_errors(log, expected):
     module = load_case("training_recovery_test_helpers.py")
     assert module.is_device_oom(log) is expected
+
+
+def test_expected_failed_recovery_job_prints_initialization_error_before_cleanup(
+    platform_case, monkeypatch, tmp_path, capsys
+):
+    module = load_case("test_qwen2.5_0.5B_training_recovery.py")
+    monkeypatch.setenv("VIME_SCRIPT_EXTERNAL_RAY", "1")
+    monkeypatch.setattr(U, "get_test_tmp_dir", lambda: str(tmp_path))
+    client = SimpleNamespace(submit_job=lambda **kwargs: "fixture-job")
+    monkeypatch.setattr(module, "JobSubmissionClient", lambda *args: client)
+
+    def wait_job(client, submission_id, log, **kwargs):
+        log.write_text("fixture: backend initialization failed before OOM injection")
+        return module.JobStatus.FAILED
+
+    monkeypatch.setattr(module, "wait_job", wait_job)
+    monkeypatch.setattr(module.ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(module.ray, "shutdown", lambda: None)
+
+    def no_actor(*args, **kwargs):
+        raise ValueError("none")
+
+    monkeypatch.setattr(module.ray, "get_actor", no_actor)
+    with pytest.raises(AssertionError):
+        module.execute()
+    output = capsys.readouterr().out
+    assert "Recovery verification failed; failed.log tail:" in output
+    assert "backend initialization failed before OOM injection" in output
+    assert not list(tmp_path.glob("vime_training_recovery_*"))
