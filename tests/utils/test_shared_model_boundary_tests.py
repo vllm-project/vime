@@ -145,12 +145,17 @@ def test_moe_recovery_keeps_real_failure_reshard_routes_and_stateless_optimizer(
     call = calls[0]
     assert call["model_path"] == str(module.MODEL_DIR)
     assert call["dataset_path"] == str(module.DATASET_DIR / "gsm8k/train.parquet")
-    assert call["train_gpus"] == call["rollout_gpus"] == 4
+    assert call["train_gpus"] == (8 if platform == "npu" else 4)
+    assert call["rollout_gpus"] == 4
     assert call["failure_rollout"] == call["save_interval"] == 1
     assert call["kill_manager"] and call["manager_crash_phase"] == "training" and not call["fault_tolerance"]
     assert not call["pd"] and call["keep_artifacts"]
     assert call["job_timeout_seconds"] == (10800 if platform == "npu" else 3600)
     args = shlex.split(call["extra_args"])
+    if platform == "npu":
+        assert option(args, "--num-gpus-per-node") == "16"
+    else:
+        assert "--num-gpus-per-node" not in args
     for flag in (
         "--use-stateless-adam",
         "--no-save-optim",
@@ -159,7 +164,7 @@ def test_moe_recovery_keeps_real_failure_reshard_routes_and_stateless_optimizer(
         "--overlap-grad-reduce",
     ):
         assert flag in args
-    assert option(args, "--expert-model-parallel-size") == "4"
+    assert option(args, "--expert-model-parallel-size") == ("8" if platform == "npu" else "4")
     assert option(args, "--rollout-num-gpus-per-engine") == "2"
     assert option(args, "--moe-token-dispatcher-type") == "alltoall"
     assert json.loads(option(args, "--train-env-vars"))["OMP_NUM_THREADS"] == "8"

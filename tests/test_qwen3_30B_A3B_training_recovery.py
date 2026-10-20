@@ -23,6 +23,7 @@ def prepare():
 def execute(
     directory=None, model_path=None, dataset_path=None, pd=False, keep_artifacts=None, job_timeout_seconds=None
 ):
+    npu = U.current_platform().name == "npu"
     suite = runpy.run_path(str(Path(__file__).with_name("test_qwen2.5_0.5B_training_recovery.py")))
     suite["execute"](
         directory=directory,
@@ -34,7 +35,9 @@ def execute(
         manager_crash_phase="training",
         fault_tolerance=False,
         model_type="qwen3-30B-A3B",
-        train_gpus=4,
+        # ETP1 experts shard over EP, not dense TP. Eight expert ranks halve
+        # the FP32 expert-gradient buffer that OOMed before fault injection.
+        train_gpus=8 if npu else 4,
         rollout_gpus=4,
         pd=pd,
         keep_artifacts=keep_artifacts,
@@ -44,7 +47,8 @@ def execute(
             else (10800 if U.current_platform().name == "npu" else 3600)
         ),
         extra_args=(
-            "--rollout-num-gpus-per-engine 2 --expert-model-parallel-size 4 "
+            ("--num-gpus-per-node 16 " if npu else "")
+            + f"--rollout-num-gpus-per-engine 2 --expert-model-parallel-size {8 if npu else 4} "
             # Exercise recovery without Adam moments; scheduler/RNG still resume
             # with the model, and accepted R3 routes must replay byte-for-byte.
             "--use-stateless-adam --no-save-optim "

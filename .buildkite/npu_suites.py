@@ -133,7 +133,7 @@ SUITES = {
         ("test_moonlight_16B_A3B_r3.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}, 360),
     ],
     "migration-moe-recovery": [
-        ("test_qwen3_30B_A3B_training_recovery.py", "npu-8", "", {}, 360),
+        ("test_qwen3_30B_A3B_training_recovery.py", "npu-16", "", {}, 360),
     ],
     "migration-models": [
         ("test_quick_start_glm4_9B.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}, 360),
