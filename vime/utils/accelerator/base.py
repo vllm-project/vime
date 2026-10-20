@@ -232,6 +232,17 @@ class Accelerator(abc.ABC):
         return env
 
     @classmethod
+    def megatron_lifecycle_qualname(cls) -> str | None:
+        """Name a module replacing vime.backends.megatron_lifecycle, or None.
+
+        A backend whose vendor patches must be installed at an exact point in
+        Megatron's startup, or whose memory saver behaves differently, names
+        its module here. None means the shared default, and nothing is
+        imported.
+        """
+        return None
+
+    @classmethod
     def weight_transfer_init_info_qualname(cls, transport: str) -> str:
         """Name the trainer init-info class for ``transport``.
 

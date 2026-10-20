@@ -43,12 +43,12 @@ def isolate_selection(monkeypatch):
         "MUSA_PATCH_PATH",
         "SUPA_VISIBLE_DEVICES",
         "BIREN_HOME",
-        # An Ascend toolkit installation alone makes the NPU backend consider
-        # itself requested, so a CANN host would otherwise pick it here.
-        "ASCEND_RT_VISIBLE_DEVICES",
-        "ASCEND_HOME_PATH",
     ):
         monkeypatch.delenv(name, raising=False)
+    # Say explicitly that no Ascend device is visible, rather than deleting
+    # the variable: deleting it lets a CANN host's real devices be detected,
+    # and then this describes that host instead of the case under test.
+    monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", "-1")
     accelerator._REGISTRY.clear()
     accelerator.reset_accelerator()
     # Keep this independent of the runner's hardware: no builtin backend
