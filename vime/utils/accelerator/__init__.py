@@ -23,6 +23,7 @@ from .cuda import CUDAAccelerator
 from .musa import MUSAAccelerator
 from .musa import is_musa_available as _is_musa_available
 from .npu import NPUAccelerator
+from .npu import has_visible_device as _has_npu_device
 from .npu import is_npu_available as _is_npu_available
 from .supa import SUPAAccelerator
 from .supa import is_supa_available as _is_supa_available
@@ -171,7 +172,12 @@ def _npu_requested() -> bool:
     configured = os.environ.get("VIME_ACCELERATOR", "").lower()
     if configured and configured != "auto":
         return configured == "npu"
-    return "ASCEND_RT_VISIBLE_DEVICES" in os.environ or bool(os.environ.get("ASCEND_HOME_PATH"))
+    # Nothing short of VIME_ACCELERATOR is a request for this backend. slime
+    # also treats an Ascend toolkit path or a pre-set visibility variable as
+    # one, but ASCEND_HOME_PATH is exported by every CANN install, including
+    # on hosts running CPU tooling or a CUDA job. A host that does have
+    # devices still reaches NPU through ordinary availability and priority.
+    return False
 
 
 def _bootstrap_torch_npu_if_needed() -> bool:
@@ -512,6 +518,10 @@ def engine_actor_env(args: Any, env_vars: Any = None) -> dict[str, str]:
 
 def serving_subprocess_env(base_env: Any, *, visible_devices: str, colocate: bool) -> dict[str, str]:
     return _describing_backend().serving_subprocess_env(base_env, visible_devices=visible_devices, colocate=colocate)
+
+
+def megatron_lifecycle_qualname() -> str | None:
+    return _describing_backend().megatron_lifecycle_qualname()
 
 
 def weight_transfer_backend(transport: str) -> str:

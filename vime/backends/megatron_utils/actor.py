@@ -1,7 +1,6 @@
 import logging
 import os
 from argparse import Namespace
-from contextlib import nullcontext
 from datetime import timedelta
 from pathlib import Path
 
@@ -12,6 +11,7 @@ from megatron.core import mpu
 from torch_memory_saver import torch_memory_saver
 from transformers import AutoConfig, AutoTokenizer
 
+from vime.backends import megatron_lifecycle
 from vime.data.tensor import TensorRef
 from vime.observability import train_data_utils, train_metric_utils
 from vime.observability.logging_utils import init_tracking
@@ -81,6 +81,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
         init(args)
 
+        megatron_lifecycle.current().after_args(args)
         if is_megatron_main_rank():
             init_tracking(args, primary=False, role=role)
 
@@ -95,9 +96,15 @@ class MegatronTrainRayActor(TrainRayActor):
 
         dist.barrier(group=get_gloo_group())
 
-        self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id = initialize_model_and_optimizer(
-            args, role
-        )
+        lifecycle = megatron_lifecycle.current()
+        with lifecycle.training_region(args.offload_train):
+            self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id = initialize_model_and_optimizer(
+                args, role
+            )
+            if args.offload_train:
+                # Lazily created optimizer state must be allocated inside the
+                # region, or it is left behind when the region is offloaded.
+                lifecycle.initialize_optimizer_state(self.optimizer)
 
         vpp_size = mpu.get_virtual_pipeline_model_parallel_world_size() or 1
         if vpp_size > 1:
@@ -668,7 +675,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 # Clear connection markers only after every rank is connected.
                 ray.get(self.rollout_manager.clear_updatable_num_new_engines.remote())
 
-        with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
+        with megatron_lifecycle.current().offload_disable_context(self.args.offload_train):
             if self.args.dspark_enabled and self.args.offload_train:
                 backup = self.weights_backuper.get("actor")
                 for name, param in named_params_and_buffers(self.args, self.model):
