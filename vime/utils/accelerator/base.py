@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import abc
 import os
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -174,6 +175,61 @@ class Accelerator(abc.ABC):
         if transport not in names:
             raise ValueError(f"Unknown weight transport: {transport!r}")
         return names[transport]
+
+    # Child-process environment. A training actor, a serving engine actor and
+    # the serving subprocess that actor launches are started by three
+    # different subsystems, but what each has to be told about the
+    # accelerator is one question, so it is answered in one place. The first
+    # two are built on the driver, which may own no device, so these are
+    # classmethods like the lookups above.
+
+    @classmethod
+    def train_actor_env(cls, args: Any, env_vars: Mapping[str, str] | None = None) -> dict[str, str]:
+        """Environment a training actor needs, including the offload allocator."""
+        env = dict(env_vars or {})
+        if not getattr(args, "offload_train", False):
+            return env
+        return cls.offload_allocator_env(env)
+
+    @classmethod
+    def engine_actor_env(cls, args: Any, env_vars: Mapping[str, str] | None = None) -> dict[str, str]:
+        """Environment a serving engine actor needs."""
+        return dict(env_vars or {})
+
+    @classmethod
+    def serving_subprocess_env(
+        cls, base_env: Mapping[str, str], *, visible_devices: str, colocate: bool
+    ) -> dict[str, str]:
+        """Environment the serving subprocess needs, given its device selection."""
+        return dict(base_env)
+
+    @classmethod
+    def offload_allocator_env(cls, env_vars: Mapping[str, str]) -> dict[str, str]:
+        """Hand the allocator to torch_memory_saver in the actor process.
+
+        All three variables are required for it to take over, so a missing
+        library raises rather than letting training start without offload.
+        """
+        import torch_memory_saver
+
+        for name in (
+            "torch_memory_saver_hook_mode_preload_cu13.abi3.so",
+            "torch_memory_saver_hook_mode_preload_cu12.abi3.so",
+            "torch_memory_saver_hook_mode_preload.abi3.so",
+        ):
+            dynlib_path = os.path.join(os.path.dirname(os.path.dirname(torch_memory_saver.__file__)), name)
+            if os.path.exists(dynlib_path):
+                break
+        else:
+            raise FileNotFoundError(
+                "Cannot find torch_memory_saver dynamic library. Please make sure torch_memory_saver is properly installed."
+            )
+
+        env = dict(env_vars)
+        env["LD_PRELOAD"] = dynlib_path
+        env["TMS_INIT_ENABLE"] = "1"
+        env["TMS_INIT_ENABLE_CPU_BACKUP"] = "1"
+        return env
 
     @classmethod
     def weight_transfer_init_info_qualname(cls, transport: str) -> str:

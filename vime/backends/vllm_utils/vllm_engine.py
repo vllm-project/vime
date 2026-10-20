@@ -81,6 +81,11 @@ def _build_subprocess_env(server_args_dict: dict[str, Any]) -> dict[str, str]:
     env["CUDA_VISIBLE_DEVICES"] = server_args_dict["_visible_devices"]
     # ROCm: keep HIP visibility in sync with CUDA (no-op on CUDA).
     env["HIP_VISIBLE_DEVICES"] = server_args_dict["_visible_devices"]
+    env = accelerator.serving_subprocess_env(
+        env,
+        visible_devices=server_args_dict["_visible_devices"],
+        colocate=getattr(args, "colocate", False),
+    )
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")
     env["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     if getattr(args, "vllm_enable_deterministic_inference", False):

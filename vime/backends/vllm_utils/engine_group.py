@@ -12,6 +12,7 @@ from vime.backends.vllm_utils.server_control import unregister_worker
 from vime.backends.vllm_utils.vllm_config import ServerGroupConfig
 from vime.ray import resources
 from vime.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, add_default_ray_env_vars
+from vime.utils import accelerator
 
 GPU_MEMORY_TYPE_KV_CACHE = "kv_cache"
 GPU_MEMORY_TYPE_WEIGHTS = "weights"
@@ -224,6 +225,7 @@ class ServerGroup:
             env_vars["PYTORCH_CUDA_ALLOC_CONF"] = ",".join(
                 kv for kv in _alloc.split(",") if kv and not kv.strip().startswith("expandable_segments")
             )
+            env_vars = accelerator.engine_actor_env(self.args, env_vars)
             rollout_engine = RolloutRayActor.options(
                 num_cpus=num_cpus,
                 scheduling_strategy=scheduling_strategy,
