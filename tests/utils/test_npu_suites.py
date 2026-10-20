@@ -71,7 +71,7 @@ def test_invalid_or_empty_selection_fails_before_emitting_json(monkeypatch, sele
     assert not result.stdout
     if selection in ("", "smk", "image-build", "nightly"):
         assert (
-            "select a non-empty suite (currently: migration-basic, migration-parallel, migration-full-disk)"
+            "select a non-empty suite (currently: migration-basic, migration-parallel, migration-lifecycle, migration-recovery, migration-checkpoint)"
             in result.stderr
         )
 
@@ -96,11 +96,11 @@ def test_migration_does_not_require_image_build(suites, monkeypatch):
     assert all(step["image"].endswith(":test-pr-commit") for step in suites.build_steps())
 
 
-def test_batch_two_and_full_disk_retry_are_independent(suites, monkeypatch):
-    monkeypatch.setenv("NPU_SUITES", "migration-parallel,migration-full-disk")
+def test_batch_two_preserves_parallel_layouts(suites, monkeypatch):
+    monkeypatch.setenv("NPU_SUITES", "migration-parallel")
     steps = suites.build_steps()
-    assert len(steps) == 10
-    assert len({step["key"] for step in steps}) == 10
+    assert len(steps) == 9
+    assert len({step["key"] for step in steps}) == 9
     assert sum(step["agents"]["resource_class"] == "npu-8" for step in steps) == 7
     for step in steps:
         assert step["concurrency"] == 4
@@ -113,13 +113,42 @@ def test_batch_two_and_full_disk_retry_are_independent(suites, monkeypatch):
     assert all(step["env"]["VIME_TEST_ENABLE_EVAL"] == "0" for step in ppo)
     disaggregate = next(step for step in ppo if "disaggregate" in step["command"])
     assert "--transport object-store" in disaggregate["command"]
-    disk = steps[-1]
-    assert "test_full_disk_weight_update.py" in disk["command"]
-    assert disk["env"]["VIME_TEST_NUM_ROLLOUT"] == "2"
-    monkeypatch.setenv("NPU_SUITES", "migration-basic,migration-parallel,migration-full-disk")
+    monkeypatch.setenv("NPU_SUITES", "migration-basic,migration-parallel")
     steps = suites.build_steps()
-    assert len(steps) == 16  # full disk is not repeated when its retry suite is also selected
+    assert len(steps) == 16
     assert sum("test_full_disk_weight_update.py" in step["command"] for step in steps) == 1
+    monkeypatch.setenv("NPU_SUITES", "migration-full-disk")
+    with pytest.raises(SystemExit, match="unknown suite"):
+        suites.build_steps()
+
+
+def test_batch_three_keeps_all_gpu_variants_and_shared_resource_limit(suites, monkeypatch):
+    monkeypatch.setenv("NPU_SUITES", "migration-lifecycle,migration-recovery,migration-checkpoint")
+    steps = suites.build_steps()
+    assert len(steps) == 17 and len({step["key"] for step in steps}) == 17
+    assert [
+        len(suites.SUITES[name]) for name in ("migration-lifecycle", "migration-recovery", "migration-checkpoint")
+    ] == [5, 7, 5]
+    for step in steps:
+        assert step["concurrency"] == 4 and step["concurrency_group"] == "vime-npu-migration-basic"
+        assert step["agents"]["resource_class"] in ("npu-4", "npu-8")
+        assert "python tests/ci/npu_test_environment.py" in step["command"]
+    spec = importlib.util.spec_from_file_location("gpu_suites_reference", REPO / ".buildkite/gpu_suites.py")
+    gpu = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gpu)
+    originals = {(name, extra) for entries in gpu.SUITES.values() for name, _, extra, _ in entries}
+    for group in ("migration-lifecycle", "migration-recovery", "migration-checkpoint"):
+        for name, _, extra, *_ in suites.SUITES[group]:
+            assert (name, extra) in originals
+    checkpoint = [step for step in steps if "test_qwen3_4B_ckpt.py" in step["command"]]
+    assert len(checkpoint) == 5
+    assert all(
+        step["agents"]["resource_class"] == "npu-8" and step["timeout_in_minutes"] == 360 for step in checkpoint
+    )
+    monkeypatch.setenv(
+        "NPU_SUITES", "migration-basic,migration-parallel,migration-lifecycle,migration-recovery,migration-checkpoint"
+    )
+    assert len(suites.build_steps()) == 33
 
 
 def test_existing_image_is_explicit_and_schedule_still_builds(suites, monkeypatch):
@@ -147,7 +176,8 @@ def test_gate_exposes_every_suite(suites):
     "selection",
     [
         "image-build,migration-basic",
-        "migration-parallel,migration-full-disk",
+        "migration-parallel",
+        "migration-lifecycle,migration-recovery,migration-checkpoint",
         "image-build",
         "image-build,unknown",
         "nightly",
@@ -179,9 +209,7 @@ def test_upload_uses_same_selection_for_image_and_tests(tmp_path, from_env, sele
         "BUILDKITE_SOURCE": "webhook",
         "BUILDKITE_COMMIT": "test-pr-commit",
         "TEST_SUITE_METADATA": selection,
-        "TEST_IMAGE_METADATA": (
-            "registry.example/vime:previous-commit" if selection.startswith("migration-parallel") else ""
-        ),
+        "TEST_IMAGE_METADATA": ("registry.example/vime:previous-commit" if selection.startswith("migration-") else ""),
         "TEST_UPLOAD_LOG": str(log),
     }
     env.pop("NPU_SUITES", None)
@@ -199,7 +227,11 @@ def test_upload_uses_same_selection_for_image_and_tests(tmp_path, from_env, sele
         text=True,
         timeout=15,
     )
-    if selection not in ("image-build,migration-basic", "migration-parallel,migration-full-disk"):
+    if selection not in (
+        "image-build,migration-basic",
+        "migration-parallel",
+        "migration-lifecycle,migration-recovery,migration-checkpoint",
+    ):
         assert result.returncode != 0
         assert not log.exists(), "Invalid selection must fail before uploading the image build"
         return
@@ -208,6 +240,6 @@ def test_upload_uses_same_selection_for_image_and_tests(tmp_path, from_env, sele
     building = selection.startswith("image-build")
     assert yaml.safe_load(image_yaml)["steps"][0]["skip"] is not building
     generated = json.loads(test_json)["steps"]
-    assert len(generated) == (7 if building else 10)
+    assert len(generated) == (7 if building else 9 if selection == "migration-parallel" else 17)
     expected_image = ":test-pr-commit" if building else "registry.example/vime:previous-commit"
     assert all(step["image"].endswith(expected_image) for step in generated)

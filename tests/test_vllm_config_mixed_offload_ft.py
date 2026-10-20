@@ -19,6 +19,10 @@ import vime.utils.external_utils.command_utils as U
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
 NUM_GPUS = 8
+ENABLE_EVAL = bool(int(os.environ.get("VIME_TEST_ENABLE_EVAL", "1")))
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 
 # Two models on 8 GPUs (colocate): actor gets weight updates, ref is frozen.
 VLLM_CONFIG_YAML = """\
@@ -39,121 +43,135 @@ vllm:
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/gsm8k")
+    U.exec_command(f"mkdir -p {quote(str(TEST_ROOT / 'models'))} {quote(str(DATASET_DIR))}")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/gsm8k", dir_dst=DATASET_DIR)
 
 
 def execute():
-    config_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", prefix="vllm_mixed_offload_ft_", delete=False)
-    config_file.write(VLLM_CONFIG_YAML)
-    config_file.flush()
-    config_path = config_file.name
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", prefix="vllm_mixed_offload_ft_", dir=U.get_test_tmp_dir()
+    ) as config_file:
+        config_file.write(VLLM_CONFIG_YAML)
+        config_file.flush()
+        config_path = config_file.name
 
-    ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load /root/models/{MODEL_NAME}/ "
+        ckpt_args = f"--hf-checkpoint {quote(str(MODEL_DIR))} " f"--ref-load {quote(str(MODEL_DIR))} "
 
-    rollout_args = (
-        "--rollout-data-transport straw "
-        "--prompt-data /root/datasets/gsm8k/train.parquet "
-        "--input-key messages "
-        "--label-key label "
-        "--apply-chat-template "
-        "--rollout-shuffle "
-        "--rm-type math "
-        "--num-rollout 3 "
-        "--rollout-batch-size 4 "
-        "--n-samples-per-prompt 4 "
-        "--rollout-max-response-len 512 "
-        "--rollout-temperature 0.8 "
-        "--global-batch-size 16 "
-    )
-
-    eval_args = (
-        "--eval-interval 20 "
-        "--eval-prompt-data gsm8k /root/datasets/gsm8k/test.parquet "
-        "--n-samples-per-eval-prompt 1 "
-        "--eval-max-response-len 512 "
-        "--eval-top-k 1 "
-    )
-
-    perf_args = (
-        "--tensor-model-parallel-size 1 "
-        "--sequence-parallel "
-        "--pipeline-model-parallel-size 1 "
-        "--context-parallel-size 1 "
-        "--expert-model-parallel-size 1 "
-        "--expert-tensor-parallel-size 1 "
-        "--use-dynamic-batch-size "
-        "--max-tokens-per-gpu 4096 "
-    )
-
-    grpo_args = (
-        "--advantage-estimator grpo "
-        "--use-kl-loss "
-        "--kl-loss-coef 0.00 "
-        "--kl-loss-type low_var_kl "
-        "--entropy-coef 0.00 "
-        "--eps-clip 0.2 "
-    )
-
-    optimizer_args = (
-        "--optimizer adam "
-        "--lr 1e-6 "
-        "--lr-decay-style constant "
-        "--weight-decay 0.1 "
-        "--adam-beta1 0.9 "
-        "--adam-beta2 0.98 "
-    )
-
-    vllm_args = (
-        "--rollout-num-gpus-per-engine 1 "
-        "--vllm-gpu-memory-utilization 0.7 "
-        "--vllm-max-num-seqs 32 "
-        "--vllm-max-cudagraph-capture-size 16 "
-        f"--vllm-config {config_path} "
-    )
-
-    ci_args = "--ci-test "
-
-    fault_tolerance_args = (
-        "--use-fault-tolerance "
-        "--rollout-health-check-interval 5 "
-        "--rollout-health-check-timeout 10 "
-        "--rollout-health-check-first-wait 0 "
-    )
-
-    misc_args = (
-        "--attention-dropout 0.0 "
-        "--hidden-dropout 0.0 "
-        "--accumulate-allreduce-grads-in-fp32 "
-        "--attention-softmax-in-fp32 "
-        "--attention-backend flash "
-        "--actor-num-nodes 1 "
-        "--actor-num-gpus-per-node 8 "
-        "--colocate "
-    )
-
-    train_args = (
-        f"{ckpt_args} "
-        f"{rollout_args} "
-        f"{optimizer_args} "
-        f"{grpo_args} "
-        f"{U.get_default_wandb_args(__file__)} "
-        f"{perf_args} "
-        f"{eval_args} "
-        f"{vllm_args} "
-        f"{ci_args} "
-        f"{fault_tolerance_args} "
-        f"{misc_args} "
-    )
-
-    with tempfile.TemporaryDirectory(prefix="vime_straw_") as rollout_dir:
-        train_args += f"--rollout-data-dir {quote(rollout_dir)} "
-        U.execute_train(
-            train_args=train_args,
-            num_gpus_per_node=NUM_GPUS,
-            megatron_model_type=MODEL_TYPE,
+        rollout_args = (
+            "--rollout-data-transport straw "
+            f"--prompt-data {quote(str(DATASET_DIR / 'gsm8k/train.parquet'))} "
+            "--input-key messages "
+            "--label-key label "
+            "--apply-chat-template "
+            "--rollout-shuffle "
+            "--rm-type math "
+            "--num-rollout 3 "
+            "--rollout-batch-size 4 "
+            "--n-samples-per-prompt 4 "
+            "--rollout-max-response-len 512 "
+            "--rollout-temperature 0.8 "
+            "--global-batch-size 16 "
         )
+
+        eval_args = (
+            "--eval-interval 20 "
+            f"--eval-prompt-data gsm8k {quote(str(DATASET_DIR / 'gsm8k/test.parquet'))} "
+            "--n-samples-per-eval-prompt 1 "
+            "--eval-max-response-len 512 "
+            "--eval-top-k 1 "
+        )
+
+        if not ENABLE_EVAL:
+            eval_args = ""
+
+        perf_args = (
+            "--tensor-model-parallel-size 1 "
+            "--sequence-parallel "
+            "--pipeline-model-parallel-size 1 "
+            "--context-parallel-size 1 "
+            "--expert-model-parallel-size 1 "
+            "--expert-tensor-parallel-size 1 "
+            "--use-dynamic-batch-size "
+            f"--max-tokens-per-gpu {2048 if U.current_platform().name == 'npu' else 4096} "
+        )
+
+        grpo_args = (
+            "--advantage-estimator grpo "
+            "--use-kl-loss "
+            "--kl-loss-coef 0.00 "
+            "--kl-loss-type low_var_kl "
+            "--entropy-coef 0.00 "
+            "--eps-clip 0.2 "
+        )
+
+        optimizer_args = (
+            "--optimizer adam "
+            "--lr 1e-6 "
+            "--lr-decay-style constant "
+            "--weight-decay 0.1 "
+            "--adam-beta1 0.9 "
+            "--adam-beta2 0.98 "
+        )
+
+        vllm_args = (
+            "--rollout-num-gpus-per-engine 1 "
+            "--vllm-gpu-memory-utilization 0.7 "
+            "--vllm-max-num-seqs 32 "
+            "--vllm-max-cudagraph-capture-size 16 "
+            f"--vllm-config {quote(config_path)} "
+        )
+
+        if U.current_platform().name == "npu":
+            vllm_args = (
+                "--rollout-num-gpus-per-engine 1 --vllm-gpu-memory-utilization 0.5 "
+                "--vllm-max-num-seqs 16 --vllm-max-cudagraph-capture-size 8 --vllm-max-model-len 8192 "
+                f"--vllm-config {quote(config_path)} "
+            )
+
+        ci_args = "--ci-test "
+
+        fault_tolerance_args = (
+            "--use-fault-tolerance "
+            "--rollout-health-check-interval 5 "
+            "--rollout-health-check-timeout 10 "
+            "--rollout-health-check-first-wait 0 "
+        )
+
+        misc_args = (
+            "--attention-dropout 0.0 "
+            "--hidden-dropout 0.0 "
+            "--accumulate-allreduce-grads-in-fp32 "
+            "--attention-softmax-in-fp32 "
+            "--attention-backend flash "
+            "--actor-num-nodes 1 "
+            "--actor-num-gpus-per-node 8 "
+            "--colocate "
+        )
+
+        train_args = (
+            f"{ckpt_args} "
+            f"{rollout_args} "
+            f"{optimizer_args} "
+            f"{grpo_args} "
+            f"{U.get_default_wandb_args(__file__)} "
+            f"{perf_args} "
+            f"{eval_args} "
+            f"{vllm_args} "
+            f"{ci_args} "
+            f"{fault_tolerance_args} "
+            f"{misc_args} "
+            f"{U.get_test_platform_args()} "
+            f"{'--log-probs-chunk-size 128 ' if U.current_platform().name == 'npu' else ''}"
+        )
+
+        with tempfile.TemporaryDirectory(prefix="vime_straw_", dir=U.get_test_tmp_dir()) as rollout_dir:
+            train_args += f"--rollout-data-dir {quote(rollout_dir)} "
+            U.execute_train(
+                train_args=train_args,
+                num_gpus_per_node=NUM_GPUS,
+                megatron_model_type=MODEL_TYPE,
+            )
 
 
 if __name__ == "__main__":

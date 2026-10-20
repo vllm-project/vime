@@ -63,9 +63,60 @@ SUITES = {
         # Basic disaggregated PPO coverage; this does not validate Ray NIXL.
         ("test_qwen3_4B_ppo_disaggregate.py", "npu-8", "--transport object-store", {"VIME_TEST_ENABLE_EVAL": "0"}),
     ],
-    # Rerun the #383 failure without repeating the other six passing cases.
-    "migration-full-disk": [
-        ("test_full_disk_weight_update.py", "npu-4", "", {"VIME_TEST_NUM_ROLLOUT": "2"}),
+    # Batch 3: keep memory/lifecycle, recovery and optimizer roundtrips selectable
+    # independently. Recovery retains real allocator OOM and TP1 -> TP2 restart.
+    "migration-lifecycle": [
+        ("test_vllm_config_mixed_offload.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}),
+        ("test_vllm_config_mixed_offload_ft.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}),
+        ("test_release_train.py", "npu-4", "", {}),
+        ("test_qwen2.5_0.5B_debug_rollout_then_train.py", "npu-8", "", {}, 360),
+        ("test_straw_checkpoint_fork.py", "npu-4", "", {}, 360),
+    ],
+    "migration-recovery": [
+        ("test_qwen2.5_0.5B_rollout_health.py", "npu-4", "--crash-mode server", {}),
+        ("test_qwen2.5_0.5B_rollout_health.py", "npu-4", "--crash-mode actor", {}),
+        (
+            "test_qwen2.5_0.5B_training_recovery.py",
+            "npu-4",
+            "--mode straw --failure-rollout 1 --save-interval 3 --no-fault-tolerance",
+            {},
+            360,
+        ),
+        (
+            "test_qwen2.5_0.5B_training_recovery.py",
+            "npu-4",
+            "--mode straw --failure-rollout 1 --save-interval 3 --kill-manager --no-fault-tolerance",
+            {},
+            360,
+        ),
+        (
+            "test_qwen2.5_0.5B_training_recovery.py",
+            "npu-4",
+            "--mode straw --failure-rollout 1 --role-config --kill-manager --manager-crash-phase training",
+            {},
+            360,
+        ),
+        (
+            "test_qwen2.5_0.5B_training_recovery.py",
+            "npu-4",
+            "--mode debug --failure-rollout 1 --save-interval 3 --kill-manager --no-fault-tolerance",
+            {},
+            360,
+        ),
+        (
+            "test_qwen2.5_0.5B_training_recovery.py",
+            "npu-4",
+            "--mode straw --failure-rollout 1 --save-interval 1 --weight-sync disk-delta --kill-manager",
+            {},
+            360,
+        ),
+    ],
+    "migration-checkpoint": [
+        ("test_qwen3_4B_ckpt.py", "npu-8", "--save-optimizer gpu --load-optimizer gpu", {}, 360),
+        ("test_qwen3_4B_ckpt.py", "npu-8", "--save-optimizer gpu --load-optimizer cpu", {}, 360),
+        ("test_qwen3_4B_ckpt.py", "npu-8", "--save-optimizer cpu --load-optimizer cpu", {}, 360),
+        ("test_qwen3_4B_ckpt.py", "npu-8", "--save-optimizer cpu --load-optimizer gpu", {}, 360),
+        ("test_qwen3_4B_ckpt.py", "npu-8", "--async-save", {}, 360),
     ],
     "nightly": [],
 }

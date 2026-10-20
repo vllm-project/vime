@@ -16,30 +16,34 @@ import vime.utils.external_utils.command_utils as U
 MODEL_NAME = "Qwen3.5-0.8B"
 MODEL_TYPE = "qwen3.5-0.8B"
 NUM_GPUS = 4
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 NUM_ROLLOUT = 2
 TORCH_DIST_CKPT = f"/dev/shm/{MODEL_NAME}_torch_dist"
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/gsm8k")
+    U.exec_command(f"mkdir -p {quote(str(TEST_ROOT / 'models'))} {quote(str(DATASET_DIR))}")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/gsm8k", dir_dst=DATASET_DIR)
     U.convert_checkpoint(
         model_name=MODEL_NAME,
         megatron_model_type=MODEL_TYPE,
         num_gpus_per_node=NUM_GPUS,
         dir_dst="/dev/shm",
+        hf_checkpoint=str(MODEL_DIR),
     )
 
 
 def execute():
-    with tempfile.TemporaryDirectory(prefix="vime_release_train_") as work_dir:
+    with tempfile.TemporaryDirectory(prefix="vime_release_train_", dir=U.get_test_tmp_dir()) as work_dir:
         save_dir = Path(work_dir) / "mcore"
         update_weight_dir = Path(work_dir) / "update_weight"
 
         ckpt_args = (
-            f"--hf-checkpoint /root/models/{MODEL_NAME}/ "
-            f"--ref-load {TORCH_DIST_CKPT} "
+            f"--hf-checkpoint {quote(str(MODEL_DIR))} "
+            f"--ref-load {quote(TORCH_DIST_CKPT if U.current_platform().torch_dist_convert else str(MODEL_DIR))} "
             "--release-train "
             f"--save {quote(str(save_dir))} "
             "--save-interval 1 "
@@ -48,7 +52,7 @@ def execute():
         rollout_args = (
             "--rollout-data-transport straw "
             f"--rollout-data-dir {quote(str(save_dir / 'rollout_data'))} "
-            "--prompt-data /root/datasets/gsm8k/train.parquet "
+            f"--prompt-data {quote(str(DATASET_DIR / 'gsm8k/train.parquet'))} "
             "--input-key messages "
             "--label-key label "
             "--apply-chat-template "
@@ -72,7 +76,7 @@ def execute():
             "--expert-model-parallel-size 1 "
             "--expert-tensor-parallel-size 1 "
             "--use-dynamic-batch-size "
-            "--max-tokens-per-gpu 9216 "
+            f"--max-tokens-per-gpu {2048 if U.current_platform().name == 'npu' else 9216} "
         )
 
         grpo_args = (
@@ -99,6 +103,12 @@ def execute():
             "--vllm-gpu-memory-utilization 0.7 "
             "--vllm-max-cudagraph-capture-size 16 "
         )
+
+        if U.current_platform().name == "npu":
+            vllm_args = (
+                "--rollout-num-gpus-per-engine 1 --vllm-gpu-memory-utilization 0.5 "
+                "--vllm-max-num-seqs 16 --vllm-max-cudagraph-capture-size 8 --vllm-max-model-len 8192 "
+            )
 
         disk_update_args = (
             "--update-weight-mode full "
@@ -131,6 +141,8 @@ def execute():
             f"{disk_update_args} "
             f"{ci_args} "
             f"{misc_args} "
+            f"{U.get_test_platform_args()} "
+            f"{'--log-probs-chunk-size 128 ' if U.current_platform().name == 'npu' else ''}"
         )
 
         U.execute_train(

@@ -7,6 +7,7 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+from shlex import quote
 
 import ray
 
@@ -16,22 +17,25 @@ from vime.ray.training_recovery import RECOVERY_NAMESPACE, training_session_name
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
 NUM_GPUS = 4
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 
 
 def prepare():
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/gsm8k")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/gsm8k", dir_dst=DATASET_DIR)
 
 
 def execute(crash_mode, directory=None):
-    directory = Path(directory or tempfile.mkdtemp(prefix="vime_rollout_health_"))
+    directory = Path(directory or tempfile.mkdtemp(prefix="vime_rollout_health_", dir=U.get_test_tmp_dir()))
     directory.mkdir(parents=True, exist_ok=True)
     source = Path(__file__).with_name("test_qwen2.5_0.5B_training_recovery.py")
     spec = importlib.util.spec_from_file_location("recovery_e2e", source)
     recovery = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(recovery)
     arguments = recovery.train_args(
-        directory, "debug", 1, f"/root/models/{MODEL_NAME}", "/root/datasets/gsm8k/train.parquet", 3, False
+        directory, "debug", 1, str(MODEL_DIR), str(DATASET_DIR / "gsm8k/train.parquet"), 3, False
     )
     arguments = arguments.replace("--num-rollout 3", "--num-rollout 2")
     arguments = arguments.replace("training_recovery_test_helpers", "rollout_health_test_helpers")

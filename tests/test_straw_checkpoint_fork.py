@@ -18,12 +18,15 @@ import vime.utils.external_utils.command_utils as U
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
 NUM_GPUS = 4
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/gsm8k")
+    U.exec_command(f"mkdir -p {quote(str(TEST_ROOT / 'models'))} {quote(str(DATASET_DIR))}")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/gsm8k", dir_dst=DATASET_DIR)
 
 
 def load_source_checkpoint(directory, step):
@@ -136,10 +139,10 @@ def execute(*, model_path=None, prompt_data=None, work_dir=None, num_gpus_per_no
     from vime.data.archive import RolloutArchive
     from vime.data.transport import load_rollout_samples
 
-    model_path = model_path or f"/root/models/{MODEL_NAME}"
-    prompt_data = prompt_data or "/root/datasets/gsm8k/train.parquet"
+    model_path = model_path or str(MODEL_DIR)
+    prompt_data = prompt_data or str(DATASET_DIR / "gsm8k/train.parquet")
     # work_dir must be shared when the four GPUs live on different hosts.
-    with tempfile.TemporaryDirectory(prefix="vime_straw_fork_", dir=work_dir) as directory:
+    with tempfile.TemporaryDirectory(prefix="vime_straw_fork_", dir=work_dir or U.get_test_tmp_dir()) as directory:
         root = Path(directory)
         common = (
             f"--hf-checkpoint {quote(str(model_path))} --ref-load {quote(str(model_path))} "
@@ -164,6 +167,9 @@ def execute(*, model_path=None, prompt_data=None, work_dir=None, num_gpus_per_no
             f"--actor-num-nodes 1 --actor-num-gpus-per-node 1 --num-gpus-per-node {num_gpus_per_node} "
             "--rollout-num-gpus 3 --save-interval 1 "
         )
+        common += f"{U.get_test_platform_args()} "
+        if U.current_platform().name == "npu":
+            common += "--vllm-max-num-seqs 16 --vllm-max-model-len 8192 "
         parent, child = root / "parent", root / "child"
         outputs = root / "outputs"
         legacy = root / "legacy-model"

@@ -49,8 +49,12 @@ steps:
                 value: migration-basic
               - label: "run-npu-ci-migration-parallel (batch 2: 9 layout/parallel/PPO scenarios)"
                 value: migration-parallel
-              - label: "run-npu-ci-migration-full-disk (retry only: 2 rollouts)"
-                value: migration-full-disk
+              - label: "run-npu-ci-migration-lifecycle (batch 3: 5 memory/replay/fork scenarios)"
+                value: migration-lifecycle
+              - label: "run-npu-ci-migration-recovery (batch 3: 7 crash/OOM recovery scenarios)"
+                value: migration-recovery
+              - label: "run-npu-ci-migration-checkpoint (batch 3: 5 optimizer/async checkpoint scenarios)"
+                value: migration-checkpoint
               - label: "run-npu-ci-nightly"
                 value: nightly
           - text: "Existing NPU image (optional; leave image-build unselected)"

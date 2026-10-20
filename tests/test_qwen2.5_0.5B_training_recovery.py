@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from shlex import quote
+from shlex import quote, split
 from types import SimpleNamespace
 
 import pytest
@@ -18,16 +18,20 @@ from ray.job_submission import JobStatus, JobSubmissionClient
 
 import vime.utils.external_utils.command_utils as U
 from vime.ray.training_recovery import RECOVERY_NAMESPACE, training_session_name
+from vime.utils.external_utils.launch import runtime_env_vars
 
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
 NUM_GPUS = 4
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 REPO = Path(__file__).resolve().parents[1]
 
 
 def prepare():
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/gsm8k")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/gsm8k", dir_dst=DATASET_DIR)
 
 
 def train_args(directory, mode, tp_size, model_path, dataset_path, save_interval, fault_tolerance):
@@ -54,6 +58,12 @@ def train_args(directory, mode, tp_size, model_path, dataset_path, save_interval
     )
     if fault_tolerance:
         arguments += "--use-fault-tolerance "
+    arguments += f"{U.get_test_platform_args()} "
+    if U.current_platform().name == "npu":
+        arguments += (
+            "--log-probs-chunk-size 128 --vllm-gpu-memory-utilization 0.5 "
+            "--vllm-max-num-seqs 16 --vllm-max-cudagraph-capture-size 8 --vllm-max-model-len 8192 "
+        )
     if tp_size > 1:
         arguments += "--sequence-parallel "
     if mode == "straw":
@@ -115,7 +125,10 @@ def verify(directory, mode, failure_rollout, save_interval, kill_manager, wedge_
         int(new) > int(old) for old, new in zip(before["weight_versions"], after["weight_versions"], strict=True)
     )
     failed_log = (directory / "failed.log").read_text()
-    assert "CUDA out of memory" in failed_log or "torch.OutOfMemoryError" in failed_log
+    from training_recovery_test_helpers import is_device_oom
+
+    assert is_device_oom(failed_log), "Expected an allocator OOM; inspect failed.log"
+    assert "OOM injection: device=" in failed_log, "The deliberate device allocation was not reached"
     resumed_log = (directory / "resumed.log").read_text()
     gradients = [float(value) for value in re.findall(r"'train/grad_norm': ([^,}]+)", resumed_log)]
     # Include NaN/Inf in parsing and require every resumed step: a later failed
@@ -157,7 +170,7 @@ def execute(
     rollout_gpus=2,
     extra_args="",
 ):
-    directory = Path(directory or tempfile.mkdtemp(prefix="vime_training_recovery_"))
+    directory = Path(directory or tempfile.mkdtemp(prefix="vime_training_recovery_", dir=U.get_test_tmp_dir()))
     directory.mkdir(parents=True, exist_ok=True)
     save_interval = save_interval or (1 if failure_rollout else 3)
     # prepare() may need the download proxy; the driver and Ray head must then
@@ -165,46 +178,44 @@ def execute(
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         os.environ.pop(name, None)
     external_ray = os.environ.get("VIME_SCRIPT_EXTERNAL_RAY") == "1"
+    platform = U.current_platform()
+    runtime_env = {
+        "env_vars": runtime_env_vars(
+            platform,
+            {
+                "PYTHONPATH": f"{REPO}/tests:{REPO}:/root/Megatron-LM",
+                "VIME_RECOVERY_TEST_DIR": str(directory),
+                "VIME_RECOVERY_TEST_FAILURE_ROLLOUT": str(failure_rollout),
+                "VIME_RECOVERY_TEST_KILL_MANAGER": str(int(kill_manager and manager_crash_phase == "training")),
+                "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+                "RAY_USE_UVLOOP": "0",
+                "PYTHONUNBUFFERED": "1",
+                "OMP_NUM_THREADS": "1",
+                "NO_PROXY": "*",
+                "no_proxy": "*",
+                **{
+                    name: os.environ[name]
+                    for name in ("NCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME", "NCCL_NVLS_ENABLE")
+                    if name in os.environ
+                },
+                **{
+                    name: ""
+                    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+                },
+            },
+        )
+    }
     if not external_ray:
         subprocess.run(
-            [
-                "ray",
-                "start",
-                "--head",
-                "--node-ip-address",
-                "127.0.0.1",
-                "--num-gpus",
-                str(train_gpus + rollout_gpus),
-                "--disable-usage-stats",
-            ],
+            ["ray", "start", "--head", "--node-ip-address", "127.0.0.1"]
+            + split(platform.ray_start_args(train_gpus + rollout_gpus))
+            + ["--disable-usage-stats"],
+            env={**os.environ, **runtime_env["env_vars"]},
             check=True,
         )
     client = JobSubmissionClient(os.environ.get("VIME_TEST_RAY_DASHBOARD", "http://127.0.0.1:8265"))
-    runtime_env = {
-        "env_vars": {
-            "PYTHONPATH": f"{REPO}/tests:{REPO}:/root/Megatron-LM",
-            "VIME_RECOVERY_TEST_DIR": str(directory),
-            "VIME_RECOVERY_TEST_FAILURE_ROLLOUT": str(failure_rollout),
-            "VIME_RECOVERY_TEST_KILL_MANAGER": str(int(kill_manager and manager_crash_phase == "training")),
-            "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-            "RAY_USE_UVLOOP": "0",
-            "PYTHONUNBUFFERED": "1",
-            "OMP_NUM_THREADS": "1",
-            "NO_PROXY": "*",
-            "no_proxy": "*",
-            **{
-                name: os.environ[name]
-                for name in ("NCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME", "NCCL_NVLS_ENABLE")
-                if name in os.environ
-            },
-            **{
-                name: ""
-                for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
-            },
-        }
-    }
-    model_path = model_path or f"/root/models/{MODEL_NAME}"
-    dataset_path = dataset_path or "/root/datasets/gsm8k/train.parquet"
+    model_path = model_path or str(MODEL_DIR)
+    dataset_path = dataset_path or str(DATASET_DIR / "gsm8k/train.parquet")
     session_args = SimpleNamespace(
         rollout_data_transport="straw" if mode == "straw" else "object-store",
         rollout_data_dir=str(directory / "queue"),

@@ -18,23 +18,26 @@ import vime.utils.external_utils.command_utils as U
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
 NUM_GPUS = 8
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 NUM_ROLLOUT = 2
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/gsm8k")
+    U.exec_command(f"mkdir -p {quote(str(TEST_ROOT / 'models'))} {quote(str(DATASET_DIR))}")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/gsm8k", dir_dst=DATASET_DIR)
 
 
 def _common_args():
     """Arguments shared by generation and replay."""
 
-    ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load /root/models/{MODEL_NAME}/ "
+    ckpt_args = f"--hf-checkpoint {quote(str(MODEL_DIR))} " f"--ref-load {quote(str(MODEL_DIR))} "
 
     rollout_args = (
         "--rollout-data-transport straw "
-        "--prompt-data /root/datasets/gsm8k/train.parquet "
+        f"--prompt-data {quote(str(DATASET_DIR / 'gsm8k/train.parquet'))} "
         "--input-key messages "
         "--label-key label "
         "--apply-chat-template "
@@ -56,7 +59,7 @@ def _common_args():
         "--expert-model-parallel-size 1 "
         "--expert-tensor-parallel-size 1 "
         "--use-dynamic-batch-size "
-        "--max-tokens-per-gpu 4096 "
+        f"--max-tokens-per-gpu {2048 if U.current_platform().name == 'npu' else 4096} "
     )
 
     grpo_args = "--advantage-estimator grpo " "--eps-clip 0.2 "
@@ -81,7 +84,16 @@ def _common_args():
         "--colocate "
     )
 
-    return f"{ckpt_args} " f"{rollout_args} " f"{optimizer_args} " f"{grpo_args} " f"{perf_args} " f"{misc_args} "
+    return (
+        f"{ckpt_args} "
+        f"{rollout_args} "
+        f"{optimizer_args} "
+        f"{grpo_args} "
+        f"{perf_args} "
+        f"{misc_args} "
+        f"{U.get_test_platform_args()} "
+        f"{'--log-probs-chunk-size 128 ' if U.current_platform().name == 'npu' else ''}"
+    )
 
 
 def execute_rollout_only(debug_data_dir: str):
@@ -91,12 +103,18 @@ def execute_rollout_only(debug_data_dir: str):
         "--rollout-num-gpus-per-engine 1 " "--vllm-gpu-memory-utilization 0.7 " "--vllm-max-cudagraph-capture-size 16 "
     )
 
+    if U.current_platform().name == "npu":
+        vllm_args = (
+            "--rollout-num-gpus-per-engine 1 --vllm-gpu-memory-utilization 0.5 "
+            "--vllm-max-num-seqs 16 --vllm-max-cudagraph-capture-size 8 --vllm-max-model-len 8192 "
+        )
+
     phase1_args = (
         f"{_common_args()} "
         f"{vllm_args} "
         "--debug-rollout-only "
         f"--rollout-data-dir {quote(os.path.join(debug_data_dir, 'rollout_queue'))} "
-        f"--save-debug-rollout-data {debug_data_dir}/rollout_{{rollout_id}}.straw.json "
+        f"--save-debug-rollout-data {quote(os.path.join(debug_data_dir, 'rollout_{rollout_id}.straw.json'))} "
     )
 
     print("=" * 60)
@@ -116,7 +134,7 @@ def execute_train_only(debug_data_dir: str, extension: str):
     phase2_args = (
         (f"--rollout-data-dir {quote(os.path.join(debug_data_dir, 'train_queue'))} " if extension == "pt" else "")
         + f"{_common_args()} "
-        f"--load-debug-rollout-data {debug_data_dir}/rollout_{{rollout_id}}.{extension} "
+        f"--load-debug-rollout-data {quote(os.path.join(debug_data_dir, 'rollout_{rollout_id}.' + extension))} "
         "--ci-test "
     )
 
@@ -132,7 +150,7 @@ def execute_train_only(debug_data_dir: str, extension: str):
 
 
 def execute():
-    with tempfile.TemporaryDirectory(prefix="vime_debug_rollout_") as debug_data_dir:
+    with tempfile.TemporaryDirectory(prefix="vime_debug_rollout_", dir=U.get_test_tmp_dir()) as debug_data_dir:
         print(f"Using temp dir for rollout data: {debug_data_dir}")
         execute_rollout_only(debug_data_dir)
         from vime.data.archive import RolloutArchive

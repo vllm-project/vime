@@ -92,6 +92,18 @@ def current_platform() -> Platform:
         raise ValueError(f"No launcher adapter is registered for platform {selected!r}") from exc
 
 
+def runtime_env_vars(platform: Platform, extra_env: dict | None = None) -> dict:
+    """Device environment shared by CLI launches and externally managed Ray jobs."""
+    extra_env = extra_env or {}
+    all_env = {**platform.env, **extra_env}
+    for key in ("PYTHONPATH", "LD_LIBRARY_PATH"):
+        if key in platform.env and key in extra_env:
+            paths = str(extra_env[key]).split(os.pathsep) + str(platform.env[key]).split(os.pathsep)
+            all_env[key] = os.pathsep.join(dict.fromkeys(path for path in paths if path))
+    all_env["VIME_PLATFORM"] = platform.name
+    return all_env
+
+
 def launch_commands(
     platform: Platform,
     train_args: str,
@@ -109,15 +121,9 @@ def launch_commands(
     works with no change here. The caller checks Ray liveness; existing clusters
     and independently owned serving processes must survive trainer restarts.
     """
-    extra_env = extra_env or {}
-    all_env = {**platform.env, **extra_env}
     # Test helpers prepend their import paths without hiding the platform's
     # adaptor/CANN modules or shared libraries from the raylet and its workers.
-    for key in ("PYTHONPATH", "LD_LIBRARY_PATH"):
-        if key in platform.env and key in extra_env:
-            paths = str(extra_env[key]).split(os.pathsep) + str(platform.env[key]).split(os.pathsep)
-            all_env[key] = os.pathsep.join(dict.fromkeys(path for path in paths if path))
-    all_env["VIME_PLATFORM"] = platform.name
+    all_env = runtime_env_vars(platform, extra_env)
     cmds: list = []
     if not external_ray and not ray_running:
         # Export the device env BEFORE `ray start` so the raylet and the actors it spawns

@@ -27,9 +27,12 @@ NPU suites to run via a multi-select field:
   `image-build` does not automatically select `migration-basic`.
 - **`migration-parallel`** — second batch: nine shared layout, PP/CP, gradient
   comparison, debug-dump and PPO scenarios.
-- **`migration-full-disk`** — reruns only full-disk with two rollouts, to verify
-  the training-memory fix after build #383. Selecting this together with
-  `migration-basic` runs full-disk only once.
+- **`migration-lifecycle`** — batch three: five mixed-offload, release/recreate,
+  debug replay and checkpoint-fork scenarios.
+- **`migration-recovery`** — batch three: seven server/actor crash and real
+  allocator OOM recovery scenarios.
+- **`migration-checkpoint`** — batch three: five optimizer placement and
+  asynchronous checkpoint roundtrips, each training after restore.
 - **`nightly`** — reserved for future coverage; currently empty. Selecting only
   this suite fails with an explicit error rather than uploading zero tests.
 
@@ -219,18 +222,19 @@ that contains `/opt/npu_patch/series.conf`, then updating
 `DEFAULT_CI_IMAGE` in `npu_suites.py`. The legacy default image contains patch
 bytes under `/tmp/npu_patch` but not the OLD series required by this reconciler.
 
-## Second batch and full-disk retry
+## Second batch
 
-For the next run after #383, select **`migration-parallel` +
-`migration-full-disk`**: ten jobs, without repeating the other six passing
-batch-one scenarios. The original six `smk` entries remain commented out.
+`migration-parallel` contains nine layout/parallel/PPO scenarios, all passed
+in build #385. The separate full-disk retry suite has been removed after its
+#384 success; full-disk remains part of `migration-basic`. The six `smk` entries
+remain commented out.
 
-This change updates tests and CI configuration, with no image dependencies or
-vendor patch changes. To reuse #383, leave `image-build` unselected and paste
-this into **Existing NPU image**:
+To reuse the verified #385 training environment, leave `image-build` unselected
+and paste this into **Existing NPU image**. Runtime patch reconciliation still
+checks the current checkout:
 
 ```text
-swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/vime-ci-npu:d314eacb8256a6fd19b5a3aaebc46def027be1bf
+swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/vime-ci-npu:a4e997f184c9c561cf16bac6f8491081c3d3a621
 ```
 
 Alternatively, leave that field empty and select `image-build` with the same
@@ -284,3 +288,55 @@ with `--log-probs-chunk-size 128`. The two NPU rollouts, response limit 1024,
 entropy coefficient 0.01, serving settings and publication assertions remain.
 Passing CPU launch tests does not establish that the NPU OOM is resolved;
 completion of both training steps and the final publication checks is required.
+
+
+## Third batch: memory, recovery and checkpoint state
+
+Select **`migration-lifecycle`**, **`migration-recovery`** and/or
+**`migration-checkpoint`** independently. Together they run 17 new scenarios;
+including the existing basic/parallel suites gives 33 different migration
+scenarios. All share `vime-npu-migration-basic`, concurrency four. Four-NPU and
+eight-NPU jobs request at most 32 NPUs across simultaneous migration jobs.
+The completed six smoke cases remain paused.
+
+| Suite | GPU inventory | Model / dataset | NPUs / timeout |
+| --- | --- | --- | --- |
+| `migration-lifecycle` | G05/G06 mixed updatable/frozen offload, including fault injection | Qwen2.5-0.5B-Instruct / GSM8K | 8 / 180 min each |
+| `migration-lifecycle` | G18 release/recreate trainers from checkpoint | Qwen3.5-0.8B / GSM8K | 4 / 180 min |
+| `migration-lifecycle` | G23 rollout-only then straw/PT training replay | Qwen2.5-0.5B-Instruct / GSM8K | 8 / 360 min |
+| `migration-lifecycle` | G24 eight checkpoint-fork/replay phases | Qwen2.5-0.5B-Instruct / GSM8K | 4 / 360 min |
+| `migration-recovery` | G29/G30 server/actor crash, stale router cleanup and training | Qwen2.5-0.5B-Instruct / GSM8K | 4 / 180 min each |
+| `migration-recovery` | G31–G35 real OOM, TP1→TP2, manager crash, replay and disk delta | Qwen2.5-0.5B-Instruct / GSM8K | 4 / 360 min each |
+| `migration-checkpoint` | G49–G52 device↔device/CPU optimizer state, G53 async-save | Qwen3-4B / DAPO math-17k | 8 / 360 min each |
+
+Use `image-build` with the selected suites to build this PR's image. These
+changes add no vendor patches or dependencies, so the #385 image above may also
+be reused with **Existing NPU image**. Future dependency changes require a new
+image. Start with lifecycle, then recovery and checkpoint if separate runs
+make logs easier to inspect; no ordering dependency is imposed between jobs.
+
+The shared scripts use configurable asset/scratch roots and preserve the GPU
+parallel layouts. NPU memory policy keeps graph execution, log-prob chunks of
+128, training token budgets of 2048, serving memory utilization 0.5 and graph
+capture size 8 (the fork test retains its existing 0.4 serving utilization).
+Recovery advertises custom Ray `NPU` resources, forwards CANN/HCCL/adaptor
+paths to the raylet and submitted jobs, and allocates **twice the selected
+device capacity** at the deliberate failure boundary. It still requires the
+OOM, retained serving identity, new trainer identity, TP resharding, sample and
+route digests, replay cursor, scheduler progress, weight versions, post-failure
+inference and finite positive resumed gradients. No fake OOM replaces this
+hardware check. PD/NIXL and MoE/R3 recovery are outside this batch.
+
+Checkpoint roundtrips keep all four optimizer placement directions; CLI `gpu`
+means device-resident optimizer on NPU. Save two rollouts, load checkpoint 1,
+then train rollout 2 with `num-rollout=3`, retaining the saved scheduler horizon.
+The earlier horizon of two allowed loading without a subsequent training step.
+Both platforms now check scheduler progress, optimizer-load flags/placement,
+finite per-rollout gradients and the straw queue/builder snapshots. Custom
+nonempty checkpoint paths are rejected rather than cleared. Successful default
+temporary checkpoints are removed; explicit paths and failures retain evidence.
+
+G05/G06 exercise frozen-model sleep/wakeup, but the original tests do not
+compare frozen weights element by element. `VLLMEngine.check_weights()` is a
+`supported=False` stub, so completion must not be reported as frozen-weight
+numerical equivalence. Other hardware outcomes require the new CI logs.

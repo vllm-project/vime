@@ -122,7 +122,9 @@ def _install_crash(manager, phase):
 def _consume_batch(refs, rank):
     data = process_rollout_data(refs, rank, len(refs))
     weight = torch.nn.Parameter(torch.zeros(1))
-    optimizer = torch.optim.SGD([weight], lr=0.01)
+    # This fixture trains CPU tensors. Avoid probing installed accelerator
+    # backends (torch-npu's foreach selector initializes a device even on CPU).
+    optimizer = torch.optim.SGD([weight], lr=0.01, foreach=False)
     inputs = torch.tensor([float(tokens.sum()) for tokens in data["tokens"]])
     targets = torch.tensor(data["local_raw_reward"]) + 1
     loss = ((inputs * weight - targets) ** 2).mean()
