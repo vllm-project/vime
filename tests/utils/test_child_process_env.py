@@ -37,7 +37,17 @@ class _VendorAccelerator(CUDAAccelerator):
 def isolate_selection(monkeypatch):
     registry = accelerator._REGISTRY.copy()
     selected = accelerator._ACCELERATOR
-    for name in ("VIME_ACCELERATOR", "MUSA_VISIBLE_DEVICES", "MUSA_PATCH_PATH", "SUPA_VISIBLE_DEVICES", "BIREN_HOME"):
+    for name in (
+        "VIME_ACCELERATOR",
+        "MUSA_VISIBLE_DEVICES",
+        "MUSA_PATCH_PATH",
+        "SUPA_VISIBLE_DEVICES",
+        "BIREN_HOME",
+        # An Ascend toolkit installation alone makes the NPU backend consider
+        # itself requested, so a CANN host would otherwise pick it here.
+        "ASCEND_RT_VISIBLE_DEVICES",
+        "ASCEND_HOME_PATH",
+    ):
         monkeypatch.delenv(name, raising=False)
     accelerator._REGISTRY.clear()
     accelerator.reset_accelerator()
