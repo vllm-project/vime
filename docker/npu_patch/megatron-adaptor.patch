@@ -1,0 +1,52 @@
+diff --git a/megatron_adaptor/features_manager/megatron/megatron_basic.py b/megatron_adaptor/features_manager/megatron/megatron_basic.py
+--- a/megatron_adaptor/features_manager/megatron/megatron_basic.py
++++ b/megatron_adaptor/features_manager/megatron/megatron_basic.py
+@@ -78,27 +78,27 @@ class MegatronBasicFeature(MindSpeedFeature):
+         # class via force_patch.  The MindSpeed subclass imports its own
+         # Triton operators directly from mindspeed.ops.triton and never
+         # reads these FLA paths, so no conflict arises.
+-        from megatron_adaptor.patches.megatron.gdn_packed_seq import (
+-            _npu_causal_conv1d,
+-            _npu_chunk_gated_delta_rule,
+-            _npu_l2norm,
+-        )
+-
+-        pm.register_patch(
+-            'fla.modules.convolution.causal_conv1d',
+-            _npu_causal_conv1d,
+-            create_dummy=True,
+-        )
+-        pm.register_patch(
+-            'fla.ops.gated_delta_rule.chunk_gated_delta_rule',
+-            _npu_chunk_gated_delta_rule,
+-            create_dummy=True,
+-        )
+-        pm.register_patch(
+-            'fla.modules.l2norm.l2norm',
+-            _npu_l2norm,
+-            create_dummy=True,
+-        )
++        # from megatron_adaptor.patches.megatron.gdn_packed_seq import (
++        #    _npu_causal_conv1d,
++        #    _npu_chunk_gated_delta_rule,
++        #    _npu_l2norm,
++        #)
++
++        #pm.register_patch(
++        #    'fla.modules.convolution.causal_conv1d',
++        #    _npu_causal_conv1d,
++        #    create_dummy=True,
++        #)
++        #pm.register_patch(
++        #    'fla.ops.gated_delta_rule.chunk_gated_delta_rule',
++        #    _npu_chunk_gated_delta_rule,
++        #    create_dummy=True,
++        #)
++        #pm.register_patch(
++        #    'fla.modules.l2norm.l2norm',
++        #    _npu_l2norm,
++        #    create_dummy=True,
++        #)
+ 
+     def register_non_mcore_basic_patches(self, pm, args):
+         from megatron_adaptor.patches.megatron.megatron_basic import (
