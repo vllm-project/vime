@@ -30,9 +30,10 @@ def isolate_selection(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     accelerator._REGISTRY.clear()
     accelerator.reset_accelerator()
-    monkeypatch.setattr(accelerator, "is_musa_available", lambda: False)
-    monkeypatch.setattr(accelerator, "is_supa_available", lambda: False)
-    monkeypatch.setattr(accelerator, "_cuda_available", lambda: False)
+    # Keep this independent of the runner's hardware: no builtin backend
+    # registers itself, so a test sees only the backends it registers. A CI
+    # host that has real accelerators must not change these outcomes.
+    monkeypatch.setattr(accelerator, "_register_builtin_backends", lambda: None)
     yield
     accelerator._REGISTRY.clear()
     accelerator._REGISTRY.update(registry)

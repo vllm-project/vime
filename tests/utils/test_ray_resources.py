@@ -53,9 +53,10 @@ def isolate_selection(monkeypatch):
 @pytest.fixture
 def no_local_accelerator(monkeypatch):
     """A driver host that offers no accelerator of its own."""
-    monkeypatch.setattr(accelerator, "is_musa_available", lambda: False)
-    monkeypatch.setattr(accelerator, "is_supa_available", lambda: False)
-    monkeypatch.setattr(accelerator, "_cuda_available", lambda: False)
+    # Keep this independent of the runner's hardware: no builtin backend
+    # registers itself, so a test sees only the backends it registers. A CI
+    # host that has real accelerators must not change these outcomes.
+    monkeypatch.setattr(accelerator, "_register_builtin_backends", lambda: None)
 
 
 def test_a_driver_without_any_device_keeps_rays_gpu_resource(no_local_accelerator):
