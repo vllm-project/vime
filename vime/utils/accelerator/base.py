@@ -146,6 +146,18 @@ class Accelerator(abc.ABC):
     def weight_update_backend(self, default: str = "nccl") -> str:
         return self.communication_backend(default)
 
+    ray_device_key = "GPU"
+    """The Ray resource name this accelerator is advertised and scheduled under.
+
+    Ray resolves a worker's visible-devices variable from the resource name it
+    was scheduled against, so a backend addressed under the wrong name starts
+    with no visible device. Backends whose devices Ray models separately from
+    its own GPU resource override this together with the flag below.
+    """
+
+    ray_uses_native_gpu_resource = True
+    """Whether ``ray_device_key`` is Ray's own GPU resource rather than a custom one."""
+
     @property
     def visible_devices_env(self) -> str:
         return "CUDA_VISIBLE_DEVICES"

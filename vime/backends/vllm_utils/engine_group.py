@@ -10,6 +10,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from vime.backends.vllm_utils.server_control import unregister_worker
 from vime.backends.vllm_utils.vllm_config import ServerGroupConfig
+from vime.ray import resources
 from vime.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, add_default_ray_env_vars
 
 GPU_MEMORY_TYPE_KV_CACHE = "kv_cache"
@@ -225,11 +226,11 @@ class ServerGroup:
             )
             rollout_engine = RolloutRayActor.options(
                 num_cpus=num_cpus,
-                num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
                 runtime_env={
                     "env_vars": add_default_ray_env_vars(env_vars),
                 },
+                **resources.actor_options(num_gpus),
             ).remote(
                 self.args,
                 rank=global_rank,
