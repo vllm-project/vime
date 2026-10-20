@@ -42,6 +42,12 @@ NPU suites to run via a multi-select field:
 - **`migration-foundation`** — batch five: Qwen3.5 basic GRPO (object-store
   variant), NPU TP1/TP2 numerical reference, external vLLM teacher OPD and
   Geo3K two-turn VLM protocol.
+- **`migration-pd`** — final batch: external small-model PD/delta weight sync,
+  PD OOM/wedged-engine recovery, and encoder/prefill/decode disaggregation.
+- **`migration-pd-models`** — final batch: GLM4.7 and Qwen3.6 PD/MTP scenarios;
+  Qwen uses an explicitly labeled BF16/alltoall NPU variant of GPU DeepEP.
+- **`migration-agent`** — separate agent test; currently blocked because the
+  NPU CI has no external x86 Sunabako sandbox cluster for the pinned task images.
 - **`nightly`** — reserved for future coverage; currently empty. Selecting only
   this suite fails with an explicit error rather than uploading zero tests.
 
@@ -165,7 +171,7 @@ NPU_SUITES=image-build,migration-basic BUILDKITE_COMMIT="$(git rev-parse HEAD)" 
 ## Adding a test
 
 Suites and test mappings are defined in [`npu_suites.py`](./npu_suites.py).
-The nine active migration groups contain 45 scenarios; `smk` remains temporarily
+The twelve selectable migration groups contain 51 scenarios; `smk` remains temporarily
 paused and `nightly` remains empty.
 
 Each entry is a 4-tuple, with an optional fifth item for the timeout in minutes:
@@ -383,11 +389,12 @@ numerical equivalence. Other hardware outcomes require the new CI logs.
 
 ## Fourth batch: MoE, routing replay and model-specific boundaries
 
-This batch adds eight shared GPU scenarios, taking the migration registry from
-33 to 41. Their NPU hardware results are pending. Select the following groups
-independently; all eight jobs request `npu-8` with a 360-minute timeout. They
-share the existing concurrency group and limit of four, so their maximum
-simultaneous request is 32 NPUs, subject to queue availability. No multi-node
+This batch introduced eight shared GPU scenarios, taking the registry from
+33 to 41. Six of these eight have passed by build #390; G20 and G37 remain
+failed. All use a 360-minute timeout. After the #390 initialization OOM, G37
+requests `npu-16` (train 8/EP8 + serving 4); the other seven request `npu-8`.
+They share concurrency four, allowing at most 40 NPUs when G37 and three
+8-device jobs run together, subject to queue availability. No multi-node
 scenario is introduced.
 
 | Suite / GPU inventory | Shared test | Model / dataset | Preserved boundary |
@@ -396,7 +403,7 @@ scenario is introduced.
 | `migration-moe` / G46 | `test_moonlight_16B_A3B_non_colocate_nccl.py` | moonshotai/Moonlight-16B-A3B-Instruct / DAPO math-17k | Actor 4 TP1/EP4 + rollout 4 DP4/EP, naive all-to-all, collective weight updates, two rollouts |
 | `migration-moe` / G20 | `test_moonlight_16B_A3B.py` | moonshotai/Moonlight-16B-A3B-Instruct / DAPO math-17k | MLA/MoE, TP2/CP2/EP8, colocated, two rollouts |
 | `migration-moe` / G21 | `test_moonlight_16B_A3B_r3.py` | moonshotai/Moonlight-16B-A3B-Instruct / DAPO math-17k | G20 topology plus R3, straw and online GC |
-| `migration-moe-recovery` / G37 | `test_qwen3_30B_A3B_training_recovery.py` | Qwen/Qwen3-30B-A3B / GSM8K | Actor 4 + rollout 4, EP4, real OOM, manager loss during training, TP1→TP2, route identity, stateless Adam |
+| `migration-moe-recovery` / G37 | `test_qwen3_30B_A3B_training_recovery.py` | Qwen/Qwen3-30B-A3B / GSM8K | NPU actor 8 + rollout 4, EP8 (npu-16); CUDA actor 4 + rollout 4, EP4; real OOM, manager loss during training, TP1→TP2, route identity, stateless Adam |
 | `migration-models` / G08 | `test_quick_start_glm4_9B.py` | zai-org/GLM-Z1-9B-0414 / DAPO math-17k | Actor 4 TP2/CP2 + rollout 4 TP2, two rollouts, response 8192 |
 | `migration-models` / G22 | `test_mimo_7B_mtp_only_grad.py` | XiaomiMiMo/MiMo-7B-RL / DAPO math-17k | TP2, one rollout, training MTP loss and vLLM MTP draft with three speculative tokens; main-model zero / MTP positive gradient checks |
 | `migration-models` / G19 | `test_qwen3_4B_streaming_partial_rollout.py` | Qwen/Qwen3-4B / DAPO math-17k | TP2/CP2, two rollouts, SSE generation, oversampling, partial reuse and off-policy masking |
@@ -459,7 +466,8 @@ they do not establish support for MLA, routed-expert replay or MiMo MTP on NPU.
 ## Batch five: foundation and external services
 
 Select `migration-foundation` for four independent jobs, sharing the existing
-concurrency group with a maximum of four. The NPU hardware outcomes are pending.
+concurrency group with a maximum of four. All four jobs passed build #390;
+the alternative-transport and numerical-reference boundaries below still apply.
 
 | GPU ID | Test | Model / data | Allocation / logical use | Limit |
 | --- | --- | --- | --- | --- |
@@ -489,8 +497,8 @@ physical device using the platform subprocess environment and V2 runner. It
 preserves the OPD reward endpoint, loss hooks and two training rollouts. Teacher
 health/startup failures print logs; teardown kills only its process tree and
 restores the driver's visibility. Run it in a fresh CI pod with no pre-existing
-Ray head. Native teacher prompt-logprob support remains a hardware acceptance
-item; no fake teacher or reward bypass is introduced.
+Ray head. The real teacher reward/prompt-logprob path completed build #390; no fake
+teacher or reward bypass is introduced, and convergence is not established.
 
 G44 retains pinned model/data revisions, render-once/generate-twice, image
 features and token/context alignment assertions. It uses one NPU in eager mode;
@@ -505,3 +513,76 @@ This batch changes runtime code only and can reuse the build #389 image via
 different dependencies is not equivalent. To rerun #389 failures as well, also
 select `migration-moe` and `migration-moe-recovery` (nine jobs in total). No CI
 build is triggered by generating or reviewing these configurations.
+
+
+## Build #390 and the final batch
+
+Build #390 finished with seven passing and two failing tests. All four batch-five
+jobs passed; Qwen30B R3 and Moonlight R3 passed as well. G20 failed inside the
+Ascend V2 sampler on an invalid request index, before training; the index's
+origin still needs backend diagnostics. Do not treat it as the earlier context
+length problem or claim an unverified graph workaround fixes it.
+
+G37 failed during actor initialization: a 27-GiB FP32 DDP gradient-buffer
+allocation had only 22.30 GiB free on a 61.28-GiB NPU. The deliberate OOM hook had
+not executed. Its NPU variant now uses eight training devices with EP8 plus four serving
+devices, requesting npu-16. Both platforms retain TP1 -> TP2; CUDA keeps its
+original four-device EP4 trainer. ETP1 expert gradients shard over EP rather
+than dense TP, so increasing only TP would not halve this buffer. FP32 gradients,
+stateless Adam, R3, the actual OOM injection, manager loss and all recovery
+checks remain enabled. This revised topology still requires a CI run.
+
+| Suite / GPU ID | Model and data | Resources | Boundary |
+| --- | --- | --- | --- |
+| `migration-pd` / G41 | Qwen3-4B / GSM8K | npu-8, train 4 + prefill 1 + decode 1 | Real external PD, three rollouts, disk-delta; positive entropy coefficient retained |
+| `migration-pd` / G36 | Qwen2.5-0.5B-Instruct / GSM8K | npu-4, train 2 + prefill 1 + decode 1 | Real OOM, manager loss, wedged engine and TP1 -> TP2 recovery |
+| `migration-pd` / G45 | Qwen2.5-VL-3B-Instruct / synthetic image | npu-4, 3 logical serving devices | Original regular/EPD token comparison, image features and service-role assertions |
+| `migration-pd-models` / G09 | GLM-4.7-Flash / DAPO math-17k | npu-8, colocated | Actor TP2/PP2/CP2/EP4, PD4+4, speculative MTP4 |
+| `migration-pd-models` / G11 variant | Qwen3.6-35B-A3B / DAPO math-17k | npu-8, colocated | TP2/CP2/EP8, GDN, PD/MTP4; alltoall replaces GPU DeepEP explicitly |
+| `migration-agent` / G42 | Qwen3.8-27B / two pinned MiMo code tasks | npu-8 | Training entry adapted; blocked until external x86 sandbox is provided |
+
+All six entries have a 360-minute limit and share the existing concurrency
+limit of four. Run `migration-pd` first to validate the small-model connectors,
+then `migration-pd-models`. Rerun G37 with `migration-moe-recovery`. Do not select
+`migration-agent` in the current environment: the user confirmed no external
+sandbox exists. Its preflight fails before package installs or model downloads,
+with an explicit prerequisite error; this is recorded as blocked, not passed.
+
+The shared platform selects Ascend `MooncakePullConnector` for P/D KV transfer;
+CUDA still selects `NixlConnector`. Ascend worker handshake ports occupy the
+first TP*DP*PP*PCP slots, followed by scheduler control ports. The allocator
+reserves that full range and advertises the scheduler port to the router.
+Producer/consumer roles remain distinct. The external-server path uses the same
+platform contract, device visibility and HCCL weight-backend naming. This is
+KV transport, independent of Ray rollout-data NIXL and of weight synchronization.
+
+G45 keeps `ECCPUConnector` and its **host-memory** NIXL feature transfer. Its
+setup pins `nixl==1.4.1` and `nixl-cu12==1.4.1`, aligned with the pinned vLLM
+connector requirements, using `--no-deps` to preserve torch/torch-npu/numpy.
+The CUDA-12 backend wheel provides the native library for CPU/UCX use; no NPU
+memory registration is claimed. `UCX_TLS=tcp,sm,self` restricts this job to host
+transports. Before loading the model, a 4-KiB DRAM registration probe checks the
+library/API; binary loading and actual feature transfers still require CI.
+The other PD jobs import the existing Ascend Mooncake backend before downloads.
+
+PD configs, debug rollout dumps, external-server logs, weight checkpoints and
+local disk-delta staging use per-test `test_work_directory()` contexts. Local
+staging stays on `/tmp`, while shared scratch uses the configured test root.
+Keep/explicit caller paths are preserved; owned processes are stopped before
+removing automatic scratch. Global `pkill vllm` is removed from the external PD
+test. Model/dataset caches remain persistent. No global legacy tmp sweep returns.
+
+For agent testing, the two official pinned OCI images are amd64 and the Ascend
+CI host is arm64. An arm64 sunabako wheel cannot execute their x86 binaries in
+local native mode. A reachable x86 `SUNABAKO_CLUSTER` plus `SUNABAKO_IMAGES`, or
+an independently validated arm64 task-image plan, is required. No fabricated
+agent/reward or ordinary model-only substitute is used. The current setup keeps
+the image's arm64 SDK and Ray 2.48 authentication mode instead of applying the
+GPU setup's new-Ray CLI and reinstalling its dependencies.
+
+G10/G12 DeepEP+FP8 remain unported GPU combinations. G01/G15 object-store, G17
+NPU mathematical reference, and G11 alltoall are explicitly scoped variants.
+Registration counts are not equivalent to full GPU-configuration parity.
+The final batch changes shared Python/runtime setup and can reuse the #390
+image with `image-build` unselected; its EPD setup installs only its pinned
+optional wheels. Hardware acceptance and sandbox provisioning are pending.

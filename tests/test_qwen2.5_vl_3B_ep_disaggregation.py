@@ -7,7 +7,6 @@ import base64
 import io
 import os
 import sys
-import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -23,15 +22,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import vime.utils.external_utils.command_utils as U
 from vime.backends.vllm_utils.arguments import vllm_parse_args
 from vime.backends.vllm_utils.deployment import start_rollout_servers
+from vime.platforms import current_platform
 from vime.ray.placement_group import _create_placement_group
 from vime.rollout import vllm_rollout
+from vime.utils.external_utils.launch import runtime_env_vars
 from vime.utils.http_utils import init_http_client, is_port_available, post
 from vime.utils.processing_utils import load_tokenizer
 
 NUM_GPUS = 3
 MODEL_NAME = "Qwen2.5-VL-3B-Instruct"
 MODEL_REVISION = "66285546d2b821cf421d4f5eb2576359d3770cd3"
-TEST_ROOT = Path(os.environ.get("VIME_TEST_ROOT", "/root"))
+TEST_ROOT = U.get_test_root()
 MODEL_PATH = TEST_ROOT / "models" / MODEL_NAME
 MAX_MODEL_LEN = 4096
 MAX_NEW_TOKENS = 32
@@ -51,7 +52,7 @@ def prepare() -> None:
     U.exec_command(f"hf download Qwen/{MODEL_NAME} --revision {MODEL_REVISION} --local-dir {MODEL_PATH}")
 
 
-def _write_config(worker_types: tuple[str, ...]) -> str:
+def _write_config(worker_types: tuple[str, ...], directory) -> str:
     config = {
         "vllm": [
             {
@@ -70,10 +71,9 @@ def _write_config(worker_types: tuple[str, ...]) -> str:
             }
         ]
     }
-    handle = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", prefix="vime_epd_", delete=False)
-    with handle:
-        yaml.safe_dump(config, handle)
-    return handle.name
+    path = Path(directory) / "serving.yaml"
+    path.write_text(yaml.safe_dump(config))
+    return str(path)
 
 
 def _make_args(config_path: str, worker_types: tuple[str, ...]):
@@ -100,7 +100,7 @@ def _make_args(config_path: str, worker_types: tuple[str, ...]):
     args.rollout_max_context_len = MAX_MODEL_LEN
     args.use_distributed_post = False
     args.vllm_server_concurrency = 4
-    args.vllm_enable_deterministic_inference = True
+    args.vllm_enable_deterministic_inference = not current_platform().is_npu
     args.vllm_router_ip = None
     args.vllm_router_port = None
     args.vllm_pipeline_parallel_size = 1
@@ -127,8 +127,8 @@ def _shutdown_servers(servers: dict[str, Any]) -> None:
 
 
 @contextmanager
-def _deployment(pg, worker_types: tuple[str, ...]):
-    config_path = _write_config(worker_types)
+def _deployment(pg, worker_types: tuple[str, ...], directory):
+    config_path = _write_config(worker_types, directory)
     args = _make_args(config_path, worker_types)
     servers: dict[str, Any] = {}
     try:
@@ -242,7 +242,16 @@ def _validate_epd_services(server) -> None:
 
 
 def execute() -> None:
-    ray.init()
+    with U.test_work_directory("vime_epd_") as directory:
+        _execute(directory)
+
+
+def _execute(directory) -> None:
+    # Set the vendor environment before creating the standalone Ray head.
+    env = runtime_env_vars(U.current_platform(), {"PYTHONPATH": os.environ.get("PYTHONPATH", "")})
+    os.environ.update(env)
+    options = {"num_gpus": 0, "resources": {"NPU": NUM_GPUS}} if current_platform().is_npu else {}
+    ray.init(**options)
     pg = _create_placement_group(NUM_GPUS)
     image_messages = [
         {
@@ -254,10 +263,10 @@ def execute() -> None:
         }
     ]
     try:
-        with _deployment(pg, ("regular",)) as (baseline_args, _):
+        with _deployment(pg, ("regular",), directory) as (baseline_args, _):
             baseline_tokens = asyncio.run(_generate(baseline_args, image_messages))
 
-        with _deployment(pg, ("encoder", "prefill", "decode")) as (epd_args, epd_server):
+        with _deployment(pg, ("encoder", "prefill", "decode"), directory) as (epd_args, epd_server):
             epd_tokens = asyncio.run(_generate(epd_args, image_messages, epd_server=epd_server))
             assert epd_tokens == baseline_tokens
             tokenizer = load_tokenizer(str(MODEL_PATH), trust_remote_code=True)

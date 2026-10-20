@@ -72,7 +72,7 @@ def test_invalid_or_empty_selection_fails_before_emitting_json(monkeypatch, sele
     assert not result.stdout
     if selection in ("", "smk", "image-build", "nightly"):
         assert (
-            "select a non-empty suite (currently: migration-basic, migration-parallel, migration-lifecycle, migration-recovery, migration-checkpoint, migration-moe, migration-moe-recovery, migration-models, migration-foundation)"
+            "select a non-empty suite (currently: migration-basic, migration-parallel, migration-lifecycle, migration-recovery, migration-checkpoint, migration-moe, migration-moe-recovery, migration-models, migration-foundation, migration-pd, migration-pd-models, migration-agent)"
             in result.stderr
         )
 
@@ -292,7 +292,8 @@ def test_batch_four_preserves_eight_gpu_scenarios_and_cleanup_policy(suites, mon
     for group in groups:
         assert all(entry[0] in original_files for entry in suites.SUITES[group])
     for step in steps:
-        assert step["agents"] == {"queue": "ascend-a3", "resource_class": "npu-8"}
+        resource = "npu-16" if "test_qwen3_30B_A3B_training_recovery.py" in step["command"] else "npu-8"
+        assert step["agents"] == {"queue": "ascend-a3", "resource_class": resource}
         assert step["concurrency"] == 4 and step["concurrency_group"] == "vime-npu-migration-basic"
         assert step["timeout_in_minutes"] == 360 and step["depends_on"] == "image-build-npu"
         assert step["env"]["VIME_TEST_KEEP_ARTIFACTS"] == "0"
@@ -316,13 +317,13 @@ def test_batch_four_preserves_eight_gpu_scenarios_and_cleanup_policy(suites, mon
     monkeypatch.setenv("NPU_KEEP_ARTIFACTS", "1")
     assert all(step["env"]["VIME_TEST_KEEP_ARTIFACTS"] == "1" for step in suites.build_steps())
     monkeypatch.setenv("NPU_SUITES", ",".join(name for name, entries in suites.SUITES.items() if entries))
-    assert len(suites.build_steps()) == 45
+    assert len(suites.build_steps()) == 51
 
 
 def test_all_migration_jobs_dispose_failed_sessions_without_global_sweeps(suites, monkeypatch):
     monkeypatch.setenv("NPU_SUITES", ",".join(name for name in suites.SUITES if name.startswith("migration-")))
     steps = suites.build_steps()
-    assert len(steps) == 45
+    assert len(steps) == 51
     for step in steps:
         script = shlex.split(step["command"])[2]
         assert "cleanup_npu_batch3.py" not in script
@@ -343,3 +344,24 @@ def test_batch_five_keeps_variants_explicit_and_shares_concurrency(suites, monke
     assert "test_ppo_logprob_entropy_npu.py" in steps[1]["command"]
     monkeypatch.setenv("NPU_KEEP_ARTIFACTS", "1")
     assert all(step["env"]["VIME_TEST_KEEP_ARTIFACTS"] == "1" for step in suites.build_steps())
+
+
+def test_final_batch_has_five_real_disaggregation_jobs_and_separate_agent(suites, monkeypatch):
+    monkeypatch.setenv("NPU_SUITES", "migration-pd,migration-pd-models,migration-agent")
+    steps = suites.build_steps()
+    assert len(steps) == 6
+    assert [len(suites.SUITES[group]) for group in ("migration-pd", "migration-pd-models", "migration-agent")] == [
+        3,
+        2,
+        1,
+    ]
+    assert all(step["concurrency"] == 4 and step["timeout_in_minutes"] == 360 for step in steps)
+    assert all(step["env"]["VIME_TEST_KEEP_ARTIFACTS"] == "0" for step in steps)
+    qwen36 = next(step for step in steps if "test_qwen3.6" in step["command"])
+    assert qwen36["env"]["VIME_TEST_USE_DEEPEP"] == "0"
+    agent = next(step for step in steps if "test_agent_sunabako" in step["command"])
+    assert "source tests/ci/setup_agent_e2e.sh" in agent["command"]
+    assert "gpu_lock_exec" not in agent["command"]
+    epd = next(step for step in steps if "test_qwen2.5_vl_3B_ep_disaggregation.py" in step["command"])
+    assert "source tests/ci/setup_npu_epd.sh" in epd["command"]
+    assert all("npu_pd_environment.py" in step["command"] for step in steps[:5] if step is not epd)

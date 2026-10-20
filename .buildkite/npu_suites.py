@@ -148,6 +148,34 @@ SUITES = {
         ("test_qwen2.5_0.5B_opd_vllm.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}),
         ("test_geo3k_vlm_multi_turn_e2e.py", "npu-4", "", {}),
     ],
+    # Batch 6: real Ascend PD/EPD, including fault recovery. G11 uses a
+    # BF16/alltoall NPU variant; GPU DeepEP/FP8 combinations stay separate.
+    "migration-pd": [
+        ("test_qwen3_4B_external_pd.py", "npu-8", "", {"VIME_TEST_UPDATE_MODE": "delta"}, 360),
+        (
+            "test_qwen2.5_0.5B_training_recovery.py",
+            "npu-4",
+            "--mode straw --failure-rollout 1 --pd --wedge-engine --kill-manager",
+            {},
+            360,
+        ),
+        ("test_qwen2.5_vl_3B_ep_disaggregation.py", "npu-4", "", {}, 360),
+    ],
+    "migration-pd-models": [
+        ("test_glm4.7_30B_A3B_pd_mooncake.py", "npu-8", "", {}, 360),
+        (
+            "test_qwen3.6_35B_A3B_pd_mooncake.py",
+            "npu-8",
+            "",
+            {"VIME_TEST_ENABLE_EVAL": "0", "VIME_TEST_USE_DEEPEP": "0"},
+            360,
+        ),
+    ],
+    # Select independently: requires an existing x86 sandbox cluster. The
+    # current arm64 NPU host cannot run the pinned x86 MiMo task images natively.
+    "migration-agent": [
+        ("test_agent_sunabako_codex_e2e.py", "npu-8", "", {}, 360),
+    ],
     "nightly": [],
 }
 
@@ -227,6 +255,9 @@ def npu_step(
         "migration-moe-recovery",
         "migration-models",
         "migration-foundation",
+        "migration-pd",
+        "migration-pd-models",
+        "migration-agent",
     )
     if managed_scratch:
         keep = os.environ.get("NPU_KEEP_ARTIFACTS", "0")
@@ -247,6 +278,21 @@ def npu_step(
     if suite.startswith("migration-"):
         step_env["VIME_TEST_RESOURCE_CLASS"] = resource_class
         commands.append("python tests/ci/npu_test_environment.py")
+    if suite in ("migration-pd", "migration-pd-models"):
+        if test_name == "test_qwen2.5_vl_3B_ep_disaggregation.py":
+            commands.append("source tests/ci/setup_npu_epd.sh")
+        else:
+            commands.append("python tests/ci/npu_pd_environment.py")
+    if suite == "migration-agent":
+        for key in ("SUNABAKO_CLUSTER", "SUNABAKO_IMAGES", "SUNABAKO_RUNTIME"):
+            if key in os.environ:
+                step_env[key] = os.environ[key]
+        commands.extend(
+            [
+                "export VIME_AGENT_TEST_CACHE=$HF_HOME/agent-e2e/cache",
+                "source tests/ci/setup_agent_e2e.sh",
+            ]
+        )
     commands.append(f"python tests/{test_name}{' ' + extra_args if extra_args else ''}")
     script = "\n".join(commands)
     command = f"bash -c {shlex.quote(script)}"

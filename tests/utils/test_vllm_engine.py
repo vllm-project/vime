@@ -1101,3 +1101,24 @@ def test_make_request_short_circuits_on_headless(vllm_engine, monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
+
+
+@pytest.mark.parametrize("worker_type,role", [("prefill", "kv_producer"), ("decode", "kv_consumer")])
+def test_npu_pd_reserves_handshake_and_scheduler_ports(vllm_args, monkeypatch, worker_type, role):
+    from vime.platforms import get_platform
+
+    platform = get_platform("npu")
+    monkeypatch.setattr(mod, "current_platform", lambda: platform)
+    server, _ = mod._compute_server_args(
+        vllm_args,
+        rank=0,
+        dist_init_addr=None,
+        host="127.0.0.1",
+        port=8000,
+        worker_type=worker_type,
+        disaggregation_bootstrap_port=12345,
+    )
+    assert server["kv_transfer_config"] == {"kv_connector": "MooncakePullConnector", "kv_role": role, "kv_port": 12345}
+    assert server["_disaggregation_bootstrap_port"] == 12349
+    assert platform.vllm.pd_port_count(4) == 9
+    assert server["_disaggregation_bootstrap_port"] < 12345 + platform.vllm.pd_port_count(4)

@@ -63,6 +63,12 @@ steps:
                 value: migration-models
               - label: "run-npu-ci-migration-foundation (batch 5: GRPO, NPU math, OPD teacher, multi-turn VLM)"
                 value: migration-foundation
+              - label: "run-npu-ci-migration-pd (batch 6: 3 small PD/EPD/recovery scenarios)"
+                value: migration-pd
+              - label: "run-npu-ci-migration-pd-models (batch 6: GLM4.7 and Qwen3.6 PD/MTP)"
+                value: migration-pd-models
+              - label: "run-npu-ci-migration-agent (requires external x86 Sunabako cluster)"
+                value: migration-agent
               - label: "run-npu-ci-nightly"
                 value: nightly
           - text: "Existing NPU image (optional; leave image-build unselected)"

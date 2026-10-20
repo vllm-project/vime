@@ -269,12 +269,18 @@ def execute(
                                                 "worker_type": side,
                                                 "num_gpus": rollout_gpus // 2,
                                                 "num_gpus_per_engine": rollout_gpus // 2,
-                                                "overrides": {
-                                                    "kv_transfer_config": {
-                                                        "kv_connector": "NixlConnector",
-                                                        "kv_role": "kv_both",
+                                                **(
+                                                    {
+                                                        "overrides": {
+                                                            "kv_transfer_config": {
+                                                                "kv_connector": "NixlConnector",
+                                                                "kv_role": "kv_both",
+                                                            }
+                                                        }
                                                     }
-                                                },
+                                                    if platform.name == "cuda"
+                                                    else {}
+                                                ),
                                             }
                                             for side in ("prefill", "decode")
                                         ],

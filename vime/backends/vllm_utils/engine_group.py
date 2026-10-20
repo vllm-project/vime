@@ -566,7 +566,9 @@ def _allocate_rollout_engine_addr_and_ports_normal(
             addr_and_ports[current_rank]["nccl_port"] = get_port()
 
             if worker_type in ("prefill", "decode"):
-                addr_and_ports[current_rank]["disaggregation_bootstrap_port"] = get_port()
+                addr_and_ports[current_rank]["disaggregation_bootstrap_port"] = get_port(
+                    current_platform().vllm.pd_port_count(_gpus_per_engine)
+                )
             elif worker_type == "encoder":
                 addr_and_ports[current_rank]["disaggregation_bootstrap_port"] = get_port(_gpus_per_engine)
 

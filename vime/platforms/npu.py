@@ -182,6 +182,25 @@ class NpuWeightTransferPlatformOps(WeightTransferPlatformOps):
 
 
 class NpuVLLMLaunchPlatformOps(VLLMLaunchPlatformOps):
+    def pd_port_count(self, num_devices: int) -> int:
+        # Worker handshakes followed by one control socket per DP rank.
+        return 2 * num_devices + 1
+
+    def pd_config(self, worker_type: str, bootstrap_port: int, parallel_config):
+        assert bootstrap_port is not None, "Ascend PD workers require disaggregation_bootstrap_port"
+        role = {"prefill": "kv_producer", "decode": "kv_consumer"}[worker_type]
+        slots = 1
+        for key in (
+            "tensor_parallel_size",
+            "data_parallel_size",
+            "pipeline_parallel_size",
+            "prefill_context_parallel_size",
+        ):
+            slots *= int(parallel_config.get(key, 1))
+        config = {"kv_connector": "MooncakePullConnector", "kv_role": role, "kv_port": bootstrap_port}
+        # Ascend's scheduler listens after the worker-handshake port range.
+        return config, bootstrap_port + slots
+
     def subprocess_env(self, base_env, *, visible_devices: str, colocate: bool) -> dict[str, str]:
         env = dict(base_env)
         env.pop("PYTORCH_CUDA_ALLOC_CONF", None)

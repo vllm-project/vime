@@ -1,33 +1,35 @@
 """GLM-4.7-Flash colocated training test with single-node PD + Mooncake."""
 
 import os
-import tempfile
+from pathlib import Path
+from shlex import quote
 
 import yaml
 
 import vime.utils.external_utils.command_utils as U
 
-
 MODEL_REPO = "zai-org/GLM-4.7-Flash"
 MODEL_NAME = "GLM-4.7-Flash"
 MODEL_TYPE = "glm4.7-30B-A3B"
 NUM_GPUS = 8
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download {MODEL_REPO} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/dapo-math-17k")
+    U.exec_command(f"hf download {MODEL_REPO} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/dapo-math-17k", dir_dst=DATASET_DIR)
     U.convert_checkpoint(
         model_name=MODEL_NAME,
         megatron_model_type=MODEL_TYPE,
         num_gpus_per_node=NUM_GPUS,
-        dir_dst="/root/models",
-        hf_checkpoint=f"/root/models/{MODEL_NAME}",
+        dir_dst=str(MODEL_DIR.parent),
+        hf_checkpoint=str(MODEL_DIR),
     )
 
 
-def write_vllm_config() -> str:
+def write_vllm_config(directory) -> str:
     config = {
         "vllm": [
             {
@@ -47,18 +49,22 @@ def write_vllm_config() -> str:
             }
         ]
     }
-    f = tempfile.NamedTemporaryFile("w", suffix=".yaml", prefix="vllm_pd_mooncake_", delete=False)
-    with f:
-        yaml.safe_dump(config, f, sort_keys=False)
-    return f.name
+    path = Path(directory) / "serving.yaml"
+    path.write_text(yaml.safe_dump(config, sort_keys=False))
+    return str(path)
 
 
 def execute():
-    vllm_config = write_vllm_config()
+    with U.test_work_directory("vime_glm_pd_") as directory:
+        _execute(directory)
 
-    ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME} " f"--ref-load /root/models/{MODEL_NAME}_torch_dist "
+
+def _execute(directory):
+    vllm_config = write_vllm_config(directory)
+    ref = MODEL_DIR if U.current_platform().name == "npu" else MODEL_DIR.parent / (MODEL_NAME + "_torch_dist")
+    ckpt_args = f"--hf-checkpoint {quote(str(MODEL_DIR))} --ref-load {quote(str(ref))} "
     rollout_args = (
-        "--prompt-data /root/datasets/dapo-math-17k/dapo-math-17k.jsonl "
+        f"--prompt-data {quote(str(DATASET_DIR / 'dapo-math-17k/dapo-math-17k.jsonl'))} "
         "--input-key prompt "
         "--label-key label "
         "--apply-chat-template "
@@ -116,7 +122,7 @@ def execute():
         "--vllm-max-cudagraph-capture-size 40 "
         '--vllm-speculative-config \'{"method":"mtp","num_speculative_tokens":4}\' '
         "--router-request-timeout-secs 1200 "
-        f"--vllm-config {vllm_config} "
+        f"--vllm-config {quote(vllm_config)} "
     )
     misc_args = (
         "--ci-test "
@@ -139,6 +145,7 @@ def execute():
         f"{perf_args} "
         f"{vllm_args} "
         f"{misc_args} "
+        f"{U.get_test_npu_model_args(max_model_len=8192)} "
     )
     U.execute_train(train_args=train_args, num_gpus_per_node=NUM_GPUS, megatron_model_type=MODEL_TYPE)
 

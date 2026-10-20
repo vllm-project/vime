@@ -18,17 +18,24 @@ import json
 import os
 import socket
 import subprocess
-import tempfile
 import time
 import urllib.request
 from pathlib import Path
+from shlex import quote
+
+from vllm.utils.system_utils import kill_process_tree
 
 import vime.utils.external_utils.command_utils as U
+from vime.platforms import current_platform
+from vime.utils.http_utils import is_port_available
 
 MODEL_NAME = "Qwen3-4B"
 MODEL_TYPE = "qwen3-4B"
 TORCH_DIST_CKPT = f"/root/models/{MODEL_NAME}_torch_dist"
 NUM_GPUS = 6
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 NUM_TRAIN_GPUS = 4
 NUM_PREFILL_ENGINES = 1
 NUM_DECODE_ENGINES = 1
@@ -37,7 +44,7 @@ EXTERNAL_HOST = "127.0.0.1"
 PREFILL_PORTS = [13150]
 DECODE_PORTS = [13151]
 BOOTSTRAP_PORTS = [13160]
-DECODE_BOOTSTRAP_PORTS = [13161]
+DECODE_BOOTSTRAP_PORTS = [13180]
 
 
 def _get_bond_ipv4():
@@ -87,20 +94,22 @@ def _get_external_host():
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/gsm8k")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/gsm8k", dir_dst=DATASET_DIR)
     U.convert_checkpoint(
         model_name=MODEL_NAME,
         megatron_model_type=MODEL_TYPE,
         num_gpus_per_node=NUM_TRAIN_GPUS,
-        dir_dst="/root/models",
+        dir_dst=str(MODEL_DIR.parent),
+        hf_checkpoint=str(MODEL_DIR),
     )
 
 
 def _get_gpu_split():
     """Partition visible GPUs: 4 train + 1 prefill + 1 decode."""
-    all_gpus = os.environ.get("CUDA_VISIBLE_DEVICES", ",".join(str(i) for i in range(NUM_GPUS))).split(",")
+    all_gpus = os.environ.get(
+        current_platform().ray.visible_devices_env, ",".join(str(i) for i in range(NUM_GPUS))
+    ).split(",")
     assert len(all_gpus) >= NUM_GPUS, f"Expected at least {NUM_GPUS} GPUs, got {len(all_gpus)}"
     train_gpus = all_gpus[:NUM_TRAIN_GPUS]
     cursor = NUM_TRAIN_GPUS
@@ -121,29 +130,32 @@ def _launch_vllm_server(
     external_host: str = EXTERNAL_HOST,
 ) -> subprocess.Popen:
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = ",".join(gpus)
+    platform = current_platform()
+    env[platform.ray.visible_devices_env] = ",".join(gpus)
+    env = platform.vllm.subprocess_env(env, visible_devices=",".join(gpus), colocate=False)
+    env["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     env["VLLM_SERVER_DEV_MODE"] = "1"
     assert disaggregation_bootstrap_port is not None
     env["VLLM_NIXL_SIDE_CHANNEL_HOST"] = external_host
-    env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(disaggregation_bootstrap_port)
+    kv_config, advertised_port = platform.vllm.pd_config(
+        disaggregation_mode, disaggregation_bootstrap_port, {"tensor_parallel_size": tp}
+    )
+    env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(advertised_port)
+    if not is_port_available(port):
+        raise RuntimeError(f"External serving port {port} is already in use")
     env["UCX_NET_DEVICES"] = os.environ.get("VIME_TEST_DISAGGREGATION_IB_DEVICE", "all").strip() or "all"
-
-    kv_role = {
-        "prefill": "kv_producer",
-        "decode": "kv_consumer",
-    }[disaggregation_mode]
 
     cmd = [
         "vllm",
         "serve",
-        f"/root/models/{MODEL_NAME}",
+        str(MODEL_DIR),
         "--host",
         "0.0.0.0",
         "--port",
         str(port),
         "--served-model-name",
-        f"/root/models/{MODEL_NAME}",
-        f"/root/models/{MODEL_NAME}/",
+        str(MODEL_DIR),
+        str(MODEL_DIR) + "/",
         "--tensor-parallel-size",
         str(tp),
         "--gpu-memory-utilization",
@@ -155,44 +167,60 @@ def _launch_vllm_server(
         "--enable-server-load-tracking",
         "--enable-scale-out",
         "--kv-transfer-config",
-        json.dumps({"kv_connector": "NixlConnector", "kv_role": kv_role}),
+        json.dumps(kv_config),
         "--weight-transfer-config",
-        json.dumps({"backend": "nccl"}),
+        json.dumps({"backend": platform.weight_transfer.backend("nccl")}),
     ]
 
-    log_file = open(log_path, "w")
-    process = subprocess.Popen(cmd, env=env, stdout=log_file, stderr=subprocess.STDOUT)
+    if platform.is_npu:
+        cmd += ["--max-model-len", "8192", "--max-num-seqs", "16", "--additional-config", '{"weight_nz_mode": 0}']
+    with open(log_path, "w") as log_file:
+        process = subprocess.Popen(cmd, env=env, stdout=log_file, stderr=subprocess.STDOUT)
     print(
         f"Starting external vllm {disaggregation_mode} server on GPUs {gpus} "
         f"port={port} tp={tp} (pid={process.pid}), log: {log_path}"
     )
 
-    # Wait up to ~10 minutes for /server_info to come up.  /health
-    # is unreliable for prefill/decode-only nodes, so we poll /server_info
-    # — that's what vime's discover_external_engines uses anyway.
-    deadline = time.time() + 600
-    while time.time() < deadline:
-        if process.poll() is not None:
-            log_tail = Path(log_path).read_text(errors="replace")[-8000:]
-            raise RuntimeError(
-                f"{disaggregation_mode} server exited with code {process.returncode}; {log_path} tail:\n{log_tail}"
-            )
-        try:
-            req = urllib.request.urlopen(f"http://{external_host}:{port}/server_info?config_format=json", timeout=2)
-            if req.status == 200:
-                print(f"External vllm {disaggregation_mode} server is ready on GPUs {gpus}")
-                return process
-        except Exception:
-            pass
-        time.sleep(5)
+    try:
+        # Wait up to ~10 minutes for /server_info to come up.  /health
+        # is unreliable for prefill/decode-only nodes, so we poll /server_info
+        # — that's what vime's discover_external_engines uses anyway.
+        deadline = time.time() + 600
+        while time.time() < deadline:
+            if process.poll() is not None:
+                log_tail = Path(log_path).read_text(errors="replace")[-8000:]
+                raise RuntimeError(
+                    f"{disaggregation_mode} server exited with code {process.returncode}; {log_path} tail:\n{log_tail}"
+                )
+            try:
+                req = urllib.request.urlopen(
+                    f"http://{external_host}:{port}/server_info?config_format=json", timeout=2
+                )
+                if req.status == 200:
+                    print(f"External vllm {disaggregation_mode} server is ready on GPUs {gpus}")
+                    return process
+            except Exception:
+                pass
+            time.sleep(5)
 
-    process.kill()
-    process.wait()
-    log_tail = Path(log_path).read_text(errors="replace")[-8000:]
-    raise RuntimeError(f"{disaggregation_mode} server failed to start within timeout; {log_path} tail:\n{log_tail}")
+        log_tail = Path(log_path).read_text(errors="replace")[-8000:]
+        raise RuntimeError(
+            f"{disaggregation_mode} server failed to start within timeout; {log_path} tail:\n{log_tail}"
+        )
+    except BaseException:
+        kill_process_tree(process.pid)
+        process.wait(timeout=30)
+        raise
 
 
 def execute():
+    with U.test_work_directory("vime_external_pd_") as directory, U.test_work_directory(
+        "vime_external_pd_local_", parent="/tmp"
+    ) as local_checkpoint:
+        _execute(directory, local_checkpoint)
+
+
+def _execute(directory, local_checkpoint):
     update_mode = os.environ.get("VIME_TEST_UPDATE_MODE", "full")
     assert update_mode in {"full", "delta"}
     train_gpus, prefill_gpus, decode_gpus = _get_gpu_split()
@@ -202,7 +230,9 @@ def execute():
 
     # Restrict CUDA_VISIBLE_DEVICES to training GPUs before Ray starts so
     # ray's bundle allocator doesn't try to claim the external vllm GPUs.
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(train_gpus)
+    visible_env = current_platform().ray.visible_devices_env
+    previous_visible = os.environ.get(visible_env)
+    os.environ[visible_env] = ",".join(train_gpus)
 
     def launch_external_engines():
         for idx, (gpu, port, bootstrap_port) in enumerate(
@@ -216,7 +246,7 @@ def execute():
                     disaggregation_mode="prefill",
                     disaggregation_bootstrap_port=bootstrap_port,
                     external_host=external_host,
-                    log_path=f"/tmp/vllm_external_prefill_{idx}.log",
+                    log_path=str(directory / f"prefill_{idx}.log"),
                 )
             )
         for idx, (gpu, port, bootstrap_port) in enumerate(
@@ -230,19 +260,18 @@ def execute():
                     disaggregation_mode="decode",
                     disaggregation_bootstrap_port=bootstrap_port,
                     external_host=external_host,
-                    log_path=f"/tmp/vllm_external_decode_{idx}.log",
+                    log_path=str(directory / f"decode_{idx}.log"),
                 )
             )
 
-    disk_dir_cm = tempfile.TemporaryDirectory(prefix=f"vime_external_pd_{update_mode}_disk_")
-    local_checkpoint_dir_cm = tempfile.TemporaryDirectory(prefix="vime_external_pd_local_checkpoint_")
-    disk_dir = disk_dir_cm.name
-    local_checkpoint_dir = local_checkpoint_dir_cm.name
+    disk_dir = str(directory / "weights")
+    local_checkpoint_dir = str(local_checkpoint)
     try:
-        ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load {TORCH_DIST_CKPT} "
+        ref = MODEL_DIR if current_platform().is_npu else MODEL_DIR.parent / (MODEL_NAME + "_torch_dist")
+        ckpt_args = f"--hf-checkpoint {quote(str(MODEL_DIR))} --ref-load {quote(str(ref))} "
 
         rollout_args = (
-            "--prompt-data /root/datasets/gsm8k/train.parquet "
+            f"--prompt-data {quote(str(DATASET_DIR / 'gsm8k/train.parquet'))} "
             "--input-key messages "
             "--label-key label "
             "--apply-chat-template "
@@ -301,12 +330,13 @@ def execute():
         disk_update_args = (
             f"--update-weight-mode {update_mode} "
             "--update-weight-transport disk "
-            f"--update-weight-disk-dir {disk_dir} "
+            f"--update-weight-disk-dir {quote(disk_dir)} "
             "--update-weight-disk-keep-files "
         )
         if update_mode == "delta":
             disk_update_args += (
-                "--update-weight-delta-encoding xor " f"--update-weight-local-checkpoint-dir {local_checkpoint_dir} "
+                "--update-weight-delta-encoding xor "
+                f"--update-weight-local-checkpoint-dir {quote(local_checkpoint_dir)} "
             )
 
         ci_args = "--ci-test "
@@ -332,6 +362,7 @@ def execute():
             f"{disk_update_args} "
             f"{ci_args} "
             f"{misc_args} "
+            f"{U.get_test_npu_model_args(max_model_len=8192)} "
         )
 
         U.execute_train(
@@ -353,14 +384,20 @@ def execute():
             assert checkpoint_dirs, f"No disk checkpoint directories were written under {disk_dir}"
             assert any((path / "model.safetensors.index.json").exists() for path in checkpoint_dirs)
             assert any(list(path.glob("*.safetensors")) for path in checkpoint_dirs)
+    except BaseException:
+        for path in directory.glob("*.log"):
+            print(f"External PD failure; {path.name}:\n{path.read_text(errors='replace')[-16000:]}", flush=True)
+        raise
     finally:
-        for p in processes:
-            if p.poll() is None:
-                p.kill()
-                p.wait()
-        U.exec_command("pkill -9 vllm; true")
-        disk_dir_cm.cleanup()
-        local_checkpoint_dir_cm.cleanup()
+        try:
+            for process in processes:
+                kill_process_tree(process.pid)
+                process.wait(timeout=30)
+        finally:
+            if previous_visible is None:
+                os.environ.pop(visible_env, None)
+            else:
+                os.environ[visible_env] = previous_visible
 
 
 if __name__ == "__main__":
