@@ -69,7 +69,7 @@ def _build_packed_ipc_update_info(
     )
     assert chunk is not None
     _, ipc_args = reduce_tensor(chunk.packed_tensor)
-    gpu_uuid = str(torch.cuda.get_device_properties(torch.cuda.current_device()).uuid)
+    gpu_uuid = accelerator.device_uuid()
     return (
         {
             "names": chunk.names,

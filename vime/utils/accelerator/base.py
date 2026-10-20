@@ -96,6 +96,17 @@ class Accelerator(abc.ABC):
     def get_device_properties(self, device: int | str | torch.device | None = None) -> Any:
         return None
 
+    def device_uuid(self) -> str:
+        """Return a stable identifier for the current device.
+
+        Weight transfer names the local device in its handshake, so sender and
+        receiver have to derive the same identifier the same way.
+        """
+        uuid = getattr(self.get_device_properties(self.current_device()), "uuid", None)
+        if uuid is None:
+            raise RuntimeError(f"Accelerator {self.name!r} does not expose a device UUID")
+        return str(uuid)
+
     def memory_module(self) -> Any:
         """Return the backend memory namespace, if it exposes one."""
         return None

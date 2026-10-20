@@ -437,6 +437,10 @@ def get_device_properties(device_arg: int | str | torch.device | None = None) ->
     return _backend().get_device_properties(device_arg)
 
 
+def device_uuid() -> str:
+    return _backend().device_uuid()
+
+
 def memory_module() -> Any:
     return _backend().memory_module()
 
