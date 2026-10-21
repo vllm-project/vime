@@ -168,6 +168,7 @@ class VLLMEngine(RayActor):
         disaggregation_bootstrap_port=None,
         router_ip=None,
         router_port=None,
+        external_kv_transfer_config=None,
     ):
         del nccl_port
 
@@ -191,6 +192,7 @@ class VLLMEngine(RayActor):
             base_gpu_id=self.base_gpu_id,
             vllm_overrides=self.vllm_overrides,
             num_gpus_per_engine=self.num_gpus_per_engine,
+            external_kv_transfer_config=external_kv_transfer_config,
         )
 
         self.node_rank = server_args_dict["node_rank"]
@@ -508,12 +510,21 @@ class VLLMEngine(RayActor):
     def pause_generation(self, mode: str = "abort"):
         if self.node_rank != 0:
             return
-        response = requests.post(
-            f"http://{self.server_host}:{self.server_port}/pause",
-            params={"mode": "keep" if mode == "in_place" else mode, "clear_cache": "false"},
-            json={},
-        )
-        response.raise_for_status()
+        url = f"http://{self.server_host}:{self.server_port}/pause"
+        started = time.monotonic()
+        logger.info(f"Pause start: url={url}, worker_type={self.worker_type}, mode={mode}, timeout=300s")
+        try:
+            response = requests.post(
+                url,
+                params={"mode": "keep" if mode == "in_place" else mode, "clear_cache": "false"},
+                json={},
+                timeout=300,
+            )
+            response.raise_for_status()
+        except requests.RequestException:
+            logger.exception(f"Pause failed after {time.monotonic() - started:.2f}s: {url}")
+            raise
+        logger.info(f"Pause completed after {time.monotonic() - started:.2f}s: {url}")
         return response
 
     def continue_generation(self):
@@ -663,6 +674,7 @@ def _compute_server_args(
     base_gpu_id: int | None = None,
     vllm_overrides: dict | None = None,
     num_gpus_per_engine: int | None = None,
+    external_kv_transfer_config: dict | None = None,
 ):
     normalized_overrides = {}
     for key, value in (vllm_overrides or {}).items():
@@ -727,9 +739,19 @@ def _compute_server_args(
             kwargs["headless"] = True
 
     if worker_type in ("prefill", "decode"):
-        kwargs["kv_transfer_config"], disaggregation_bootstrap_port = current_platform().vllm.pd_config(
-            worker_type, disaggregation_bootstrap_port, kwargs
-        )
+        if external_kv_transfer_config is not None:
+            if not args.rollout_external:
+                raise ValueError("External KV transfer metadata requires --rollout-external")
+            expected_role = "kv_producer" if worker_type == "prefill" else "kv_consumer"
+            if external_kv_transfer_config.get("kv_role") not in (expected_role, "kv_both"):
+                raise ValueError(f"External {worker_type} has incompatible KV role: {external_kv_transfer_config}")
+            if worker_type == "prefill" and disaggregation_bootstrap_port is None:
+                raise ValueError("External prefill requires an advertised disaggregation_bootstrap_port")
+            kwargs["kv_transfer_config"] = dict(external_kv_transfer_config)
+        else:
+            kwargs["kv_transfer_config"], disaggregation_bootstrap_port = current_platform().vllm.pd_config(
+                worker_type, disaggregation_bootstrap_port, kwargs
+            )
 
     if ec_transfer_override is not None and worker_type in ("encoder", "regular", "prefill"):
         kwargs["ec_transfer_config"] = {

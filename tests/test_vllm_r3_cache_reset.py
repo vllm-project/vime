@@ -14,6 +14,7 @@ NUM_GPUS = 0
 def test_abort_then_r3_reset_fully_pauses_without_losing_abort(monkeypatch, r3, node_rank):
     engine = object.__new__(vllm_engine.VLLMEngine)
     engine.args = SimpleNamespace(use_rollout_routing_replay=r3)
+    engine.worker_type = "regular"
     engine.node_rank = node_rank
     engine.server_host, engine.server_port = "localhost", 8000
     state = "running"

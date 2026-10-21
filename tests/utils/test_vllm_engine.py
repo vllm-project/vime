@@ -903,7 +903,7 @@ def test_pipeline_rl_pause_and_disk_reload(vllm_engine, monkeypatch, flush_cache
     calls = []
 
     def post(url, *, json, params=None, timeout=None):
-        assert timeout is None
+        assert timeout == (300 if url.endswith("/pause") else None)
         calls.append((url, json, params))
         return _MockResponse(json_data={"success": True})
 
@@ -936,6 +936,67 @@ def test_pipeline_rl_worker_rank_does_not_send_control_requests(vllm_engine, mon
     vllm_engine.pause_generation()
     vllm_engine.update_weights_from_disk("/weights", weight_version="2")
     vllm_engine.continue_generation()
+
+
+def test_pause_timeout_is_visible_before_other_training_ranks_time_out(vllm_engine, monkeypatch, caplog):
+    def post(url, **kwargs):
+        assert kwargs["timeout"] == 300
+        raise requests.ReadTimeout("prefill pause did not complete")
+
+    vllm_engine.worker_type = "prefill"
+    monkeypatch.setattr(mod.requests, "post", post)
+    with caplog.at_level("INFO"), pytest.raises(requests.ReadTimeout):
+        vllm_engine.pause_generation()
+    assert "worker_type=prefill" in caplog.text
+    assert "Pause failed" in caplog.text
+
+
+@pytest.mark.parametrize("platform_name", ["cuda", "npu"])
+@pytest.mark.parametrize("worker_type", ["prefill", "decode"])
+def test_external_pd_preserves_discovered_ports_and_strict_config(vllm_args, monkeypatch, platform_name, worker_type):
+    from vime.backends.vllm_utils.external import ExternalEngineInfo, external_engine_init_kwargs
+    from vime.platforms import get_platform
+
+    platform = get_platform(platform_name)
+    monkeypatch.setattr(mod, "current_platform", lambda: platform)
+    base_port = 13160 if worker_type == "prefill" else 13180
+    config, advertised = platform.vllm.pd_config(worker_type, base_port, {"tensor_parallel_size": 1})
+    info = ExternalEngineInfo(
+        "http://host:8000", "host", 8000, worker_type, 1, advertised, {"kv_transfer_config": config}
+    )
+    engine = mod.VLLMEngine(vllm_args, rank=0, worker_type=worker_type, num_gpus_per_engine=1)
+    calls = []
+    actual = {
+        "nnodes": 1,
+        "node_rank": 0,
+        "kv_transfer_config": dict(config),
+        "weight_transfer_config": {"backend": platform.weight_transfer.backend("nccl")},
+    }
+    monkeypatch.setattr(mod, "get_server_info", lambda url: actual)
+    monkeypatch.setattr(engine, "_register_to_router", lambda args: calls.append(args))
+    engine.init(**external_engine_init_kwargs(info))
+    assert calls[0]["kv_transfer_config"] == config
+    assert calls[0]["_disaggregation_bootstrap_port"] == advertised
+    # Discovery and attachment are separate requests. Still reject a server
+    # whose transfer configuration changed between them.
+    monkeypatch.setattr(
+        mod, "get_server_info", lambda url: {**actual, "kv_transfer_config": {**config, "kv_role": "changed"}}
+    )
+    with pytest.raises(AssertionError, match="kv_transfer_config"):
+        engine.init(**external_engine_init_kwargs(info))
+
+
+def test_external_pd_rejects_wrong_role_in_discovery(vllm_args):
+    with pytest.raises(ValueError, match="incompatible KV role"):
+        mod._compute_server_args(
+            vllm_args,
+            0,
+            None,
+            "host",
+            8000,
+            worker_type="decode",
+            external_kv_transfer_config={"kv_connector": "MooncakePullConnector", "kv_role": "kv_producer"},
+        )
 
 
 def test_pull_weights_posts_collective_rpc(vllm_engine, monkeypatch):

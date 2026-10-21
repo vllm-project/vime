@@ -46,6 +46,17 @@ def keep_test_artifacts() -> bool:
     return get_bool_env_var("VIME_TEST_KEEP_ARTIFACTS", "0")
 
 
+def hf_download_public_model(full_name: str, *, dir_dst: str | Path, revision: str | None = None):
+    if current_platform().name == "npu":
+        from vime.utils.external_utils.hf_assets import download_public_model
+
+        return download_public_model(full_name, dir_dst, revision=revision)
+    command = ["hf", "download", full_name, "--local-dir", str(dir_dst)]
+    if revision is not None:
+        command += ["--revision", revision]
+    return exec_command(shlex.join(command))
+
+
 @contextmanager
 def test_work_directory(prefix: str, directory=None, keep: bool | None = None, parent=None):
     """Clean owned scratch even on failure; explicit directories remain caller-owned."""

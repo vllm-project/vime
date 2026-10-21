@@ -44,6 +44,21 @@ def platform(request, monkeypatch, tmp_path):
     return get_platform(request.param)
 
 
+@pytest.mark.parametrize(
+    "filename", ["test_qwen2.5_vl_3B_ep_disaggregation.py", "test_qwen3.6_35B_A3B_pd_mooncake.py"]
+)
+def test_pd_public_model_download_retains_model_revision_and_cache(platform, monkeypatch, filename):
+    module = load(monkeypatch, filename)
+    calls = []
+    monkeypatch.setattr(U, "hf_download_public_model", lambda repo, **kwargs: calls.append((repo, kwargs)))
+    monkeypatch.setattr(U, "hf_download_dataset", lambda *args, **kwargs: None)
+    monkeypatch.setattr(U, "convert_checkpoint", lambda **kwargs: None)
+    module.prepare()
+    assert calls[0][0] == f"Qwen/{module.MODEL_NAME}"
+    assert calls[0][1]["dir_dst"] == (module.MODEL_PATH if "vl_3B" in filename else module.MODEL_DIR)
+    assert calls[0][1].get("revision") == getattr(module, "MODEL_REVISION", None)
+
+
 @pytest.mark.parametrize("filename", ["test_glm4.7_30B_A3B_pd_mooncake.py", "test_qwen3.6_35B_A3B_pd_mooncake.py"])
 def test_large_pd_cases_keep_topologies_and_mtp_with_owned_scratch(platform, monkeypatch, filename):
     module = load(monkeypatch, filename)

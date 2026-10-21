@@ -586,3 +586,25 @@ Registration counts are not equivalent to full GPU-configuration parity.
 The final batch changes shared Python/runtime setup and can reuse the #390
 image with `image-build` unselected; its EPD setup installs only its pinned
 optional wheels. Hardware acceptance and sandbox provisioning are pending.
+
+### Build #391 PD fixes
+
+The external PD adapter now keeps the discovered KV configuration and advertised
+control ports rather than treating them as new local port allocations. Public
+model downloads for G45/G11 retain their repositories, revisions and cache paths;
+on failure they retry via the official endpoint with Xet disabled, at most three
+attempts, and reject incomplete safetensors shards.
+
+The NPU vLLM patch polls scheduler-side KV completion even when an empty worker
+output was discarded, so producer ACKs can free retained blocks and finish a
+pause. Pause HTTP calls log their engine role and have a 300-second timeout.
+The Ascend patch drains pulls and deregisters Mooncake buffers before sleep,
+then registers them again only after the KV pool wakes. Weight-only wakes keep
+KV buffers unregistered. These changes preserve PD, colocation, memory offload,
+fault injection and recovery assertions; hardware acceptance still requires CI.
+
+Select `migration-pd`, then `migration-pd-models`; keep `migration-agent`
+unselected until a sandbox is provisioned. The changes are Python and patch
+updates without new binary dependencies. The #391 image can be supplied through
+**Existing NPU image** with `image-build` unselected: the existing runtime patch
+reconciler replaces the image's old patch series before the tests run.

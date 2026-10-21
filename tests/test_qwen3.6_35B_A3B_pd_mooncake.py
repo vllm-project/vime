@@ -14,7 +14,7 @@ TORCH_DIST_CKPT = f"/root/models/{MODEL_NAME}_torch_dist"
 
 
 def prepare():
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_public_model(f"Qwen/{MODEL_NAME}", dir_dst=MODEL_DIR)
     U.hf_download_dataset("zhuzilin/dapo-math-17k", dir_dst=DATASET_DIR)
     if U.get_bool_env_var("VIME_TEST_ENABLE_EVAL", "1"):
         U.hf_download_dataset("zhuzilin/aime-2024", dir_dst=DATASET_DIR)

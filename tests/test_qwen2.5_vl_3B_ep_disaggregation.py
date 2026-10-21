@@ -49,7 +49,7 @@ GROUP_OVERRIDES = {
 
 def prepare() -> None:
     MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --revision {MODEL_REVISION} --local-dir {MODEL_PATH}")
+    U.hf_download_public_model(f"Qwen/{MODEL_NAME}", revision=MODEL_REVISION, dir_dst=MODEL_PATH)
 
 
 def _write_config(worker_types: tuple[str, ...], directory) -> str:
