@@ -65,9 +65,7 @@ def engine_actor_env(args: Any, env_vars: Mapping[str, str] | None = None) -> di
     return _with_cann_and_allocator(env, getattr(args, "colocate", False))
 
 
-def serving_subprocess_env(
-    base_env: Mapping[str, str], *, visible_devices: str, colocate: bool
-) -> dict[str, str]:
+def serving_subprocess_env(base_env: Mapping[str, str], *, visible_devices: str, colocate: bool) -> dict[str, str]:
     env = dict(base_env)
     # The caller set the CUDA selection before asking; replace it rather than
     # leave both, so the subprocess cannot be pointed at two device sets.

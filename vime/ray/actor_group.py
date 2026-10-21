@@ -10,8 +10,8 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from vime.ray import resources
 from vime.ray.training_recovery import configure_recovery_checkpoint, training_recovery_enabled
-from vime.utils import device_env
 from vime.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, add_default_ray_env_vars
+from vime.utils import device_env
 from vime.utils.weight_sync import should_flush_cache
 
 

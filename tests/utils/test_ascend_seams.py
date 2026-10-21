@@ -65,8 +65,13 @@ def test_every_named_init_info_factory_exists(transport):
 def test_the_ascend_lifecycle_implements_the_whole_default_surface():
     """A missing hook would silently fall back to GPU behavior on NPU."""
     ascend = importlib.import_module(NPUAccelerator.megatron_lifecycle_qualname())
-    required = ("before_import", "after_args", "training_region", "initialize_optimizer_state",
-                "offload_disable_context")
+    required = (
+        "before_import",
+        "after_args",
+        "training_region",
+        "initialize_optimizer_state",
+        "offload_disable_context",
+    )
 
     assert [name for name in required if not callable(getattr(ascend, name, None))] == []
 

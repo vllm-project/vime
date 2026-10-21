@@ -353,9 +353,7 @@ def get_accelerator() -> Accelerator:
     if _ACCELERATOR is not None:
         return _ACCELERATOR
     if accelerator_disabled():
-        raise RuntimeError(
-            "VIME_ACCELERATOR=none disables accelerator selection; this code path needs a device."
-        )
+        raise RuntimeError("VIME_ACCELERATOR=none disables accelerator selection; this code path needs a device.")
     with _SELECTION_LOCK:
         if _ACCELERATOR is not None:
             return _ACCELERATOR
