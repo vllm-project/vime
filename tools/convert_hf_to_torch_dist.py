@@ -5,11 +5,14 @@ import shutil
 import torch
 import torch.distributed as dist
 
-# Before anything from megatron: importing this installs the training
-# backend's vendor layer, and a patch applied after Megatron is already
-# imported does not reach the aliases Megatron captured at import time.
-# A no-op where there is nothing to install.
-import vime.backends.megatron_utils  # noqa: F401
+from vime.backends import megatron_lifecycle
+
+# Before anything from megatron: a patch applied after Megatron is already
+# imported does not reach the aliases Megatron captured at import time. The
+# pinned Megatron keeps torch.compile as jit_fuser, and MegatronAdaptor's
+# patch only updates the attribute named compile. Idempotent, and a no-op
+# where there is nothing to install.
+megatron_lifecycle.current().before_import()
 
 # isort: split
 from megatron.core.enums import ModelType

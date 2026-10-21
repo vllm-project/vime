@@ -96,22 +96,8 @@ class NPUAccelerator(TorchAccelerator):
         return names[transport]
 
     @classmethod
-    def train_actor_env(cls, args: Any, env_vars: Any = None) -> dict[str, str]:
-        from vime_plugins.ascend import device_env
-
-        return device_env.train_actor_env(args, env_vars)
-
-    @classmethod
-    def engine_actor_env(cls, args: Any, env_vars: Any = None) -> dict[str, str]:
-        from vime_plugins.ascend import device_env
-
-        return device_env.engine_actor_env(args, env_vars)
-
-    @classmethod
-    def serving_subprocess_env(cls, base_env: Any, *, visible_devices: str, colocate: bool) -> dict[str, str]:
-        from vime_plugins.ascend import device_env
-
-        return device_env.serving_subprocess_env(base_env, visible_devices=visible_devices, colocate=colocate)
+    def device_env_qualname(cls) -> str:
+        return "vime_plugins.ascend.device_env"
 
     def _module(self) -> Any:
         module = npu_module()
