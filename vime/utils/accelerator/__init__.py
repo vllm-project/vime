@@ -441,16 +441,8 @@ def device_uuid() -> str:
     return _backend().device_uuid()
 
 
-def train_actor_env(args: Any, env_vars: Any = None) -> dict[str, str]:
-    return _describing_backend().train_actor_env(args, env_vars)
-
-
-def engine_actor_env(args: Any, env_vars: Any = None) -> dict[str, str]:
-    return _describing_backend().engine_actor_env(args, env_vars)
-
-
-def serving_subprocess_env(base_env: Any, *, visible_devices: str, colocate: bool) -> dict[str, str]:
-    return _describing_backend().serving_subprocess_env(base_env, visible_devices=visible_devices, colocate=colocate)
+def device_env_qualname() -> str | None:
+    return _describing_backend().device_env_qualname()
 
 
 def weight_transfer_backend(transport: str) -> str:

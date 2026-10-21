@@ -23,7 +23,7 @@ from vime.backends.vllm_utils.runtime import (
 )
 from vime.backends.vllm_utils.server_control import register_worker, unregister_worker
 from vime.ray.ray_actor import RayActor
-from vime.utils import accelerator
+from vime.utils import accelerator, device_env
 from vime.utils.http_utils import _wrap_ipv6, get_host_info
 from vime.utils.model_config import vllm_model_config_overrides
 
@@ -81,7 +81,7 @@ def _build_subprocess_env(server_args_dict: dict[str, Any]) -> dict[str, str]:
     env["CUDA_VISIBLE_DEVICES"] = server_args_dict["_visible_devices"]
     # ROCm: keep HIP visibility in sync with CUDA (no-op on CUDA).
     env["HIP_VISIBLE_DEVICES"] = server_args_dict["_visible_devices"]
-    env = accelerator.serving_subprocess_env(
+    env = device_env.current().serving_subprocess_env(
         env,
         visible_devices=server_args_dict["_visible_devices"],
         colocate=getattr(args, "colocate", False),
