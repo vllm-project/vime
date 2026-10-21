@@ -249,6 +249,21 @@ def _bootstrap_torch_supa_if_needed() -> bool:
     return _try_import_torch_supa()
 
 
+def _candidate_available(name: str, entry: _BackendRegistration) -> bool:
+    """Whether a backend can be auto-selected, bootstrapping it if it must.
+
+    A runtime that torch does not autoload is not importable until something
+    imports it, so ``is_available()`` alone would report the backend absent on
+    a host that has its devices. Probe for a device first, with a check that
+    imports nothing, and only then let the backend attach itself.
+    """
+    if name == "npu" and entry.factory is NPUAccelerator:
+        if not _has_npu_device():
+            return False
+        _bootstrap_torch_npu_if_needed()
+    return entry.is_available()
+
+
 def _cuda_available() -> bool:
     try:
         return bool(torch.cuda.is_available() and torch.cuda.device_count() > 0)
@@ -354,7 +369,7 @@ def get_accelerator() -> Accelerator:
         # Highest priority wins; names break priority ties deterministically.
         candidates = sorted(_REGISTRY.items(), key=lambda item: (-item[1].priority, item[0]))
         for name, registration in candidates:
-            if registration.is_available():
+            if _candidate_available(name, registration):
                 _ACCELERATOR = _make_selected(name, explicit=False)
                 logger.info("Selected accelerator %s (auto)", _ACCELERATOR.name)
                 return _ACCELERATOR
@@ -379,7 +394,9 @@ def initialize_accelerator() -> Accelerator | None:
         return None
     with _SELECTION_LOCK:
         _register_builtin_backends()
-        if _requested_name() is not None or any(entry.is_available() for entry in _REGISTRY.values()):
+        if _requested_name() is not None or any(
+            _candidate_available(name, entry) for name, entry in _REGISTRY.items()
+        ):
             return get_accelerator()
         return None
 
@@ -411,10 +428,20 @@ def _describing_backend() -> type[Accelerator]:
     A process that only builds scheduling requests needs the description of
     the accelerator the job runs on, not a working local device, and may
     legitimately have none of its own. Resolution order is the already
-    selected backend, the explicitly requested one read for its class
-    attributes alone, whatever this host can actually offer, and finally the
-    neutral defaults on :class:`Accelerator`, which are what the GPU path
-    already assumes. No backend is instantiated and no runtime is imported.
+    selected backend, the explicitly requested one, whatever this host can
+    actually offer, and finally the neutral defaults on :class:`Accelerator`,
+    which are what the GPU path already assumes.
+
+    Side effects by branch, because they are not uniform:
+
+    * An already selected backend, and the neutral default: none.
+    * An explicit request: the registered class is returned as a class. A
+      registration whose factory is not itself a class is called once to
+      learn the type, so such a factory must stay cheap.
+    * Falling through to auto-detection: this runs the ordinary selection,
+      which probes for devices, may import a vendor runtime, and installs
+      the process-wide backend. A caller that must not reach a runtime sets
+      VIME_ACCELERATOR, to a backend name or to "none".
     """
     if _ACCELERATOR is not None:
         return type(_ACCELERATOR)
