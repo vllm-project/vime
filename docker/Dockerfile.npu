@@ -201,12 +201,14 @@ RUN pip install --no-deps --force-reinstall /tmp/router-wheels/*.whl && \
 # extra: it pins a different torch / torch_npu than this image.
 RUN pip install --no-deps einops 'fla-core==0.5.2' 'flash-linear-attention==0.5.2'
 
-# Vime currently imports torch_memory_saver from its training actor.
+# Build Python and both allocator libraries together from the patched source.
 RUN git clone --depth 1 --branch 2026.6.0 \
       https://github.com/sgl-project/sgl-kernel-npu.git /root/sgl-kernel-npu && \
+    git -C /root/sgl-kernel-npu apply --check /opt/npu_patch/torch-memory-saver.patch && \
+    git -C /root/sgl-kernel-npu apply /opt/npu_patch/torch-memory-saver.patch && \
     cd /root/sgl-kernel-npu/contrib/torch_memory_saver/python && \
     python3 setup.py bdist_wheel && \
-    python3 -m pip install --no-deps \
+    python3 -m pip install --no-deps --force-reinstall \
       dist/torch_memory_saver-*.whl && \
     cd /root && \
     rm -rf /root/sgl-kernel-npu

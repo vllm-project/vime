@@ -16,7 +16,7 @@ This guide provides instructions for installing Vime with NPU support, including
 | MegatronAdaptor | `15582addff3f3d4680e350826fa70d012b475509` | [GitCode](https://gitcode.com/Ascend/MegatronAdaptor) |
 | TransformerEngineNPU | `d743c83d060d5edc48867ecb9e93ec80d81860e4` | [GitCode](https://gitcode.com/Ascend/TransformerEngineNPU) |
 | MindSpeed | `fc63de5c48426dd019c3b3f39e65f5bdf56e4086` | [GitCode](https://gitcode.com/Ascend/MindSpeed) |
-| torch_memory_saver (NPU) | `sgl-kernel-npu` tag `2026.6.0` | [GitHub](https://github.com/sgl-project/sgl-kernel-npu) |
+| torch_memory_saver (NPU) | `sgl-kernel-npu` tag `2026.6.0` + `torch-memory-saver.patch` | [GitHub](https://github.com/sgl-project/sgl-kernel-npu) |
 
 ## Preparing the Running Environment
 
@@ -139,13 +139,15 @@ keep the latter as provided by the base image. Do not install the training packa
 
 ### 6. torch_memory_saver
 
-Build the NPU wheel from `sgl-kernel-npu`:
+Apply the NPU patch, then build and reinstall the wheel:
 
 ```bash
 git clone --depth 1 --branch 2026.6.0 https://github.com/sgl-project/sgl-kernel-npu.git "${VIME_INSTALL_ROOT}/sgl-kernel-npu"
+git -C "${VIME_INSTALL_ROOT}/sgl-kernel-npu" apply --check "${PATCH_DIR}/torch-memory-saver.patch"
+git -C "${VIME_INSTALL_ROOT}/sgl-kernel-npu" apply "${PATCH_DIR}/torch-memory-saver.patch"
 cd "${VIME_INSTALL_ROOT}/sgl-kernel-npu/contrib/torch_memory_saver/python"
 python3 setup.py bdist_wheel
-python3 -m pip install --no-deps dist/torch_memory_saver-*.whl
+python3 -m pip install --no-deps --force-reinstall dist/torch_memory_saver-*.whl
 cd "${VIME_INSTALL_ROOT}/vime"
 ```
 

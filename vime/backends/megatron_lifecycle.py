@@ -1,21 +1,21 @@
-"""Points in Megatron's startup and offload where a backend may differ.
+"""Points in Megatron's startup where a backend may differ.
 
-A backend that needs vendor patches installed at an exact moment, or whose
-memory saver behaves differently, names a replacement module through
-``Accelerator.megatron_lifecycle_qualname()``. The default below is what the
-GPU path does today, and importing this module imports neither Megatron nor
-any vendor runtime.
+A backend that needs vendor patches installed at an exact moment names a
+replacement module through ``Accelerator.megatron_lifecycle_qualname()``. The
+default below does nothing, and importing this module imports neither Megatron
+nor any vendor runtime.
 
-Replacements are whole modules rather than a bag of capability flags on the
-accelerator: "this backend's memory saver cannot be disabled" is not a
-property of the device, it is how this function behaves for it.
+The contract is two functions because that is all that is left: both are about
+*when* a vendor layer may touch Megatron, which nothing outside the import
+order can express. Offload used to be here too; it moved into the dependencies
+instead, where Megatron exposes a buffer-allocation hook and the patched NPU
+memory saver takes the allocator through the same preload shim as CUDA.
 """
 
 from __future__ import annotations
 
 import importlib
 import sys
-from contextlib import nullcontext
 from typing import Any
 
 
@@ -27,25 +27,6 @@ def before_import() -> None:
 def after_args(args: Any) -> None:
     """Run once Megatron's arguments are fully resolved."""
     return None
-
-
-def training_region(offload_train: bool):
-    """Region whose allocations are offloaded and reloaded together."""
-    return nullcontext()
-
-
-def initialize_optimizer_state(optimizer: Any) -> None:
-    """Materialize lazily created optimizer state inside the training region."""
-    return None
-
-
-def offload_disable_context(offload_train: bool):
-    """Context in which offloaded memory is resident again, for weight export."""
-    if not offload_train:
-        return nullcontext()
-    from torch_memory_saver import torch_memory_saver
-
-    return torch_memory_saver.disable()
 
 
 def current():

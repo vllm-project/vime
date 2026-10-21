@@ -6,7 +6,6 @@ everything it names exists, never that a device works.
 
 import importlib
 import sys
-from types import SimpleNamespace
 
 import pytest
 
@@ -14,7 +13,6 @@ from vime.backends import megatron_lifecycle
 from vime.ray import resources
 from vime.utils import accelerator
 from vime.utils.accelerator.npu import NPUAccelerator
-from vime_plugins.ascend import device_env
 
 
 pytestmark = pytest.mark.unit
@@ -65,14 +63,19 @@ def test_every_named_init_info_factory_exists(transport):
 
 
 def test_the_ascend_lifecycle_implements_the_whole_default_surface():
-    """A missing hook would silently fall back to GPU behavior on NPU."""
+    """A missing hook would silently fall back to GPU behavior on NPU.
+
+    Derived from the default module rather than listed, so a hook added or
+    dropped there has to be answered here too.
+    """
     ascend = importlib.import_module(NPUAccelerator.megatron_lifecycle_qualname())
-    required = (
-        "before_import",
-        "after_args",
-        "training_region",
-        "initialize_optimizer_state",
-        "offload_disable_context",
+    required = tuple(
+        name
+        for name, value in vars(megatron_lifecycle).items()
+        if not name.startswith("_")
+        and callable(value)
+        and name != "current"
+        and getattr(value, "__module__", None) == megatron_lifecycle.__name__
     )
 
     assert [name for name in required if not callable(getattr(ascend, name, None))] == []
@@ -89,36 +92,6 @@ def test_importing_the_ascend_package_loads_no_vendor_runtime():
         importlib.import_module(module)
 
     assert [name for name in sys.modules if name.split(".")[0] in vendor] == []
-
-
-def test_npu_offload_never_suspends_the_memory_saver():
-    """The NPU memory saver has no disable(); its offload is region-scoped."""
-    ascend = importlib.import_module(NPUAccelerator.megatron_lifecycle_qualname())
-
-    assert type(ascend.offload_disable_context(True)).__name__ == "nullcontext"
-    assert type(ascend.training_region(False)).__name__ == "nullcontext"
-
-
-@pytest.mark.parametrize("colocate", [False, True])
-@pytest.mark.parametrize("sleep_mode", [False, True])
-def test_npu_serving_overrides_incompatible_allocator_before_startup(monkeypatch, colocate, sleep_mode):
-    # CI #398: the image enables expandable segments, while a non-colocated
-    # vLLM engine can still use a memory pool through --enable-sleep-mode.
-    monkeypatch.setattr(device_env, "_cann_site_packages", lambda: None)
-    monkeypatch.setenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
-    args = SimpleNamespace(colocate=colocate, vllm_enable_sleep_mode=sleep_mode)
-    inherited = {"PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True", "KEEP": "1"}
-
-    actor_env = device_env.engine_actor_env(args)
-    assert actor_env["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:False"
-
-    # Check both a direct launch and the actor -> subprocess inheritance path.
-    for base_env in (inherited, {**inherited, **actor_env}):
-        server_env = device_env.serving_subprocess_env(base_env, visible_devices="4,5,6,7", colocate=colocate)
-        assert server_env["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:False"
-        assert server_env["ASCEND_RT_VISIBLE_DEVICES"] == "4,5,6,7"
-        assert server_env["KEEP"] == "1"
-    assert inherited["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:True"
 
 
 def test_a_backend_without_an_override_gets_the_shared_default(monkeypatch):

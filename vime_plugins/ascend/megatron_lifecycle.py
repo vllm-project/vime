@@ -1,14 +1,17 @@
-"""Ascend's Megatron startup and offload behavior.
+"""Ascend's Megatron startup behavior.
 
 Named by NPUAccelerator.megatron_lifecycle_qualname(). Replaces
 vime.backends.megatron_lifecycle for NPU jobs. Importing this module has no
 vendor side effects; before_import() is the point where they happen.
+
+Offload is not here: Megatron's buffer-allocation hook and the patched NPU
+memory saver handle it, so the shared training and weight-export paths apply
+unchanged.
 """
 
 from __future__ import annotations
 
 import importlib
-from contextlib import nullcontext
 from threading import RLock
 from typing import Any
 
@@ -79,30 +82,3 @@ def after_args(args: Any) -> None:
     features_manager.apply_features_patches(full_args)
     # Re-applying can replace attention again.
     _install_attention_override()
-
-
-def training_region(offload_train: bool):
-    if not offload_train:
-        return nullcontext()
-    from torch_memory_saver import torch_memory_saver
-
-    # The NPU build offloads a tagged region rather than everything the
-    # allocator holds, and needs the CPU backup requested explicitly.
-    return torch_memory_saver.region(tag="training", enable_cpu_backup=True)
-
-
-def initialize_optimizer_state(optimizer: Any) -> None:
-    if optimizer is None:
-        return
-    for opt in getattr(optimizer, "chained_optimizers", [optimizer]):
-        if opt.optimizer is not None and opt.init_state_fn is not None:
-            opt.init_state_fn(opt.optimizer, opt.config)
-
-
-def offload_disable_context(offload_train: bool):
-    """Always a no-op region: the NPU memory saver has no disable().
-
-    Its offload is scoped to the tagged training region, so weight export
-    reads resident memory without having to suspend the saver.
-    """
-    return nullcontext()

@@ -28,6 +28,7 @@ BUILDKITE_SOURCE = os.environ.get("BUILDKITE_SOURCE", "")
 # (test_name, resource_class, extra_args, env_overrides[, timeout_in_minutes])
 SUITES = {
     "smk": [
+        ("test_npu_memory_saver.py", "npu-2", "", {}, 15),
         ("test_delta_disk_weight_update.py", "npu-4", "", {}),
         ("test_qwen3_4B_npu.py", "npu-8", "", {}),
         ("test_qwen3_30B_A3B_npu.py", "npu-16", "", {}),

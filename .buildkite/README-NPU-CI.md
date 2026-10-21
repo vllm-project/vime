@@ -105,6 +105,11 @@ container starts. Changes that add, remove, or upgrade external repositories,
 modify installed dependencies, or otherwise change the Docker image must be
 validated with `image-build`.
 
+`torch-memory-saver.patch` is applied only while building the TMS wheel in
+`Dockerfile.npu`. It is not a runtime Git-source patch and must not be added to
+`series.conf`: the TMS source tree is removed after installation. Changes to
+this patch require `image-build` so Python and the allocator libraries match.
+
 The initial rollout of this mechanism requires publishing a new default image
 that contains `/opt/npu_patch/series.conf`, then updating
 `DEFAULT_CI_IMAGE` in `npu_suites.py`. The legacy default image contains patch

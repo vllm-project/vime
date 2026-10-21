@@ -76,76 +76,56 @@ index a5b6c009ba499cc4afbb71df1bdd0f66c1c27cb0..22794d7e60dd2d86483f2b088a2c6323
              ),
          )
  
-diff --git a/megatron/core/distributed/distributed_data_parallel.py b/megatron/core/distributed/distributed_data_parallel.py
-index 55179ff3024251f41679b3c5eaa0b8706d26d549..6629f41a653552c42dcbcf5b9db8825d08266be0 100644
---- a/megatron/core/distributed/distributed_data_parallel.py
-+++ b/megatron/core/distributed/distributed_data_parallel.py
-@@ -45,6 +45,8 @@ class DistributedDataParallel(_BaseDataParallel):
-         module: torch.nn.Module,
-         disable_bucketing: bool = False,
-         pg_collection: Optional[ProcessGroupCollection] = None,
-+        disable_grad_buffers_cpu_backup: bool = False,
-+        disable_param_buffers_cpu_backup: bool = False,
-     ):
-         super().__init__(config=config, module=module)
-         if has_config_logger_enabled(config):
-@@ -209,6 +211,8 @@ class DistributedDataParallel(_BaseDataParallel):
-                         param_and_grad_dtype_to_indices[(param_dtype, grad_dtype)],
-                         self.ddp_config.nccl_ub,
-                         pg_collection,
-+                        disable_grad_buffers_cpu_backup=disable_grad_buffers_cpu_backup,
-+                        disable_param_buffers_cpu_backup=disable_param_buffers_cpu_backup,
-                     )
-                 )
- 
 diff --git a/megatron/core/distributed/param_and_grad_buffer.py b/megatron/core/distributed/param_and_grad_buffer.py
-index 088374fbf13f0465c944299af72b2463ad2f04af..807c4a88d40b79eaa56c98e6e1fcca634bc7c278 100644
 --- a/megatron/core/distributed/param_and_grad_buffer.py
 +++ b/megatron/core/distributed/param_and_grad_buffer.py
-@@ -599,6 +599,8 @@ class _ParamAndGradBuffer:
-         param_indices: List[int],
-         nccl_ub: bool,
-         pg_collection: Optional[ProcessGroupCollection] = None,
-+        disable_grad_buffers_cpu_backup: bool = False,
-+        disable_param_buffers_cpu_backup: bool = False,
-     ):
- 
-         if pg_collection is None:
-@@ -629,6 +631,9 @@ class _ParamAndGradBuffer:
-         self.data_parallel_world_size = self.data_parallel_group.size()
-         self.gradient_scaling_factor = gradient_scaling_factor
-         self.nccl_ub = nccl_ub
-+        disable_param_buffers_cpu_backup = (
-+            disable_param_buffers_cpu_backup and self.ddp_config.use_distributed_optimizer
-+        )
- 
-         # Data structures to store underlying buckets and relevant indexing data.
-         self.buckets = []
-@@ -755,6 +760,12 @@ class _ParamAndGradBuffer:
- 
-         if self.nccl_ub:
-             # If nccl_ub is True, use nccl_allocator to allocate memory for param_data/grad_data.
-+            assert not disable_grad_buffers_cpu_backup, (
-+                "disable_grad_buffers_cpu_backup is not supported with nccl_ub=True"
-+            )
-+            assert not disable_param_buffers_cpu_backup, (
-+                "disable_param_buffers_cpu_backup is not supported with nccl_ub=True"
-+            )
-             nccl_allocator.init()
-             pool = nccl_allocator.create_nccl_mem_pool(
-                 symmetric=not self.ddp_config.disable_symmetric_registration
-@@ -773,8 +784,11 @@ class _ParamAndGradBuffer:
-             torch.distributed.barrier()
-         else:
-             # If nccl_ub is False, mem_alloc_context is nullcontext.
-+            # Individual param/grad contexts below handle TMS regions separately.
-             mem_alloc_context = nullcontext
- 
-+        # NPU already wraps model construction in the outer VIME training
-+        # torch_memory_saver region. Do not open nested mem-pool regions here.
-         with mem_alloc_context():
-             # For MXFP8 param: Create a shared buffer for param AG and grad RS for memory efficiency
+@@ -780,12 +780,7 @@
              # The buffer is mapped to weight gradients whose dtype is either bf16 or FP32.
+             # It can be temporarily reused by param AG.
+             if self.ddp_config.use_distributed_optimizer and any(is_mxfp8tensor(p) for p in params):
+-                self.shared_buffer = torch.zeros(
+-                    self.numel,
+-                    dtype=self.grad_dtype,
+-                    device=torch.cuda.current_device(),
+-                    requires_grad=False,
+-                )
++                self.shared_buffer = self._allocate_buffer("shared", self.numel, self.grad_dtype)
+                 # For FP32 weight grads, only half of the buffer is used to store params in bf16.
+                 if self.grad_dtype == torch.float32:
+                     self.param_data = self.shared_buffer[: math.ceil(self.numel / 2)].view(
+@@ -797,18 +792,8 @@
+             else:
+                 # Only re-map param tensors if using distributed optimizer.
+                 if self.ddp_config.use_distributed_optimizer:
+-                    self.param_data = torch.zeros(
+-                        self.numel,
+-                        dtype=self.param_dtype,
+-                        device=torch.cuda.current_device(),
+-                        requires_grad=False,
+-                    )
+-                self.grad_data = torch.zeros(
+-                    self.numel,
+-                    dtype=self.grad_dtype,
+-                    device=torch.cuda.current_device(),
+-                    requires_grad=False,
+-                )
++                    self.param_data = self._allocate_buffer("param", self.numel, self.param_dtype)
++                self.grad_data = self._allocate_buffer("grad", self.numel, self.grad_dtype)
+ 
+         self.grad_data_size = 0
+         self.param_data_size = 0
+@@ -894,6 +879,11 @@
+             dp_cp_group=self.dp_cp_group,
+         )
+ 
++    def _allocate_buffer(self, buffer_type, numel, dtype):
++        return torch.zeros(
++            numel, dtype=dtype, device=torch.cuda.current_device(), requires_grad=False
++        )
++
+     def scale_gradients(self, scaling_factor: float) -> None:
+         """Scale the gradient data by `scaling_factor`."""
+         self.grad_data *= scaling_factor
 diff --git a/megatron/core/extensions/transformer_engine.py b/megatron/core/extensions/transformer_engine.py
 index ef8527e9e5ef870ddd8d07c3508f763d0abf782a..57fbe5bd7c54d950f1b0954186ff1f05a5b3fc93 100644
 --- a/megatron/core/extensions/transformer_engine.py
@@ -1519,33 +1499,6 @@ index 17df57ddacb73fcf4a763876595ed6f5834896fe..260a5f6c8dbb3a3b1c16b92c57018247
              **kwargs,
          )
          self._vocab = self._tokenizer.get_vocab()
-diff --git a/megatron/training/training.py b/megatron/training/training.py
-index e9736ac085c7b62161847da6bb0053ad6bd5cd60..6567ed4267e91c305107c56b26b91c657ce4e806 100644
---- a/megatron/training/training.py
-+++ b/megatron/training/training.py
-@@ -1327,6 +1327,14 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
-         # Wait for the default stream to complete before starting ddp_stream
-         ddp_stream.wait_stream(torch.cuda.current_stream())
-         # Make ddp_stream start after whatever the default stream already queued
-+        dp_extra_kwargs = {}
-+        if DP is DDP:
-+            dp_extra_kwargs['disable_grad_buffers_cpu_backup'] = getattr(
-+                args, 'disable_grad_buffers_cpu_backup', False
-+            )
-+            dp_extra_kwargs['disable_param_buffers_cpu_backup'] = getattr(
-+                args, 'disable_param_buffers_cpu_backup', False
-+            )
-         with torch.cuda.stream(ddp_stream):
-             model = [
-                 DP(
-@@ -1337,6 +1345,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
-                     # model chunks is overlapped with compute anyway.
-                     disable_bucketing=(model_chunk_idx > 0)
-                     or args.overlap_param_gather_with_optimizer_step,
-+                    **dp_extra_kwargs,
-                 )
-                 for (model_chunk_idx, model_chunk) in enumerate(model)
-             ]
 diff --git a/megatron/training/utils.py b/megatron/training/utils.py
 index 7709f651391a30afc276cc980ecc6f90716e6b00..65b8f7fcaae4a762f04a1c16b85a0f91de6a229c 100644
 --- a/megatron/training/utils.py

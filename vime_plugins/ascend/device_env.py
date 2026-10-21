@@ -16,6 +16,8 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
+from vime.utils import device_env
+
 _ALLOC_CONF = "expandable_segments:False"
 
 
@@ -48,13 +50,13 @@ def _with_cann_and_allocator(env: dict[str, str]) -> dict[str, str]:
 
 
 def train_actor_env(args: Any, env_vars: Mapping[str, str] | None = None) -> dict[str, str]:
-    env = dict(env_vars or {})
+    # The patched NPU torch_memory_saver takes the allocator through the same
+    # preload shim as CUDA, so the shared contract applies unchanged and this
+    # adds to it rather than replacing it.
+    env = device_env.train_actor_env(args, env_vars)
     if not getattr(args, "offload_train", False):
         return env
-    # The NPU build of torch_memory_saver hooks the allocator from Python
-    # instead of through an LD_PRELOAD shim, so none of the CUDA preload
-    # contract applies here.
-    env["TMS_HOOK_MODE"] = "torch"
+    env["TMS_HOOK_MODE"] = "preload"
     return _with_cann_and_allocator(env)
 
 
