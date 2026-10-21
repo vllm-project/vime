@@ -271,7 +271,21 @@ def _register_builtin_backends() -> None:
         )
 
 
+def accelerator_disabled() -> bool:
+    """Whether VIME_ACCELERATOR asks for no accelerator at all.
+
+    Vime already has this state internally: ``initialize_accelerator()``
+    returns None where nothing is available, and every description falls back
+    to the neutral defaults on :class:`Accelerator`. There was no way to ask
+    for it, which a process needs on a host that does have accelerators but
+    whose vendor runtime it must not load.
+    """
+    return os.environ.get("VIME_ACCELERATOR", "").strip().lower() == "none"
+
+
 def _requested_name() -> str | None:
+    if accelerator_disabled():
+        return None
     value = os.environ.get("VIME_ACCELERATOR")
     if value and value.lower() != "auto":
         return value.strip().lower()
@@ -323,6 +337,10 @@ def get_accelerator() -> Accelerator:
     global _ACCELERATOR
     if _ACCELERATOR is not None:
         return _ACCELERATOR
+    if accelerator_disabled():
+        raise RuntimeError(
+            "VIME_ACCELERATOR=none disables accelerator selection; this code path needs a device."
+        )
     with _SELECTION_LOCK:
         if _ACCELERATOR is not None:
             return _ACCELERATOR
@@ -357,6 +375,8 @@ def initialize_accelerator() -> Accelerator | None:
     """
     if _ACCELERATOR is not None:
         return _ACCELERATOR
+    if accelerator_disabled():
+        return None
     with _SELECTION_LOCK:
         _register_builtin_backends()
         if _requested_name() is not None or any(entry.is_available() for entry in _REGISTRY.values()):
@@ -398,6 +418,8 @@ def _describing_backend() -> type[Accelerator]:
     """
     if _ACCELERATOR is not None:
         return type(_ACCELERATOR)
+    if accelerator_disabled():
+        return Accelerator
     _register_builtin_backends()
     requested = _requested_name()
     if requested is not None:
