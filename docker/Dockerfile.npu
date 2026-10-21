@@ -2,13 +2,14 @@
 
 ARG BASE_IMAGE=quay.io/atlas-ci/vllm-ascend
 ARG BASE_IMAGE_TAG=v0.30.0-e00cb64-a3
-ARG RUST_IMAGE=rust:1.95-bookworm
+ARG RUST_IMAGE=rust
+ARG RUST_IMAGE_TAG=1.95-bookworm
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG APTMIRROR=""
 # Optional Cargo mirror, e.g. sparse+https://rsproxy.cn/index/.
 ARG CARGO_REGISTRY=""
 
-FROM ${RUST_IMAGE} AS rust-toolchain
+FROM ${RUST_IMAGE}:${RUST_IMAGE_TAG} AS rust-toolchain
 
 # Shared Rust toolchain and mirrors for wheel builds.
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS wheel-builder-base
