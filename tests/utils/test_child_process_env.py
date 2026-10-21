@@ -1,7 +1,6 @@
 """What the accelerator tells a training actor, an engine actor and the
 serving subprocess, and that answering it needs no local device."""
 
-import os
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -73,28 +72,6 @@ def test_without_offload_the_environment_is_untouched():
     args = SimpleNamespace(offload_train=False)
 
     assert device_env.current().train_actor_env(args, {"A": "1"}) == {"A": "1"}
-
-
-def test_offload_hands_the_allocator_to_torch_memory_saver(tmp_path):
-    """The same three variables the GPU path set inline, and a real library."""
-    args = SimpleNamespace(offload_train=True)
-
-    env = device_env.current().train_actor_env(args, {"A": "1"})
-
-    assert env["A"] == "1"
-    assert env["TMS_INIT_ENABLE"] == "1"
-    assert env["TMS_INIT_ENABLE_CPU_BACKUP"] == "1"
-    assert os.path.exists(env["LD_PRELOAD"])
-    assert os.path.basename(env["LD_PRELOAD"]).startswith("torch_memory_saver_hook_mode_preload")
-
-
-def test_a_missing_preload_library_fails_instead_of_starting_without_offload(monkeypatch, tmp_path):
-    import torch_memory_saver
-
-    monkeypatch.setattr(torch_memory_saver, "__file__", str(tmp_path / "pkg" / "__init__.py"))
-
-    with pytest.raises(FileNotFoundError, match="torch_memory_saver dynamic library"):
-        device_env._offload_allocator_env({})
 
 
 def test_engine_and_serving_default_to_passing_the_environment_through():

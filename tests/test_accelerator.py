@@ -310,12 +310,44 @@ def test_selected_npu_bootstraps_runtime_once(monkeypatch):
         return True
 
     monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", "0")
+    # Auto-selection probes for a device before importing anything, so the
+    # probe has to be answered here too; a runner without Ascend hardware
+    # would otherwise select nothing.
+    monkeypatch.setattr(accelerator, "_has_npu_device", lambda: True)
     monkeypatch.setattr(accelerator, "_import_torch_npu", import_torch_npu)
 
     assert imports == []
     assert accelerator.initialize_accelerator().name == "npu"
     assert accelerator.initialize_accelerator().name == "npu"
     assert imports == ["torch_npu"]
+
+
+@pytest.mark.unit
+def test_an_ascend_toolkit_without_devices_does_not_select_npu(monkeypatch):
+    """CANN exports ASCEND_HOME_PATH on hosts that have no cards at all."""
+    monkeypatch.setenv("ASCEND_HOME_PATH", "/usr/local/Ascend/ascend-toolkit/latest")
+    monkeypatch.setattr(accelerator, "_has_npu_device", lambda: False)
+    monkeypatch.setattr(accelerator, "is_musa_available", lambda: False)
+    monkeypatch.setattr(accelerator, "is_supa_available", lambda: False)
+    monkeypatch.setattr(accelerator, "_cuda_available", lambda: False)
+    monkeypatch.setattr(accelerator, "_import_torch_npu", lambda: pytest.fail("the runtime must not be imported"))
+
+    assert accelerator.initialize_accelerator() is None
+
+
+@pytest.mark.unit
+def test_an_explicit_request_selects_npu_without_a_device_probe(monkeypatch):
+    """VIME_ACCELERATOR is the one thing that does not need the probe."""
+    fake_npu = SimpleNamespace(is_available=lambda: True)
+    monkeypatch.setenv("VIME_ACCELERATOR", "npu")
+    monkeypatch.setattr(accelerator, "_has_npu_device", lambda: False)
+    monkeypatch.setattr(
+        accelerator,
+        "_import_torch_npu",
+        lambda: monkeypatch.setattr(accelerator.torch, "npu", fake_npu, raising=False) or True,
+    )
+
+    assert accelerator.initialize_accelerator().name == "npu"
 
 
 @pytest.mark.unit

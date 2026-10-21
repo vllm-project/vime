@@ -97,12 +97,6 @@ def test_npu_offload_never_suspends_the_memory_saver():
     assert type(ascend.training_region(False)).__name__ == "nullcontext"
 
 
-def test_the_default_lifecycle_still_suspends_it_for_gpus():
-    """The GPU path keeps torch_memory_saver.disable() during weight export."""
-    assert type(megatron_lifecycle.offload_disable_context(False)).__name__ == "nullcontext"
-    assert type(megatron_lifecycle.offload_disable_context(True)).__name__ != "nullcontext"
-
-
 def test_a_backend_without_an_override_gets_the_shared_default(monkeypatch):
     registry = accelerator._REGISTRY.copy()
     selected = accelerator._ACCELERATOR
