@@ -24,11 +24,13 @@ def model(directory):
     )
 
 
-def test_mirror_401_falls_back_in_fresh_process_without_changing_assets(monkeypatch, tmp_path):
+def test_http_retries_keep_reachable_mirror_and_original_assets(monkeypatch, tmp_path):
     model(tmp_path)
     before = (tmp_path / "first.safetensors").read_bytes()
     calls = []
     monkeypatch.setenv("HF_ENDPOINT", "https://hf-mirror.com")
+    monkeypatch.setenv("HTTPS_PROXY", "http://ci-proxy:3128")
+    monkeypatch.delenv("HF_HUB_DISABLE_XET", raising=False)
 
     def run(command, *, env, check):
         calls.append((command, env.copy()))
@@ -42,10 +44,44 @@ def test_mirror_401_falls_back_in_fresh_process_without_changing_assets(monkeypa
     assert len(calls) == 2 and calls[0][0] == calls[1][0]
     assert calls[1][0][-2:] == ["--revision", "fixed-revision"]
     assert calls[0][1]["HF_ENDPOINT"] == "https://hf-mirror.com"
-    assert calls[1][1]["HF_ENDPOINT"] == "https://huggingface.co"
-    assert calls[1][1]["HF_HUB_DISABLE_XET"] == "1"
-    assert calls[1][1]["HF_HUB_DISABLE_IMPLICIT_TOKEN"] == "1"
+    for _, env in calls:
+        assert env["HF_ENDPOINT"] == "https://hf-mirror.com"
+        assert env["HF_HUB_DISABLE_XET"] == "1"
+        assert env["HF_HUB_DISABLE_IMPLICIT_TOKEN"] == "1"
+        assert env["HTTPS_PROXY"] == "http://ci-proxy:3128"
+    assert "HF_HUB_DISABLE_XET" not in mod.os.environ
     assert (tmp_path / "first.safetensors").read_bytes() == before
+
+
+@pytest.mark.parametrize("endpoint", [None, "https://models.internal.example"])
+def test_http_download_preserves_explicit_endpoint_and_timeout_policy(monkeypatch, tmp_path, endpoint):
+    model(tmp_path)
+    if endpoint is None:
+        monkeypatch.delenv("HF_ENDPOINT", raising=False)
+    else:
+        monkeypatch.setenv("HF_ENDPOINT", endpoint)
+    monkeypatch.setenv("HF_HUB_ETAG_TIMEOUT", "7")
+    monkeypatch.setenv("HF_HUB_DOWNLOAD_TIMEOUT", "90")
+    monkeypatch.setenv("HF_HUB_DISABLE_XET", "0")
+    calls = []
+    monkeypatch.setattr(mod.subprocess, "run", lambda command, **kwargs: calls.append(kwargs["env"]))
+    mod.download_public_model("Qwen/fixed-model", tmp_path)
+    assert len(calls) == 1
+    assert calls[0].get("HF_ENDPOINT") == endpoint
+    assert calls[0]["HF_HUB_DISABLE_XET"] == "1"
+    assert calls[0]["HF_HUB_ETAG_TIMEOUT"] == "7"
+    assert calls[0]["HF_HUB_DOWNLOAD_TIMEOUT"] == "90"
+
+
+def test_http_timeout_defaults_are_finite(monkeypatch, tmp_path):
+    model(tmp_path)
+    for key in ("HF_HUB_ETAG_TIMEOUT", "HF_HUB_DOWNLOAD_TIMEOUT"):
+        monkeypatch.delenv(key, raising=False)
+    calls = []
+    monkeypatch.setattr(mod.subprocess, "run", lambda command, **kwargs: calls.append(kwargs["env"]))
+    mod.download_public_model("Qwen/fixed-model", tmp_path)
+    assert calls[0]["HF_HUB_ETAG_TIMEOUT"] == "15"
+    assert calls[0]["HF_HUB_DOWNLOAD_TIMEOUT"] == "60"
 
 
 def test_persistent_download_error_remains_a_failure_after_three_attempts(monkeypatch, tmp_path):

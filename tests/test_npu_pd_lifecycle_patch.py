@@ -1,6 +1,9 @@
 """Exercise shipped PD patch logic on CPU, without applying vendor patches."""
 
 import ast
+import dataclasses
+import logging
+import os
 import queue
 import textwrap
 from pathlib import Path
@@ -197,6 +200,90 @@ def test_scheduler_consumes_producer_ack_even_after_empty_worker_output():
     acks.put("finished-prefill")
     namespace["tick"](scheduler, None)
     assert not requests
+
+
+@pytest.fixture
+def camem_allocator():
+    source = new_side((PATCHES / "vllm-ascend.patch").read_text(), "vllm_ascend/device_allocator/camem.py")
+    tree = ast.parse(source)
+    # Execute the shipped Python state transitions with a fake device API.
+    # Imports/torch allocation are excluded; native transitions are compiled
+    # and exercised independently in test_npu_camem_native_patch.py.
+    methods = {"sleep", "wake_up", "python_free_callback"}
+    classes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
+    allocation = next(node for node in classes if node.name == "AllocationData")
+    allocator = next(node for node in classes if node.name == "CaMemAllocator")
+    allocator.body = [node for node in allocator.body if isinstance(node, ast.FunctionDef) and node.name in methods]
+    calls = []
+
+    class Tensor:
+        def data_ptr(self):
+            return 1000
+
+        def numel(self):
+            return 64
+
+        def element_size(self):
+            return 1
+
+    namespace = {
+        "dataclasses": dataclasses,
+        "HandleType": tuple,
+        "os": os,
+        "logger": logging.getLogger(__name__),
+        "torch": SimpleNamespace(
+            Tensor=Tensor,
+            uint8=object(),
+            empty=lambda *a, **kw: Tensor(),
+            npu=SimpleNamespace(synchronize=lambda: None, empty_cache=lambda: None),
+        ),
+        "gc": SimpleNamespace(collect=lambda: None),
+        "memcpy": lambda *args: calls.append(("copy", args[-1])),
+        "create_and_map": lambda handle: calls.append(("map", handle[2])),
+        "unmap_and_release": lambda handle: calls.append(("unmap", handle[2])),
+    }
+    exec(compile(ast.Module(body=[allocation, allocator], type_ignores=[]), "<shipped-camem>", "exec"), namespace)
+    cls = namespace["CaMemAllocator"]
+    cls.default_tag = "default"
+    cls.sleep_persistent_tag = "sleep_persistent"
+    instance = cls()
+    data_cls = namespace["AllocationData"]
+    instance.pointer_to_data = {
+        ptr: data_cls((0, 64, ptr, ptr + 1), tag)
+        for ptr, tag in ((100, "weights"), (200, "kv_cache"), (300, "sleep_persistent"))
+    }
+    return instance, calls, namespace
+
+
+def test_python_camem_selective_wake_then_sleep_does_not_double_unmap(camem_allocator):
+    allocator, calls, _ = camem_allocator
+    allocator.sleep(offload_tags=("weights",))
+    allocator.wake_up(["weights"])
+    allocator.wake_up(["weights"])
+    assert calls == [("copy", 2), ("unmap", 100), ("unmap", 200), ("map", 100), ("copy", 1)]
+    allocator.sleep(offload_tags=())
+    assert calls[-1] == ("unmap", 100)
+    allocator.wake_up(["kv_cache"])
+    assert calls[-1] == ("map", 200)
+    assert allocator.pointer_to_data[300].mapped  # persistent allocations stay mapped
+
+
+def test_python_camem_failed_transition_keeps_retry_state(camem_allocator):
+    allocator, calls, namespace = camem_allocator
+
+    def fail(handle):
+        raise RuntimeError("driver failure")
+
+    namespace["unmap_and_release"] = fail
+    with pytest.raises(RuntimeError, match="driver failure"):
+        allocator.sleep(offload_tags=())
+    assert allocator.pointer_to_data[100].mapped
+    namespace["unmap_and_release"] = lambda handle: None
+    allocator.sleep(offload_tags=())
+    namespace["create_and_map"] = fail
+    with pytest.raises(RuntimeError, match="driver failure"):
+        allocator.wake_up(["weights"])
+    assert not allocator.pointer_to_data[100].mapped
 
 
 if __name__ == "__main__":

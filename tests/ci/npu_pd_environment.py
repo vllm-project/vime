@@ -11,6 +11,9 @@ def check(encoder=False):
     from mooncake.engine import TransferEngine  # noqa: F401
 
     importlib.import_module("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector")
+    allocator = importlib.import_module("vllm_ascend.device_allocator.camem")
+    if not allocator.camem_available:
+        raise RuntimeError("PD sleep/wake needs the patched CaMem native allocator; run build_camem.py")
     versions = {}
     for name in ("mooncake-transfer-engine-npu", "vllm-ascend", "nixl", "nixl-cu12"):
         try:

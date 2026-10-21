@@ -6,7 +6,7 @@ import os
 from typing import Any
 
 import ray
-from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy, PlacementGroupSchedulingStrategy
 
 from vime.backends.vllm_utils.server_control import unregister_worker
 from vime.backends.vllm_utils.vllm_config import ServerGroupConfig
@@ -18,6 +18,13 @@ GPU_MEMORY_TYPE_WEIGHTS = "weights"
 GPU_MEMORY_TYPE_CUDA_GRAPH = "cuda_graph"
 
 logger = logging.getLogger(__name__)
+
+
+@ray.remote(num_cpus=0)
+def _fence_server_processes(snapshot):
+    from vime.utils.process_lifecycle import terminate_process_tree
+
+    terminate_process_tree(snapshot)
 
 
 def reset_weights_update_groups(groups, *, timeout):
@@ -92,6 +99,7 @@ class ServerGroup:
     # Retain addresses outside the actors: deregistration must still work when
     # an actor dies or cannot answer get_url(). Keys index all_engines locally.
     engine_urls: dict[int, str] = dataclasses.field(default_factory=dict)
+    engine_process_refs: dict[int, Any] = dataclasses.field(default_factory=dict)
 
     @property
     def nodes_per_engine(self):
@@ -137,12 +145,26 @@ class ServerGroup:
                 timeout=timeout,
             )
         engines = self.all_engines[first : first + self.nodes_per_engine]
+        identities = [
+            ray.get(self.engine_process_refs[index], timeout=timeout)
+            for index in range(first, first + self.nodes_per_engine)
+            if index in self.engine_process_refs
+        ]
         shutdowns = [engine.shutdown.remote() for engine in engines if engine is not None]
         if shutdowns:
             ray.wait(shutdowns, num_returns=len(shutdowns), timeout=timeout)
         for engine in engines:
             if engine is not None:
                 ray.kill(engine, no_restart=True)
+        for identity in identities:
+            # This task is independent of the retired actor's RPC queue. The
+            # cached identity is the result of successful init.
+            cleanup = _fence_server_processes.options(
+                scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=identity["node_id"], soft=False)
+            ).remote(identity["process"])
+            ray.get(cleanup, timeout=max(timeout, 15))
+        for index in range(first, first + self.nodes_per_engine):
+            self.engine_process_refs.pop(index, None)
         self.all_engines[first : first + self.nodes_per_engine] = [None] * self.nodes_per_engine
 
     def start_engines(self, port_cursors: dict[int, int] | None = None) -> tuple[list, dict[int, int]]:
@@ -275,6 +297,9 @@ class ServerGroup:
             )
             for rank, engine in rollout_engines
         ]
+        if not self.args.rollout_external:
+            for (rank, _engine), identity in zip(rollout_engines, init_handles, strict=True):
+                self.engine_process_refs[rank - self.rank_offset] = identity
         return init_handles, port_cursors
 
     def offload(self, level: int = 2):

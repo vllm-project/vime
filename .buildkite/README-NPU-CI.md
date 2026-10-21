@@ -228,6 +228,13 @@ container starts. Changes that add, remove, or upgrade external repositories,
 modify installed dependencies, or otherwise change the Docker image must be
 validated with `image-build`.
 
+The CaMem C++ patch also needs a native rebuild. Both the Dockerfile and runtime
+updater run `docker/npu_patch/build_camem.py`, which compiles only the small
+CANN allocator module and preserves the image's other prebuilt Ascend ops.
+It requires g++, Python headers and CANN headers/libraries (installed by the
+current Dockerfile). Source/compiler/SDK fingerprints skip unchanged builds;
+reusing an image still builds a changed allocator before running tests.
+
 `torch-memory-saver.patch` is applied only while building the TMS wheel in
 `Dockerfile.npu`. It is not a runtime Git-source patch and must not be added to
 `series.conf`: the TMS source tree is removed after installation. Changes to
@@ -592,8 +599,23 @@ optional wheels. Hardware acceptance and sandbox provisioning are pending.
 The external PD adapter now keeps the discovered KV configuration and advertised
 control ports rather than treating them as new local port allocations. Public
 model downloads for G45/G11 retain their repositories, revisions and cache paths;
-on failure they retry via the official endpoint with Xet disabled, at most three
-attempts, and reject incomplete safetensors shards.
+the #391 implementation retried via the official endpoint, which #392 showed
+was unreachable from those CI jobs. The current implementation disables Xet
+from the first attempt and keeps the configured endpoint, proxy, model revision
+and cache for at most three attempts, rejecting incomplete safetensors shards.
+HTTP file redirects can still require access to another host; CI reachability
+must be verified before treating G11/G45 as backend test results.
+
+For the remaining #392 failures, select `migration-pd` and
+`migration-pd-models`. These suites upload `.npu-test-diagnostics/**/*` as
+Buildkite artifacts. Per-server native/Python output keeps a tail of at most
+8 MiB; recovery failures also retain at most 2 MiB from each child job log.
+Checkpoints and queue scratch keep their existing temporary-directory cleanup.
+GLM PD additionally logs CaMem pointer/tag/mapping state and Mooncake memory
+registration returns. Process retirement waits for owned server descendants
+on their original node before allowing a replacement; this is shared GPU/NPU
+lifecycle handling. CaMem mapping-state tracking is Ascend-specific. These
+changes have CPU validation and still require NPU CI acceptance.
 
 The NPU vLLM patch polls scheduler-side KV completion even when an empty worker
 output was discarded, so producer ACKs can free retained blocks and finish a

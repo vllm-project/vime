@@ -1,4 +1,4 @@
-"""Download public test models with a bounded fallback for mirror/Xet failures."""
+"""Download public test models through the configured endpoint without Xet."""
 
 import json
 import os
@@ -39,18 +39,23 @@ def download_public_model(repo: str, directory: str | Path, *, revision: str | N
     command = ["hf", "download", repo, "--local-dir", str(directory)]
     if revision is not None:
         command += ["--revision", revision]
-    original = os.environ.copy()
-    fallback = {
-        **original,
-        "HF_ENDPOINT": "https://huggingface.co",
+    env = {
+        **os.environ,
         "HF_HUB_DISABLE_XET": "1",
         "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
     }
+    env.setdefault("HF_HUB_ETAG_TIMEOUT", "15")
+    env.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+    env.setdefault("HF_HUB_DISABLE_UPDATE_CHECK", "1")
     # Each CLI process reads Hub settings afresh. Reuse completed files and the
-    # CLI's per-file locks; never wipe the persistent asset cache on a retry.
-    for attempt, env in enumerate((original, fallback, fallback), start=1):
-        endpoint = env.get("HF_ENDPOINT", "https://huggingface.co")
-        print(f"Public model download {attempt}/3: endpoint={endpoint}; {shlex.join(command)}", flush=True)
+    # CLI's per-file locks. A mirror may be the only reachable endpoint in CI:
+    # disabling Xet must not silently switch metadata requests to the origin.
+    endpoint = env.get("HF_ENDPOINT", "https://huggingface.co")
+    for attempt in range(1, 4):
+        print(
+            f"Public model download {attempt}/3: endpoint={endpoint}; transport=HTTP; {shlex.join(command)}",
+            flush=True,
+        )
         try:
             subprocess.run(command, env=env, check=True)
         except subprocess.CalledProcessError:

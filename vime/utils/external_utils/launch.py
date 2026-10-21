@@ -95,7 +95,12 @@ def current_platform() -> Platform:
 def runtime_env_vars(platform: Platform, extra_env: dict | None = None) -> dict:
     """Device environment shared by CLI launches and externally managed Ray jobs."""
     extra_env = extra_env or {}
-    all_env = {**platform.env, **extra_env}
+    diagnostics = {
+        key: os.environ[key]
+        for key in ("VIME_TEST_DIAGNOSTICS_DIR", "VIME_NPU_MEMORY_DIAGNOSTICS")
+        if key in os.environ
+    }
+    all_env = {**platform.env, **diagnostics, **extra_env}
     for key in ("PYTHONPATH", "LD_LIBRARY_PATH"):
         if key in platform.env and key in extra_env:
             paths = str(extra_env[key]).split(os.pathsep) + str(platform.env[key]).split(os.pathsep)

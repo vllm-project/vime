@@ -11,9 +11,17 @@ from unittest.mock import Mock
 import pytest
 
 from vime.utils.external_utils import command_utils
-from vime.utils.external_utils.launch import PLATFORMS, launch_commands
+from vime.utils.external_utils.launch import PLATFORMS, launch_commands, runtime_env_vars
 
 NUM_GPUS = 0
+
+
+def test_opt_in_diagnostics_reach_ray_jobs_and_keep_explicit_overrides(monkeypatch):
+    monkeypatch.setenv("VIME_TEST_DIAGNOSTICS_DIR", "/workspace/diagnostics")
+    monkeypatch.setenv("VIME_NPU_MEMORY_DIAGNOSTICS", "1")
+    env = runtime_env_vars(PLATFORMS["npu"], {"VIME_NPU_MEMORY_DIAGNOSTICS": "0"})
+    assert env["VIME_TEST_DIAGNOSTICS_DIR"] == "/workspace/diagnostics"
+    assert env["VIME_NPU_MEMORY_DIAGNOSTICS"] == "0"
 
 
 def test_npu_helper_paths_preserve_adaptor_and_cann_environment():

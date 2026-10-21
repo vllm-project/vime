@@ -365,3 +365,8 @@ def test_final_batch_has_five_real_disaggregation_jobs_and_separate_agent(suites
     epd = next(step for step in steps if "test_qwen2.5_vl_3B_ep_disaggregation.py" in step["command"])
     assert "source tests/ci/setup_npu_epd.sh" in epd["command"]
     assert all("npu_pd_environment.py" in step["command"] for step in steps[:5] if step is not epd)
+    for step in steps[:5]:
+        assert step["artifact_paths"] == ".npu-test-diagnostics/**/*"
+        assert 'export VIME_TEST_DIAGNOSTICS_DIR="$PWD/.npu-test-diagnostics"' in shlex.split(step["command"])[2]
+    glm = next(step for step in steps if "test_glm4.7" in step["command"])
+    assert glm["env"]["VIME_NPU_MEMORY_DIAGNOSTICS"] == "1"

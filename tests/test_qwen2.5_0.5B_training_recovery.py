@@ -415,6 +415,13 @@ def execute(
             # snapshot/identity/OOM assertion failed, before scratch is removed.
             for log_path in (directory / "failed.log", directory / "resumed.log"):
                 if log_path.exists():
+                    diagnostics = os.environ.get("VIME_TEST_DIAGNOSTICS_DIR")
+                    if diagnostics:
+                        target = Path(diagnostics) / log_path.name
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with log_path.open("rb") as source:
+                            source.seek(max(0, log_path.stat().st_size - 2 * 1024 * 1024))
+                            target.write_bytes(source.read())
                     print(
                         f"Recovery verification failed; {log_path.name} tail:\n{log_path.read_text()[-16000:]}",
                         flush=True,

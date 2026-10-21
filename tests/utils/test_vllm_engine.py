@@ -773,6 +773,27 @@ def test_launch_server_process_brackets_ipv6_health_url(vllm_args, monkeypatch):
     assert base_urls == ["http://[2001:db8::1]:8000"]
 
 
+def test_startup_failure_reports_native_output_and_process_identity(vllm_args, monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("VIME_TEST_DIAGNOSTICS_DIR", str(tmp_path))
+    monkeypatch.setattr(mod, "_build_subprocess_env", lambda _: {})
+    monkeypatch.setattr(mod.multiprocessing, "set_start_method", lambda *a, **kw: None)
+
+    def process(*, target, args):
+        Path(args[2]).write_text("native driver failed during engine startup")
+        return SimpleNamespace(start=lambda: None, is_alive=lambda: False, pid=123, exitcode=-6)
+
+    def unhealthy(**kwargs):
+        raise RuntimeError("Server process terminated unexpectedly")
+
+    monkeypatch.setattr(mod.multiprocessing, "Process", process)
+    monkeypatch.setattr(mod, "_wait_server_healthy", unhealthy)
+    with caplog.at_level("ERROR"), pytest.raises(RuntimeError, match="pid=123, exitcode=-6") as error:
+        mod.launch_server_process({"_args": vllm_args, "host": "host", "port": 8000, "_worker_type": "decode"})
+    assert "native driver failed" in caplog.text
+    assert "role=decode" in caplog.text and "port=8000" in caplog.text
+    assert "terminated unexpectedly" in str(error.value.__cause__)
+
+
 @pytest.mark.unit
 def test_get_base_gpu_id_with_critic_offset(vllm_args):
     vllm_args.colocate = False

@@ -208,6 +208,9 @@ main() {
     echo "=== Step 3: Reconcile image patches with current VIME patches ==="
     reconcile_series "$old_series" "$VIME_NPU_PATCH_STATE_DIR" "$new_series" "$VIME_NPU_PATCH_SOURCE_ROOT"
 
+    # Cached by source/compiler/SDK fingerprint, including when reusing an image.
+    python3 "$VIME_DIR/docker/npu_patch/build_camem.py"
+
     echo "=== Step 4: Install current VIME code ==="
     install_vime_code
 
