@@ -12,10 +12,6 @@ from __future__ import annotations
 from vime.utils import accelerator
 
 
-def resource_name() -> str:
-    return accelerator.ray_device_key()
-
-
 def bundle(device_count: float = 1, cpu_count: float = 1) -> dict[str, float]:
     return {accelerator.ray_device_key(): device_count, "CPU": cpu_count}
 

@@ -45,9 +45,9 @@ def isolate_selection(monkeypatch):
         "BIREN_HOME",
     ):
         monkeypatch.delenv(name, raising=False)
-    # Say explicitly that no Ascend device is visible, rather than deleting
-    # the variable: deleting it lets a CANN host's real devices be detected,
-    # and then this describes that host instead of the case under test.
+    # Say explicitly that no Ascend device is visible, rather than leaving the
+    # variable unset: unset lets a CANN host's real devices be detected, and
+    # then this describes that host instead of the case under test.
     monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", "-1")
     accelerator._REGISTRY.clear()
     accelerator.reset_accelerator()
