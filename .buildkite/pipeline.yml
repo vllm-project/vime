@@ -64,7 +64,7 @@ steps:
         python:3.11 bash -c '
           set -euo pipefail
           pip install -q torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle blake3 xxhash zstandard psutil wandb
+          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle blake3 xxhash zstandard psutil wandb tensordict
           pip install -q -e . --no-deps
           python tests/test_megatron_argument_validation.py
           python tests/test_value_temperature.py
@@ -86,6 +86,7 @@ steps:
           python tests/test_metric_report_dist.py
           python tests/test_loss_cp_invariance.py
           python tests/test_sample.py
+          python -m pytest -q tests/rollout/test_transfer_queue_contract.py tests/rollout/test_transfer_queue_adapter.py
           python tests/test_cispo_loss.py
           python tests/test_logprob_response_spans.py
           python tests/test_empty_colocated_weight_bucket.py

@@ -10,7 +10,7 @@ import uuid
 from argparse import Namespace
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import vllm_router  # noqa: F401 — ensures vllm-router is importable on startup
@@ -35,6 +35,9 @@ from vime.utils.processing_utils import (
 from vime.utils.types import Sample
 
 from .rm_hub import async_rm, batched_async_rm
+
+if TYPE_CHECKING:
+    from vime.rollout.data_source import DataSource
 
 __all__ = ["generate_rollout", "get_model_url", "prime_encoder"]
 
@@ -737,7 +740,10 @@ async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
 
 
 async def generate_rollout_async(
-    args: Namespace, rollout_id: int, data_source: Callable[[int], list[list[Sample]]]
+    args: Namespace,
+    rollout_id: int,
+    data_source: Callable[[int], list[list[Sample]]],
+    group_ready: Callable[[list[Sample]], Awaitable[None]] | None = None,
 ) -> tuple[RolloutFnTrainOutput, list[list[Sample]]]:
     """An example to implement the generate_rollout function for an rule based rm rollout generation.
 
@@ -803,6 +809,8 @@ async def generate_rollout_async(
             # add the samples to the data
             # NOTE: here we have not stored all the unused samples back to the data buffer.
             if len(data) < target_data_size:
+                if group_ready is not None:
+                    await group_ready(group)
                 data.append(group)
                 pbar.update(args.n_samples_per_prompt)
 
@@ -988,8 +996,49 @@ async def eval_rollout_single_dataset(
     }
 
 
+async def _queued_rollout(
+    args: Namespace,
+    rollout_id: int,
+    source: Callable[[int], list[list[Sample]]],
+    group_ready: Callable[[list[Sample]], Awaitable[None]],
+) -> tuple[RolloutFnTrainOutput, list[list[Sample]]]:
+    state = GenerateState(args)
+    completed = False
+    try:
+        output = await asyncio.wait_for(
+            generate_rollout_async(args, rollout_id, source, group_ready), args.transfer_queue_timeout_s
+        )
+        completed = True
+        return output
+    finally:
+        if not completed:
+            state.aborted = True
+            pending = tuple(state.pendings | state.cancellable_tasks)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+
+def generate_queued_rollout(
+    args: Namespace,
+    rollout_id: int,
+    data_source: "DataSource",
+    *,
+    evaluation: bool,
+    group_ready: Callable[[list[Sample]], Awaitable[None]],
+) -> RolloutFnTrainOutput:
+    assert not evaluation and args.rollout_global_dataset
+    output, aborted_samples = run(_queued_rollout(args, rollout_id, data_source.get_samples, group_ready))
+    if aborted_samples:
+        data_source.add_samples(aborted_samples)
+    return output
+
+
 def generate_rollout(
-    args: Namespace, rollout_id: int, data_source: Any, evaluation: bool = False
+    args: Namespace,
+    rollout_id: int,
+    data_source: "DataSource",
+    evaluation: bool = False,
 ) -> RolloutFnTrainOutput | RolloutFnEvalOutput:
     """An example to implement the generate_rollout function for an rule based rm rollout generation.
 
