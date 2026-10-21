@@ -19,7 +19,6 @@ class _CustomResourceAccelerator(Accelerator):
     device_type = "fake"
     communication_backend_name = "fccl"
     ray_device_key = "FAKE"
-    ray_uses_native_gpu_resource = False
 
     def is_available(self) -> bool:
         return True
@@ -75,6 +74,17 @@ def test_a_driver_without_any_device_keeps_rays_gpu_resource(no_local_accelerato
     assert accelerator.ray_device_key() == "GPU"
     assert resources.actor_options(1) == {"num_gpus": 1}
     assert resources.bundle() == {"GPU": 1, "CPU": 1}
+
+
+def test_whether_ray_owns_the_resource_is_derived_from_its_name(no_local_accelerator):
+    """One name, not a name plus a flag that could disagree with it."""
+    assert accelerator.ray_device_key() == "GPU"
+    assert accelerator.ray_uses_native_gpu_resource() is True
+
+    accelerator.register_accelerator("fake-oot", _CustomResourceAccelerator, lambda: True, priority=300)
+
+    assert accelerator.ray_device_key() == "FAKE"
+    assert accelerator.ray_uses_native_gpu_resource() is False
 
 
 def test_a_custom_resource_backend_is_scheduled_under_its_own_name(no_local_accelerator):

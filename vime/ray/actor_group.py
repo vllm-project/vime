@@ -77,6 +77,29 @@ class RayTrainGroup:
             **self.args.train_env_vars,
         }
 
+        if self.args.offload_train:
+            import torch_memory_saver
+
+            for path in [
+                "torch_memory_saver_hook_mode_preload_cu13.abi3.so",
+                "torch_memory_saver_hook_mode_preload_cu12.abi3.so",
+                "torch_memory_saver_hook_mode_preload.abi3.so",
+            ]:
+                dynlib_path = os.path.join(
+                    os.path.dirname(os.path.dirname(torch_memory_saver.__file__)),
+                    path,
+                )
+                if os.path.exists(dynlib_path):
+                    break
+            else:
+                raise FileNotFoundError(
+                    "Cannot find torch_memory_saver dynamic library. Please make sure torch_memory_saver is properly installed."
+                )
+
+            env_vars["LD_PRELOAD"] = dynlib_path
+            env_vars["TMS_INIT_ENABLE"] = "1"
+            env_vars["TMS_INIT_ENABLE_CPU_BACKUP"] = "1"
+
         env_vars = device_env.current().train_actor_env(self.args, env_vars)
 
         # We cannot do routing replay for critic.

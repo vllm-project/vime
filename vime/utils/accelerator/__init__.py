@@ -466,8 +466,12 @@ def ray_device_key() -> str:
 
 
 def ray_uses_native_gpu_resource() -> bool:
-    """Whether that resource name is Ray's own GPU resource."""
-    return _describing_backend().ray_uses_native_gpu_resource
+    """Whether this job's accelerator is Ray's own GPU resource.
+
+    Derived rather than declared: a second attribute could disagree with the
+    name, and nothing would catch it.
+    """
+    return _describing_backend().ray_device_key == "GPU"
 
 
 def device_type() -> str:

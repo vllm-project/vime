@@ -6,6 +6,7 @@ everything it names exists, never that a device works.
 
 import importlib
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +14,7 @@ from vime.backends import megatron_lifecycle
 from vime.ray import resources
 from vime.utils import accelerator
 from vime.utils.accelerator.npu import NPUAccelerator
+from vime_plugins.ascend import device_env
 
 
 pytestmark = pytest.mark.unit
@@ -92,6 +94,32 @@ def test_importing_the_ascend_package_loads_no_vendor_runtime():
         importlib.import_module(module)
 
     assert [name for name in sys.modules if name.split(".")[0] in vendor] == []
+
+
+def test_npu_training_adds_only_the_hook_mode_to_the_shared_contract(monkeypatch):
+    """LD_PRELOAD and the TMS_INIT_* pair stay with the caller that set them.
+
+    The patched NPU memory saver takes the allocator through the same preload
+    shim as CUDA, so this only has to name the hook mode and the NPU allocator
+    policy, and must preserve what the caller already put in.
+    """
+    monkeypatch.setattr(device_env, "_cann_site_packages", lambda: None)
+    inherited = {
+        "KEEP": "1",
+        "LD_PRELOAD": "/set/by/the/caller.so",
+        "TMS_INIT_ENABLE": "1",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+    }
+
+    env = device_env.train_actor_env(SimpleNamespace(offload_train=True), inherited)
+
+    assert env["TMS_HOOK_MODE"] == "preload"
+    assert env["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:False"
+    assert env["LD_PRELOAD"] == "/set/by/the/caller.so"
+    assert env["TMS_INIT_ENABLE"] == "1"
+    assert env["KEEP"] == "1"
+    assert inherited["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:True"
+    assert device_env.train_actor_env(SimpleNamespace(offload_train=False), inherited) == inherited
 
 
 def test_a_backend_without_an_override_gets_the_shared_default(monkeypatch):

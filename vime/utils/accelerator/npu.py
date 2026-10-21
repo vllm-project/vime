@@ -55,7 +55,6 @@ class NPUAccelerator(TorchAccelerator):
     # ASCEND_RT_VISIBLE_DEVICES. Scheduling these devices as Ray GPUs would
     # leave every worker with no visible device.
     ray_device_key = "NPU"
-    ray_uses_native_gpu_resource = False
 
     @property
     def visible_devices_env(self) -> str:

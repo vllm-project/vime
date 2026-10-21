@@ -216,12 +216,10 @@ class Accelerator(abc.ABC):
 
     Ray resolves a worker's visible-devices variable from the resource name it
     was scheduled against, so a backend addressed under the wrong name starts
-    with no visible device. Backends whose devices Ray models separately from
-    its own GPU resource override this together with the flag below.
+    with no visible device. ``GPU`` is Ray's own resource and is handled
+    through its GPU APIs; any other name is a custom resource. Backends whose
+    devices Ray models separately override this.
     """
-
-    ray_uses_native_gpu_resource = True
-    """Whether ``ray_device_key`` is Ray's own GPU resource rather than a custom one."""
 
     @property
     def visible_devices_env(self) -> str:
