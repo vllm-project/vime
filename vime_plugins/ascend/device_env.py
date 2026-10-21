@@ -35,16 +35,15 @@ def _cann_site_packages() -> str | None:
     return None
 
 
-def _with_cann_and_allocator(env: dict[str, str], colocate: bool) -> dict[str, str]:
+def _with_cann_and_allocator(env: dict[str, str]) -> dict[str, str]:
     cann_python_path = _cann_site_packages()
     if cann_python_path is not None:
         existing = env.get("PYTHONPATH", os.environ.get("PYTHONPATH", ""))
         if cann_python_path not in {part for part in existing.split(os.pathsep) if part}:
             env["PYTHONPATH"] = os.pathsep.join([cann_python_path, existing] if existing else [cann_python_path])
-    if colocate:
-        # Colocated training and serving share the device, and expandable
-        # segments make the NPU allocator unable to hand memory back.
-        env["PYTORCH_NPU_ALLOC_CONF"] = _ALLOC_CONF
+    # NPU memory pools require this even outside colocate: vLLM sleep mode
+    # and training offload both use pools incompatible with expandable segments.
+    env["PYTORCH_NPU_ALLOC_CONF"] = _ALLOC_CONF
     return env
 
 
@@ -56,13 +55,13 @@ def train_actor_env(args: Any, env_vars: Mapping[str, str] | None = None) -> dic
     # instead of through an LD_PRELOAD shim, so none of the CUDA preload
     # contract applies here.
     env["TMS_HOOK_MODE"] = "torch"
-    return _with_cann_and_allocator(env, getattr(args, "colocate", False))
+    return _with_cann_and_allocator(env)
 
 
 def engine_actor_env(args: Any, env_vars: Mapping[str, str] | None = None) -> dict[str, str]:
     env = dict(env_vars or {})
     env["VLLM_USE_AOT_COMPILE"] = "0"
-    return _with_cann_and_allocator(env, getattr(args, "colocate", False))
+    return _with_cann_and_allocator(env)
 
 
 def serving_subprocess_env(base_env: Mapping[str, str], *, visible_devices: str, colocate: bool) -> dict[str, str]:
@@ -74,4 +73,4 @@ def serving_subprocess_env(base_env: Mapping[str, str], *, visible_devices: str,
     env.pop("HIP_VISIBLE_DEVICES", None)
     env["ASCEND_RT_VISIBLE_DEVICES"] = visible_devices
     env["VLLM_USE_AOT_COMPILE"] = "0"
-    return _with_cann_and_allocator(env, colocate)
+    return _with_cann_and_allocator(env)

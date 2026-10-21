@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from vime.utils import accelerator
+from vime.utils.accelerator import npu as npu_backend
 
 NUM_GPUS = 0
 
@@ -310,10 +311,9 @@ def test_selected_npu_bootstraps_runtime_once(monkeypatch):
         return True
 
     monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", "0")
-    # Auto-selection probes for a device before importing anything, so the
-    # probe has to be answered here too; a runner without Ascend hardware
-    # would otherwise select nothing.
-    monkeypatch.setattr(accelerator, "_has_npu_device", lambda: True)
+    # Both auto-selection and runtime availability inspect device nodes.
+    # Mock the hardware boundary so both checks see the same fake device.
+    monkeypatch.setattr(npu_backend, "glob", lambda pattern: ["/dev/davinci0"])
     monkeypatch.setattr(accelerator, "_import_torch_npu", import_torch_npu)
 
     assert imports == []
@@ -337,10 +337,15 @@ def test_an_ascend_toolkit_without_devices_does_not_select_npu(monkeypatch):
 
 @pytest.mark.unit
 def test_an_explicit_request_selects_npu_without_a_device_probe(monkeypatch):
-    """VIME_ACCELERATOR is the one thing that does not need the probe."""
+    """Explicit selection skips the auto-selection gate, then validates runtime."""
     fake_npu = SimpleNamespace(is_available=lambda: True)
     monkeypatch.setenv("VIME_ACCELERATOR", "npu")
-    monkeypatch.setattr(accelerator, "_has_npu_device", lambda: False)
+    monkeypatch.setattr(npu_backend, "glob", lambda pattern: ["/dev/davinci0"])
+    monkeypatch.setattr(
+        accelerator,
+        "_has_npu_device",
+        lambda: pytest.fail("explicit selection must skip the auto-selection probe"),
+    )
     monkeypatch.setattr(
         accelerator,
         "_import_torch_npu",
@@ -377,6 +382,27 @@ def test_npu_availability_handles_missing_torch_namespace(monkeypatch):
     monkeypatch.delattr(accelerator.torch, "npu", raising=False)
 
     assert accelerator.is_npu_available() is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("visible_devices", "device_nodes", "expected"),
+    [("-1", ["/dev/davinci0"], False), ("0", [], False), ("0", ["/dev/davinci0"], True)],
+)
+def test_npu_availability_requires_a_visible_device(monkeypatch, visible_devices, device_nodes, expected):
+    checks = []
+
+    def runtime_available():
+        checks.append(True)
+        return True
+
+    monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", visible_devices)
+    monkeypatch.setattr(npu_backend, "glob", lambda pattern: device_nodes)
+    monkeypatch.setattr(accelerator.torch, "npu", SimpleNamespace(is_available=runtime_available), raising=False)
+
+    assert accelerator.is_npu_available() is expected
+    assert accelerator.NPUAccelerator().is_available() is expected
+    assert checks == ([True, True] if expected else [])
 
 
 @pytest.mark.unit

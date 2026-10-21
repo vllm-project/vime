@@ -6,6 +6,7 @@ everything it names exists, never that a device works.
 
 import importlib
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +14,7 @@ from vime.backends import megatron_lifecycle
 from vime.ray import resources
 from vime.utils import accelerator
 from vime.utils.accelerator.npu import NPUAccelerator
+from vime_plugins.ascend import device_env
 
 
 pytestmark = pytest.mark.unit
@@ -95,6 +97,28 @@ def test_npu_offload_never_suspends_the_memory_saver():
 
     assert type(ascend.offload_disable_context(True)).__name__ == "nullcontext"
     assert type(ascend.training_region(False)).__name__ == "nullcontext"
+
+
+@pytest.mark.parametrize("colocate", [False, True])
+@pytest.mark.parametrize("sleep_mode", [False, True])
+def test_npu_serving_overrides_incompatible_allocator_before_startup(monkeypatch, colocate, sleep_mode):
+    # CI #398: the image enables expandable segments, while a non-colocated
+    # vLLM engine can still use a memory pool through --enable-sleep-mode.
+    monkeypatch.setattr(device_env, "_cann_site_packages", lambda: None)
+    monkeypatch.setenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
+    args = SimpleNamespace(colocate=colocate, vllm_enable_sleep_mode=sleep_mode)
+    inherited = {"PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True", "KEEP": "1"}
+
+    actor_env = device_env.engine_actor_env(args)
+    assert actor_env["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:False"
+
+    # Check both a direct launch and the actor -> subprocess inheritance path.
+    for base_env in (inherited, {**inherited, **actor_env}):
+        server_env = device_env.serving_subprocess_env(base_env, visible_devices="4,5,6,7", colocate=colocate)
+        assert server_env["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:False"
+        assert server_env["ASCEND_RT_VISIBLE_DEVICES"] == "4,5,6,7"
+        assert server_env["KEEP"] == "1"
+    assert inherited["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:True"
 
 
 def test_a_backend_without_an_override_gets_the_shared_default(monkeypatch):

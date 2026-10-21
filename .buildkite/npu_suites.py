@@ -103,7 +103,9 @@ def npu_step(
 
     commands = "\n".join(
         [
+            "set -e",
             'echo "INFO: update NPU environment"',
+            'source "${ASCEND_HOME:-/usr/local/Ascend}/ascend-toolkit/set_env.sh"',
             'if [ -n "${BUILDKITE_COMMIT}" ]; then',
             "  source /workspace/build/buildkite/.buildkite/scripts/update-npu-environment.sh",
             "fi",
