@@ -39,6 +39,10 @@ def isolate_selection(monkeypatch):
     selected = accelerator._ACCELERATOR
     for name in ("VIME_ACCELERATOR", "MUSA_VISIBLE_DEVICES", "MUSA_PATCH_PATH", "SUPA_VISIBLE_DEVICES", "BIREN_HOME"):
         monkeypatch.delenv(name, raising=False)
+    # Say explicitly that no Ascend device is visible, rather than leaving the
+    # variable unset: unset lets a CANN host's real devices be detected, and
+    # then this describes that host instead of the case under test.
+    monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", "-1")
     accelerator._REGISTRY.clear()
     accelerator.reset_accelerator()
     # Keep this independent of the runner's hardware: no builtin backend

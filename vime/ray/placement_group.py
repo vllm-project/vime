@@ -8,6 +8,7 @@ from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from vime.ray import resources
+from vime.utils import accelerator
 from vime.utils.cleanup import Cleanup
 
 from .actor_group import RayTrainGroup
@@ -22,7 +23,7 @@ class InfoActor:
         accelerator_ids = resources.accelerator_ids()
         if not accelerator_ids:
             raise RuntimeError(
-                f"No {resources.resource_name()} accelerator IDs are assigned to this actor. "
+                f"No {accelerator.ray_device_key()} accelerator IDs are assigned to this actor. "
                 f"Accelerator IDs: {ray.get_runtime_context().get_accelerator_ids()}"
             )
         return ray.util.get_node_ip_address(), accelerator_ids[0]
@@ -54,7 +55,7 @@ def _create_placement_group(num_gpus):
     if num_gpus == 0:
         return None, [], []
 
-    resource_name = resources.resource_name()
+    resource_name = accelerator.ray_device_key()
     bundles = [resources.bundle() for _ in range(num_gpus)]
     pg = placement_group(bundles, strategy="PACK")
     num_bundles = len(bundles)

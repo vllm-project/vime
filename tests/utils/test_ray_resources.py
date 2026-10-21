@@ -42,6 +42,10 @@ def isolate_selection(monkeypatch):
     selected = accelerator._ACCELERATOR
     for name in ("VIME_ACCELERATOR", "MUSA_VISIBLE_DEVICES", "MUSA_PATCH_PATH", "SUPA_VISIBLE_DEVICES", "BIREN_HOME"):
         monkeypatch.delenv(name, raising=False)
+    # Say explicitly that no Ascend device is visible, rather than leaving the
+    # variable unset: unset lets a CANN host's real devices be detected, and
+    # then this describes that host instead of the case under test.
+    monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", "-1")
     accelerator._REGISTRY.clear()
     accelerator.reset_accelerator()
     yield
@@ -62,7 +66,7 @@ def no_local_accelerator(monkeypatch):
 def test_a_driver_without_any_device_keeps_rays_gpu_resource(no_local_accelerator):
     assert accelerator.initialize_accelerator() is None
 
-    assert resources.resource_name() == "GPU"
+    assert accelerator.ray_device_key() == "GPU"
     assert resources.actor_options(1) == {"num_gpus": 1}
     assert resources.bundle() == {"GPU": 1, "CPU": 1}
 
@@ -70,7 +74,7 @@ def test_a_driver_without_any_device_keeps_rays_gpu_resource(no_local_accelerato
 def test_a_custom_resource_backend_is_scheduled_under_its_own_name(no_local_accelerator):
     accelerator.register_accelerator("fake-oot", _CustomResourceAccelerator, lambda: True, priority=300)
 
-    assert resources.resource_name() == "FAKE"
+    assert accelerator.ray_device_key() == "FAKE"
     assert resources.bundle(2, 4) == {"FAKE": 2, "CPU": 4}
     # num_gpus is pinned to 0 so Ray does not also reserve a GPU it has none of.
     assert resources.actor_options(0.5) == {"num_gpus": 0, "resources": {"FAKE": 0.5}}
@@ -81,7 +85,7 @@ def test_an_explicit_request_is_described_without_requiring_its_device(monkeypat
     accelerator.register_accelerator("fake-oot", _CustomResourceAccelerator, lambda: False, priority=300)
     monkeypatch.setenv("VIME_ACCELERATOR", "fake-oot")
 
-    assert resources.resource_name() == "FAKE"
+    assert accelerator.ray_device_key() == "FAKE"
     assert resources.actor_options(1) == {"num_gpus": 0, "resources": {"FAKE": 1}}
 
 
@@ -89,7 +93,7 @@ def test_an_unknown_explicit_request_is_rejected(monkeypatch, no_local_accelerat
     monkeypatch.setenv("VIME_ACCELERATOR", "nonexistent")
 
     with pytest.raises(ValueError, match="Unknown accelerator 'nonexistent'"):
-        resources.resource_name()
+        accelerator.ray_device_key()
 
 
 def test_native_gpu_ids_come_from_rays_gpu_api(monkeypatch, no_local_accelerator):
