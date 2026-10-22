@@ -7,11 +7,9 @@ import torch.distributed as dist
 
 from vime.backends import megatron_lifecycle
 
-# Before anything from megatron: a patch applied after Megatron is already
-# imported does not reach the aliases Megatron captured at import time. The
-# pinned Megatron keeps torch.compile as jit_fuser, and MegatronAdaptor's
-# patch only updates the attribute named compile. Idempotent, and a no-op
-# where there is nothing to install.
+# Must precede every megatron import: a patch applied afterwards misses the
+# aliases Megatron captured at import time. Idempotent, and a no-op without a
+# vendor layer to install.
 megatron_lifecycle.current().before_import()
 
 # isort: split
