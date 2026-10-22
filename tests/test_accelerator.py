@@ -378,6 +378,46 @@ def test_npu_backend_is_recognized_as_accelerator_backend():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("capturing", [False, True])
+@pytest.mark.parametrize("active_pool", [None, object()])
+def test_npu_empty_cache_defers_until_pool_and_capture_have_exited(monkeypatch, capturing, active_pool):
+    state = {"capturing": capturing, "pool": active_pool}
+    calls = []
+    fake_npu = SimpleNamespace(
+        is_current_stream_capturing=lambda: state["capturing"],
+        memory=SimpleNamespace(MemPoolContext=SimpleNamespace(active_pool=lambda: state["pool"])),
+        empty_cache=lambda: calls.append("empty_cache"),
+    )
+    monkeypatch.setattr(accelerator.torch, "npu", fake_npu, raising=False)
+    backend = accelerator.NPUAccelerator()
+
+    backend.empty_cache()
+    assert calls == (["empty_cache"] if not capturing and active_pool is None else [])
+
+    # Leaving the export pool must not permanently suppress reclamation.
+    state.update(capturing=False, pool=None)
+    calls.clear()
+    backend.empty_cache()
+    assert calls == ["empty_cache"]
+
+
+@pytest.mark.unit
+def test_npu_empty_cache_propagates_allocator_errors(monkeypatch):
+    def empty_cache():
+        raise RuntimeError("device failure")
+
+    fake_npu = SimpleNamespace(
+        is_current_stream_capturing=lambda: False,
+        memory=SimpleNamespace(MemPoolContext=SimpleNamespace(active_pool=lambda: None)),
+        empty_cache=empty_cache,
+    )
+    monkeypatch.setattr(accelerator.torch, "npu", fake_npu, raising=False)
+
+    with pytest.raises(RuntimeError, match="device failure"):
+        accelerator.NPUAccelerator().empty_cache()
+
+
+@pytest.mark.unit
 def test_npu_availability_handles_missing_torch_namespace(monkeypatch):
     monkeypatch.delattr(accelerator.torch, "npu", raising=False)
 

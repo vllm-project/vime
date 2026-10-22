@@ -244,12 +244,18 @@ index f5e47804f..466d85741 100644
          # Use the worker's assigned device rather than the ambient current
          # device: the receive path is no longer wrapped in
          # ``with torch.device(self.device)`` by the caller, so the current
-@@ -294,6 +298,8 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
+@@ -294,6 +298,14 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
              self.client.finish_weight_update()
          self._post_send_sync()
          del weight_refs
 +        torch.npu.ipc_collect()
-+        torch.npu.empty_cache()
++        # Exports may run inside TMS.disable()'s temporary memory pool.
++        # Defer global cleanup until the pool has exited and training resumes.
++        if (
++            torch.npu.memory.MemPoolContext.active_pool() is None
++            and not torch.npu.is_current_stream_capturing()
++        ):
++            torch.npu.empty_cache()
  
      def _send(self, source: "WeightSource") -> list[torch.Tensor] | None:
          if self.packed:

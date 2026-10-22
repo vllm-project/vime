@@ -119,6 +119,10 @@ class NPUAccelerator(TorchAccelerator):
         is_capturing = getattr(module, "is_current_stream_capturing", None)
         if is_capturing is not None and is_capturing():
             return
+        # TMS.disable() routes exports through a temporary pool without graph
+        # capture. Global cleanup is only safe after that pool has exited.
+        if module.memory.MemPoolContext.active_pool() is not None:
+            return
         module.empty_cache()
 
     def supports(self, capability: str) -> bool:

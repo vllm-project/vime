@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def _receive_ipc(queue, result):
@@ -27,6 +28,9 @@ def _worker():
     import torch
     import torch_npu  # noqa: F401
     from torch_memory_saver import torch_memory_saver as tms
+    from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import NPUIPCTrainerWeightTransferEngine
+
+    from vime.utils.accelerator.npu import NPUAccelerator
 
     torch.npu.set_device(0)
     tms._ensure_initialized()
@@ -58,6 +62,16 @@ def _worker():
     assert config() == expected
     assert len(thread_tensors) == 1
 
+    # Exercise the real sender's cleanup with a stub data/control plane. The
+    # tensor IPC below separately verifies data reaches another process.
+    sender = SimpleNamespace(
+        source=(),
+        is_sender=False,
+        _send=lambda source: [],
+        _post_send_sync=NPUIPCTrainerWeightTransferEngine._post_send_sync,
+    )
+    backend = NPUAccelerator()
+
     try:
         with tms.region(tag="exception", enable_cpu_backup=False):
             raise ValueError("expected region failure")
@@ -74,9 +88,13 @@ def _worker():
         assert free_paused > free_before
         try:
             with tms.disable():
+                assert torch.npu.memory.MemPoolContext.active_pool() is not None
                 temporary = torch.full_like(weights, 59)
                 assert temporary.min().item() == 59
                 del temporary
+                # Neither entry may globally empty an active export pool.
+                backend.empty_cache()
+                NPUIPCTrainerWeightTransferEngine.send_weights(sender)
                 if step == 1:
                     raise ValueError("expected export failure")
         except ValueError:
@@ -89,7 +107,9 @@ def _worker():
         # Non-backed contents must be reconstructed before being read.
         grads.zero_()
         assert grads.max().item() == 0
-        torch.npu.empty_cache()
+        assert torch.npu.memory.MemPoolContext.active_pool() is None
+        backend.empty_cache()
+        NPUIPCTrainerWeightTransferEngine.send_weights(sender)
         cycles.append({"released_bytes": free_paused - free_before, "data_restored": True})
 
     # Adam creates its moments during the first step, outside explicit regions.
@@ -149,6 +169,7 @@ def _worker():
                 "exception_state_restored": True,
                 "adam_restored": True,
                 "ipc_values_verified": True,
+                "pool_cleanup_verified": True,
             }
         )
     )
