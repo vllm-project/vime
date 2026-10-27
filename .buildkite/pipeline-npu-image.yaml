@@ -48,8 +48,7 @@ steps:
       VIME_IMAGE_TAG: "${BUILDKITE_COMMIT}"
       IMAGE_NAME: "vime-ci-npu"
       IMAGE_REGISTRY: "swr.cn-southwest-2.myhuaweicloud.com/modelfoundry"
-      BASE_IMAGE: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/vllm-ascend-ci"
-      RUST_IMAGE: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/rust"
+      RUST_IMAGE: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/rust:1.95-bookworm"
       CARGO_REGISTRY: "sparse+https://rsproxy.cn/index/"
       BUILDKITD_ADDR: "tcp://buildkitd-service.buildkitd:1234"
     command: |
@@ -84,7 +83,6 @@ steps:
         --local context=. \
         --local dockerfile=./docker \
         --opt filename=Dockerfile.npu \
-        --opt build-arg:BASE_IMAGE="$${BASE_IMAGE}" \
         --opt build-arg:VIME_COMMIT="$${VIME_IMAGE_TAG}" \
         --opt build-arg:RUST_IMAGE="$${RUST_IMAGE}" \
         --opt build-arg:CARGO_REGISTRY="$${CARGO_REGISTRY}" \
