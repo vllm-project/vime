@@ -1,0 +1,324 @@
+diff --git a/contrib/torch_memory_saver/csrc/api_forwarder.h b/contrib/torch_memory_saver/csrc/api_forwarder.h
+--- a/contrib/torch_memory_saver/csrc/api_forwarder.h
++++ b/contrib/torch_memory_saver/csrc/api_forwarder.h
+@@ -2,7 +2,20 @@
+ #include <acl/acl.h>
+ #include <dlfcn.h>
+ namespace APIForwarder {
++
++// Loading CANN before Python starts changes its initial signal handlers and
++// breaks Ray's deferred SIGINT handling. Resolve ACL functions on first use.
++void *get_runtime_function(const char *name);
+ aclError call_real_aclrt_malloc_align32(void **ptr, size_t size,
+                                         aclrtMemMallocPolicy policy);
+ aclError call_real_aclrt_free(void *ptr);
+ } // namespace APIForwarder
++
++// Cache each symbol at its call site. decltype only uses the ACL declaration;
++// no link-time dependency on libascendcl is introduced.
++#define TMS_CANN_CALL(function, ...)                                           \
++  ([&]() {                                                                     \
++    static auto callable = reinterpret_cast<decltype(&::function)>(              \
++        APIForwarder::get_runtime_function(#function));                         \
++    return callable(__VA_ARGS__);                                               \
++  }())
+diff --git a/contrib/torch_memory_saver/csrc/api_forwarder.cpp b/contrib/torch_memory_saver/csrc/api_forwarder.cpp
+--- a/contrib/torch_memory_saver/csrc/api_forwarder.cpp
++++ b/contrib/torch_memory_saver/csrc/api_forwarder.cpp
+@@ -21,12 +21,25 @@
+ static AclrtMallocFuncAlign32 real_aclrt_malloc_align32_ = NULL;
+ static AclrtFreeFunc real_aclrt_free_ = NULL;
+ 
++void *get_runtime_function(const char *name) {
++  static void *runtime = []() {
++    void *handle = dlopen("libascendcl.so", RTLD_NOW | RTLD_LOCAL);
++    if (handle == nullptr) {
++      std::cerr << "[torch_memory_saver.cpp] Cannot load libascendcl.so: "
++                << dlerror() << std::endl;
++      exit(1);
++    }
++    return handle;
++  }();
++  return check_dlsym(dlsym(runtime, name));
++}
++
+ aclError call_real_aclrt_malloc_align32(void **ptr, size_t size,
+                                         aclrtMemMallocPolicy policy) {
+   static std::once_flag malloc_flag;
+   std::call_once(malloc_flag, []() {
+-    real_aclrt_malloc_align32_ = (AclrtMallocFuncAlign32)check_dlsym(
+-        dlsym(RTLD_NEXT, "aclrtMallocAlign32"));
++    real_aclrt_malloc_align32_ =
++        (AclrtMallocFuncAlign32)get_runtime_function("aclrtMallocAlign32");
+   });
+ 
+   aclError ret = real_aclrt_malloc_align32_(ptr, size, policy);
+@@ -44,8 +57,7 @@
+ 
+   static std::once_flag free_flag;
+   std::call_once(free_flag, []() {
+-    real_aclrt_free_ =
+-        (AclrtFreeFunc)check_dlsym(dlsym(RTLD_NEXT, "aclrtFree"));
++    real_aclrt_free_ = (AclrtFreeFunc)get_runtime_function("aclrtFree");
+   });
+ 
+   aclError ret = real_aclrt_free_(ptr);
+diff --git a/contrib/torch_memory_saver/csrc/core.cpp b/contrib/torch_memory_saver/csrc/core.cpp
+--- a/contrib/torch_memory_saver/csrc/core.cpp
++++ b/contrib/torch_memory_saver/csrc/core.cpp
+@@ -14,9 +14,9 @@
+                                   const bool enable_cpu_backup) {
+   aclrtDrvMemHandle allocHandle;
+   CANNUtils::cann_mem_create(&allocHandle, size, device);
+-  int ret = aclrtReserveMemAddress(ptr, size, 0, nullptr, 0);
++  int ret = TMS_CANN_CALL(aclrtReserveMemAddress, ptr, size, 0, nullptr, 0);
+   SIMPLE_CHECK(ret == ACL_SUCCESS, "aclrtReserveMemAddress failed");
+-  ret = aclrtMapMem(*ptr, size, 0, allocHandle, 0);
++  ret = TMS_CANN_CALL(aclrtMapMem, *ptr, size, 0, allocHandle, 0);
+   SIMPLE_CHECK(ret == ACL_SUCCESS, "aclrtMapMem failed");
+   {
+     const std::lock_guard<std::mutex> lock(allocator_metadata_mutex_);
+@@ -44,17 +44,17 @@
+   }
+ 
+   static constexpr int32_t kSyncTimeoutMs = 3000;
+-  int ret = aclrtSynchronizeDeviceWithTimeout(kSyncTimeoutMs);
++  int ret = TMS_CANN_CALL(aclrtSynchronizeDeviceWithTimeout, kSyncTimeoutMs);
+   SIMPLE_CHECK(ret == ACL_SUCCESS, "aclrtSynchronizeDeviceWithTimeout failed.");
+-  ret = aclrtUnmapMem(ptr);
++  ret = TMS_CANN_CALL(aclrtUnmapMem, ptr);
+   SIMPLE_CHECK(ret == ACL_SUCCESS, "aclrtUnmapMem failed.");
+-  ret = aclrtFreePhysical(metadata.allocHandle);
++  ret = TMS_CANN_CALL(aclrtFreePhysical, metadata.allocHandle);
+   SIMPLE_CHECK(ret == ACL_SUCCESS, "aclrtFreePhysical failed.");
+-  ret = aclrtReleaseMemAddress(ptr);
++  ret = TMS_CANN_CALL(aclrtReleaseMemAddress, ptr);
+   SIMPLE_CHECK(ret == ACL_SUCCESS, "aclrtReleaseMemAddress failed.");
+ 
+   if (nullptr != metadata.cpu_backup) {
+-    ret = aclrtFreeHost(metadata.cpu_backup);
++    ret = TMS_CANN_CALL(aclrtFreeHost, metadata.cpu_backup);
+     SIMPLE_CHECK(ret == ACL_SUCCESS, "aclrtFreeHost failed.");
+     metadata.cpu_backup = nullptr;
+   }
+@@ -80,17 +80,17 @@
+ 
+     if (metadata.enable_cpu_backup) {
+       if (nullptr == metadata.cpu_backup) {
+-        aclrtMallocHost(&metadata.cpu_backup, metadata.size);
++        TMS_CANN_CALL(aclrtMallocHost, &metadata.cpu_backup, metadata.size);
+       }
+       SIMPLE_CHECK(metadata.cpu_backup != nullptr,
+                    "cpu_backup should not be nullptr");
+-      aclrtMemcpy(metadata.cpu_backup, metadata.size, ptr, metadata.size,
++      TMS_CANN_CALL(aclrtMemcpy, metadata.cpu_backup, metadata.size, ptr, metadata.size,
+                   ACL_MEMCPY_DEVICE_TO_HOST);
+     }
+ 
+-    int ret = aclrtUnmapMem(ptr);
++    int ret = TMS_CANN_CALL(aclrtUnmapMem, ptr);
+     SIMPLE_CHECK(ret == ACL_SUCCESS, "aclrtUnmapMem failed.");
+-    ret = aclrtFreePhysical(metadata.allocHandle);
++    ret = TMS_CANN_CALL(aclrtFreePhysical, metadata.allocHandle);
+     SIMPLE_CHECK(ret == ACL_SUCCESS, "aclrtFreePhysical failed.");
+ 
+ #ifdef TMS_DEBUG_LOG
+@@ -120,13 +120,13 @@
+     aclrtDrvMemHandle newAllocHandle;
+     CANNUtils::cann_mem_create(&newAllocHandle, metadata.size, metadata.device);
+ 
+-    aclrtMapMem(ptr, metadata.size, 0, newAllocHandle, 0);
++    TMS_CANN_CALL(aclrtMapMem, ptr, metadata.size, 0, newAllocHandle, 0);
+ 
+     if (metadata.enable_cpu_backup) {
+       SIMPLE_CHECK(metadata.cpu_backup != nullptr,
+                    "cpu_backup should not be nullptr");
+       // TODO may use cudaMemcpyAsync if needed
+-      aclrtMemcpy(ptr, metadata.size, metadata.cpu_backup, metadata.size,
++      TMS_CANN_CALL(aclrtMemcpy, ptr, metadata.size, metadata.cpu_backup, metadata.size,
+                   ACL_MEMCPY_HOST_TO_DEVICE);
+       // maybe we can free host memory if needed (currently keep it there to
+       // reduce re-alloc time)
+diff --git a/contrib/torch_memory_saver/csrc/entrypoint.cpp b/contrib/torch_memory_saver/csrc/entrypoint.cpp
+--- a/contrib/torch_memory_saver/csrc/entrypoint.cpp
++++ b/contrib/torch_memory_saver/csrc/entrypoint.cpp
+@@ -95,6 +95,14 @@
+   return thread_local_config.is_interesting_region();
+ }
+ 
++const char *tms_get_current_tag() {
++  return thread_local_config.current_tag_.c_str();
++}
++
++bool tms_get_enable_cpu_backup() {
++  return thread_local_config.enable_cpu_backup();
++}
++
+ void tms_set_current_tag(const char *tag) {
+   SIMPLE_CHECK(tag != nullptr, "tag should not be null");
+   thread_local_config.current_tag_ = tag;
+diff --git a/contrib/torch_memory_saver/csrc/utils.h b/contrib/torch_memory_saver/csrc/utils.h
+--- a/contrib/torch_memory_saver/csrc/utils.h
++++ b/contrib/torch_memory_saver/csrc/utils.h
+@@ -1,4 +1,5 @@
+ #pragma once
++#include "api_forwarder.h"
+ #include <acl/acl.h>
+ #include <iostream>
+ 
+@@ -33,13 +34,13 @@
+   prop.memAttr = ACL_HBM_MEM_HUGE;
+   prop.reserve = 0;
+   prop.handleType = ACL_MEM_HANDLE_TYPE_NONE;
+-  aclError ret = aclrtMallocPhysical(alloc_handle, size, &prop, 0);
++  aclError ret = TMS_CANN_CALL(aclrtMallocPhysical, alloc_handle, size, &prop, 0);
+   SIMPLE_CHECK(ret == ACL_SUCCESS, "aclrtMallocPhysical failed");
+ }
+ 
+ static int cann_ctx_get_device() {
+   int ans;
+-  aclError ret = aclrtGetDevice(&ans);
++  aclError ret = TMS_CANN_CALL(aclrtGetDevice, &ans);
+   SIMPLE_CHECK(ret == ACL_SUCCESS, "aclrtGetDevice failed");
+   return ans;
+ }
+diff --git a/contrib/torch_memory_saver/python/setup.py b/contrib/torch_memory_saver/python/setup.py
+--- a/contrib/torch_memory_saver/python/setup.py
++++ b/contrib/torch_memory_saver/python/setup.py
+@@ -68,8 +68,9 @@
+             ],
+             include_dirs=include_dirs,
+             library_dirs=library_dirs,
+-            # CUDA -> ACL
+-            libraries=["ascendcl"],
++            # Resolve CANN on first use so preload does not load its signal
++            # handlers before Python has initialized its own handlers.
++            libraries=["dl"],
+             define_macros=[
+                 *common_macros,
+                 *extra_macros,
+diff --git a/contrib/torch_memory_saver/python/torch_memory_saver/binary_wrapper.py b/contrib/torch_memory_saver/python/torch_memory_saver/binary_wrapper.py
+--- a/contrib/torch_memory_saver/python/torch_memory_saver/binary_wrapper.py
++++ b/contrib/torch_memory_saver/python/torch_memory_saver/binary_wrapper.py
+@@ -27,6 +27,8 @@
+     cdll.tms_set_current_tag.argtypes = [ctypes.c_char_p]
+     cdll.tms_set_interesting_region.argtypes = [ctypes.c_bool]
+     cdll.tms_get_interesting_region.restype = ctypes.c_bool
++    cdll.tms_get_current_tag.restype = ctypes.c_char_p
++    cdll.tms_get_enable_cpu_backup.restype = ctypes.c_bool
+     cdll.tms_set_enable_cpu_backup.argtypes = [ctypes.c_bool]
+     cdll.tms_pause.argtypes = [ctypes.c_char_p]
+     cdll.tms_resume.argtypes = [ctypes.c_char_p]
+diff --git a/contrib/torch_memory_saver/python/torch_memory_saver/entrypoint.py b/contrib/torch_memory_saver/python/torch_memory_saver/entrypoint.py
+--- a/contrib/torch_memory_saver/python/torch_memory_saver/entrypoint.py
++++ b/contrib/torch_memory_saver/python/torch_memory_saver/entrypoint.py
+@@ -1,6 +1,7 @@
+ import ctypes
+ import logging
+ import os
++import threading
+ from contextlib import contextmanager
+ from typing import Optional
+ 
+@@ -97,12 +98,32 @@
+         self._binary_wrapper = BinaryWrapper(
+             path_binary=self._hook_util.get_path_binary()
+         )
+-        self._mem_pool = torch.npu.MemPool(allocator=self._hook_util.get_allocator())
++        self._mem_pools = {}
+         _sanity_checks()
+ 
+     @contextmanager
++    def _use_mem_pool(self, pool, device):
++        # TMS configuration is thread-local. The default torch_npu helper
++        # routes every thread's allocations to the pool instead.
++        ctx = torch.npu.memory.MemPoolContext(pool)
++        try:
++            torch_npu._C._npu_beginAllocateCurrentThreadToPool(device, pool.id)
++            try:
++                yield
++            finally:
++                torch_npu._C._npu_endAllocateCurrentStreamToPool(device, pool.id)
++        finally:
++            del ctx
++
++    @contextmanager
+     def region(self, tag: str, enable_cpu_backup: bool):
+-        with torch.npu.use_mem_pool(self._mem_pool):
++        device = torch.npu.current_device()
++        key = (threading.get_ident(), device, tag, enable_cpu_backup)
++        pool = self._mem_pools.get(key)
++        if pool is None:
++            pool = torch.npu.MemPool(allocator=self._hook_util.get_allocator())
++            self._mem_pools[key] = pool
++        with self._use_mem_pool(pool, device):
+             with self._with_region_config(tag=tag, enable_cpu_backup=enable_cpu_backup):
+                 yield
+ 
+@@ -127,16 +148,20 @@
+ 
+     @contextmanager
+     def _with_region_config(self, tag: str, enable_cpu_backup: bool):
+-        assert not self._binary_wrapper.cdll.tms_get_interesting_region()
++        cdll = self._binary_wrapper.cdll
++        old_tag = cdll.tms_get_current_tag().decode("utf-8")
++        old_active = cdll.tms_get_interesting_region()
++        old_backup = cdll.tms_get_enable_cpu_backup()
+         self._binary_wrapper.set_config(
+             tag=tag, interesting_region=True, enable_cpu_backup=enable_cpu_backup
+         )
+         try:
+             yield
+         finally:
+-            assert self._binary_wrapper.cdll.tms_get_interesting_region()
+             self._binary_wrapper.set_config(
+-                tag=_TAG_DEFAULT, interesting_region=False, enable_cpu_backup=False
++                tag=old_tag,
++                interesting_region=old_active,
++                enable_cpu_backup=old_backup,
+             )
+ 
+     @contextmanager
+@@ -146,21 +171,23 @@
+         if not self._binary_wrapper.cdll.tms_get_interesting_region():
+             raise RuntimeError("disable() should be called only when tms is active")
+ 
++        device = torch.npu.current_device()
++        pool = torch.npu.MemPool()
+         self._binary_wrapper.cdll.tms_set_interesting_region(False)
+         try:
+             # Affected by the memory allocation mechanism of torch_npu, a new mempool must be adopted.
+             # Otherwise, paused virtual addresses may be reused, causing memory conflicts and trigger errors.
+-            pool = torch.npu.MemPool()
+-            with torch.npu.use_mem_pool(pool):
+-                yield
+-
+-            torch.npu.synchronize()
+-            # Note that this operation does not release the device memory immediately. The memory will
+-            # only be released after the memory region is resumed and empty_cache() is invoked.
+-            torch_npu._C._npu_releasePool(torch.npu.current_device(), pool.id)
+-            del pool
++            with self._use_mem_pool(pool, device):
++                yield
+         finally:
+-            self._binary_wrapper.cdll.tms_set_interesting_region(True)
++            try:
++                torch.npu.synchronize(device)
++                # Cached memory is reclaimed after resume + empty_cache;
++                # global empty_cache is unsafe while training is paused.
++                torch_npu._C._npu_releasePool(device, pool.id)
++            finally:
++                self._binary_wrapper.cdll.tms_set_interesting_region(True)
++                del pool
+ 
+     def pause(self, tag: Optional[str]):
+         tag_bytes = tag.encode("utf-8") if tag else None
+@@ -172,7 +199,7 @@
+ 
+ 
+ def _sanity_checks():
+-    if "expandable_segments:True" in os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""):
++    if "expandable_segments:True" in os.environ.get("PYTORCH_NPU_ALLOC_CONF", ""):
+         raise RuntimeError(
+             "TorchMemorySaver is disabled for the current process because expandable_segments is not supported yet."
+         )

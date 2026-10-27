@@ -4,6 +4,15 @@ import shutil
 
 import torch
 import torch.distributed as dist
+
+from vime.backends import megatron_lifecycle
+
+# Must precede every megatron import: a patch applied afterwards misses the
+# aliases Megatron captured at import time. Idempotent, and a no-op without a
+# vendor layer to install.
+megatron_lifecycle.current().before_import()
+
+# isort: split
 from megatron.core.enums import ModelType
 from megatron.training.arguments import parse_args, validate_args
 from megatron.training.checkpointing import get_checkpoint_name, get_checkpoint_tracker_filename, save_checkpoint

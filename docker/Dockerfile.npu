@@ -1,0 +1,223 @@
+# syntax=docker/dockerfile:1.7
+
+ARG BASE_IMAGE=quay.io/atlas-ci/vllm-ascend
+ARG BASE_IMAGE_TAG=v0.31.0-007abb8-a3
+ARG RUST_IMAGE=rust:1.95-bookworm
+ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+ARG APTMIRROR=""
+# Optional Cargo mirror, e.g. sparse+https://rsproxy.cn/index/.
+ARG CARGO_REGISTRY=""
+
+FROM ${RUST_IMAGE} AS rust-toolchain
+
+# Shared Rust toolchain and mirrors for wheel builds.
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS wheel-builder-base
+
+ARG PIP_INDEX_URL
+ARG APTMIRROR
+ARG CARGO_REGISTRY
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    CARGO_BUILD_JOBS=4 \
+    PATH=/usr/local/cargo/bin:${PATH}
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+COPY --from=rust-toolchain /usr/local/cargo/bin /usr/local/cargo/bin
+
+RUN if [ -n "$APTMIRROR" ]; then \
+      sed -i "s@^\(deb.*\)https\?://[a-z0-9.-]*\.ubuntu\.com@\1$APTMIRROR@g" /etc/apt/sources.list; \
+    else \
+      sed -i '/ports\.ubuntu\.com/ {h;s|ports\.ubuntu\.com|mirrors.tuna.tsinghua.edu.cn|g;G}' /etc/apt/sources.list; \
+    fi && \
+    if [ -n "$PIP_INDEX_URL" ]; then \
+      pip config set global.index-url "${PIP_INDEX_URL}" && \
+      if [ "${PIP_INDEX_URL#http://}" != "${PIP_INDEX_URL}" ]; then \
+        pip config set global.trusted-host "$(echo "${PIP_INDEX_URL}" | awk -F/ '{print $3}')"; \
+      fi; \
+    fi && \
+    if [ -n "$CARGO_REGISTRY" ]; then \
+      mkdir -p "${CARGO_HOME}" && \
+      printf '%s\n' \
+        '[source.crates-io]' \
+        'replace-with = "mirror"' \
+        '[source.mirror]' \
+        "registry = \"${CARGO_REGISTRY}\"" \
+        '[net]' \
+        'retry = 5' \
+        > "${CARGO_HOME}/config.toml"; \
+    fi
+
+FROM wheel-builder-base AS sunabako-wheel
+
+COPY docker/patch/latest/sunabako-arm64.patch /tmp/sunabako-arm64.patch
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends git curl && \
+    python3 -m pip install "maturin>=1.8,<2" && \
+    curl -fsSL https://files.pythonhosted.org/packages/cd/16/d9fd84bbf784c19425d9d83d8d98deef6d5f107012e8d50bddeb5c11cf5c/sunabako-0.1.1.tar.gz -o /tmp/sdk.tar.gz && \
+    mkdir /sdk && tar -xf /tmp/sdk.tar.gz -C /sdk --strip-components=1 && cd /sdk && \
+    git apply --check /tmp/sunabako-arm64.patch && \
+    git apply /tmp/sunabako-arm64.patch && \
+    python3 -m maturin build --locked --release --target aarch64-unknown-linux-gnu --out /wheels
+
+FROM wheel-builder-base AS vllm-router-wheel
+
+ARG VLLM_ROUTER_COMMIT=1fbcde7443d75b36befb61bc081f64c2a1f13a4b
+# Build the patched Python API and native Rust extension together.
+COPY docker/patch/latest/router-health-check.patch /tmp/router-health-check.patch
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends git cmake pkg-config libssl-dev && \
+    python3 -m pip install setuptools-rust wheel && \
+    git init /router && cd /router && git remote add origin https://github.com/vllm-project/router.git && \
+    git fetch --depth 1 origin ${VLLM_ROUTER_COMMIT} && git checkout FETCH_HEAD && \
+    git apply --check /tmp/router-health-check.patch && \
+    git apply /tmp/router-health-check.patch && \
+    python3 -m pip wheel -v --no-deps --no-build-isolation --wheel-dir /wheels .
+
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG}
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+WORKDIR /root
+
+ARG MEGATRON_COMMIT=1dcf0dafa884ad52ffb243625717a3471643e087
+ARG MINDSPEED_COMMIT=fc63de5c48426dd019c3b3f39e65f5bdf56e4086
+ARG MEGATRON_ADAPTOR_COMMIT=15582addff3f3d4680e350826fa70d012b475509
+ARG TRANSFORMER_ENGINE_NPU_COMMIT=d743c83d060d5edc48867ecb9e93ec80d81860e4
+ARG SOC_VERSION="ascend910_9391"
+ARG PIP_INDEX_URL
+ARG APTMIRROR
+
+ENV SOC_VERSION=$SOC_VERSION \
+    DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    ASCEND_TOOLKIT_HOME=/usr/local/Ascend/ascend-toolkit/latest \
+    ASCEND_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp \
+    ASCEND_AICPU_PATH=/usr/local/Ascend/ascend-toolkit/latest \
+    ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest \
+    VLLM_ASCEND_ENABLE_NZ=0 \
+    RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1 \
+    HCCL_HOST_SOCKET_PORT_RANGE=60000-60050 \
+    HCCL_NPU_SOCKET_PORT_RANGE=61000-61050 \
+    PYTORCH_NPU_ALLOC_CONF=expandable_segments:True \
+    HYDRA_FULL_ERROR=1 \
+    PYTHONPATH=/root/Megatron-LM:/root/MegatronAdaptor:/root/TransformerEngineNPU:/root/vime
+
+# For patches managed by docker/npu_patch/series.conf, keep the corresponding
+# COPY/apply operations synchronized. Build-only patches are handled separately.
+COPY docker/npu_patch /opt/npu_patch
+
+RUN git config --global http.sslVerify false
+
+# System and pip dependencies.
+RUN if [ -n "$APTMIRROR" ];then sed -i "s@^\(deb.*\)https\?://[a-z0-9.-]*\.ubuntu\.com@\1$APTMIRROR@g" /etc/apt/sources.list; \
+    else sed -i '/ports\.ubuntu\.com/ {h;s|ports\.ubuntu\.com|mirrors.tuna.tsinghua.edu.cn|g;G}' /etc/apt/sources.list; fi && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential cmake curl git libnuma-dev ninja-build patch rsync wget && \
+    rm -rf /var/lib/apt/lists/* && \
+    pip config set global.index-url ${PIP_INDEX_URL} && \
+    if [ "${PIP_INDEX_URL#http://}" != "${PIP_INDEX_URL}" ]; then pip config set global.trusted-host "$(echo ${PIP_INDEX_URL} | awk -F/ '{print $3}')"; fi && \
+    pip config set global.extra-index-url \
+      "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.aliyun.com/pypi/simple/" && \
+    git config --global http.version HTTP/1.1
+
+# vllm and vllm-ascend are installed editable (-e) in the base image; apply the
+# NPU colocate patches directly to their source trees.
+RUN git -C /vllm-workspace/vllm apply --check --whitespace=nowarn \
+      /opt/npu_patch/vllm.patch && \
+    git -C /vllm-workspace/vllm apply --whitespace=nowarn \
+      /opt/npu_patch/vllm.patch
+
+RUN git -C /vllm-workspace/vllm-ascend apply --check --whitespace=nowarn \
+      /opt/npu_patch/vllm-ascend.patch && \
+    git -C /vllm-workspace/vllm-ascend apply --whitespace=nowarn \
+      /opt/npu_patch/vllm-ascend.patch
+
+# Protect the serving stack while installing Vime dependencies.
+RUN python3 -c 'import importlib.metadata as m; names = ["numpy", "ray", "torch", "torch-npu", "torchvision", "transformers", "triton-ascend", "vllm", "vllm-ascend", "fastapi", "starlette"]; open("/tmp/vime-npu-constraints.txt", "w").write("\n".join(f"{name}=={m.version(name)}" for name in names) + "\n")' && \
+    printf '%s\n' 'datasets==5.0.1' 'pyarrow==25.0.1' >> /tmp/vime-npu-constraints.txt
+
+# Training source dependencies.
+RUN git clone https://github.com/NVIDIA/Megatron-LM.git /root/Megatron-LM && \
+    git -C /root/Megatron-LM checkout "${MEGATRON_COMMIT}"
+
+RUN git clone https://gitcode.com/Ascend/MindSpeed.git /root/MindSpeed && \
+    git -C /root/MindSpeed checkout "${MINDSPEED_COMMIT}"
+
+RUN git clone https://gitcode.com/Ascend/MegatronAdaptor.git /root/MegatronAdaptor && \
+    git -C /root/MegatronAdaptor checkout "${MEGATRON_ADAPTOR_COMMIT}" && \
+    git clone https://gitcode.com/Ascend/TransformerEngineNPU.git /root/TransformerEngineNPU && \
+    git -C /root/TransformerEngineNPU checkout "${TRANSFORMER_ENGINE_NPU_COMMIT}"
+
+# Apply NPU training-stack patches from the build-context snapshot.
+# The standalone Megatron patch targets the pinned NPU training baseline.
+# fla 0.5.2 supplies the GDN kernels; the adaptor torch stand-in rejects
+# residual and must stay disabled.
+RUN git -C /root/Megatron-LM apply --check --whitespace=nowarn \
+      /opt/npu_patch/megatron.patch && \
+    git -C /root/Megatron-LM apply --whitespace=nowarn \
+      /opt/npu_patch/megatron.patch && \
+    git -C /root/MindSpeed apply --whitespace=nowarn \
+      /opt/npu_patch/mindspeed.patch && \
+    git -C /root/MegatronAdaptor apply --check --whitespace=nowarn \
+      /opt/npu_patch/megatron-adaptor.patch && \
+    git -C /root/MegatronAdaptor apply --whitespace=nowarn \
+      /opt/npu_patch/megatron-adaptor.patch
+
+RUN pip install --constraint /tmp/vime-npu-constraints.txt --no-build-isolation \
+      "nvidia-modelopt==0.46.0" "nvdlfw-inspect==0.2.2" && \
+    pip install --no-deps --no-build-isolation -e /root/Megatron-LM && \
+    pip install --no-deps --no-build-isolation -e /root/TransformerEngineNPU && \
+    pip install --no-deps --no-build-isolation -e /root/MegatronAdaptor && \
+    pip install --no-deps --no-build-isolation -e /root/MindSpeed
+
+# Defaults to the main branch for local builds. Release workflows should
+# pass an immutable commit SHA for reproducible images.
+ARG VIME_COMMIT=main
+RUN test -n "${VIME_COMMIT}" && \
+    git init /root/vime && \
+    git -C /root/vime remote add origin https://github.com/vllm-project/vime.git && \
+    git -C /root/vime fetch --depth 1 origin "${VIME_COMMIT}" && \
+    git -C /root/vime checkout --detach FETCH_HEAD
+
+# Install the arm64 wheel before resolving the required Sunabako dependency.
+COPY --from=sunabako-wheel /wheels/ /tmp/sunabako-wheels/
+RUN pip install --no-deps /tmp/sunabako-wheels/*.whl && \
+    rm -rf /tmp/sunabako-wheels
+
+# ring_flash_attn is a CUDA extension and is not used on Ascend.
+RUN pip install \
+      --constraint /tmp/vime-npu-constraints.txt \
+      --requirement /root/vime/requirements.txt && \
+    pip install --no-deps --no-build-isolation -e /root/vime
+
+# Keep the shared health-check patch in both the Python API and Rust extension.
+COPY --from=vllm-router-wheel /wheels/ /tmp/router-wheels/
+RUN pip install --no-deps --force-reinstall /tmp/router-wheels/*.whl && \
+    rm -rf /tmp/router-wheels
+
+# Qwen3.5 GDN layers import fla.ShortConvolution at init. Do not use the npu
+# extra: it pins a different torch / torch_npu than this image.
+RUN pip install --no-deps einops 'fla-core==0.5.2' 'flash-linear-attention==0.5.2'
+
+# Build Python and both allocator libraries together from the patched source.
+RUN git clone --depth 1 --branch 2026.6.0 \
+      https://github.com/sgl-project/sgl-kernel-npu.git /root/sgl-kernel-npu && \
+    git -C /root/sgl-kernel-npu apply --check /opt/npu_patch/torch-memory-saver.patch && \
+    git -C /root/sgl-kernel-npu apply /opt/npu_patch/torch-memory-saver.patch && \
+    cd /root/sgl-kernel-npu/contrib/torch_memory_saver/python && \
+    python3 setup.py bdist_wheel && \
+    python3 -m pip install --no-deps --force-reinstall \
+      dist/torch_memory_saver-*.whl && \
+    cd /root && \
+    rm -rf /root/sgl-kernel-npu
+
+# Minimal import check.
+RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    python3 -c 'import numpy, pyarrow, datasets, fastapi, starlette; from ray._private.serialization import SerializationContext; from ray._private.worker import global_worker; SerializationContext(global_worker); print(f"Data/Ray check passed: numpy={numpy.__version__}, pyarrow={pyarrow.__version__}, datasets={datasets.__version__}, fastapi={fastapi.__version__}, starlette={starlette.__version__}")' && \
+    python3 -c 'import megatron, mindspeed, megatron_adaptor, transformer_engine, torch_memory_saver, vime, vllm, vllm_ascend;'
+
+WORKDIR /root/vime
+ENTRYPOINT []
+CMD ["/bin/bash"]

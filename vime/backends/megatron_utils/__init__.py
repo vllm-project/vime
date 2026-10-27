@@ -2,9 +2,13 @@ import logging
 
 import torch
 
+from vime.backends import megatron_lifecycle
 from vime.utils import accelerator
 
 accelerator.initialize_accelerator()
+# Before the first Megatron import below: a backend whose vendor layer
+# patches Megatron has to install those patches first. A no-op by default.
+megatron_lifecycle.current().before_import()
 
 try:
     import deep_ep

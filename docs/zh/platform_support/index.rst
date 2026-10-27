@@ -7,3 +7,4 @@
    :maxdepth: 1
 
    ../platform_support/amd_tutorial.md
+   npu_tutorial.md

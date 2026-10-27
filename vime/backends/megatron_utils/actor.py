@@ -12,6 +12,7 @@ from megatron.core import mpu
 from torch_memory_saver import torch_memory_saver
 from transformers import AutoConfig, AutoTokenizer
 
+from vime.backends import megatron_lifecycle
 from vime.data.tensor import TensorRef
 from vime.observability import train_data_utils, train_metric_utils
 from vime.observability.logging_utils import init_tracking
@@ -81,6 +82,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
         init(args)
 
+        megatron_lifecycle.current().after_args(args)
         if is_megatron_main_rank():
             init_tracking(args, primary=False, role=role)
 

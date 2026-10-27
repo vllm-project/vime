@@ -1,0 +1,2445 @@
+diff --git a/vllm/config/model.py b/vllm/config/model.py
+index 502f1bbd8d4f743f6483f30ae8b8e9ec5cf81558..e68b3fb088001ac27b51a2a0d65e154ad240c74e 100644
+--- a/vllm/config/model.py
++++ b/vllm/config/model.py
+@@ -279,6 +279,8 @@ class ModelConfig:
+     equivalent to setting `-cc.mode=none -cc.cudagraph_mode=none`."""
+     return_sampling_mask: bool = False
+     """Whether to return the post-processing token support for each sample."""
++    return_sampling_mask_logprobs: bool = False
++    """Whether to return normalized logprobs aligned with sampling-mask IDs."""
+     max_logprobs: int = Field(default=20, ge=-1)
+     """Maximum number of log probabilities to return when `logprobs` is
+     specified in `SamplingParams`. The default value comes the default for the
+@@ -367,11 +369,15 @@ class ModelConfig:
+     used with `--generation-config auto`, the override parameters will be
+     merged with the default config from the model. If used with
+     `--generation-config vllm`, only the override parameters are used."""
++    custom_pull_weights_pre_read_hook: str | None = None
++    """Import path of a hook(source_dir, target_version) called before reading published weights."""
++
+     enable_sleep_mode: bool = False
+     """Enable sleep mode for the engine (only cuda and
+     hip platforms are supported)."""
+     sleep_preserve_parameter_names: list[str] = field(default_factory=list)
+     """Parameter-name globs to preserve across level-2 sleep.
++    Use ``draft.<name>`` for draft-private parameters, or ``draft.*`` for all.
+     The sender must omit these parameters; loaders must preserve their storage."""
+     sleep_mode_backend: str = "cumem"
+     """Mechanism used to free and restore GPU state for sleep mode. ``"cumem"``
+@@ -436,6 +442,7 @@ class ModelConfig:
+     mm_hasher_algorithm: InitVar[MMHasherAlgorithm | None] = None
+     mm_shm_cache_max_object_size_mb: InitVar[int | None] = None
+     mm_encoder_only: InitVar[bool | None] = None
++    mm_decoder_only: InitVar[bool | None] = None
+     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
+     mm_encoder_attn_backend: InitVar[AttentionBackendEnum | str | None] = None
+     mm_encoder_attn_dtype: InitVar[str | None] = None
+@@ -474,6 +481,7 @@ class ModelConfig:
+             "spec_target_max_model_len",
+             "enforce_eager",
+             "return_sampling_mask",
++            "return_sampling_mask_logprobs",
+             "logprobs_mode",
+             "use_fp64_gumbel",
+             "enable_trace_replay",
+@@ -572,6 +580,7 @@ class ModelConfig:
+         mm_hasher_algorithm: MMHasherAlgorithm | None,
+         mm_shm_cache_max_object_size_mb: int | None,
+         mm_encoder_only: bool | None,
++        mm_decoder_only: bool | None,
+         mm_encoder_tp_mode: MMEncoderTPMode | None,
+         mm_encoder_attn_backend: AttentionBackendEnum | str | None,
+         mm_encoder_attn_dtype: str | None,
+@@ -845,6 +854,7 @@ class ModelConfig:
+                 mm_hasher_algorithm=mm_hasher_algorithm,
+                 mm_shm_cache_max_object_size_mb=mm_shm_cache_max_object_size_mb,
+                 mm_encoder_only=mm_encoder_only,
++                mm_decoder_only=mm_decoder_only,
+                 mm_encoder_tp_mode=mm_encoder_tp_mode,
+                 mm_encoder_attn_backend=mm_encoder_attn_backend,
+                 mm_encoder_attn_dtype=mm_encoder_attn_dtype,
+@@ -1049,6 +1059,10 @@ class ModelConfig:
+     @model_validator(mode="after")
+     def validate_model_config_after(self: "ModelConfig") -> "ModelConfig":
+         """Called after __post_init__."""
++        if self.return_sampling_mask_logprobs and not self.return_sampling_mask:
++            raise ValueError(
++                "return_sampling_mask_logprobs requires return_sampling_mask"
++            )
+         if not isinstance(self.tokenizer, str):
+             raise ValueError(
+                 f"tokenizer must be a string, got "
+diff --git a/vllm/config/multimodal.py b/vllm/config/multimodal.py
+index 3bba0434c3e4473d5412a9d0672f8e2386b73c3e..393d697da0e127522e7d98d897221c55bff889d9 100644
+--- a/vllm/config/multimodal.py
++++ b/vllm/config/multimodal.py
+@@ -382,6 +382,9 @@ class MultiModalConfig:
+
+     This is usually only valid in disaggregated Encoder process.
+     """
++    mm_decoder_only: bool = False
++    """Skip local encoder towers while retaining multimodal input processing
++    and cache capacity for external encoder outputs."""
+     mm_encoder_tp_mode: MMEncoderTPMode = "weights"
+     """Indicates how to optimize multi-modal encoder inference using tensor
+     parallelism (TP).
+@@ -513,6 +516,10 @@ class MultiModalConfig:
+
+     @model_validator(mode="after")
+     def _validate_multimodal_config(self):
++        if self.mm_encoder_only and self.mm_decoder_only:
++            raise ValueError(
++                "mm_encoder_only and mm_decoder_only are mutually exclusive"
++            )
+         if self.mm_processor_cache_type != "shm" and (
+             self.mm_shm_cache_max_object_size_mb
+             != MultiModalConfig.mm_shm_cache_max_object_size_mb
+diff --git a/vllm/config/vllm.py b/vllm/config/vllm.py
+index b4298cd145b8e02892d38f1bb2a5687544d68f9b..e42b868609a41b3c18d49aad2d06673e299c98c2 100644
+--- a/vllm/config/vllm.py
++++ b/vllm/config/vllm.py
+@@ -2812,6 +2812,8 @@ class VllmConfig:
+             raise ValueError(
+                 "An EC producer-only instance requires a multimodal model."
+             )
++        if mm_config.mm_decoder_only:
++            raise ValueError("An EC producer-only instance cannot use mm_decoder_only.")
+         mm_config.mm_encoder_only = True
+
+     def _resolve_mm_processor_device(self) -> None:
+diff --git a/vllm/distributed/ec_transfer/ec_connector/cpu/scheduler/__init__.py b/vllm/distributed/ec_transfer/ec_connector/cpu/scheduler/__init__.py
+index 65403980b9d04c2dde50ea779a0c90a2626ed2e4..7f6fec65c402e857c561e8cef9e8ae62b6acc2d2 100644
+--- a/vllm/distributed/ec_transfer/ec_connector/cpu/scheduler/__init__.py
++++ b/vllm/distributed/ec_transfer/ec_connector/cpu/scheduler/__init__.py
+@@ -146,8 +146,10 @@ class ECCPUScheduler:
+                 "ec_enable_nixl requires NIXL; install the `nixl` package or "
+                 "remove ec_enable_nixl from ec_connector_extra_config."
+             )
+-        engine_id = self._ec_config.engine_id
+-        assert engine_id is not None
++        engine_id = (
++            f"{vllm_config.instance_id}_dp"
++            f"{vllm_config.parallel_config.data_parallel_index}"
++        )
+         self._dtype = vllm_config.model_config.dtype
+         self._hidden_dim = _get_encoder_cache_hidden_dim(vllm_config)
+         self._element_size = torch.empty(0, dtype=self._dtype).element_size()
+@@ -167,7 +169,10 @@ class ECCPUScheduler:
+         )
+         if self._is_producer:
+             self._peer_host = envs.VLLM_EC_SIDE_CHANNEL_HOST
+-            self._peer_port = envs.VLLM_EC_SIDE_CHANNEL_PORT
++            self._peer_port = (
++                envs.VLLM_EC_SIDE_CHANNEL_PORT
++                + vllm_config.parallel_config.data_parallel_index
++            )
+
+         self._data = NixlDataTransport(
+             agent_name=engine_id,
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/base.py b/vllm/distributed/kv_transfer/kv_connector/v1/base.py
+index 71593f59e55ccd6beaf85e230dafc3be29d40f48..c8871cb478ba98a1fdbf36fb19f002d1ea11a49b 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/base.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/base.py
+@@ -169,6 +169,9 @@ class KVConnectorWorkerMetadata(ABC):
+     being passed to the Scheduler KVConnector.
+     """
+
++    def get_request_metrics(self) -> dict[str, dict[str, float]]:
++        return {}
++
+     @abstractmethod
+     def aggregate(
+         self, other: "KVConnectorWorkerMetadata"
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py
+index 778eb0f7560d91e063e8bde629794f44c071489c..45a22efd3ed8a26f3dde842d68854d5112d87dff 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py
+@@ -42,6 +42,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+     NixlAgentMetadata,
+     NixlConnectorMetadata,
+     NixlHandshakePayload,
++    NixlRequestMetrics,
+     ReqId,
+     ReqMeta,
+     TransferHandle,
+@@ -873,6 +874,8 @@ class NixlBaseConnectorWorker:
+         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
+         self.expected_consumer_notifications_by_req: dict[ReqId, int] = {}
+         self.xfer_stats = NixlKVConnectorStats()
++        self.request_metrics = NixlRequestMetrics()
++        self.pending_request_metrics: dict[str, dict[str, float]] = {}
+
+         self._physical_blocks_per_logical_kv_block = 1
+         self._sync_block_size_with_kernel()
+@@ -1332,6 +1335,7 @@ class NixlBaseConnectorWorker:
+     ):
+         # Do NIXL handshake in background and add to _ready_requests when done.
+         assert meta.remote is not None
++        handshake_start = time.perf_counter()
+         fut = self._ensure_handshake(
+             remote_engine_id,
+             meta.remote.host,
+@@ -1349,6 +1353,7 @@ class NixlBaseConnectorWorker:
+         def request_ready(f: Future[Any], entry=(req_id, meta)):
+             try:
+                 f.result()
++                meta.handshake_wait_time = time.perf_counter() - handshake_start
+                 self._ready_requests.put(entry)
+             except Exception as e:
+                 self._log_failure(
+@@ -3084,6 +3089,13 @@ class NixlBaseConnectorWorker:
+                     if xfer_state == "DONE":
+                         res = self.nixl_wrapper.get_xfer_telemetry(handle)
+                         self.xfer_stats.record_transfer(res)
++                        metrics = self.pending_request_metrics.setdefault(req_id, {})
++                        for name, value in (
++                            ("kv_transfer_worker_time_ms", res.xferDuration / 1e3),
++                            ("kv_transfer_post_worker_time_ms", res.postDuration / 1e3),
++                            ("kv_transfer_bytes", res.totalBytes),
++                        ):
++                            metrics[name] = metrics.get(name, 0) + value
+                         self.nixl_wrapper.release_xfer_handle(handle)
+                     elif xfer_state == "PROC":
+                         in_progress.append(handle)
+@@ -3107,6 +3119,10 @@ class NixlBaseConnectorWorker:
+                         in_progress.append(handle)
+
+             if not in_progress:
++                completed_metrics = self.pending_request_metrics.pop(req_id, None)
++                if completed_metrics is not None:
++                    self.request_metrics.requests[req_id] = completed_metrics
++                # Only report request as completed when all transfers are done.
+                 done_req_ids.add(req_id)
+                 del transfers[req_id]
+             else:
+@@ -3775,4 +3791,6 @@ class NixlBaseConnectorWorker:
+             for handle in handles:
+                 self.nixl_wrapper.release_xfer_handle(handle)
+         self._recving_transfers.clear()
++        self.pending_request_metrics.clear()
++        self.request_metrics.requests.clear()
+         self._finish_shutdown()
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py
+index 6e43356c0d7bc9955578fbb97dd9e9c0558c406c..4bb9c78e8cd54467d6df74da4fb89f1fea99632e 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py
+@@ -37,6 +37,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+ )
+ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+     NixlConnectorMetadata,
++    NixlRequestMetrics,
+ )
+ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
+     NixlPullConnectorScheduler,
+@@ -264,6 +265,12 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
+         assert self.connector_worker is not None
+         return self.connector_worker.get_block_ids_with_load_errors()
+
++    def build_connector_worker_meta(self) -> NixlRequestMetrics | None:
++        assert self.connector_worker is not None
++        metadata = self.connector_worker.request_metrics
++        self.connector_worker.request_metrics = NixlRequestMetrics()
++        return metadata if metadata.requests else None
++
+     def get_kv_connector_stats(self) -> KVConnectorStats | None:
+         if self.connector_worker is None:
+             return None
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/metadata.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/metadata.py
+index a33f620a0a0d9145736ee12b33a60494bd03877e..9744e89ec7715a0506a11a9d08ad30688c79724e 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/metadata.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/metadata.py
+@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
+ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+     KVConnectorHandshakeMetadata,
+     KVConnectorMetadata,
++    KVConnectorWorkerMetadata,
+ )
+ from vllm.logger import init_logger
+
+@@ -18,6 +19,22 @@ logger = init_logger(__name__)
+ TransferHandle = int
+ ReqId = str
+
++
++@dataclass
++class NixlRequestMetrics(KVConnectorWorkerMetadata):
++    requests: dict[str, dict[str, float]] = field(default_factory=dict)
++
++    def get_request_metrics(self) -> dict[str, dict[str, float]]:
++        return self.requests
++
++    def aggregate(self, other: KVConnectorWorkerMetadata) -> "NixlRequestMetrics":
++        for request_id, metrics in other.get_request_metrics().items():
++            target = self.requests.setdefault(request_id, {})
++            for name, value in metrics.items():
++                target[name] = target.get(name, 0) + value
++        return self
++
++
+ GET_META_MSG = b"get_meta_msg"
+
+ # Push-mode (WRITE-based) registration notification.
+@@ -261,6 +278,7 @@ class ReqMeta:
+     # Worker-only, per-region physical pages to zero after a successful pull.
+     # None selects group-based completion; empty lists mean no zeroing.
+     region_blocks_to_zero: BlockIds | None = None
++    handshake_wait_time: float = 0.0
+
+
+ class NixlConnectorMetadata(KVConnectorMetadata):
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_worker.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_worker.py
+index 16a25149ea22f1614783033b46c7c2cd30a87af0..8a6cfdfc17776a4ebc0637be506e09d5e483c4cc 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_worker.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_worker.py
+@@ -135,6 +135,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
+
+     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
+         assert meta.remote is not None and self.transfer_topo is not None
++        self.pending_request_metrics.setdefault(req_id, {})[
++            "kv_handshake_wait_worker_time_ms"
++        ] = meta.handshake_wait_time * 1000
+         engine_id = meta.remote.engine_id
+         if engine_id in self._invalid_remote_engines:
+             self._handle_failed_transfer(
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py b/vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+index 0bd8ebe3cd667929e756ae62c44cb895eaab6125..247d85d927dcdb785275408cdbea8f6165639447 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+@@ -3,6 +3,7 @@
+ """SimpleCPUOffloadConnector: minimal CPU KV cache offloading."""
+
+ from collections.abc import Iterable
++from math import isfinite
+ from typing import TYPE_CHECKING, Any
+
+ import torch
+@@ -150,6 +151,17 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
+             )
+             return
+
++        if "cpu_to_gpu_ratio" in extra_config and not any(
++            key in extra_config
++            for key in ("cpu_bytes_to_use", "cpu_bytes_to_use_per_rank")
++        ):
++            ratio = float(extra_config["cpu_to_gpu_ratio"])
++            if not isfinite(ratio) or ratio <= 0:
++                raise ValueError("cpu_to_gpu_ratio must be finite and positive")
++            cpu_capacity_per_rank = int(
++                ratio * kv_cache_config.kv_cache_tensors[0].size
++            )
++
+         logger.info(
+             "SimpleCPUOffloadConnector: role=%s, "
+             "per_rank=%.2f GB, world_size=%d, mode=%s, backend=%s, disk=%s",
+diff --git a/vllm/distributed/weight_transfer/base.py b/vllm/distributed/weight_transfer/base.py
+index 3140b70e96564cb46aeaa284b562c3d49480e9f8..6eba3fa96f51c33746720e9f93a871fc9f6c77ce 100644
+--- a/vllm/distributed/weight_transfer/base.py
++++ b/vllm/distributed/weight_transfer/base.py
+@@ -514,9 +514,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
+
+     @abstractmethod
+     def shutdown(self) -> None:
+-        """Shutdown the weight transfer engine.
+-        This should be called when the worker is shutting down.
+-        """
++        """Release transfer resources without shutting down the inference worker."""
+         raise NotImplementedError
+
+
+diff --git a/vllm/distributed/weight_transfer/clients.py b/vllm/distributed/weight_transfer/clients.py
+index 745e67779e0a03aa6894534bd1c1b7e6e801baef..0ccce60f973ae0effb73ba1390bf24da7aa76a5f 100644
+--- a/vllm/distributed/weight_transfer/clients.py
++++ b/vllm/distributed/weight_transfer/clients.py
+@@ -60,7 +60,7 @@ class HTTPVLLMWeightSyncClient:
+
+     Mirrors `vllm/entrypoints/rl/online/api_router.py`:
+     `/init_weight_transfer_engine`, `/start_weight_update`, `/update_weights`,
+-    `/finish_weight_update`.
++    `/finish_weight_update`, `/shutdown_weight_transfer_engine`.
+     """
+
+     def __init__(self, base_url: str, timeout: float = 300) -> None:
+@@ -78,6 +78,9 @@ class HTTPVLLMWeightSyncClient:
+     def init_weight_transfer_engine(self, init_info: dict[str, Any]) -> None:
+         self._post("init_weight_transfer_engine", {"init_info": init_info})
+
++    def shutdown_weight_transfer_engine(self) -> None:
++        self._post("shutdown_weight_transfer_engine")
++
+     def start_weight_update(self) -> None:
+         self._post("start_weight_update")
+
+@@ -109,6 +112,11 @@ class RayVLLMWeightSyncClient:
+         request = WeightTransferInitRequest(init_info=init_info)
+         ray.get([h.init_weight_transfer_engine.remote(request) for h in self.handles])
+
++    def shutdown_weight_transfer_engine(self) -> None:
++        import ray
++
++        ray.get([h.shutdown_weight_transfer_engine.remote() for h in self.handles])
++
+     def start_weight_update(self) -> None:
+         import ray
+
+diff --git a/vllm/distributed/weight_transfer/m2n_engine.py b/vllm/distributed/weight_transfer/m2n_engine.py
+index c61bac4f2d1aa0db367960665ae2183094eccd78..e480e60eaf91d0c525707d65256da89e90b5d554 100644
+--- a/vllm/distributed/weight_transfer/m2n_engine.py
++++ b/vllm/distributed/weight_transfer/m2n_engine.py
+@@ -449,5 +449,7 @@ class M2NWeightTransferEngine(
+             torch.accelerator.synchronize()
+             self._handle.destroy()
+             self._handle = None
+-        self.model_update_group = None
++        if self.model_update_group is not None:
++            self.model_update_group.destroy()
++            self.model_update_group = None
+         self._parameter_destinations = []
+diff --git a/vllm/distributed/weight_transfer/m2n_trainer.py b/vllm/distributed/weight_transfer/m2n_trainer.py
+index 2d1d9f47ec024bb5ac25840f2925527aad31317d..8b9b73f9f9cccf99ad272506483169849c1225c0 100644
+--- a/vllm/distributed/weight_transfer/m2n_trainer.py
++++ b/vllm/distributed/weight_transfer/m2n_trainer.py
+@@ -410,4 +410,6 @@ class M2NTrainerWeightTransferEngine(TrainerWeightTransferEngine[M2NTrainerInitI
+         if self._executor is not None:
+             self._executor.shutdown()
+             self._executor = None
+-        self.group = None
++        if self.group is not None:
++            self.group.destroy()
++            self.group = None
+diff --git a/vllm/distributed/weight_transfer/nccl_engine.py b/vllm/distributed/weight_transfer/nccl_engine.py
+index 77d8b608727e62b818d8b16212f0629e5df3b415..331cb5eacc01c74b70e91efa754776128e7f3b46 100644
+--- a/vllm/distributed/weight_transfer/nccl_engine.py
++++ b/vllm/distributed/weight_transfer/nccl_engine.py
+@@ -229,7 +229,7 @@ class NCCLWeightTransferEngine(
+
+     def shutdown(self) -> None:
+         if self.model_update_group is not None:
+-            # Clean up the communicator by removing the reference
++            self.model_update_group.destroy()
+             self.model_update_group = None
+
+
+@@ -456,4 +456,6 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
+             torch.cuda.current_stream().synchronize()
+
+     def shutdown(self) -> None:
+-        self.model_update_group = None
++        if self.model_update_group is not None:
++            self.model_update_group.destroy()
++            self.model_update_group = None
+diff --git a/vllm/distributed/weight_transfer/sparse_nccl_engine.py b/vllm/distributed/weight_transfer/sparse_nccl_engine.py
+index 01b29529deb7e966a2f186788082a7052b116700..f9233516a56ea1b4e71f413ebbb24e2e88556ed6 100644
+--- a/vllm/distributed/weight_transfer/sparse_nccl_engine.py
++++ b/vllm/distributed/weight_transfer/sparse_nccl_engine.py
+@@ -186,6 +186,7 @@ class SparseNCCLWeightTransferEngine(
+
+     def shutdown(self) -> None:
+         if self.model_update_group is not None:
++            self.model_update_group.destroy()
+             self.model_update_group = None
+
+
+@@ -371,4 +372,6 @@ class SparseNCCLTrainerWeightTransferEngine(
+             torch.cuda.current_stream().synchronize()
+
+     def shutdown(self) -> None:
+-        self.model_update_group = None
++        if self.model_update_group is not None:
++            self.model_update_group.destroy()
++            self.model_update_group = None
+diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
+index 31777e266f8be21f06a99ecdc256edd5dbff970e..f2f85a62975b312c5f6a0993bd362ebea5f7012e 100644
+--- a/vllm/engine/arg_utils.py
++++ b/vllm/engine/arg_utils.py
+@@ -470,6 +470,7 @@ class EngineArgs:
+     # AuxOutputConfig.
+     enable_return_routed_experts: bool = False
+     return_sampling_mask: bool = ModelConfig.return_sampling_mask
++    return_sampling_mask_logprobs: bool = ModelConfig.return_sampling_mask_logprobs
+     model_weights: str = ModelConfig.model_weights
+     served_model_name: str | list[str] | None = ModelConfig.served_model_name
+     tokenizer: str | None = ModelConfig.tokenizer
+@@ -644,6 +645,7 @@ class EngineArgs:
+         MultiModalConfig.mm_shm_cache_max_object_size_mb
+     )
+     mm_encoder_only: bool = MultiModalConfig.mm_encoder_only
++    mm_decoder_only: bool = MultiModalConfig.mm_decoder_only
+     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
+     mm_encoder_attn_backend: AttentionBackendEnum | str | None = (
+         MultiModalConfig.mm_encoder_attn_backend
+@@ -770,6 +772,9 @@ class EngineArgs:
+     reasoning_config: ReasoningConfig = get_field(VllmConfig, "reasoning_config")
+
+     generation_config: str = ModelConfig.generation_config
++    custom_pull_weights_pre_read_hook: str | None = (
++        ModelConfig.custom_pull_weights_pre_read_hook
++    )
+     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
+     sleep_mode_offload_cudagraph: bool = ModelConfig.sleep_mode_offload_cudagraph
+     sleep_preserve_parameter_names: list[str] = get_field(
+@@ -974,6 +979,10 @@ class EngineArgs:
+             "--return-sampling-mask",
+             **model_kwargs["return_sampling_mask"],
+         )
++        model_group.add_argument(
++            "--return-sampling-mask-logprobs",
++            **model_kwargs["return_sampling_mask_logprobs"],
++        )
+         model_group.add_argument("--max-logprobs", **model_kwargs["max_logprobs"])
+         model_group.add_argument("--logprobs-mode", **model_kwargs["logprobs_mode"])
+         model_group.add_argument("--use-fp64-gumbel", **model_kwargs["use_fp64_gumbel"])
+@@ -1008,6 +1017,10 @@ class EngineArgs:
+         model_group.add_argument(
+             "--override-generation-config", **model_kwargs["override_generation_config"]
+         )
++        model_group.add_argument(
++            "--custom-pull-weights-pre-read-hook",
++            **model_kwargs["custom_pull_weights_pre_read_hook"],
++        )
+         model_group.add_argument(
+             "--enable-sleep-mode", **model_kwargs["enable_sleep_mode"]
+         )
+@@ -1457,6 +1470,9 @@ class EngineArgs:
+         multimodal_group.add_argument(
+             "--media-io-kwargs", **multimodal_kwargs["media_io_kwargs"]
+         )
++        multimodal_group.add_argument(
++            "--mm-decoder-only", **multimodal_kwargs["mm_decoder_only"]
++        )
+         multimodal_group.add_argument(
+             "--mm-processor-kwargs", **multimodal_kwargs["mm_processor_kwargs"]
+         )
+@@ -1964,6 +1980,7 @@ class EngineArgs:
+             allow_deprecated_quantization=self.allow_deprecated_quantization,
+             enforce_eager=self.enforce_eager,
+             return_sampling_mask=self.return_sampling_mask,
++            return_sampling_mask_logprobs=self.return_sampling_mask_logprobs,
+             max_logprobs=self.max_logprobs,
+             logprobs_mode=self.logprobs_mode,
+             use_fp64_gumbel=self.use_fp64_gumbel,
+@@ -1986,6 +2003,7 @@ class EngineArgs:
+             mm_shm_cache_max_object_size_mb=self.mm_shm_cache_max_object_size_mb,
+             mm_hasher_algorithm=self.mm_hasher_algorithm,
+             mm_encoder_only=self.mm_encoder_only,
++            mm_decoder_only=self.mm_decoder_only,
+             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
+             mm_encoder_attn_backend=self.mm_encoder_attn_backend,
+             mm_encoder_attn_dtype=self.mm_encoder_attn_dtype,
+@@ -1995,6 +2013,7 @@ class EngineArgs:
+             pooler_config=self.pooler_config,
+             generation_config=self.generation_config,
+             override_generation_config=self.override_generation_config,
++            custom_pull_weights_pre_read_hook=self.custom_pull_weights_pre_read_hook,
+             enable_sleep_mode=self.enable_sleep_mode,
+             sleep_mode_offload_cudagraph=self.sleep_mode_offload_cudagraph,
+             sleep_preserve_parameter_names=self.sleep_preserve_parameter_names,
+diff --git a/vllm/engine/protocol.py b/vllm/engine/protocol.py
+index 2bb128ba073eda31b0916252920112458e95865c..b415347bd30db0f27753c9659b779af1cb389ebf 100644
+--- a/vllm/engine/protocol.py
++++ b/vllm/engine/protocol.py
+@@ -161,6 +161,11 @@ class EngineClient(ABC):
+         """Raise if unhealthy."""
+         ...
+
++    @abstractmethod
++    async def check_health_generate(self, timeout: float = 20.0) -> None:
++        """Require a scheduler or inference response, not just a live frontend."""
++        ...
++
+     @abstractmethod
+     async def start_profile(
+         self,
+@@ -298,6 +303,10 @@ class EngineClient(ABC):
+         """Initialize weight transfer for RL training."""
+         raise NotImplementedError
+
++    async def shutdown_weight_transfer_engine(self) -> None:
++        """Release the trainer connection without shutting down inference."""
++        raise NotImplementedError
++
+     async def start_weight_update(self) -> None:
+         """Start a new weight update."""
+         raise NotImplementedError
+@@ -321,3 +330,7 @@ class EngineClient(ABC):
+     async def get_weight_version(self) -> str:
+         """Return the latest committed weight version."""
+         raise NotImplementedError
++
++    async def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
++        """Return bounded snapshots of in-flight request queues."""
++        raise NotImplementedError
+diff --git a/vllm/entrypoints/generate/base/protocol.py b/vllm/entrypoints/generate/base/protocol.py
+index 9781bf935f33bee1475c5aeee73fccfff2d10636..e39d675d8874968ccec2d42fd9631a9d9521d886 100644
+--- a/vllm/entrypoints/generate/base/protocol.py
++++ b/vllm/entrypoints/generate/base/protocol.py
+@@ -114,6 +114,52 @@ class PerRequestMetrics(OpenAIBaseModel):
+     tokens_per_second: float | None = None
+     # Experimental, subject to change.
+     speculative_decoding: SpeculativeDecodingMetrics | None = None
++    remote_kv_wait_time_ms: float | None = None
++    kv_initial_queue_wait_time_ms: float | None = Field(
++        default=None,
++        description=(
++            "Scheduler admission to the first KV allocation attempt, in wall time."
++        ),
++    )
++    kv_post_receive_queue_wait_time_ms: float | None = Field(
++        default=None,
++        description=(
++            "Accumulated wall time from remote-KV request promotion to the next "
++            "allocation attempt; excludes worker transfer and allocation retries."
++        ),
++    )
++    kv_allocation_wait_time_ms: float | None = Field(
++        default=None,
++        description=(
++            "Accumulated wall time from each initial KV allocation attempt to success, "
++            "including capacity retries; excludes time before the first attempt."
++        ),
++    )
++    kv_handshake_wait_worker_time_ms: float | None = Field(
++        default=None,
++        description=(
++            "Summed worker waits for successful NIXL handshakes; zero when cached."
++        ),
++    )
++    kv_transfer_worker_time_ms: float | None = Field(
++        default=None,
++        description=(
++            "Sum of completed-transfer telemetry durations across handles "
++            "and workers; worker time, not wall-clock KV wait."
++        ),
++    )
++    kv_transfer_post_worker_time_ms: float | None = Field(
++        default=None,
++        description=(
++            "Sum of transfer-post durations across handles and workers; "
++            "may overlap transfer duration."
++        ),
++    )
++    kv_transfer_bytes: int | None = None
++    prefill_queue_time_ms: float | None = None
++    prefill_time_to_first_token_ms: float | None = None
++    prefill_kv_allocation_wait_time_ms: float | None = None
++    prefill_kv_initial_queue_wait_time_ms: float | None = None
+
+
+ class RequestResponseMetadata(BaseModel):
+diff --git a/vllm/entrypoints/generate/base/serving.py b/vllm/entrypoints/generate/base/serving.py
+index a0eda6d05ff4a391b69c11f60bd9a1fa9e15bcf8..0cbfd7820b34acef939caa8dc79aa1f3155d27c9 100644
+--- a/vllm/entrypoints/generate/base/serving.py
++++ b/vllm/entrypoints/generate/base/serving.py
+@@ -45,6 +45,7 @@ PRIORITY_HEADER = "X-Vllm-Priority"
+ def build_per_request_timing_metrics(
+     metrics: RequestStateStats | None,
+     num_generation_tokens: int,
++    kv_transfer_params: dict | None = None,
+ ) -> PerRequestMetrics:
+     """Build per-request timing metrics from ``RequestStateStats``.
+
+@@ -89,11 +90,29 @@ def build_per_request_timing_metrics(
+             tokens_per_second = num_generation_tokens / inference_time_ms * 1000
+
+     return PerRequestMetrics(
++        prefill_queue_time_ms=(kv_transfer_params or {})
++        .get("prefill_metrics", {})
++        .get("queue_time_ms"),
++        prefill_time_to_first_token_ms=(kv_transfer_params or {})
++        .get("prefill_metrics", {})
++        .get("time_to_first_token_ms"),
++        prefill_kv_allocation_wait_time_ms=(kv_transfer_params or {})
++        .get("prefill_metrics", {})
++        .get("kv_allocation_wait_time_ms"),
++        prefill_kv_initial_queue_wait_time_ms=(kv_transfer_params or {})
++        .get("prefill_metrics", {})
++        .get("kv_initial_queue_wait_time_ms"),
+         time_to_first_token_ms=time_to_first_token_ms,
+         generation_time_ms=generation_time_ms,
+         queue_time_ms=queue_time_ms,
+         mean_itl_ms=mean_itl_ms,
+         tokens_per_second=tokens_per_second,
++        **(metrics.kv_transfer_metrics or {}),
++        remote_kv_wait_time_ms=(
++            metrics.remote_kv_wait_time * 1000
++            if metrics.remote_kv_wait_time is not None
++            else None
++        ),
+     )
+
+
+diff --git a/vllm/entrypoints/rl/offline.py b/vllm/entrypoints/rl/offline.py
+index 1db6a82533ddd425723ed2fc9a4d7d57343f80da..be72a9a5540c21371adaa015fc34d5e123f1136d 100644
+--- a/vllm/entrypoints/rl/offline.py
++++ b/vllm/entrypoints/rl/offline.py
+@@ -26,6 +26,10 @@ class RLOfflineMixin(OfflineInferenceMixin):
+             "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
+         )
+
++    def shutdown_weight_transfer_engine(self) -> None:
++        """Release the trainer connection without shutting down inference."""
++        self.llm_engine.collective_rpc("shutdown_weight_transfer_engine")
++
+     def start_weight_update(self) -> None:
+         """Start a new weight update."""
+         self.llm_engine.collective_rpc("start_weight_update")
+diff --git a/vllm/entrypoints/rl/online/api_router.py b/vllm/entrypoints/rl/online/api_router.py
+index ef9269749f3b2938b3f8d4db7014c05a3c9c9035..be8425757bb91556b2af97694aba8868f5326163 100644
+--- a/vllm/entrypoints/rl/online/api_router.py
++++ b/vllm/entrypoints/rl/online/api_router.py
+@@ -171,6 +171,13 @@ async def init_weight_transfer_engine(
+     return JSONResponse(content={"message": "Weight transfer initialized"})
+
+
++@router.post("/shutdown_weight_transfer_engine")
++async def shutdown_weight_transfer_engine(raw_request: Request):
++    with weight_operation_metrics().record("shutdown"):
++        await engine_client(raw_request).shutdown_weight_transfer_engine()
++    return JSONResponse(content={"message": "Weight transfer shut down"})
++
++
+ @router.post("/start_weight_update")
+ async def start_weight_update(raw_request: Request):
+     with weight_operation_metrics().record("start"):
+diff --git a/vllm/entrypoints/rl/online/metrics.py b/vllm/entrypoints/rl/online/metrics.py
+index ed16f9a820b5c95fa69c7f447d6dea37f206a03e..b67f479f6dc0ac68cf780a1c06251dc2575735e6 100644
+--- a/vllm/entrypoints/rl/online/metrics.py
++++ b/vllm/entrypoints/rl/online/metrics.py
+@@ -10,7 +10,7 @@ from typing import Literal
+
+ from prometheus_client import REGISTRY, CollectorRegistry, Gauge, Histogram
+
+-Operation = Literal["init", "start", "start_draft", "update", "finish"]
++Operation = Literal["init", "shutdown", "start", "start_draft", "update", "finish"]
+
+
+ class WeightOperationMetrics:
+diff --git a/vllm/entrypoints/scale_out/factories.py b/vllm/entrypoints/scale_out/factories.py
+index bd48c709ddc0505cb9161733a155da688e5daa30..dfe4d09911bc459689f7ad4f40bfcbece5984669 100644
+--- a/vllm/entrypoints/scale_out/factories.py
++++ b/vllm/entrypoints/scale_out/factories.py
+@@ -57,6 +57,7 @@ def init_scale_out_state(
+         request_logger=request_logger,
+         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
++        enable_per_request_metrics=args.enable_per_request_metrics,
+         enable_log_outputs=args.enable_log_outputs,
+         force_no_detokenize=args.tokens_only,
+     )
+diff --git a/vllm/entrypoints/scale_out/token_in_token_out/protocol.py b/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
+index 84a6a2c623887a51357f776cb696ef50efe8de4f..2909d664160870bda14c6d7d67f431edd81eb7d8 100644
+--- a/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
++++ b/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
+@@ -411,6 +411,7 @@ class GenerateChoiceBase(BaseModel):
+     # or (b) `enable_return_routed_experts` is off server-side.
+     routed_experts: str | None = None
+     sampling_mask: list[list[int]] | None = None
++    sampling_mask_logprobs: list[list[float]] | None = None
+
+     @field_validator("token_ids")
+     @classmethod
+@@ -443,6 +444,7 @@ class GenerateStreamChoiceBase(BaseModel):
+     token_ids: list[int] | None = None
+     routed_experts: str | None = None
+     sampling_mask: list[list[int]] | None = None
++    sampling_mask_logprobs: list[list[float]] | None = None
+
+
+ class GenerateTokensStreamChoice(GenerateStreamChoiceBase):
+@@ -469,6 +471,7 @@ class GenerateStreamResponseBase(BaseModel):
+     prompt_token_ids: list[NonNegativeInt] | None = None
+     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+     metrics: PerRequestMetrics | None = None
++    weight_version: str | None = None
+
+
+ class GenerateTokensStreamResponse(GenerateStreamResponseBase):
+@@ -498,6 +501,7 @@ class GenerateResponseBase(BaseModel):
+     prompt_token_ids: list[NonNegativeInt] | None = None
+     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+     metrics: PerRequestMetrics | None = None
++    weight_version: str | None = None
+
+     kv_transfer_params: dict[str, Any] | None = Field(
+         default=None,
+diff --git a/vllm/entrypoints/scale_out/token_in_token_out/serving.py b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
+index 816d70bec000765c951815f7859d33c891ee3e05..4b77d8d4e2ccb142554ec2e643bb8e45c6ba2918 100644
+--- a/vllm/entrypoints/scale_out/token_in_token_out/serving.py
++++ b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
+@@ -20,6 +20,7 @@ from vllm.entrypoints.generate.base.protocol import (
+ from vllm.entrypoints.generate.base.serving import (
+     GenerateBaseServing,
+     build_spec_decoding_metrics,
++    build_per_request_timing_metrics,
+     clamp_prompt_logprobs,
+     format_token_id_placeholder,
+ )
+@@ -124,6 +125,7 @@ class ServingTokens(GenerateBaseServing):
+         force_no_detokenize: bool = False,
+         return_tokens_as_token_ids: bool = False,
+         enable_prompt_tokens_details: bool = False,
++        enable_per_request_metrics: bool = False,
+         enable_log_outputs: bool = False,
+     ):
+         super().__init__(
+@@ -134,6 +136,7 @@ class ServingTokens(GenerateBaseServing):
+         )
+         self.online_renderer = online_renderer
+         self.enable_prompt_tokens_details = enable_prompt_tokens_details
++        self.enable_per_request_metrics = enable_per_request_metrics
+         self.enable_log_outputs = enable_log_outputs
+         self.force_no_detokenize = force_no_detokenize
+         self.has_tokenizer = (
+@@ -443,8 +446,10 @@ class ServingTokens(GenerateBaseServing):
+             )
+
+             sampling_mask = None
++            sampling_mask_logprobs = None
+             if output.sampling_mask is not None:
+                 sampling_mask = output.sampling_mask.token_ids
++                sampling_mask_logprobs = output.sampling_mask.logprobs
+
+             choice_fields: dict[str, Any] = dict(
+                 index=output.index,
+@@ -453,6 +458,7 @@ class ServingTokens(GenerateBaseServing):
+                 token_ids=as_list(output.token_ids),
+                 routed_experts=routed_experts_b64,
+                 sampling_mask=sampling_mask,
++                sampling_mask_logprobs=sampling_mask_logprobs,
+             )
+             if text_mode:
+                 text_choices.append(
+@@ -483,11 +489,20 @@ class ServingTokens(GenerateBaseServing):
+
+         request_metadata.final_usage_info = usage
+
+-        per_request_metrics = None
++        per_request_metrics = (
++            build_per_request_timing_metrics(
++                final_res.metrics,
++                num_generated_tokens,
++                request.kv_transfer_params,
++            )
++            if self.enable_per_request_metrics
++            else None
++        )
+         if request.sampling_params.n == 1:
+             spec_stats = build_spec_decoding_metrics(final_res)
+             if spec_stats is not None:
+-                per_request_metrics = PerRequestMetrics(speculative_decoding=spec_stats)
++                per_request_metrics = per_request_metrics or PerRequestMetrics()
++                per_request_metrics.speculative_decoding = spec_stats
+         response_fields: dict[str, Any] = dict(
+             request_id=request_id,
+             created=created_time,
+@@ -504,6 +519,7 @@ class ServingTokens(GenerateBaseServing):
+             ),
+             mm_placeholders=request._response_mm_placeholders,
+             metrics=per_request_metrics,
++            weight_version=final_res.weight_version,
+             kv_transfer_params=final_res.kv_transfer_params,
+             ec_transfer_params=final_res.ec_transfer_params,
+         )
+@@ -513,6 +529,18 @@ class ServingTokens(GenerateBaseServing):
+         else:
+             response = GenerateTokensResponse(choices=tokens_choices, **response_fields)
+
++        if self.enable_per_request_metrics and response.kv_transfer_params is not None:
++            response.kv_transfer_params["prefill_metrics"] = {
++                "queue_time_ms": per_request_metrics.queue_time_ms,
++                "time_to_first_token_ms": per_request_metrics.time_to_first_token_ms,
++                "kv_allocation_wait_time_ms": (
++                    per_request_metrics.kv_allocation_wait_time_ms
++                ),
++                "kv_initial_queue_wait_time_ms": (
++                    per_request_metrics.kv_initial_queue_wait_time_ms
++                ),
++            }
++
+         # Log complete response if output logging is enabled
+         if self.enable_log_outputs and self.request_logger:
+             for choice in response.choices:
+@@ -625,11 +653,17 @@ class ServingTokens(GenerateBaseServing):
+                         token_ids=as_list(delta_token_ids),
+                         routed_experts=routed_experts_b64,
+                         sampling_mask=sampling_mask,
++                        sampling_mask_logprobs=(
++                            output.sampling_mask.logprobs
++                            if output.sampling_mask is not None
++                            else None
++                        ),
+                     )
+                     chunk: GenerateTokensStreamResponse | GenerateTextStreamResponse
+                     if text_mode:
+                         chunk = GenerateTextStreamResponse(
+                             request_id=request_id,
++                            weight_version=res.weight_version,
+                             choices=[
+                                 GenerateTextStreamChoice(
+                                     text=output.text, **choice_fields
+@@ -639,6 +673,7 @@ class ServingTokens(GenerateBaseServing):
+                     else:
+                         chunk = GenerateTokensStreamResponse(
+                             request_id=request_id,
++                            weight_version=res.weight_version,
+                             choices=[GenerateTokensStreamChoice(**choice_fields)],
+                         )
+
+@@ -656,7 +691,12 @@ class ServingTokens(GenerateBaseServing):
+                     # Omit fields that are absent from token-bearing chunks.
+                     exclude = {
+                         name
+-                        for name in ("prompt_token_ids", "mm_placeholders", "metrics")
++                        for name in (
++                            "prompt_token_ids",
++                            "mm_placeholders",
++                            "metrics",
++                            "weight_version",
++                        )
+                         if getattr(chunk, name) is None
+                     }
+                     yield f"data: {chunk.model_dump_json(exclude=exclude)}\n\n"
+@@ -674,13 +714,20 @@ class ServingTokens(GenerateBaseServing):
+                 )
+
+             if include_usage:
+-                per_request_metrics = None
++                per_request_metrics = (
++                    build_per_request_timing_metrics(
++                        last_res.metrics if last_res is not None else None,
++                        total_completion_tokens,
++                        request.kv_transfer_params,
++                    )
++                    if self.enable_per_request_metrics
++                    else None
++                )
+                 if sampling_params.n == 1:
+                     spec_stats = build_spec_decoding_metrics(last_res)
+                     if spec_stats is not None:
+-                        per_request_metrics = PerRequestMetrics(
+-                            speculative_decoding=spec_stats
+-                        )
++                        per_request_metrics = per_request_metrics or PerRequestMetrics()
++                        per_request_metrics.speculative_decoding = spec_stats
+                 final_chunk: GenerateTokensStreamResponse | GenerateTextStreamResponse
+                 if text_mode:
+                     final_chunk = GenerateTextStreamResponse(
+@@ -688,6 +735,7 @@ class ServingTokens(GenerateBaseServing):
+                         choices=[],
+                         usage=final_usage_info,
+                         metrics=per_request_metrics,
++                        weight_version=last_res.weight_version if last_res else None,
+                     )
+                 else:
+                     final_chunk = GenerateTokensStreamResponse(
+@@ -695,6 +743,7 @@ class ServingTokens(GenerateBaseServing):
+                         choices=[],
+                         usage=final_usage_info,
+                         metrics=per_request_metrics,
++                        weight_version=last_res.weight_version if last_res else None,
+                     )
+                 yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
+
+diff --git a/vllm/entrypoints/serve/instrumentator/basic.py b/vllm/entrypoints/serve/instrumentator/basic.py
+index 64201db3f3d9b7fc54fdd5d33501503c5df9761f..16f1d7bdac1bfc5c60306fdac1d420b07879166d 100644
+--- a/vllm/entrypoints/serve/instrumentator/basic.py
++++ b/vllm/entrypoints/serve/instrumentator/basic.py
+@@ -28,7 +28,9 @@ def engine_client(request: Request) -> EngineClient:
+
+
+ @router.get("/load")
+-async def get_server_load_metrics(request: Request):
++async def get_server_load_metrics(
++    request: Request, include_inflight: bool = False, inflight_limit: int = 100
++):
+     # This endpoint returns the current server load metrics.
+     # It tracks requests utilizing the GPU from the following routes:
+     # - /v1/responses
+@@ -47,7 +49,12 @@ async def get_server_load_metrics(request: Request):
+     # - /rerank
+     # - /v1/rerank
+     # - /v2/rerank
+-    return JSONResponse(content={"server_load": request.app.state.server_load_metrics})
++    content = {"server_load": request.app.state.server_load_metrics}
++    if include_inflight:
++        content["inflight"] = await engine_client(
++            request
++        ).get_inflight_queue_diagnostics(inflight_limit)
++    return JSONResponse(content=content)
+
+
+ @router.get("/version")
+diff --git a/vllm/entrypoints/serve/instrumentator/health.py b/vllm/entrypoints/serve/instrumentator/health.py
+index 5c0b2d1855d9a27374a476b1e1bd8916b3615f0e..0b548fd36c6002b7e6748bc3ee6c96d3279d929a 100644
+--- a/vllm/entrypoints/serve/instrumentator/health.py
++++ b/vllm/entrypoints/serve/instrumentator/health.py
+@@ -7,7 +7,7 @@ from fastapi.responses import Response
+
+ from vllm.engine.protocol import EngineClient
+ from vllm.logger import init_logger
+-from vllm.v1.engine.exceptions import EngineDeadError
++from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+
+ logger = init_logger(__name__)
+
+@@ -31,3 +31,16 @@ async def health(raw_request: Request) -> Response:
+         return Response(status_code=200)
+     except EngineDeadError:
+         return Response(status_code=503)
++
++
++@router.get("/health_generate", response_class=Response)
++async def health_generate(raw_request: Request) -> Response:
++    """Check inference progress while keeping the lightweight health route intact."""
++    client = engine_client(raw_request)
++    if client is None:
++        return Response(status_code=200)
++    try:
++        await client.check_health_generate()
++        return Response(status_code=200)
++    except (EngineDeadError, EngineGenerateError, TimeoutError):
++        return Response(status_code=503)
+diff --git a/vllm/model_executor/model_loader/reload/meta.py b/vllm/model_executor/model_loader/reload/meta.py
+index 9874ebd67be9e8f9c4e056cd9d46d273b5be2fa6..02433a1859fccb6471baa8e152672b4bc3162dce 100644
+--- a/vllm/model_executor/model_loader/reload/meta.py
++++ b/vllm/model_executor/model_loader/reload/meta.py
+@@ -30,6 +30,7 @@ SKIP_LOAD_TENSORS: set[str] = {
+     "expert_global_to_physical",
+     "expert_physical_to_global",
+     "expert_local_to_global",
++    "expert_ids_per_ep_rank",
+     "e_score_correction_bias",
+ }
+
+diff --git a/vllm/model_executor/models/glm4_moe_lite_mtp.py b/vllm/model_executor/models/glm4_moe_lite_mtp.py
+index f5a82b72314bb8ec59098e153bda07d8b8839388..570f30fe3c1428010b1cf41050e112b53167cc3d 100644
+--- a/vllm/model_executor/models/glm4_moe_lite_mtp.py
++++ b/vllm/model_executor/models/glm4_moe_lite_mtp.py
+@@ -142,7 +142,11 @@ class Glm4MoeLiteMultiTokenPredictorLayer(nn.Module):
+     ) -> torch.Tensor:
+         assert inputs_embeds is not None
+         # masking inputs at position 0, as not needed by MTP
+-        inputs_embeds[positions == 0] = 0
++        # Avoid dynamic bool indexing during NPU graph capture.
++        mask = (positions == 0).unsqueeze(-1)
++        inputs_embeds = torch.where(
++            mask, torch.zeros_like(inputs_embeds), inputs_embeds
++        )
+         inputs_embeds = self.enorm(inputs_embeds)
+         previous_hidden_states = self.hnorm(previous_hidden_states)
+
+diff --git a/vllm/model_executor/models/interfaces.py b/vllm/model_executor/models/interfaces.py
+index 272b78da50a45abfadedfb6f2b512fae3b36a81c..4576be113528dbc8a116f0f898e37760536564e7 100644
+--- a/vllm/model_executor/models/interfaces.py
++++ b/vllm/model_executor/models/interfaces.py
+@@ -346,8 +346,8 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
+         """Mark each child module that was assigned to this model during this context
+         as a tower model component.
+
+-        Tower model components are automatically skipped when `--limit-mm-per-prompt`
+-        is set to zero for all of their modalities.
++        Tower model components are automatically skipped in decoder-only mode or
++        when `--limit-mm-per-prompt` is zero for all of their modalities.
+
+         If `targets` is set, instead include descendants that are an instance
+         of `targets`, even if they aren't direct children.
+@@ -377,7 +377,8 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
+                     lambda mod: StageMissingLayer(stage_name, mod),
+                     targets=targets,
+                 )
+-                if all(mm_config.get_limit_per_prompt(m) == 0 for m in modalities)
++                if mm_config.mm_decoder_only
++                or all(mm_config.get_limit_per_prompt(m) == 0 for m in modalities)
+                 else nullcontext()
+             ):
+                 yield
+diff --git a/vllm/multimodal/encoder_budget.py b/vllm/multimodal/encoder_budget.py
+index 32db904bfa14514624a7380ad05ff6a7cd474a55..86555e6a3eac92dc52491968621a7ab1f5b6c6f7 100644
+--- a/vllm/multimodal/encoder_budget.py
++++ b/vllm/multimodal/encoder_budget.py
+@@ -76,13 +76,14 @@ class MultiModalBudget:
+             tower_modalities = {
+                 modality
+                 for modality in supported_mm_limits
+-                if mm_limits.get(modality, 0) > 0
++                if not mm_config.mm_decoder_only and mm_limits.get(modality, 0) > 0
+             }
+             # Modalities that bypass the tower (pre-computed embeddings only)
+             embed_only_modalities = {
+                 modality
+                 for modality in supported_mm_limits
+-                if enable_mm_embeds and mm_limits.get(modality, 0) == 0
++                if mm_config.mm_decoder_only
++                or (enable_mm_embeds and mm_limits.get(modality, 0) == 0)
+             }
+
+             active_modalities = tower_modalities | embed_only_modalities
+@@ -95,7 +96,7 @@ class MultiModalBudget:
+
+         if embed_only_modalities:
+             logger.info_once(
+-                "enable_mm_embeds is True; modalities handled as embedding-only: %s",
++                "Modalities handled without local encoder towers: %s",
+                 tuple(embed_only_modalities),
+             )
+
+diff --git a/vllm/outputs.py b/vllm/outputs.py
+index 8e69ffa91d91c809b36807e8473096ee23a934e5..da96ec75486dcc77f0cc186044264eec39e63d61 100644
+--- a/vllm/outputs.py
++++ b/vllm/outputs.py
+@@ -36,6 +36,7 @@ class SamplingMask:
+     """
+
+     token_ids: list[list[int]]
++    logprobs: list[list[float]] | None = None
+
+
+ @dataclass
+@@ -143,6 +144,7 @@ class RequestOutput:
+             prefix-cache writes for this request.
+         kv_transfer_params: The params for remote K/V transfer.
+         ec_transfer_params: The params for remote encoder-cache transfer.
++        weight_version: The weight version for this output.
+
+     """
+
+@@ -164,6 +166,7 @@ class RequestOutput:
+         prompt_token_id_logprobs: np.ndarray | None = None,
+         kv_transfer_params: dict[str, Any] | None = None,
+         ec_transfer_params: dict[str, Any] | None = None,
++        weight_version: str | None = None,
+         # Forward compatibility, code that uses args added in new release can
+         # still run with older versions of vLLM without breaking.
+         **kwargs: Any,
+@@ -187,12 +190,14 @@ class RequestOutput:
+         self.num_cache_creation_tokens = num_cache_creation_tokens
+         self.kv_transfer_params = kv_transfer_params
+         self.ec_transfer_params = ec_transfer_params
++        self.weight_version = weight_version
+
+     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
+         """Merge subsequent RequestOutput into this one"""
+         self.finished |= next_output.finished
+         self.kv_transfer_params = next_output.kv_transfer_params
+         self.ec_transfer_params = next_output.ec_transfer_params
++        self.weight_version = next_output.weight_version
+
+         for next_completion in next_output.outputs:
+             for i, completion in enumerate(self.outputs):
+@@ -208,10 +213,16 @@ class RequestOutput:
+                             completion.logprobs.extend(next_completion.logprobs)  # type: ignore[arg-type]
+                         if next_completion.sampling_mask is not None:
+                             if completion.sampling_mask is None:
+-                                completion.sampling_mask = SamplingMask([])
+-                            completion.sampling_mask.token_ids.extend(
+-                                next_completion.sampling_mask.token_ids
+-                            )
++                                completion.sampling_mask = next_completion.sampling_mask
++                            else:
++                                completion.sampling_mask.token_ids.extend(
++                                    next_completion.sampling_mask.token_ids
++                                )
++                                if next_completion.sampling_mask.logprobs is not None:
++                                    assert completion.sampling_mask.logprobs is not None
++                                    completion.sampling_mask.logprobs.extend(
++                                        next_completion.sampling_mask.logprobs
++                                    )
+                         if next_completion.spec_decode_metrics is not None:
+                             completion.spec_decode_metrics = (
+                                 next_completion.spec_decode_metrics
+diff --git a/vllm/utils/local_checkpoint.py b/vllm/utils/local_checkpoint.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7e2ed2e8b8e40ab3eefc0475efc9a667bf505b05
+--- /dev/null
++++ b/vllm/utils/local_checkpoint.py
+@@ -0,0 +1,329 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Maintain a host-local checkpoint from full and delta weight versions."""
++
++from __future__ import annotations
++
++import fcntl
++import glob
++import importlib
++import io
++import json
++import mmap
++import os
++import shutil
++import struct
++import threading
++import zlib
++from concurrent.futures import ThreadPoolExecutor
++from contextlib import ExitStack, contextmanager, suppress
++
++import numpy as np
++import zstandard
++
++NUM_WORKERS = min(32, os.cpu_count() or 8)
++SYNC_DIR = ".weight_sync"
++
++
++def pull_checkpoint(
++    local_checkpoint_dir: str,
++    base_dir: str,
++    source_dir: str,
++    target_version: int,
++    pre_read_hook: str | None = None,
++) -> None:
++    """Bring a host-local checkpoint to a published weight version."""
++    if target_version > 0 and pre_read_hook:
++        module_path, _, function_name = pre_read_hook.rpartition(".")
++        hook = getattr(importlib.import_module(module_path), function_name)
++        hook(source_dir, target_version)
++    with _pull_lock(local_checkpoint_dir):
++        applied = _read_applied_version(local_checkpoint_dir)
++        floor = applied if applied is not None else 0
++        start = target_version
++        while start > floor and _is_delta(_version_dir(source_dir, start)):
++            start -= 1
++
++        if applied is None or start > applied:
++            seed_dir = base_dir if start == 0 else _version_dir(source_dir, start)
++            _reset_checkpoint(seed_dir, local_checkpoint_dir, start)
++        else:
++            start = applied
++
++        for version in range(start + 1, target_version + 1):
++            _apply_delta(local_checkpoint_dir, _version_dir(source_dir, version))
++
++
++def _version_dir(source_dir: str, version: int) -> str:
++    return os.path.join(source_dir, f"weight_v{version:06d}")
++
++
++def _is_delta(version_dir: str) -> bool:
++    if not os.path.isdir(version_dir):
++        raise FileNotFoundError(f"Published weight version missing: {version_dir}")
++    try:
++        with open(
++            os.path.join(version_dir, "model.safetensors.index.json")
++        ) as index_file:
++            return "delta_encoding" in json.load(index_file).get("metadata", {})
++    except FileNotFoundError:
++        return False
++
++
++class _Adler32:
++    def __init__(self) -> None:
++        self._value = 1
++
++    def update(self, data) -> None:
++        self._value = zlib.adler32(data, self._value)
++
++    def hexdigest(self) -> str:
++        return f"{self._value:08x}"
++
++
++def _new_hasher(algorithm: str):
++    if algorithm == "xxh3-128":
++        import xxhash
++
++        return xxhash.xxh3_128()
++    if algorithm == "blake3":
++        import blake3
++
++        return blake3.blake3()
++    if algorithm == "adler32":
++        return _Adler32()
++    raise KeyError(f"Unknown checksum algorithm {algorithm!r}")
++
++
++def _checksum(algorithm: str, data) -> str:
++    hasher = _new_hasher(algorithm)
++    hasher.update(data)
++    return hasher.hexdigest()
++
++
++@contextmanager
++def _pull_lock(local_checkpoint_dir: str):
++    sync_dir = os.path.join(local_checkpoint_dir, SYNC_DIR)
++    os.makedirs(sync_dir, exist_ok=True)
++    with open(os.path.join(sync_dir, "lock"), "w") as lock_file:
++        fcntl.flock(lock_file, fcntl.LOCK_EX)
++        try:
++            yield
++        finally:
++            fcntl.flock(lock_file, fcntl.LOCK_UN)
++
++
++def _read_applied_version(local_checkpoint_dir: str) -> int | None:
++    try:
++        with open(
++            os.path.join(local_checkpoint_dir, SYNC_DIR, "state.json")
++        ) as state_file:
++            return int(json.load(state_file)["version"])
++    except FileNotFoundError:
++        return None
++
++
++def _write_applied_version(local_checkpoint_dir: str, version: int) -> None:
++    path = os.path.join(local_checkpoint_dir, SYNC_DIR, "state.json")
++    temporary = f"{path}.tmp"
++    with open(temporary, "w") as state_file:
++        json.dump({"version": f"{version:06d}"}, state_file)
++        state_file.flush()
++        os.fsync(state_file.fileno())
++    os.replace(temporary, path)
++
++
++def _drop_page_cache(path: str) -> None:
++    try:
++        file_descriptor = os.open(path, os.O_RDONLY)
++        try:
++            os.posix_fadvise(file_descriptor, 0, 0, os.POSIX_FADV_DONTNEED)
++        finally:
++            os.close(file_descriptor)
++    except OSError:
++        pass
++
++
++def _reset_checkpoint(source_dir: str, local_checkpoint_dir: str, version: int) -> None:
++    os.makedirs(local_checkpoint_dir, exist_ok=True)
++    source_files = [entry for entry in os.scandir(source_dir) if entry.is_file()]
++    for entry in source_files:
++        shutil.copy2(entry.path, os.path.join(local_checkpoint_dir, entry.name))
++        _drop_page_cache(entry.path)
++
++    source_names = {entry.name for entry in source_files}
++    for entry in os.scandir(local_checkpoint_dir):
++        if entry.is_file() and entry.name not in source_names:
++            os.remove(entry.path)
++
++    for entry in source_files:
++        copied_size = os.path.getsize(os.path.join(local_checkpoint_dir, entry.name))
++        if copied_size != entry.stat().st_size:
++            raise RuntimeError(
++                f"Size mismatch copying {entry.name}: "
++                f"source {entry.stat().st_size} != local {copied_size}"
++            )
++    _write_applied_version(local_checkpoint_dir, version)
++
++
++def _tensor_locations(checkpoint_dir: str) -> dict[str, tuple[str, int, int]]:
++    """Map each tensor to (file, byte offset, nbytes), honoring the HF shard index."""
++    index_path = os.path.join(checkpoint_dir, "model.safetensors.index.json")
++    if os.path.isfile(index_path):
++        with open(index_path) as index_file:
++            weight_map = json.load(index_file)["weight_map"]
++        # Match the model loader: unreferenced files may contain stale copies of
++        # the same tensors. Open indexed shards directly so missing files fail.
++        paths = [os.path.join(checkpoint_dir, name) for name in sorted(set(weight_map.values()))]
++    else:
++        paths = glob.glob(os.path.join(checkpoint_dir, "*.safetensors"))
++    locations = {}
++    for path in paths:
++        with open(path, "rb") as tensor_file:
++            (header_length,) = struct.unpack("<Q", tensor_file.read(8))
++            header = json.loads(tensor_file.read(header_length))
++        for name, info in header.items():
++            if name == "__metadata__":
++                continue
++            begin, end = info["data_offsets"]
++            locations[name] = (
++                path,
++                8 + header_length + begin,
++                end - begin,
++            )
++    return locations
++
++
++@contextmanager
++def _writable_mmap(path: str):
++    with (
++        open(path, "r+b") as file_handle,
++        mmap.mmap(file_handle.fileno(), 0) as mapped_file,
++    ):
++        yield mapped_file
++
++
++def _apply_delta(local_checkpoint_dir: str, version_dir: str) -> None:
++    with open(os.path.join(version_dir, "model.safetensors.index.json")) as index_file:
++        metadata = json.load(index_file)["metadata"]
++
++    applied = _read_applied_version(local_checkpoint_dir)
++    version = int(metadata["version"])
++    if applied == version:
++        return
++    if applied != int(metadata["base_version"]):
++        raise RuntimeError(
++            f"Out-of-order delta: local at {applied}, "
++            f"delta builds on {metadata['base_version']}"
++        )
++    if metadata["compression_format"] != "zstd":
++        raise NotImplementedError(
++            f"Compression {metadata['compression_format']!r} is not supported"
++        )
++
++    encoding = metadata["delta_encoding"]
++    checksum_algorithm = metadata["checksum_format"]
++    locations = _tensor_locations(local_checkpoint_dir)
++    open_mmaps = {}
++    resources = ExitStack()
++    mismatches = []
++    mismatch_lock = threading.Lock()
++    delta_blobs = []
++    items = []
++    try:
++        for delta_file in sorted(glob.glob(os.path.join(version_dir, "*.safetensors"))):
++            with open(delta_file, "rb") as tensor_file:
++                blob = tensor_file.read()
++            delta_blobs.append(blob)
++            (header_length,) = struct.unpack("<Q", blob[:8])
++            header = json.loads(blob[8 : 8 + header_length])
++            checksums = header.get("__metadata__", {})
++            view = memoryview(blob)
++            data_start = 8 + header_length
++            for name, info in header.items():
++                if name == "__metadata__":
++                    continue
++                begin, end = info["data_offsets"]
++                path, offset, byte_count = locations[name]
++                if path not in open_mmaps:
++                    open_mmaps[path] = resources.enter_context(_writable_mmap(path))
++                items.append(
++                    (
++                        name,
++                        view[data_start + begin : data_start + end],
++                        path,
++                        offset,
++                        byte_count,
++                        checksums.get(name),
++                    )
++                )
++
++        for mapped_file in open_mmaps.values():
++            with suppress(AttributeError, OSError, ValueError):
++                mapped_file.madvise(mmap.MADV_WILLNEED)
++
++        def report_mismatch(name: str) -> None:
++            with mismatch_lock:
++                mismatches.append(name)
++
++        def apply_xor(item) -> None:
++            name, compressed, path, offset, byte_count, expected = item
++            region = np.ndarray(
++                (byte_count,),
++                dtype=np.uint8,
++                buffer=open_mmaps[path],
++                offset=offset,
++            )
++            hasher = _new_hasher(checksum_algorithm)
++            reader = zstandard.ZstdDecompressor().stream_reader(
++                io.BytesIO(bytes(compressed))
++            )
++            position = 0
++            while position < byte_count:
++                block = reader.read(min(2 << 20, byte_count - position))
++                if not block:
++                    break
++                chunk = np.frombuffer(block, dtype=np.uint8)
++                region[position : position + chunk.size] ^= chunk
++                hasher.update(region[position : position + chunk.size])
++                position += chunk.size
++            if position != byte_count or hasher.hexdigest() != expected:
++                report_mismatch(name)
++
++        def apply_overwrite(item) -> None:
++            name, compressed, path, offset, byte_count, expected = item
++            delta = np.frombuffer(
++                zstandard.ZstdDecompressor().decompress(bytes(compressed)),
++                dtype=np.uint8,
++            )
++            region = np.ndarray(
++                (byte_count,),
++                dtype=np.uint8,
++                buffer=open_mmaps[path],
++                offset=offset,
++            )
++            count = int.from_bytes(delta[:4].tobytes(), "little")
++            positions_end = 4 + 4 * count
++            positions = np.frombuffer(delta[4:positions_end].tobytes(), dtype="<u4")
++            region[positions] = delta[positions_end:]
++            if _checksum(checksum_algorithm, region) != expected:
++                report_mismatch(name)
++
++        if encoding == "xor":
++            apply_tensor = apply_xor
++        elif encoding == "overwrite":
++            apply_tensor = apply_overwrite
++        else:
++            raise NotImplementedError(f"Delta encoding {encoding!r} is not supported")
++
++        with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
++            list(executor.map(apply_tensor, items))
++    finally:
++        resources.close()
++
++    if mismatches:
++        raise RuntimeError(
++            f"Checksum mismatch for {len(mismatches)} tensors after applying "
++            f"{version_dir}: {sorted(mismatches)[:20]}"
++        )
++    _write_applied_version(local_checkpoint_dir, version)
+diff --git a/vllm/v1/core/sched/interface.py b/vllm/v1/core/sched/interface.py
+index dd88d99c1f79db0d6468af41c3bbdd03ba731701..da89f7681f0031867cb18d5470515129fa2f9eda 100644
+--- a/vllm/v1/core/sched/interface.py
++++ b/vllm/v1/core/sched/interface.py
+@@ -3,7 +3,7 @@
+ import enum
+ from abc import ABC, abstractmethod
+ from collections.abc import Iterable
+-from typing import TYPE_CHECKING
++from typing import TYPE_CHECKING, Any
+
+ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+
+@@ -94,6 +94,7 @@ class SchedulerInterface(ABC):
+         self,
+         scheduler_output: "SchedulerOutput",
+         model_runner_output: "ModelRunnerOutput",
++        weight_version: str | None = None,
+     ) -> dict[int, "EngineCoreOutputs"]:
+         """Update the scheduler state based on the model runner output.
+
+@@ -243,6 +244,11 @@ class SchedulerInterface(ABC):
+         """Returns (num_running_reqs, num_waiting_reqs)."""
+         raise NotImplementedError
+
++    @abstractmethod
++    def get_inflight_queue_diagnostics(self, limit: int) -> dict[str, Any]:
++        """Return a bounded snapshot of in-flight request queues."""
++        raise NotImplementedError
++
+     def get_kv_cache_usage(self) -> float:
+         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
+         return 0.0
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index 0758c6122565ca73cf18dd5e327177712ff0b17b..63f1bb8463e418bb45af9e82f632cbe9083240d3 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -1242,6 +1242,18 @@ class Scheduler(SchedulerInterface):
+                 # Replayed tokens are already counted in the adopted hit; a
+                 # chunk that ends inside the replayed range needs no new slots.
+                 num_tokens_past_hit = max(num_new_tokens - num_replay_tokens, 0)
++                for phase, started_at in request.kv_queue_started_at.items():
++                    key = f"kv_{phase}_queue_wait_time_ms"
++                    request.kv_transfer_metrics[key] = (
++                        request.kv_transfer_metrics.get(key, 0)
++                        + (time.monotonic() - started_at) * 1000
++                    )
++                request.kv_queue_started_at.clear()
++                if (
++                    self.connector is not None
++                    and request.kv_allocation_started_at is None
++                ):
++                    request.kv_allocation_started_at = time.monotonic()
+                 new_blocks = self.kv_cache_manager.allocate_slots(
+                     request,
+                     num_tokens_past_hit,
+@@ -1270,6 +1282,13 @@ class Scheduler(SchedulerInterface):
+                         self.encoder_cache_manager.free(request)
+                     break
+
++                if request.kv_allocation_started_at is not None:
++                    request.kv_transfer_metrics["kv_allocation_wait_time_ms"] = (
++                        request.kv_transfer_metrics.get("kv_allocation_wait_time_ms", 0)
++                        + (time.monotonic() - request.kv_allocation_started_at) * 1000
++                    )
++                    request.kv_allocation_started_at = None
++
+                 # KVTransfer: the connector uses this info to determine
+                 # if a load is needed. Note that
+                 # This information is used to determine if a load is
+@@ -1309,6 +1328,7 @@ class Scheduler(SchedulerInterface):
+                 if load_kv_async:
+                     # If loading async, allocate memory and put request
+                     # into the WAITING_FOR_REMOTE_KV state.
++                    request.start_remote_kv_wait()
+                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                     # Set num_computed_tokens even though KVs are not yet loaded.
+                     # request.num_computed_tokens will not be used anywhere until
+@@ -2026,6 +2046,7 @@ class Scheduler(SchedulerInterface):
+         self,
+         scheduler_output: SchedulerOutput,
+         model_runner_output: ModelRunnerOutput,
++        weight_version: str | None = None,
+     ) -> dict[int, EngineCoreOutputs]:
+         sampled_token_ids = model_runner_output.sampled_token_ids
+         logprobs = model_runner_output.logprobs
+@@ -2158,6 +2179,7 @@ class Scheduler(SchedulerInterface):
+             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
+             kv_transfer_params = None
+             ec_transfer_params = None
++            remote_kv_wait_time = None
+             prefill_stats = None
+             status_before_stop = request.status
+
+@@ -2238,6 +2260,8 @@ class Scheduler(SchedulerInterface):
+                         kv_transfer_params["remote_prefill_cached_tokens"] = (
+                             prefill_stats.num_cached_tokens
+                         )
++                    if request.remote_kv_wait_time:
++                        remote_kv_wait_time = request.remote_kv_wait_time
+
+                 if status_before_stop == RequestStatus.RUNNING:
+                     stopped_running_reqs.add(request)
+@@ -2263,6 +2287,7 @@ class Scheduler(SchedulerInterface):
+                     EngineCoreOutput(
+                         request_id=req_id,
+                         new_token_ids=new_token_ids,
++                        weight_version=weight_version,
+                         finish_reason=finish_reason,
+                         new_logprobs=new_logprobs,
+                         new_sampling_mask=new_sampling_mask,
+@@ -2279,6 +2304,8 @@ class Scheduler(SchedulerInterface):
+                         ),
+                         kv_transfer_params=kv_transfer_params,
+                         ec_transfer_params=ec_transfer_params,
++                        remote_kv_wait_time=remote_kv_wait_time,
++                        kv_transfer_metrics=request.kv_transfer_metrics or None,
+                         trace_headers=request.trace_headers,
+                         routed_experts=routed_experts,
+                         num_nans_in_logits=request.num_nans_in_logits,
+@@ -2318,6 +2345,7 @@ class Scheduler(SchedulerInterface):
+                     EngineCoreOutput(
+                         request_id=request.request_id,
+                         new_token_ids=[],
++                        weight_version=weight_version,
+                         finish_reason=request.get_finished_reason(),
+                         events=request.take_events(),
+                         trace_headers=request.trace_headers,
+@@ -2608,6 +2636,45 @@ class Scheduler(SchedulerInterface):
+         """Returns (num_running_reqs, num_waiting_reqs)."""
+         return len(self.running), len(self.waiting) + len(self.kv_holding_waiting)
+
++    def get_inflight_queue_diagnostics(self, limit: int) -> dict[str, Any]:
++        """Return a bounded snapshot of in-flight request queues."""
++        now = time.time()
++        remaining = max(0, min(limit, 1000))
++        queues = []
++
++        for name, requests in (
++            ("running", self.running),
++            ("waiting", self.waiting),
++            ("kv_holding_waiting", self.kv_holding_waiting),
++            (
++                "finished_pending_cleanup",
++                [request for request in self.requests.values() if request.is_finished()],
++            ),
++        ):
++            entries = []
++            for request in requests:
++                if remaining == 0:
++                    break
++                entries.append(
++                    {
++                        "request_id": request.request_id,
++                        "status": request.status.name,
++                        "age_seconds": round(max(0.0, now - request.arrival_time), 3),
++                        "prompt_tokens": request.num_prompt_tokens,
++                        "output_tokens": request.num_output_tokens,
++                    }
++                )
++                remaining -= 1
++            queues.append(
++                {"name": name, "num_requests": len(requests), "requests": entries}
++            )
++
++        return {
++            "data_parallel_rank": self.parallel_config.data_parallel_index,
++            "has_pending_work": self.has_requests(),
++            "queues": queues,
++        }
++
+     def get_kv_cache_usage(self) -> float:
+         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
+         return self.kv_cache_manager.usage
+@@ -2636,6 +2703,7 @@ class Scheduler(SchedulerInterface):
+                     self.num_spec_tokens
+                 )
+             if self.connector is not None:
++                request.kv_queue_started_at["initial"] = time.monotonic()
+                 self.connector.on_new_request(request)
+                 kv_transfer_params = request.kv_transfer_params
+                 if kv_transfer_params and kv_transfer_params.get("do_remote_prefill"):
+@@ -2715,6 +2783,8 @@ class Scheduler(SchedulerInterface):
+     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+         assert request.is_finished()
+
++        request.stop_remote_kv_wait()
++
+         if self.aux_output_connector is not None:
+             self.aux_output_connector.request_finished(request)
+         self._inflight_prefills.discard(request)
+@@ -3193,6 +3263,8 @@ class Scheduler(SchedulerInterface):
+                 return False
+             # Promote request to waiting or preempted.
+             self._update_waiting_for_remote_kv(request)
++            request.stop_remote_kv_wait()
++            request.kv_queue_started_at["post_receive"] = time.monotonic()
+             if request.num_preemptions:
+                 request.status = RequestStatus.PREEMPTED
+             else:
+@@ -3228,6 +3300,16 @@ class Scheduler(SchedulerInterface):
+         if self.connector is not None:
+             self.connector.update_connector_output(kv_connector_output)
+
++        metadata = kv_connector_output.kv_connector_worker_meta
++        if metadata is not None:
++            for request_id, metrics in metadata.get_request_metrics().items():
++                request = self.requests.get(request_id)
++                if request is not None:
++                    for name, value in metrics.items():
++                        request.kv_transfer_metrics[name] = (
++                            request.kv_transfer_metrics.get(name, 0) + value
++                        )
++
+         # KV Connector:: update recv and send status from last step.
+         for req_id in kv_connector_output.finished_recving or ():
+             logger.debug("Finished recving KV transfer for request %s", req_id)
+diff --git a/vllm/v1/engine/__init__.py b/vllm/v1/engine/__init__.py
+index effe8d2416e442e43499f16f3ab8d74f1a89466e..390fd5c5afdd838246b5e2ac621dca80cdb64bec 100644
+--- a/vllm/v1/engine/__init__.py
++++ b/vllm/v1/engine/__init__.py
+@@ -238,6 +238,9 @@ class EngineCoreOutput(
+
+     # [num_scored_rows, num_token_ids]; appended last for array_like compatibility.
+     prompt_token_id_logprobs: torch.Tensor | None = None
++    weight_version: str | None = None
++    remote_kv_wait_time: float | None = None
++    kv_transfer_metrics: dict[str, float] | None = None
+
+     @property
+     def finished(self) -> bool:
+diff --git a/vllm/v1/engine/async_llm.py b/vllm/v1/engine/async_llm.py
+index bdab43e925282954ebcaadef12a917ea82b36cf6..c81539e704d45ca4e2fd91017c6f4af9330db304 100644
+--- a/vllm/v1/engine/async_llm.py
++++ b/vllm/v1/engine/async_llm.py
+@@ -47,6 +47,7 @@ from vllm.tokenizers import TokenizerLike
+ from vllm.tracing import init_tracer, log_tracing_disabled_warning
+ from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
+ from vllm.usage.usage_lib import UsageContext
++from vllm.utils import random_uuid
+ from vllm.utils.async_utils import cancel_task_threadsafe
+ from vllm.utils.collection_utils import as_list
+ from vllm.v1.engine import EngineCoreRequest, PauseMode
+@@ -1093,6 +1094,32 @@ class AsyncLLM(EngineClient):
+         if self.errored:
+             raise self.dead_error
+
++    async def check_health_generate(self, timeout: float = 20.0) -> None:
++        """Require a scheduler reply when busy, or an inference result when idle."""
++        async with asyncio.timeout(timeout):
++            await self.check_health()
++            loads = await self.get_inflight_queue_diagnostics(0)
++            if any(
++                load.get("has_pending_work", False)
++                or any(queue["num_requests"] for queue in load["queues"])
++                for load in loads
++            ):
++                return
++            request_id = f"healthcheck-{random_uuid()}"
++            prompt = TokensPrompt(prompt_token_ids=[0])
++            generator = (
++                self.generate(
++                    prompt, SamplingParams(max_tokens=1, temperature=1, top_k=1), request_id
++                )
++                if self.model_config.runner_type == "generate"
++                else self.encode(prompt, PoolingParams(), request_id)
++            )
++            try:
++                await anext(generator)
++            finally:
++                await self.abort(request_id)
++                await generator.aclose()
++
+     async def start_profile(
+         self,
+         profile_prefix: str | None = None,
+@@ -1327,6 +1354,10 @@ class AsyncLLM(EngineClient):
+             "init_weight_transfer_engine", kwargs={"init_info": request.init_info}
+         )
+
++    async def shutdown_weight_transfer_engine(self) -> None:
++        """Release the trainer connection without shutting down inference."""
++        await self.collective_rpc("shutdown_weight_transfer_engine")
++
+     async def start_weight_update(self) -> None:
+         """Start a new weight update."""
+         await self.collective_rpc("start_weight_update")
+@@ -1362,3 +1393,6 @@ class AsyncLLM(EngineClient):
+
+     def get_kv_event_sources(self) -> dict[int, KVEventsConfig]:
+         return self.engine_core.get_kv_event_sources()
++
++    async def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
++        return await self.engine_core.get_inflight_queue_diagnostics_async(limit)
+diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
+index b13764abec3abc68cb4b73986982ea7e8aef330a..54645231eccf9ca9350471b92ddf565379ff47e7 100644
+--- a/vllm/v1/engine/core.py
++++ b/vllm/v1/engine/core.py
+@@ -669,7 +669,7 @@ class EngineCore:
+         # during the model execution.
+         self._process_aborts_queue()
+         engine_core_outputs = self.scheduler.update_from_output(
+-            scheduler_output, model_output
++            scheduler_output, model_output, self._weight_version
+         )
+         self._attach_iteration_details(engine_core_outputs, iteration_details)
+
+@@ -770,7 +770,7 @@ class EngineCore:
+         # during the model execution.
+         self._process_aborts_queue()
+         engine_core_outputs = self.scheduler.update_from_output(
+-            scheduler_output, model_output
++            scheduler_output, model_output, self._weight_version
+         )
+         self._attach_iteration_details(engine_core_outputs, iteration_details)
+
+@@ -1074,6 +1074,9 @@ class EngineCore:
+         """Return the latest committed weight version."""
+         return self._weight_version
+
++    def get_inflight_queue_diagnostics(self, limit: int) -> dict[str, Any]:
++        return self.scheduler.get_inflight_queue_diagnostics(limit)
++
+     def preprocess_add_request(self, request: EngineCoreRequest) -> tuple[Request, int]:
+         """Preprocess the request.
+
+@@ -2101,7 +2104,12 @@ class EngineCoreProc(EngineCore):
+         self, req_ids: list[str], client_index: int, finish_reason: FinishReason
+     ) -> None:
+         outputs = [
+-            EngineCoreOutput(req_id, [], finish_reason=finish_reason)
++            EngineCoreOutput(
++                req_id,
++                [],
++                finish_reason=finish_reason,
++                weight_version=self._weight_version,
++            )
+             for req_id in req_ids
+         ]
+         eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
+diff --git a/vllm/v1/engine/core_client.py b/vllm/v1/engine/core_client.py
+index dccc8cba5368718b4cb5a0842680ee7b2c973198..860b085bd540a076e8e750bb0f6403d9b8863402 100644
+--- a/vllm/v1/engine/core_client.py
++++ b/vllm/v1/engine/core_client.py
+@@ -222,6 +222,9 @@ class EngineCoreClient(ABC):
+     def get_weight_version(self) -> str:
+         raise NotImplementedError
+
++    def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
++        raise NotImplementedError
++
+     async def execute_dummy_batch_async(self) -> None:
+         raise NotImplementedError
+
+@@ -231,6 +234,11 @@ class EngineCoreClient(ABC):
+     async def get_weight_version_async(self) -> str:
+         raise NotImplementedError
+
++    async def get_inflight_queue_diagnostics_async(
++        self, limit: int
++    ) -> list[dict[str, Any]]:
++        raise NotImplementedError
++
+     def abort_requests(self, request_ids: list[str]) -> None:
+         raise NotImplementedError
+
+@@ -453,6 +461,9 @@ class InprocClient(EngineCoreClient):
+     def get_weight_version(self) -> str:
+         return self.engine_core.get_weight_version()
+
++    def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
++        return [self.engine_core.get_inflight_queue_diagnostics(limit)]
++
+     def add_lora(self, lora_request: LoRARequest) -> bool:
+         return self.engine_core.add_lora(lora_request)
+
+@@ -1088,6 +1099,9 @@ class SyncMPClient(MPClient):
+     def get_weight_version(self) -> str:
+         return self.call_utility("get_weight_version")
+
++    def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
++        return [self.call_utility("get_inflight_queue_diagnostics", limit)]
++
+     def collective_rpc(
+         self,
+         method: str | Callable[..., _R],
+@@ -1364,6 +1378,12 @@ class AsyncMPClient(MPClient):
+     async def get_weight_version_async(self) -> str:
+         return await self.call_utility_consensus_async("get_weight_version")
+
++    async def get_inflight_queue_diagnostics_async(
++        self, limit: int
++    ) -> list[dict[str, Any]]:
++        result = await self.call_utility_async("get_inflight_queue_diagnostics", limit)
++        return [result]
++
+     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
+         return await self.call_utility_async("add_lora", lora_request)
+
+@@ -1700,6 +1720,18 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
+         # Only the result from the first engine is returned.
+         return (await self.call_utility_all_async(method, *args))[0]
+
++    async def get_inflight_queue_diagnostics_async(
++        self, limit: int
++    ) -> list[dict[str, Any]]:
++        return await asyncio.gather(
++            *[
++                self._call_utility_async(
++                    "get_inflight_queue_diagnostics", limit, engine=engine
++                )
++                for engine in self.core_engines
++            ]
++        )
++
+     @staticmethod
+     async def process_engine_outputs(
+         self: "DPLBAsyncMPClient", outputs: EngineCoreOutputs
+diff --git a/vllm/v1/engine/input_processor.py b/vllm/v1/engine/input_processor.py
+index 17e8af5caeeff4056f912440b622f8c3a6babf2e..cc1918b529b4e391e44aeaa1202fd5f90148fbc6 100644
+--- a/vllm/v1/engine/input_processor.py
++++ b/vllm/v1/engine/input_processor.py
+@@ -189,17 +189,10 @@ class InputProcessor:
+                     vocab_size=self.model_config.get_vocab_size(),
+                 )
+
+-            if self.model_config.return_sampling_mask:
+-                if params.temperature <= 0:
+-                    raise ValueError(
+-                        "sampling distribution replay requires temperature > 0"
+-                    )
+-                if params.top_k <= 0:
+-                    raise ValueError(
+-                        "sampling distribution replay requires top_k > 0 to "
+-                        "bound sampling mask size, reduce transfer overhead, "
+-                        "and avoid potential OOMs"
+-                    )
++            if self.model_config.return_sampling_mask and params.temperature <= 0:
++                raise ValueError(
++                    "sampling distribution replay requires temperature > 0"
++                )
+             if params.thinking_token_budget is not None and (
+                 self.vllm_config.reasoning_config is None
+                 or not self.vllm_config.reasoning_config.enabled
+diff --git a/vllm/v1/engine/llm_engine.py b/vllm/v1/engine/llm_engine.py
+index 2dd70fc17917402b09899993b0dd1695679fe5a9..aec1d78fe979ffd500171899545bbdffdebbf397 100644
+--- a/vllm/v1/engine/llm_engine.py
++++ b/vllm/v1/engine/llm_engine.py
+@@ -497,6 +497,9 @@ class LLMEngine:
+         """Return the latest committed weight version."""
+         return self.engine_core.get_weight_version()
+
++    def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
++        return self.engine_core.get_inflight_queue_diagnostics(limit)
++
+     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
+         return self.collective_rpc("apply_model", args=(func,))
+
+diff --git a/vllm/v1/engine/output_processor.py b/vllm/v1/engine/output_processor.py
+index abb45f7239be11b3320b4f746b123dc4d07f4246..06721f976465ddece4e83ad6e3c20d813f8b4bcc 100644
+--- a/vllm/v1/engine/output_processor.py
++++ b/vllm/v1/engine/output_processor.py
+@@ -184,6 +184,7 @@ class RequestState:
+         # Per-sequence spec-decode accumulator; arrives once (on finish) via
+         # EngineCoreOutput, then attached to this sequence's CompletionOutput.
+         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
++        self.weight_version: str | None = None
+
+         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
+
+@@ -306,6 +307,7 @@ class RequestState:
+         kv_transfer_params: dict[str, Any] | None = None,
+         ec_transfer_params: dict[str, Any] | None = None,
+         error: RequestError | None = None,
++        weight_version: str | None = None,
+     ) -> RequestOutput | PoolingRequestOutput | None:
+         finished = finish_reason is not None
+         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
+@@ -363,6 +365,7 @@ class RequestState:
+             finished,
+             kv_transfer_params,
+             ec_transfer_params,
++            weight_version=weight_version,
+         )
+
+     def _new_request_output(
+@@ -373,6 +376,7 @@ class RequestState:
+         kv_transfer_params: dict[str, Any] | None = None,
+         ec_transfer_params: dict[str, Any] | None = None,
+         error: RequestError | None = None,
++        weight_version: str | None = None,
+     ) -> RequestOutput | PoolingRequestOutput:
+         # If prompt embeds were used, put placeholder prompt token ids
+         prompt_token_ids = self.prompt_token_ids
+@@ -413,6 +417,7 @@ class RequestState:
+             finished=finished,
+             kv_transfer_params=kv_transfer_params,
+             ec_transfer_params=ec_transfer_params,
++            weight_version=weight_version,
+             num_cached_tokens=self.num_cached_tokens,
+             num_cache_creation_tokens=self.num_cache_creation_tokens,
+             metrics=self.stats,
+@@ -444,13 +449,21 @@ class RequestState:
+             logprobs = logprobs[-num_new_tokens:] if num_new_tokens else logprobs[:0]
+
+         sampling_mask = None
+-        if (delta or finished) and self.sampling_mask_chunks:
++        if self.sampling_mask_chunks and (delta or finished):
++            chunks = self.sampling_mask_chunks
+             sampling_mask = SamplingMask(
+-                [
+-                    position
+-                    for chunk in self.sampling_mask_chunks
+-                    for position in chunk.to_nested_list()
+-                ]
++                [mask for chunk in chunks for mask in chunk.to_nested_list()][
++                    : len(token_ids)
++                ],
++                (
++                    [
++                        scores
++                        for chunk in chunks
++                        for scores in chunk.to_nested_logprobs()
++                    ][: len(token_ids)]
++                    if chunks[0].logprobs is not None
++                    else None
++                ),
+             )
+             if delta:
+                 self.sampling_mask_chunks.clear()
+@@ -576,6 +589,7 @@ class OutputProcessor:
+                         stop_reason=None,
+                         kv_transfer_params=None,
+                         ec_transfer_params=None,
++                        weight_version=req_state.weight_version,
+                     )
+                 ):
+                     req_state.queue.put(request_output)
+@@ -700,6 +714,17 @@ class OutputProcessor:
+             stop_reason = engine_core_output.stop_reason
+             kv_transfer_params = engine_core_output.kv_transfer_params
+             ec_transfer_params = engine_core_output.ec_transfer_params
++            if req_state.stats is not None and engine_core_output.kv_transfer_metrics:
++                req_state.stats.kv_transfer_metrics = (
++                    engine_core_output.kv_transfer_metrics
++                )
++            if (
++                engine_core_output.remote_kv_wait_time is not None
++                and req_state.stats is not None
++            ):
++                req_state.stats.remote_kv_wait_time = (
++                    engine_core_output.remote_kv_wait_time
++                )
+             if engine_core_output.routed_experts is not None:
+                 req_state.routed_experts_chunks.append(
+                     engine_core_output.routed_experts
+@@ -758,6 +783,7 @@ class OutputProcessor:
+                 req_state.logprobs_processor.update_from_output(engine_core_output)
+
+             # 4) Create and handle RequestOutput objects.
++            req_state.weight_version = engine_core_output.weight_version
+             if request_output := req_state.make_request_output(
+                 new_token_ids,
+                 pooling_output,
+@@ -766,6 +792,7 @@ class OutputProcessor:
+                 kv_transfer_params,
+                 ec_transfer_params,
+                 error=request_error,
++                weight_version=engine_core_output.weight_version,
+             ):
+                 if req_state.streaming_input:
+                     request_output.finished = False
+diff --git a/vllm/v1/metrics/stats.py b/vllm/v1/metrics/stats.py
+index 0046dcefa92edee37b2ea3fc6fbc0fdfeb01b07e..dc0aaec8ceadf0043006b3acf77d0e97544edab9 100644
+--- a/vllm/v1/metrics/stats.py
++++ b/vllm/v1/metrics/stats.py
+@@ -274,6 +274,9 @@ class RequestStateStats:
+     # first token latency
+     first_token_latency: float = 0.0
+
++    remote_kv_wait_time: float | None = None
++    kv_transfer_metrics: dict[str, float] | None = None
++
+     # Track if this request is corrupted (NaNs in logits)
+     is_corrupted: bool = False
+
+diff --git a/vllm/v1/outputs.py b/vllm/v1/outputs.py
+index 22169b1fda93861db267ea73be64637a3f5bc17e..8764a495a90e8eae049d8f4b1ab35c350eaa49ce 100644
+--- a/vllm/v1/outputs.py
++++ b/vllm/v1/outputs.py
+@@ -65,6 +65,7 @@ class SamplingMaskLists(NamedTuple):
+     offsets: np.ndarray | None = None
+     # [num_requests + 1] for multi-position request batches.
+     cu_num_generated_tokens: list[int] | None = None
++    logprobs: np.ndarray | None = None
+
+     def slice_request(self, req_idx: int, num_positions: int) -> "SamplingMaskLists":
+         assert self.offsets is not None
+@@ -72,10 +73,11 @@ class SamplingMaskLists(NamedTuple):
+         start = req_idx if cu is None else cu[req_idx]
+         end = start + num_positions
+         lo, hi = self.offsets[start], self.offsets[end]
++        scores = self.logprobs[lo:hi] if self.logprobs is not None else None
+         if num_positions == 1:
+-            return SamplingMaskLists(self.token_ids[lo:hi])
++            return SamplingMaskLists(self.token_ids[lo:hi], logprobs=scores)
+         return SamplingMaskLists(
+-            self.token_ids[lo:hi], self.offsets[start : end + 1] - lo
++            self.token_ids[lo:hi], self.offsets[start : end + 1] - lo, logprobs=scores
+         )
+
+     def to_nested_list(self) -> list[list[int]]:
+@@ -85,6 +87,14 @@ class SamplingMaskLists(NamedTuple):
+         offsets = self.offsets.tolist()
+         return [token_ids[offsets[i] : offsets[i + 1]] for i in range(len(offsets) - 1)]
+
++    def to_nested_logprobs(self) -> list[list[float]]:
++        assert self.logprobs is not None
++        logprobs = self.logprobs.tolist()
++        if self.offsets is None:
++            return [logprobs]
++        offsets = self.offsets.tolist()
++        return [logprobs[offsets[i] : offsets[i + 1]] for i in range(len(offsets) - 1)]
++
+
+ class LogprobsTensors(NamedTuple):
+     # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
+diff --git a/vllm/v1/request.py b/vllm/v1/request.py
+index 4b1b9ecc2eede6347d839ef52683f3d40a306af5..4dcf2c5ae9bd56b4f0ca0f336829671b0ac973cf 100644
+--- a/vllm/v1/request.py
++++ b/vllm/v1/request.py
+@@ -103,6 +103,11 @@ class Request:
+
+         # P/D: Connector-specific KV transfer parameters.
+         self.kv_transfer_params: dict[str, Any] | None = None
++        self.remote_kv_wait_started_at: float | None = None
++        self.remote_kv_wait_time = 0.0
++        self.kv_transfer_metrics: dict[str, float] = {}
++        self.kv_allocation_started_at: float | None = None
++        self.kv_queue_started_at: dict[str, float] = {}
+         # E/P/D: Connector-specific encoder-cache transfer parameters.
+         self.ec_transfer_params: dict[str, Any] | None = None
+
+@@ -341,6 +346,16 @@ class Request:
+     ) -> None:
+         self.events.append(EngineCoreEvent.new_event(event_type, timestamp))
+
++    def start_remote_kv_wait(self) -> None:
++        assert self.remote_kv_wait_started_at is None
++        self.remote_kv_wait_started_at = time.monotonic()
++
++    def stop_remote_kv_wait(self) -> None:
++        if self.remote_kv_wait_started_at is None:
++            return
++        self.remote_kv_wait_time += time.monotonic() - self.remote_kv_wait_started_at
++        self.remote_kv_wait_started_at = None
++
+     def take_events(self) -> list[EngineCoreEvent] | None:
+         if not self.events:
+             return None
+diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runner.py
+index 674cf23527d145e74b7af9d7444119229482c96f..4f8fc9ff726a86ff4f41ee9419408b0efa6954e7 100644
+--- a/vllm/v1/worker/gpu/model_runner.py
++++ b/vllm/v1/worker/gpu/model_runner.py
+@@ -471,6 +471,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+                 "use_fp64_gumbel": self.model_config.use_fp64_gumbel,
+                 "enable_trace_replay": self.model_config.enable_trace_replay,
+                 "return_sampling_mask": self.model_config.return_sampling_mask,
++                "return_sampling_mask_logprobs": (
++                    self.model_config.return_sampling_mask_logprobs
++                ),
+                 "custom_logits_processors": custom_logits_processors,
+             }
+             if self.vllm_config.watermark_config is None:
+diff --git a/vllm/v1/worker/gpu/sample/output.py b/vllm/v1/worker/gpu/sample/output.py
+index 2b1688348638ab35a25bd844ac44dc6dfb012ba9..e495a81d1567465410b9199c37fc86e169b4d8c1 100644
+--- a/vllm/v1/worker/gpu/sample/output.py
++++ b/vllm/v1/worker/gpu/sample/output.py
+@@ -11,6 +11,7 @@ import torch
+
+ from vllm.triton_utils import tl, triton
+ from vllm.v1.outputs import LogprobsTensors, SamplingMaskLists
++from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+
+ @dataclass
+@@ -39,6 +40,7 @@ def _compact_sampling_mask_kernel(
+     max_num_kept,
+     ROWS_PER_REQUEST: tl.constexpr,
+     BLOCK_SIZE: tl.constexpr,
++    WRITE_PACKED_MASK: tl.constexpr,
+ ):
+     """Per row: first ``max_num_kept`` finite-logit ids, the full count, the bitmask."""
+     output_row = tl.program_id(0)
+@@ -68,13 +70,16 @@ def _compact_sampling_mask_kernel(
+         )
+         count += tl.sum(keep_i32)
+
+-        bits = tl.reshape(keep_i32, (BLOCK_SIZE // 8, 8)) << tl.arange(0, 8)[None, :]
+-        byte_offsets = start_idx // 8 + tl.arange(0, BLOCK_SIZE // 8)
+-        tl.store(
+-            packed_mask_ptr + output_row * packed_mask_row_stride + byte_offsets,
+-            tl.sum(bits, axis=1).to(tl.uint8),
+-            mask=byte_offsets < tl.cdiv(vocab_size, 8),
+-        )
++        if WRITE_PACKED_MASK:
++            bits = (
++                tl.reshape(keep_i32, (BLOCK_SIZE // 8, 8)) << tl.arange(0, 8)[None, :]
++            )
++            byte_offsets = start_idx // 8 + tl.arange(0, BLOCK_SIZE // 8)
++            tl.store(
++                packed_mask_ptr + output_row * packed_mask_row_stride + byte_offsets,
++                tl.sum(bits, axis=1).to(tl.uint8),
++                mask=byte_offsets < tl.cdiv(vocab_size, 8),
++            )
+
+     tl.store(counts_ptr + output_row, count)
+
+@@ -96,6 +101,7 @@ class SamplingMaskTensors(NamedTuple):
+     vocab_size: int
+     # Fixed request-major output slots. Ordinary sampling has one slot.
+     rows_per_request: int = 1
++    logprobs: torch.Tensor | None = None
+
+     @classmethod
+     def from_logits(
+@@ -105,19 +111,29 @@ class SamplingMaskTensors(NamedTuple):
+         num_sampled_tokens: torch.Tensor,
+         max_num_kept: int,
+         rows_per_request: int = 1,
++        return_logprobs: bool = False,
+     ) -> SamplingMaskTensors:
+         """Capture committed target supports in fixed request-major slots."""
+         num_reqs = num_sampled_tokens.shape[0]
+         vocab_size = logits.shape[1]
+-        max_num_kept = min(max_num_kept, vocab_size, MAX_COMPACT_SUPPORT)
++        max_num_kept = (
++            vocab_size
++            if return_logprobs
++            else min(
++                MAX_COMPACT_SUPPORT if max_num_kept == -1 else max_num_kept,
++                vocab_size,
++                MAX_COMPACT_SUPPORT,
++            )
++        )
+         num_output_rows = num_reqs * rows_per_request
+         device = logits.device
+
+-        token_ids = torch.empty(
++        allocate = torch.zeros if return_logprobs else torch.empty
++        token_ids = allocate(
+             (num_output_rows, max_num_kept), dtype=torch.int32, device=device
+         )
+         packed_mask = torch.empty(
+-            (num_output_rows, (vocab_size + 7) // 8),
++            (num_output_rows, 0 if return_logprobs else (vocab_size + 7) // 8),
+             dtype=torch.uint8,
+             device=device,
+         )
+@@ -137,8 +153,19 @@ class SamplingMaskTensors(NamedTuple):
+             max_num_kept,
+             ROWS_PER_REQUEST=rows_per_request,
+             BLOCK_SIZE=8192,
++            WRITE_PACKED_MASK=not return_logprobs,
++        )
++        logprobs = None
++        if return_logprobs:
++            slots = torch.arange(rows_per_request, device=device)
++            source_rows = cu_num_logits[:-1, None] + slots
++            source_rows = torch.where(
++                slots < num_sampled_tokens[:, None], source_rows, 0
++            ).flatten()
++            logprobs = compute_token_logprobs(logits[source_rows], token_ids)
++        return cls(
++            token_ids, packed_mask, counts, vocab_size, rows_per_request, logprobs
+         )
+-        return cls(token_ids, packed_mask, counts, vocab_size, rows_per_request)
+
+     @classmethod
+     def cat(cls, chunks: Sequence[SamplingMaskTensors]) -> SamplingMaskTensors:
+@@ -151,6 +178,9 @@ class SamplingMaskTensors(NamedTuple):
+             torch.cat([chunk.counts for chunk in chunks]),
+             first.vocab_size,
+             first.rows_per_request,
++            torch.cat([chunk.logprobs for chunk in chunks])
++            if first.logprobs is not None
++            else None,
+         )
+
+     def to_cpu_nonblocking(self) -> SamplingMaskTensors:
+@@ -162,6 +192,9 @@ class SamplingMaskTensors(NamedTuple):
+             self.counts.to("cpu", non_blocking=True),
+             self.vocab_size,
+             self.rows_per_request,
++            self.logprobs.to("cpu", non_blocking=True)
++            if self.logprobs is not None
++            else None,
+         )
+
+     def tolists(
+@@ -186,6 +219,17 @@ class SamplingMaskTensors(NamedTuple):
+                 np.concatenate(([0], num_sampled_tokens))
+             ).tolist()
+
++        if self.logprobs is not None and width:
++            valid = np.arange(width)[None, :] < counts[sampled_rows, None]
++            offsets = np.zeros(len(sampled_rows) + 1, dtype=np.int64)
++            np.cumsum(counts[sampled_rows], out=offsets[1:])
++            return SamplingMaskLists(
++                token_ids[sampled_rows][valid],
++                offsets,
++                cu_num_generated_tokens,
++                self.logprobs.cpu().numpy()[sampled_rows][valid],
++            )
++
+         def support(row: int) -> np.ndarray:
+             if counts[row] <= width:
+                 return token_ids[row, : counts[row]]
+@@ -199,4 +243,14 @@ class SamplingMaskTensors(NamedTuple):
+         offsets = np.zeros(len(supports) + 1, dtype=np.int64)
+         np.cumsum([len(s) for s in supports], out=offsets[1:])
+         flat = np.concatenate([np.empty(0, dtype=np.int32), *supports])
+-        return SamplingMaskLists(flat, offsets, cu_num_generated_tokens)
++        flat_logprobs = None
++        if self.logprobs is not None:
++            # Packed-only backends keep scores in vocabulary order.
++            scores = self.logprobs.cpu().numpy()
++            flat_logprobs = np.concatenate(
++                [np.empty(0, dtype=np.float32)]
++                + [scores[row, ids] for row, ids in zip(sampled_rows, supports)]
++            )
++        return SamplingMaskLists(
++            flat, offsets, cu_num_generated_tokens, flat_logprobs
++        )
+diff --git a/vllm/v1/worker/gpu/sample/sampler.py b/vllm/v1/worker/gpu/sample/sampler.py
+index 7ffc5bf493194722fe44b07400bccbf603462c7a..dcdbebfbbbdd6842425c8d40f96d9ab8084e3e97 100644
+--- a/vllm/v1/worker/gpu/sample/sampler.py
++++ b/vllm/v1/worker/gpu/sample/sampler.py
+@@ -52,6 +52,7 @@ class Sampler:
+         use_fp64_gumbel: bool = False,
+         enable_trace_replay: bool = False,
+         return_sampling_mask: bool = False,
++        return_sampling_mask_logprobs: bool = False,
+         custom_logits_processors: Sequence[LogitsProcessor] = (),
+     ):
+         self.logprobs_mode = logprobs_mode
+@@ -85,6 +86,7 @@ class Sampler:
+         self.needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
+         self.num_speculative_tokens = num_speculative_tokens
+         self.return_sampling_mask = return_sampling_mask
++        self.return_sampling_mask_logprobs = return_sampling_mask_logprobs
+         self.use_flashinfer = (
+             not return_sampling_mask and flashinfer_sampler_supported()
+         )
+@@ -207,6 +209,7 @@ class Sampler:
+                 input_batch.cu_num_logits,
+                 num_sampled,
+                 max_num_kept,
++                return_logprobs=self.return_sampling_mask_logprobs,
+             )
+
+         # These are GPU tensors.
+diff --git a/vllm/v1/worker/gpu/spec_decode/rejection_sampler.py b/vllm/v1/worker/gpu/spec_decode/rejection_sampler.py
+index b96007b6c1c921f6e8510801b4a9a3178354f7bd..7e08f5bf24a0c77d0a6dd8de23e06eeb1232efb2 100644
+--- a/vllm/v1/worker/gpu/spec_decode/rejection_sampler.py
++++ b/vllm/v1/worker/gpu/spec_decode/rejection_sampler.py
+@@ -367,6 +367,7 @@ class RejectionSampler:
+                         num_sampled,
+                         max_num_kept,
+                         self.num_speculative_steps + 1,
++                        return_logprobs=self.sampler.return_sampling_mask_logprobs,
+                     )
+                 )
+             del processed_logits
+diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
+index a01e5dd5f7a3e28ac474f2f2281213b83c32145d..ae4e0caa62456d70fdf50310cf0315059f695763 100644
+--- a/vllm/v1/worker/gpu_worker.py
++++ b/vllm/v1/worker/gpu_worker.py
+@@ -249,16 +249,28 @@ class Worker(WorkerBase):
+             )
+         return self._sleep_mode_backend
+
++    def _get_sleep_parameters(self, model: nn.Module) -> dict[str, nn.Parameter]:
++        parameters = dict(model.named_parameters())
++        draft = self.get_draft_model()
++        if draft is not None:
++            shared = {id(parameter) for parameter in parameters.values()}
++            parameters.update(
++                (f"draft.{name}", parameter)
++                for name, parameter in draft.named_parameters()
++                if id(parameter) not in shared
++            )
++        return parameters
++
+     def _save_sleep_parameters(self, model: nn.Module) -> None:
+         patterns = self.model_config.sleep_preserve_parameter_names
+         if not patterns:
+             self._sleep_saved_parameters = {}
+             return
+-        parameters = dict(model.named_parameters())
++        parameters = self._get_sleep_parameters(model)
+         names: set[str] = set()
+         for pattern in patterns:
+             matches = fnmatch_filter(parameters, pattern)
+-            if not matches:
++            if not matches and pattern != "draft.*":
+                 raise ValueError(f"No parameter matches sleep retention: {pattern}")
+             names.update(matches)
+         self._sleep_saved_parameters = {
+@@ -269,8 +281,9 @@ class Worker(WorkerBase):
+
+     @torch.no_grad()
+     def _restore_sleep_parameters(self, model: nn.Module) -> None:
++        parameters = self._get_sleep_parameters(model)
+         for name, value in self._sleep_saved_parameters.items():
+-            model.get_parameter(name).copy_(value)
++            parameters[name].copy_(value)
+         self._sleep_saved_parameters.clear()
+
+     def sleep(self, level: int = 1) -> None:
+@@ -597,6 +610,24 @@ class Worker(WorkerBase):
+         with set_current_vllm_config(self.vllm_config):
+             self.model_runner.reload_weights(*args, **kwargs)
+
++    def pull_weights(
++        self,
++        local_checkpoint_dir: str,
++        source_dir: str,
++        target_version: int,
++    ) -> dict[str, Any]:
++        from vllm.utils.local_checkpoint import pull_checkpoint
++
++        pull_checkpoint(
++            local_checkpoint_dir=local_checkpoint_dir,
++            base_dir=self.model_config.model,
++            source_dir=source_dir,
++            target_version=target_version,
++            pre_read_hook=self.model_config.custom_pull_weights_pre_read_hook,
++        )
++
++        return {"success": True, "weight_version": str(target_version)}
++
+     @torch.inference_mode()
+     def determine_available_memory(self) -> int:
+         """Profiles the peak memory usage of the model to determine how much
+@@ -1462,6 +1493,15 @@ class Worker(WorkerBase):
+         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
+         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
+
++    def shutdown_weight_transfer_engine(self) -> None:
++        """Release a trainer connection without shutting down inference."""
++        if self._weight_update_active:
++            raise RuntimeError(
++                "Cannot release a trainer connection during a weight update"
++            )
++        if self.weight_transfer_engine is not None:
++            self.weight_transfer_engine.shutdown()
++
+     def start_weight_update(self) -> None:
+         """Start a new weight update session.
+
