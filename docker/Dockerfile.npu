@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG BASE_IMAGE=quay.io/atlas-ci/vllm-ascend
-ARG BASE_IMAGE_TAG=v0.30.0-e00cb64-a3
+ARG BASE_IMAGE_TAG=v0.31.0-007abb8-a3
 ARG RUST_IMAGE=rust
 ARG RUST_IMAGE_TAG=1.95-bookworm
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"

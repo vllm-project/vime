@@ -6,12 +6,12 @@ This guide provides instructions for installing Vime with NPU support, including
 
 | Component | Version/Commit | Source |
 | --- | --- | --- |
-| Base image | `v0.30.0-e00cb64-a3` | `quay.io/atlas-ci/vllm-ascend` |
-| vLLM | `8cc9aa5ad350f6f80cf3bebb298d410803ff75a9` | [GitHub](https://github.com/vllm-project/vllm) |
-| vLLM-Ascend | `e00cb64a4469dfcd1ea8ba2d5d5e4eb2ab7bcaf1` | [GitHub](https://github.com/vllm-project/vllm-ascend) |
+| Base image | `v0.31.0-007abb8-a3` | `quay.io/atlas-ci/vllm-ascend` |
+| vLLM | `a98247ab4db686ee03c66d5feb3c761e52a2f8ab` | [GitHub](https://github.com/vllm-project/vllm) |
+| vLLM-Ascend | `007abb8c89971f589932584a5a6d0a986bfbcdd0` | [GitHub](https://github.com/vllm-project/vllm-ascend) |
 | vLLM Router | `1fbcde7443d75b36befb61bc081f64c2a1f13a4b` + `docker/patch/latest/router-health-check.patch` | [GitHub](https://github.com/vllm-project/router) |
 | Sunabako | `0.1.1` + `docker/patch/latest/sunabako-arm64.patch` | [PyPI](https://pypi.org/project/sunabako/0.1.1/) |
-| FLA (serving, included in base image) | `flash-linear-attention-npu-a3==26.9.1+deva4a7958` | [v26.9.1-beta2](https://github.com/flashserve/flash-linear-attention-npu/releases/tag/v26.9.1-beta2) |
+| FLA (serving, included in base image) | `flash-linear-attention-npu-a3==26.9.1+dev5cc6990` | [v26.9.1-20261020-020004](https://github.com/flashserve/flash-linear-attention-npu/releases/tag/v26.9.1-20261020-020004) |
 | Megatron-LM | `1dcf0dafa884ad52ffb243625717a3471643e087` | [GitHub](https://github.com/NVIDIA/Megatron-LM) |
 | MegatronAdaptor | `15582addff3f3d4680e350826fa70d012b475509` | [GitCode](https://gitcode.com/Ascend/MegatronAdaptor) |
 | TransformerEngineNPU | `d743c83d060d5edc48867ecb9e93ec80d81860e4` | [GitCode](https://gitcode.com/Ascend/TransformerEngineNPU) |
