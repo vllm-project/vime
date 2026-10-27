@@ -8,7 +8,7 @@ issue on [vllm-project/vime](https://github.com/vllm-project/vime/issues).
 If you are running vime on Ascend NPU, please refer to the following materials.
 This tutorial explains how to set up the runtime environment and provides an
 end-to-end example for running GRPO training. It uses the **Megatron** training
-backend together with the **vLLM Ascend** rollout backend, synchronizing actor 
+backend together with the **vLLM Ascend** rollout backend, synchronizing actor
 weights to vLLM through the native HCCL weight-sync path.
 
 The current NPU support targets Ascend **Atlas A2 / A3** (aarch64) hosts with the
@@ -27,7 +27,7 @@ docker pull "${IMAGE}"
 ```
 
 For source builds and dependency debugging, the patch list and pinned commits are
-documented in [`docker/npu_patch/README.md`](https://github.com/vllm-project/vime/blob/npu/docker/npu_patch/README.md).
+documented in [`docker/npu_patch/README.md`](https://github.com/vllm-project/vime/blob/main/docker/npu_patch/README.md).
 
 ## Quick Start
 
