@@ -103,8 +103,8 @@ ENV SOC_VERSION=$SOC_VERSION \
     HYDRA_FULL_ERROR=1 \
     PYTHONPATH=/root/Megatron-LM:/root/MegatronAdaptor:/root/TransformerEngineNPU:/root/vime
 
-# PATCH MAINTENANCE: keep patch COPY/apply operations and
-# docker/npu_patch/series.conf synchronized.
+# For patches managed by docker/npu_patch/series.conf, keep the corresponding
+# COPY/apply operations synchronized. Build-only patches are handled separately.
 COPY docker/npu_patch /opt/npu_patch
 
 RUN git config --global http.sslVerify false
@@ -172,9 +172,9 @@ RUN pip install --constraint /tmp/vime-npu-constraints.txt --no-build-isolation 
     pip install --no-deps --no-build-isolation -e /root/MegatronAdaptor && \
     pip install --no-deps --no-build-isolation -e /root/MindSpeed
 
-# Defaults to the ascend branch for local builds. Release workflows should
+# Defaults to the main branch for local builds. Release workflows should
 # pass an immutable commit SHA for reproducible images.
-ARG VIME_COMMIT=ascend
+ARG VIME_COMMIT=main
 RUN test -n "${VIME_COMMIT}" && \
     git init /root/vime && \
     git -C /root/vime remote add origin https://github.com/vllm-project/vime.git && \

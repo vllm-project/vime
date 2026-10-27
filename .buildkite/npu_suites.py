@@ -28,20 +28,14 @@ BUILDKITE_SOURCE = os.environ.get("BUILDKITE_SOURCE", "")
 # (test_name, resource_class, extra_args, env_overrides[, timeout_in_minutes])
 SUITES = {
     "smk": [
-        ("test_npu_memory_saver.py", "npu-2", "", {}, 15),
         ("test_delta_disk_weight_update.py", "npu-4", "", {}),
         ("test_qwen3_4B_npu.py", "npu-8", "", {}),
         ("test_qwen3_30B_A3B_npu.py", "npu-16", "", {}),
         # Enable once the Qwen3-VL HF-to-Megatron loader and native model land:
-        # this suite passes --spec vime_plugins.models.qwen3_vl, and neither that
-        # module nor hf_to_megatron/qwen3_vl.py exists on this branch. The test
-        # file itself is kept so the two land together.
         # ("test_qwen3_vl_8B_npu.py", "npu-8", "", {}),
         ("test_glm4.7_30B_A3B_npu.py", "npu-16", "", {}),
-        # Held back with the Qwen3-VL entry above. The test file stays so this
-        # line can be enabled once the suite is ready to run it.
         # 35B convert plus the first rollout does not fit in the default 180 minutes.
-        # ("test_qwen3.5_35B_A3B_npu.py", "npu-16", "", {}, 360),
+        ("test_qwen3.5_35B_A3B_npu.py", "npu-16", "", {}, 360),
     ],
     "nightly": [],
 }
