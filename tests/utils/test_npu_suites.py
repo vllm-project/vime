@@ -27,11 +27,11 @@ def suites(monkeypatch):
     return module
 
 
-def test_image_build_runs_selected_migration_with_smoke_paused(suites, monkeypatch):
+def test_image_build_runs_selected_migration_with_all_smoke_cases(suites, monkeypatch):
     monkeypatch.setenv("NPU_SUITES", "image-build,migration-basic,smk,migration-basic")
     steps = suites.build_steps()
-    assert len(steps) == 8
-    assert len({step["key"] for step in steps}) == 8
+    assert len(steps) == 14
+    assert len({step["key"] for step in steps}) == 14
     for step in steps:
         assert step["image"].endswith("/vime-ci-npu:test-pr-commit")
         assert step["depends_on"] == "image-build-npu"
@@ -56,9 +56,17 @@ def test_image_build_runs_selected_migration_with_smoke_paused(suites, monkeypat
     assert any("--transport disk" in step["command"] for step in pipeline)
     assert any("--flush-cache-interval 2" in step["command"] for step in pipeline)
     smoke = [step for step in steps if step["key"].startswith("npu-smk-")]
-    assert len(smoke) == 1
+    assert len(smoke) == 7
     assert "test_npu_memory_saver.py" in smoke[0]["command"]
-    assert suites.SUITES["smk"] == [("test_npu_memory_saver.py", "npu-2", "", {}, 15)]
+    assert [entry[0] for entry in suites.SUITES["smk"]] == [
+        "test_npu_memory_saver.py",
+        "test_delta_disk_weight_update.py",
+        "test_qwen3_4B_npu.py",
+        "test_qwen3_30B_A3B_npu.py",
+        "test_qwen3_vl_8B_npu.py",
+        "test_glm4.7_30B_A3B_npu.py",
+        "test_qwen3.5_35B_A3B_npu.py",
+    ]
 
 
 @pytest.mark.parametrize("selection", ["", "nightly", "unknown", "image-build,unknown"])
@@ -81,18 +89,20 @@ def test_invalid_or_empty_selection_fails_before_emitting_json(monkeypatch, sele
 
 
 @pytest.mark.parametrize("selection", ["smk", "image-build"])
-def test_new_tms_smoke_is_available_with_legacy_six_cases_paused(suites, monkeypatch, selection):
+def test_all_smoke_cases_are_available_with_tms(suites, monkeypatch, selection):
     monkeypatch.setenv("NPU_SUITES", selection)
     steps = suites.build_steps()
-    assert len(steps) == 1
+    assert len(steps) == 7
     assert "test_npu_memory_saver.py" in steps[0]["command"]
     assert steps[0]["agents"]["resource_class"] == "npu-2"
     assert steps[0]["timeout_in_minutes"] == 15
-    assert "concurrency" not in steps[0]
+    assert all("concurrency" not in step for step in steps)
+    assert steps[-1]["agents"]["resource_class"] == "npu-16"
+    assert steps[-1]["timeout_in_minutes"] == 360
 
 
 def test_image_build_auto_includes_smoke_when_restored(suites, monkeypatch):
-    # Verify the existing auto-inclusion policy without re-enabling real CI jobs.
+    # Verify auto-inclusion also respects a replaced suite configuration.
     monkeypatch.setitem(suites.SUITES, "smk", [("test_qwen3.5_35B_A3B_npu.py", "npu-16", "", {}, 360)])
     monkeypatch.setenv("NPU_SUITES", "image-build")
     steps = suites.build_steps()
@@ -269,8 +279,8 @@ def test_upload_uses_same_selection_for_image_and_tests(tmp_path, from_env, sele
     assert yaml.safe_load(image_yaml)["steps"][0]["skip"] is not building
     generated = json.loads(test_json)["steps"]
     expected_count = {
-        "image-build": 1,
-        "image-build,migration-basic": 8,
+        "image-build": 7,
+        "image-build,migration-basic": 14,
         "migration-parallel": 9,
         "migration-lifecycle,migration-recovery,migration-checkpoint": 17,
         "migration-moe,migration-moe-recovery,migration-models": 8,
@@ -332,7 +342,7 @@ def test_batch_four_preserves_eight_gpu_scenarios_and_cleanup_policy(suites, mon
     monkeypatch.setenv("NPU_KEEP_ARTIFACTS", "1")
     assert all(step["env"]["VIME_TEST_KEEP_ARTIFACTS"] == "1" for step in suites.build_steps())
     monkeypatch.setenv("NPU_SUITES", ",".join(name for name, entries in suites.SUITES.items() if entries))
-    assert len(suites.build_steps()) == 52
+    assert len(suites.build_steps()) == 58
 
 
 def test_all_migration_jobs_dispose_failed_sessions_without_global_sweeps(suites, monkeypatch):

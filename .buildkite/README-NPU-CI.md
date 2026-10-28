@@ -19,10 +19,10 @@ NPU suites to run via a multi-select field:
 
 - **`image-build`** — triggers a fresh image build in the `image-build-npu` step;
   all test steps use the newly built image instead of the pre-built default.
-  It also selects the new TMS smoke test. The six previously validated smoke
-  cases remain commented out for this migration PR.
-- **`smk`** — runs `test_npu_memory_saver.py` on two NPUs (15-minute timeout);
-  its six older model cases remain paused.
+  It also selects all seven `smk` tests.
+- **`smk`** — runs the TMS allocator smoke test and the six existing model/weight
+  update tests. The TMS test uses two NPUs with a 15-minute timeout; the
+  model tests retain their original resource classes and timeouts.
 - **`migration-basic`** — runs seven shared GPU test scenarios with NPU launch
   settings. Select it together with **`image-build`** to test a new PR image;
   `image-build` does not automatically select `migration-basic`.
@@ -52,7 +52,7 @@ NPU suites to run via a multi-select field:
 - **`nightly`** — reserved for future coverage; currently empty. Selecting only
   this suite fails with an explicit error rather than uploading zero tests.
 
-Selecting only `image-build` or `smk` now runs the new TMS smoke test.
+Selecting only `image-build` or `smk` runs all seven smoke tests.
 Select the migration groups separately to exercise model and rollout scenarios.
 
 The optional **Existing NPU image** field (`npu-ci-image` metadata, or
@@ -103,10 +103,8 @@ configuration), which lists suite names from the `SUITES` dict.
 
 For a PR containing the sync-s10 baseline and test changes, select
 **`image-build` + `migration-basic`** in the NPU gate. CI builds the image tagged
-with that PR's commit, then runs these seven migration scenarios plus the new
-TMS smoke test. The six
-previously validated smoke cases are temporarily commented out at the user's
-request. No change to the default image is needed.
+with that PR's commit, then runs these seven migration scenarios plus all seven
+smoke tests. No change to the default image is needed.
 
 | Shared test | Scenario | Resource class |
 | --- | --- | --- |
@@ -122,8 +120,9 @@ All migration suites use the existing `vime-npu-migration-basic` concurrency
 group with limit four, shared across builds. Batch one alone requests at most
 16 NPUs concurrently; batch two introduces eight-NPU jobs, so the shared limit
 can request up to 32 NPUs. Actual scheduling depends on queue availability.
-Failure of one scenario does not skip the remaining scenarios. The commented
-smoke entries retain their original resource classes and timeouts for restoration.
+Failure of one scenario does not skip the remaining scenarios. Smoke tests
+retain their original resource classes and timeouts and use their existing
+scheduling outside the migration concurrency group.
 The score-centering test
 uses two logical devices inside a four-NPU pod. Each migration job has a
 180-minute timeout; image building retains its 240-minute timeout.
@@ -182,8 +181,8 @@ NPU_SUITES=image-build,migration-basic BUILDKITE_COMMIT="$(git rev-parse HEAD)" 
 ## Adding a test
 
 Suites and test mappings are defined in [`npu_suites.py`](./npu_suites.py).
-The twelve selectable migration groups contain 51 scenarios. `smk` adds one
-TMS allocator smoke test; its six older model cases remain paused. `nightly` is empty.
+The twelve selectable migration groups contain 51 scenarios. `smk` contains
+seven tests including the TMS allocator smoke test. `nightly` is empty.
 
 Each entry is a 4-tuple, with an optional fifth item for the timeout in minutes:
 
@@ -260,8 +259,8 @@ bytes under `/tmp/npu_patch` but not the OLD series required by this reconciler.
 
 `migration-parallel` contains nine layout/parallel/PPO scenarios, all passed
 in build #385. The separate full-disk retry suite has been removed after its
-#384 success; full-disk remains part of `migration-basic`. The six `smk` entries
-remain commented out.
+#384 success; full-disk remains part of `migration-basic`. The six existing
+model smoke cases are enabled together with the TMS allocator smoke test.
 
 To reuse the verified #385 training environment, leave `image-build` unselected
 and paste this into **Existing NPU image**. Runtime patch reconciliation still
@@ -332,7 +331,7 @@ Select **`migration-lifecycle`**, **`migration-recovery`** and/or
 including the existing basic/parallel suites gives 33 different migration
 scenarios. All share `vime-npu-migration-basic`, concurrency four. Four-NPU and
 eight-NPU jobs request at most 32 NPUs across simultaneous migration jobs.
-The completed six smoke cases remain paused.
+The six existing model smoke cases are enabled in `smk`.
 
 | Suite | GPU inventory | Model / dataset | NPUs / timeout |
 | --- | --- | --- | --- |
