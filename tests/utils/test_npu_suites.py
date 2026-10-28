@@ -30,8 +30,8 @@ def suites(monkeypatch):
 def test_image_build_runs_selected_migration_with_smoke_paused(suites, monkeypatch):
     monkeypatch.setenv("NPU_SUITES", "image-build,migration-basic,smk,migration-basic")
     steps = suites.build_steps()
-    assert len(steps) == 7
-    assert len({step["key"] for step in steps}) == 7
+    assert len(steps) == 8
+    assert len({step["key"] for step in steps}) == 8
     for step in steps:
         assert step["image"].endswith("/vime-ci-npu:test-pr-commit")
         assert step["depends_on"] == "image-build-npu"
@@ -55,10 +55,13 @@ def test_image_build_runs_selected_migration_with_smoke_paused(suites, monkeypat
     assert len(pipeline) == 3
     assert any("--transport disk" in step["command"] for step in pipeline)
     assert any("--flush-cache-interval 2" in step["command"] for step in pipeline)
-    assert not any(step["key"].startswith("npu-smk-") for step in steps)
+    smoke = [step for step in steps if step["key"].startswith("npu-smk-")]
+    assert len(smoke) == 1
+    assert "test_npu_memory_saver.py" in smoke[0]["command"]
+    assert suites.SUITES["smk"] == [("test_npu_memory_saver.py", "npu-2", "", {}, 15)]
 
 
-@pytest.mark.parametrize("selection", ["", "smk", "image-build", "nightly", "unknown", "image-build,unknown"])
+@pytest.mark.parametrize("selection", ["", "nightly", "unknown", "image-build,unknown"])
 def test_invalid_or_empty_selection_fails_before_emitting_json(monkeypatch, selection):
     env = {**os.environ, "NPU_SUITES": selection}
     result = subprocess.run(
@@ -70,11 +73,22 @@ def test_invalid_or_empty_selection_fails_before_emitting_json(monkeypatch, sele
     )
     assert result.returncode != 0
     assert not result.stdout
-    if selection in ("", "smk", "image-build", "nightly"):
+    if selection in ("", "nightly"):
         assert (
-            "select a non-empty suite (currently: migration-basic, migration-parallel, migration-lifecycle, migration-recovery, migration-checkpoint, migration-moe, migration-moe-recovery, migration-models, migration-foundation, migration-pd, migration-pd-models, migration-agent)"
+            "select a non-empty suite (currently: smk, migration-basic, migration-parallel, migration-lifecycle, migration-recovery, migration-checkpoint, migration-moe, migration-moe-recovery, migration-models, migration-foundation, migration-pd, migration-pd-models, migration-agent)"
             in result.stderr
         )
+
+
+@pytest.mark.parametrize("selection", ["smk", "image-build"])
+def test_new_tms_smoke_is_available_with_legacy_six_cases_paused(suites, monkeypatch, selection):
+    monkeypatch.setenv("NPU_SUITES", selection)
+    steps = suites.build_steps()
+    assert len(steps) == 1
+    assert "test_npu_memory_saver.py" in steps[0]["command"]
+    assert steps[0]["agents"]["resource_class"] == "npu-2"
+    assert steps[0]["timeout_in_minutes"] == 15
+    assert "concurrency" not in steps[0]
 
 
 def test_image_build_auto_includes_smoke_when_restored(suites, monkeypatch):
@@ -239,6 +253,7 @@ def test_upload_uses_same_selection_for_image_and_tests(tmp_path, from_env, sele
         timeout=15,
     )
     if selection not in (
+        "image-build",
         "image-build,migration-basic",
         "migration-parallel",
         "migration-lifecycle,migration-recovery,migration-checkpoint",
@@ -253,15 +268,15 @@ def test_upload_uses_same_selection_for_image_and_tests(tmp_path, from_env, sele
     building = selection.startswith("image-build")
     assert yaml.safe_load(image_yaml)["steps"][0]["skip"] is not building
     generated = json.loads(test_json)["steps"]
-    assert len(generated) == (
-        7
-        if building
-        else (
-            9
-            if selection == "migration-parallel"
-            else 8 if "migration-models" in selection else 4 if selection == "migration-foundation" else 17
-        )
-    )
+    expected_count = {
+        "image-build": 1,
+        "image-build,migration-basic": 8,
+        "migration-parallel": 9,
+        "migration-lifecycle,migration-recovery,migration-checkpoint": 17,
+        "migration-moe,migration-moe-recovery,migration-models": 8,
+        "migration-foundation": 4,
+    }
+    assert len(generated) == expected_count[selection]
     expected_image = ":test-pr-commit" if building else "registry.example/vime:previous-commit"
     assert all(step["image"].endswith(expected_image) for step in generated)
     if any(group in selection for group in ("migration-checkpoint", "migration-models", "migration-foundation")):
@@ -317,7 +332,7 @@ def test_batch_four_preserves_eight_gpu_scenarios_and_cleanup_policy(suites, mon
     monkeypatch.setenv("NPU_KEEP_ARTIFACTS", "1")
     assert all(step["env"]["VIME_TEST_KEEP_ARTIFACTS"] == "1" for step in suites.build_steps())
     monkeypatch.setenv("NPU_SUITES", ",".join(name for name, entries in suites.SUITES.items() if entries))
-    assert len(suites.build_steps()) == 51
+    assert len(suites.build_steps()) == 52
 
 
 def test_all_migration_jobs_dispose_failed_sessions_without_global_sweeps(suites, monkeypatch):

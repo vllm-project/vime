@@ -29,19 +29,21 @@ def prepare():
     U.hf_download_dataset("zhuzilin/dapo-math-17k", dir_dst=DATASET_DIR)
 
     # Convert checkpoint with MTP layers enabled
-    U.convert_checkpoint(
-        model_name=MODEL_NAME,
-        megatron_model_type=MODEL_TYPE,
-        num_gpus_per_node=NUM_GPUS,
-        extra_args=" --mtp-num-layers 1",
-        dir_dst=str(MODEL_DIR.parent),
-        hf_checkpoint=str(MODEL_DIR),
-    )
+    # This migration case intentionally initializes NPU training from HF weights.
+    if U.current_platform().name != "npu":
+        U.convert_checkpoint(
+            model_name=MODEL_NAME,
+            megatron_model_type=MODEL_TYPE,
+            num_gpus_per_node=NUM_GPUS,
+            extra_args=" --mtp-num-layers 1",
+            dir_dst=str(MODEL_DIR.parent),
+            hf_checkpoint=str(MODEL_DIR),
+        )
 
 
 def execute():
     """Run training with MTP enabled and very short output length to cause truncation."""
-    ref_load = MODEL_DIR.parent / f"{MODEL_NAME}_torch_dist" if U.current_platform().torch_dist_convert else MODEL_DIR
+    ref_load = MODEL_DIR.parent / f"{MODEL_NAME}_torch_dist" if (U.current_platform().name != "npu") else MODEL_DIR
     ckpt_args = f"--hf-checkpoint {quote(str(MODEL_DIR))} --ref-load {quote(str(ref_load))} "
 
     # Very short responses force truncation: main-model gradients must remain

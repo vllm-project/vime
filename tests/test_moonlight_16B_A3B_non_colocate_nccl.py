@@ -25,17 +25,19 @@ def prepare():
     U.exec_command(f"mkdir -p {quote(str(MODEL_DIR.parent))} {quote(str(DATASET_DIR))}")
     U.exec_command(f"hf download moonshotai/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
     U.hf_download_dataset("zhuzilin/dapo-math-17k", dir_dst=DATASET_DIR)
-    U.convert_checkpoint(
-        model_name=MODEL_NAME,
-        megatron_model_type=MODEL_TYPE,
-        num_gpus_per_node=TRAIN_GPUS,
-        dir_dst="/dev/shm",
-        hf_checkpoint=str(MODEL_DIR),
-    )
+    # This migration case intentionally initializes NPU training from HF weights.
+    if U.current_platform().name != "npu":
+        U.convert_checkpoint(
+            model_name=MODEL_NAME,
+            megatron_model_type=MODEL_TYPE,
+            num_gpus_per_node=TRAIN_GPUS,
+            dir_dst="/dev/shm",
+            hf_checkpoint=str(MODEL_DIR),
+        )
 
 
 def execute():
-    ref_load = Path(TORCH_DIST_CKPT) if U.current_platform().torch_dist_convert else MODEL_DIR
+    ref_load = Path(TORCH_DIST_CKPT) if (U.current_platform().name != "npu") else MODEL_DIR
     ckpt_args = f"--hf-checkpoint {quote(str(MODEL_DIR))} --ref-load {quote(str(ref_load))} "
 
     rollout_args = (

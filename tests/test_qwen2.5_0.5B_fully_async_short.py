@@ -30,14 +30,16 @@ def prepare():
     U.hf_download_dataset("zhuzilin/dapo-math-17k", dir_dst=DATASET_DIR)
     if torch.version.hip is not None:
         # ROCm image has no modelopt bridge: convert HF->Megatron into a container-local dir.
-        U.convert_checkpoint(
-            MODEL_NAME,
-            MODEL_TYPE,
-            num_gpus_per_node=1,
-            extra_args="--no-gradient-accumulation-fusion --attention-backend flash",
-            dir_dst="/tmp",
-            hf_checkpoint=str(MODEL_DIR),
-        )
+        # This migration case intentionally initializes NPU training from HF weights.
+        if U.current_platform().name != "npu":
+            U.convert_checkpoint(
+                MODEL_NAME,
+                MODEL_TYPE,
+                num_gpus_per_node=1,
+                extra_args="--no-gradient-accumulation-fusion --attention-backend flash",
+                dir_dst="/tmp",
+                hf_checkpoint=str(MODEL_DIR),
+            )
 
 
 def execute():

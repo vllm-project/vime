@@ -26,13 +26,15 @@ def prepare():
     U.exec_command(f"mkdir -p {quote(str(TEST_ROOT / 'models'))} {quote(str(DATASET_DIR))}")
     U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
     U.hf_download_dataset("zhuzilin/gsm8k", dir_dst=DATASET_DIR)
-    U.convert_checkpoint(
-        model_name=MODEL_NAME,
-        megatron_model_type=MODEL_TYPE,
-        num_gpus_per_node=NUM_GPUS,
-        dir_dst="/dev/shm",
-        hf_checkpoint=str(MODEL_DIR),
-    )
+    # This migration case intentionally initializes NPU training from HF weights.
+    if U.current_platform().name != "npu":
+        U.convert_checkpoint(
+            model_name=MODEL_NAME,
+            megatron_model_type=MODEL_TYPE,
+            num_gpus_per_node=NUM_GPUS,
+            dir_dst="/dev/shm",
+            hf_checkpoint=str(MODEL_DIR),
+        )
 
 
 def execute():
@@ -42,7 +44,7 @@ def execute():
 
         ckpt_args = (
             f"--hf-checkpoint {quote(str(MODEL_DIR))} "
-            f"--ref-load {quote(TORCH_DIST_CKPT if U.current_platform().torch_dist_convert else str(MODEL_DIR))} "
+            f"--ref-load {quote(TORCH_DIST_CKPT if U.current_platform().name != 'npu' else str(MODEL_DIR))} "
             "--release-train "
             f"--save {quote(str(save_dir))} "
             "--save-interval 1 "

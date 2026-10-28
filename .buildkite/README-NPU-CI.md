@@ -19,9 +19,10 @@ NPU suites to run via a multi-select field:
 
 - **`image-build`** — triggers a fresh image build in the `image-build-npu` step;
   all test steps use the newly built image instead of the pre-built default.
-  The automatic `smk` inclusion policy remains, but its six entries are currently
-  commented out for this migration PR. Select a non-empty migration suite as well.
-- **`smk`** — temporarily paused: its six cases were already validated.
+  It also selects the new TMS smoke test. The six previously validated smoke
+  cases remain commented out for this migration PR.
+- **`smk`** — runs `test_npu_memory_saver.py` on two NPUs (15-minute timeout);
+  its six older model cases remain paused.
 - **`migration-basic`** — runs seven shared GPU test scenarios with NPU launch
   settings. Select it together with **`image-build`** to test a new PR image;
   `image-build` does not automatically select `migration-basic`.
@@ -51,8 +52,8 @@ NPU suites to run via a multi-select field:
 - **`nightly`** — reserved for future coverage; currently empty. Selecting only
   this suite fails with an explicit error rather than uploading zero tests.
 
-With `smk` paused, selecting only `image-build` or `smk` also fails before
-uploading the image build because no tests are selected.
+Selecting only `image-build` or `smk` now runs the new TMS smoke test.
+Select the migration groups separately to exercise model and rollout scenarios.
 
 The optional **Existing NPU image** field (`npu-ci-image` metadata, or
 `NPU_CI_IMAGE` environment variable) accepts a full image reference. Leave
@@ -76,6 +77,15 @@ This allows testing code changes that require an updated NPU environment
 `buildkite-agent meta-data get npu-suites` for PR triggers) and generates
 individual test jobs via [`npu_suites.py`](./npu_suites.py).
 
+## Synced backend baseline
+
+The serving patches now target vLLM `a98247a` and vLLM-Ascend `007abb8`,
+with base image `v0.31.0-007abb8-a3`. Build a new image for the first run of
+this revision: the patched TMS preload wheel is build-only, and images based
+on the previous serving pair cannot be upgraded by Python patch reconciliation.
+The migration suites retain their native HF initialization, PD recovery,
+CaMem mapping-state guards, temporary-directory cleanup and concurrency of four.
+
 ## Triggers
 
 The pipeline supports two trigger modes:
@@ -93,7 +103,8 @@ configuration), which lists suite names from the `SUITES` dict.
 
 For a PR containing the sync-s10 baseline and test changes, select
 **`image-build` + `migration-basic`** in the NPU gate. CI builds the image tagged
-with that PR's commit, then runs only these seven migration scenarios. The six
+with that PR's commit, then runs these seven migration scenarios plus the new
+TMS smoke test. The six
 previously validated smoke cases are temporarily commented out at the user's
 request. No change to the default image is needed.
 
@@ -171,8 +182,8 @@ NPU_SUITES=image-build,migration-basic BUILDKITE_COMMIT="$(git rev-parse HEAD)" 
 ## Adding a test
 
 Suites and test mappings are defined in [`npu_suites.py`](./npu_suites.py).
-The twelve selectable migration groups contain 51 scenarios; `smk` remains temporarily
-paused and `nightly` remains empty.
+The twelve selectable migration groups contain 51 scenarios. `smk` adds one
+TMS allocator smoke test; its six older model cases remain paused. `nightly` is empty.
 
 Each entry is a 4-tuple, with an optional fifth item for the timeout in minutes:
 
@@ -281,8 +292,9 @@ Model repositories are under `Qwen/`; dataset repositories are `zhuzilin/gsm8k`
 and `zhuzilin/dapo-math-17k`. Optional GSM8K/AIME evaluation is disabled in this
 batch (`VIME_TEST_ENABLE_EVAL=0`). PPO no longer downloads AIME when disabled.
 
-NPU cases use native HF reference loading when automatic torch_dist conversion
-is disabled; conversion support is not implied. All second-batch NPU cases
+These migration cases explicitly select native HF reference loading on NPU
+and skip their preparation-time conversion. The shared converter remains
+available to callers that request it; these cases do not validate conversion. All second-batch NPU cases
 chunk log-prob calculations at 128 tokens and bound vLLM to 16 simultaneous
 sequences, capture size 8 and memory utilization 0.5, retaining graph execution.
 The serving context is 8192 for GSM8K and 32768 for DAPO; original response
@@ -417,8 +429,9 @@ scenario is introduced.
 
 DAPO is `zhuzilin/dapo-math-17k/dapo-math-17k.jsonl`; G37 uses
 `zhuzilin/gsm8k/train.parquet`. Assets use the shared configurable test root.
-On NPU, disabled automatic torch_dist conversion selects native HF reference
-loading. Original CUDA conversion destinations and GPU feature choices remain.
+These NPU migration cases explicitly keep native HF reference loading and skip
+preparation-time conversion. Original CUDA conversion destinations and GPU
+feature choices remain.
 Optional AIME evaluation is disabled for G13/G20/G21/G08 and is not downloaded.
 
 The shared `get_test_npu_model_args()` helper applies the existing NPU flash

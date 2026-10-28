@@ -33,18 +33,20 @@ def prepare():
     if ENABLE_EVAL:
         U.hf_download_dataset("zhuzilin/aime-2024", dir_dst=DATASET_DIR)
 
-    U.convert_checkpoint(
-        model_name=MODEL_NAME,
-        megatron_model_type=MODEL_TYPE,
-        num_gpus_per_node=NUM_GPUS,
-        dir_dst=str(TEST_ROOT),
-        hf_checkpoint=str(MODEL_DIR),
-    )
+    # This migration case intentionally initializes NPU training from HF weights.
+    if U.current_platform().name != "npu":
+        U.convert_checkpoint(
+            model_name=MODEL_NAME,
+            megatron_model_type=MODEL_TYPE,
+            num_gpus_per_node=NUM_GPUS,
+            dir_dst=str(TEST_ROOT),
+            hf_checkpoint=str(MODEL_DIR),
+        )
 
 
 def execute():
     validate_backend_options()
-    ref_load = TEST_ROOT / f"{MODEL_NAME}_torch_dist" if U.current_platform().torch_dist_convert else MODEL_DIR
+    ref_load = TEST_ROOT / f"{MODEL_NAME}_torch_dist" if (U.current_platform().name != "npu") else MODEL_DIR
     hf_checkpoint = str(MODEL_DIR) + ("-FP8" if USE_FP8_ROLLOUT else "")
     ckpt_args = f"--hf-checkpoint {quote(hf_checkpoint)} --ref-load {quote(str(ref_load))} "
 

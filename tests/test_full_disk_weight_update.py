@@ -25,13 +25,15 @@ TORCH_DIST_CKPT = f"/dev/shm/{MODEL_NAME}_torch_dist"
 def prepare():
     U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
     U.hf_download_dataset("zhuzilin/gsm8k", dir_dst=DATASET_DIR)
-    U.convert_checkpoint(
-        model_name=MODEL_NAME,
-        megatron_model_type=MODEL_TYPE,
-        num_gpus_per_node=NUM_GPUS,
-        dir_dst="/dev/shm",
-        hf_checkpoint=str(MODEL_DIR),
-    )
+    # This migration case intentionally initializes NPU training from HF weights.
+    if U.current_platform().name != "npu":
+        U.convert_checkpoint(
+            model_name=MODEL_NAME,
+            megatron_model_type=MODEL_TYPE,
+            num_gpus_per_node=NUM_GPUS,
+            dir_dst="/dev/shm",
+            hf_checkpoint=str(MODEL_DIR),
+        )
 
 
 def verify_checkpoints(disk_dir, num_rollout):
@@ -52,9 +54,9 @@ def execute():
     num_rollout = int(os.environ.get("VIME_TEST_NUM_ROLLOUT", "1"))
     assert num_rollout >= 1
     with tempfile.TemporaryDirectory(prefix="vime_full_disk_weight_update_", dir=U.get_test_tmp_dir()) as disk_dir:
-        # The NPU launcher skips automatic conversion; use the actual HF
-        # checkpoint as in the existing delta-disk test, not a missing path.
-        ref_load = TORCH_DIST_CKPT if U.current_platform().torch_dist_convert else str(MODEL_DIR)
+        # This NPU migration case uses native HF initialization, so its
+        # reference must point to the original weights.
+        ref_load = TORCH_DIST_CKPT if (U.current_platform().name != "npu") else str(MODEL_DIR)
         ckpt_args = f"--hf-checkpoint {quote(str(MODEL_DIR))} --ref-load {quote(ref_load)} "
 
         rollout_args = (

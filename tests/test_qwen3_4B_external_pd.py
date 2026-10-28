@@ -96,13 +96,15 @@ def _get_external_host():
 def prepare():
     U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
     U.hf_download_dataset("zhuzilin/gsm8k", dir_dst=DATASET_DIR)
-    U.convert_checkpoint(
-        model_name=MODEL_NAME,
-        megatron_model_type=MODEL_TYPE,
-        num_gpus_per_node=NUM_TRAIN_GPUS,
-        dir_dst=str(MODEL_DIR.parent),
-        hf_checkpoint=str(MODEL_DIR),
-    )
+    # This migration case intentionally initializes NPU training from HF weights.
+    if U.current_platform().name != "npu":
+        U.convert_checkpoint(
+            model_name=MODEL_NAME,
+            megatron_model_type=MODEL_TYPE,
+            num_gpus_per_node=NUM_TRAIN_GPUS,
+            dir_dst=str(MODEL_DIR.parent),
+            hf_checkpoint=str(MODEL_DIR),
+        )
 
 
 def _get_gpu_split():

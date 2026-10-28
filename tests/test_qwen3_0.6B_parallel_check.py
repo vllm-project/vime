@@ -31,19 +31,21 @@ def prepare():
     U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
     U.hf_download_dataset("zhuzilin/dapo-math-17k", dir_dst=DATASET_DIR)
 
-    U.convert_checkpoint(
-        model_name=MODEL_NAME,
-        megatron_model_type=MODEL_TYPE,
-        num_gpus_per_node=NUM_GPUS,
-        dir_dst=str(TEST_ROOT / "models"),
-        hf_checkpoint=str(MODEL_DIR),
-    )
+    # This migration case intentionally initializes NPU training from HF weights.
+    if U.current_platform().name != "npu":
+        U.convert_checkpoint(
+            model_name=MODEL_NAME,
+            megatron_model_type=MODEL_TYPE,
+            num_gpus_per_node=NUM_GPUS,
+            dir_dst=str(TEST_ROOT / "models"),
+            hf_checkpoint=str(MODEL_DIR),
+        )
 
 
 def execute():
     ref_load = (
         str(TEST_ROOT / "models" / f"{MODEL_NAME}_torch_dist")
-        if U.current_platform().torch_dist_convert
+        if (U.current_platform().name != "npu")
         else str(MODEL_DIR)
     )
     ckpt_args = f"--hf-checkpoint {quote(str(MODEL_DIR))} --ref-load {quote(ref_load)} "
