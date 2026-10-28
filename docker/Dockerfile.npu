@@ -50,9 +50,7 @@ RUN if [ -n "$APTMIRROR" ]; then \
 FROM wheel-builder-base AS sunabako-wheel
 
 COPY docker/patch/latest/sunabako-arm64.patch /tmp/sunabako-arm64.patch
-RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends git curl && \
+RUN apt-get update && apt-get install -y --no-install-recommends git curl && \
     python3 -m pip install "maturin>=1.8,<2" && \
     curl -fsSL https://files.pythonhosted.org/packages/cd/16/d9fd84bbf784c19425d9d83d8d98deef6d5f107012e8d50bddeb5c11cf5c/sunabako-0.1.1.tar.gz -o /tmp/sdk.tar.gz && \
     mkdir /sdk && tar -xf /tmp/sdk.tar.gz -C /sdk --strip-components=1 && cd /sdk && \
@@ -65,9 +63,7 @@ FROM wheel-builder-base AS vllm-router-wheel
 ARG VLLM_ROUTER_COMMIT=1fbcde7443d75b36befb61bc081f64c2a1f13a4b
 # Build the patched Python API and native Rust extension together.
 COPY docker/patch/latest/router-health-check.patch /tmp/router-health-check.patch
-RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends git cmake pkg-config libssl-dev && \
+RUN apt-get update && apt-get install -y --no-install-recommends git cmake pkg-config libssl-dev && \
     python3 -m pip install setuptools-rust wheel && \
     git init /router && cd /router && git remote add origin https://github.com/vllm-project/router.git && \
     git fetch --depth 1 origin ${VLLM_ROUTER_COMMIT} && git checkout FETCH_HEAD && \
