@@ -149,8 +149,8 @@ class NpuRayResourceSpec(RayResourceSpec):
         cann_python_path = _cann_python_site_packages()
         if cann_python_path is not None:
             _prepend_pythonpath(env, cann_python_path)
-        if getattr(args, "colocate", False):
-            env["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:False"
+        # Sleep-mode pools also require this outside colocate.
+        env["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:False"
         env["VLLM_USE_AOT_COMPILE"] = "0"
         return env
 
@@ -192,8 +192,7 @@ class NpuVLLMLaunchPlatformOps(VLLMLaunchPlatformOps):
         cann_python_path = _cann_python_site_packages()
         if cann_python_path is not None:
             _prepend_pythonpath(env, cann_python_path)
-        if colocate:
-            env["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:False"
+        env["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:False"
         return env
 
 

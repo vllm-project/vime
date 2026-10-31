@@ -107,9 +107,10 @@ def test_npu_runtime_env_is_scoped_to_npu_provider(monkeypatch, tmp_path, coloca
     monkeypatch.setenv("ASCEND_TOOLKIT_HOME", str(toolkit))
     monkeypatch.setenv("VIME_PLATFORM", "npu")
     args = Namespace(offload_train=True, train_backend=train_backend, colocate=colocate)
+    inherited = {"BASE": "1", "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True"}
 
-    train_env = current_platform().ray.train_runtime_env(args, {"BASE": "1"})
-    rollout_env = current_platform().ray.rollout_runtime_env(args, {"BASE": "1"})
+    train_env = current_platform().ray.train_runtime_env(args, inherited)
+    rollout_env = current_platform().ray.rollout_runtime_env(args, inherited)
 
     assert train_env["TMS_HOOK_MODE"] == "preload"
     assert "TMS_REGION_TAG" not in train_env
@@ -117,11 +118,12 @@ def test_npu_runtime_env_is_scoped_to_npu_provider(monkeypatch, tmp_path, coloca
     assert train_env["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:False"
     assert str(toolkit / "python" / "site-packages") in train_env["PYTHONPATH"]
     assert rollout_env["VLLM_USE_AOT_COMPILE"] == "0"
-    if colocate:
-        assert rollout_env["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:False"
+    assert rollout_env["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:False"
+    assert inherited["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:True"
 
 
-def test_npu_vllm_env_replaces_cuda_and_rocm_visibility(monkeypatch):
+@pytest.mark.parametrize("colocate", [False, True])
+def test_npu_vllm_env_replaces_cuda_and_rocm_visibility(monkeypatch, colocate):
     monkeypatch.setenv("VIME_PLATFORM", "npu")
     platform = current_platform()
 
@@ -129,11 +131,12 @@ def test_npu_vllm_env_replaces_cuda_and_rocm_visibility(monkeypatch):
         {
             "KEEP": "1",
             "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+            "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
             "CUDA_VISIBLE_DEVICES": "0,1",
             "HIP_VISIBLE_DEVICES": "0,1",
         },
         visible_devices="4,5",
-        colocate=True,
+        colocate=colocate,
     )
 
     assert env["KEEP"] == "1"

@@ -333,6 +333,77 @@ def test_failed_transfer_does_not_resume_generation(update_module, monkeypatch):
     assert updater.rollout_engines[0].continue_generation.calls == []
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("layer_prefix", "hf_layer"),
+    [
+        ("mtp.layers.0.transformer_layer", 47),
+        ("mtp.layers.0.mtp_model_layer", 47),
+        ("decoder.layers.46", 46),
+    ],
+)
+@pytest.mark.parametrize(("ep_size", "ep_rank"), [(1, 0), (8, 0), (8, 1), (8, 7)])
+def test_expert_parallel_hf_load_and_export(
+    update_module, monkeypatch, tmp_path, layer_prefix, hf_layer, ep_size, ep_rank
+):
+    from safetensors.torch import save_file
+
+    from vime.backends.megatron_utils.hf_to_megatron.common import load_model_hf_weights
+    from vime.backends.megatron_utils.hf_to_megatron.deepseek import deepseek_hf_tensor
+    from vime.backends.megatron_utils.megatron_to_hf import convert_to_hf
+
+    common = importlib.import_module(COMMON_MODULE)
+    monkeypatch.setattr(common.mpu, "get_expert_model_parallel_world_size", lambda: ep_size)
+    monkeypatch.setattr(common.mpu, "get_expert_model_parallel_rank", lambda: ep_rank)
+    monkeypatch.setattr(common, "get_transformer_layer_offset", lambda config: 0)
+    args = types.SimpleNamespace(
+        num_experts=64, num_layers=47, kv_channels=2, num_attention_heads=1, num_query_groups=1, vocab_size=2
+    )
+    config = types.SimpleNamespace(model_type="glm4_moe_lite", num_hidden_layers=47, tie_word_embeddings=False)
+    hf_weights = {
+        f"model.layers.{hf_layer}.mlp.experts.{expert}.{projection}_proj.weight": torch.full(
+            (2, 2), float(3 * expert + offset)
+        )
+        for expert in range(args.num_experts)
+        for offset, projection in enumerate(("gate", "up", "down"), start=1)
+    }
+    save_file(hf_weights, str(tmp_path / "model.safetensors"))
+    local_count = args.num_experts // ep_size
+    parameters = {
+        f"module.module.{layer_prefix}.mlp.experts.{linear}.weight{expert}": torch.nn.Parameter(torch.zeros(shape))
+        for expert in range(local_count)
+        for linear, shape in (("linear_fc1", (4, 2)), ("linear_fc2", (2, 2)))
+    }
+    model = types.SimpleNamespace(
+        config=config, named_parameters=lambda: iter(parameters.items()), named_buffers=lambda: iter(())
+    )
+
+    load_model_hf_weights(args, [model], tmp_path, config, deepseek_hf_tensor)
+
+    exported = {}
+    for local_expert in range(local_count):
+        hf_prefix = f"model.layers.{hf_layer}.mlp.experts.{ep_rank * local_count + local_expert}"
+        local_prefix = f"module.module.{layer_prefix}.mlp.experts"
+        expected_fc1 = torch.cat(
+            [hf_weights[f"{hf_prefix}.{projection}_proj.weight"] for projection in ("gate", "up")]
+        )
+        assert torch.equal(parameters[f"{local_prefix}.linear_fc1.weight{local_expert}"], expected_fc1)
+        assert torch.equal(
+            parameters[f"{local_prefix}.linear_fc2.weight{local_expert}"], hf_weights[f"{hf_prefix}.down_proj.weight"]
+        )
+    for name, parameter in common.named_params_and_buffers(args, [model]):
+        assert name.startswith(f"module.module.{layer_prefix}.")
+        exported.update(convert_to_hf(args, "glm4_moe_lite", name, parameter))
+    expected = {
+        f"model.layers.{hf_layer}.mlp.experts.{expert}.{projection}_proj.weight"
+        for expert in range(ep_rank * local_count, (ep_rank + 1) * local_count)
+        for projection in ("gate", "up", "down")
+    }
+    assert exported.keys() == expected
+    for name, parameter in exported.items():
+        assert torch.equal(parameter, hf_weights[name])
+
+
 @pytest.fixture
 def weight_modules():
     module_names = (
