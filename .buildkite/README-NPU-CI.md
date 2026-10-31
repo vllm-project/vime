@@ -19,10 +19,10 @@ NPU suites to run via a multi-select field:
 
 - **`image-build`** — triggers a fresh image build in the `image-build-npu` step;
   all test steps use the newly built image instead of the pre-built default.
-  It also selects all seven `smk` tests.
-- **`smk`** — runs the TMS allocator smoke test and the six existing model/weight
-  update tests. The TMS test uses two NPUs with a 15-minute timeout; the
-  model tests retain their original resource classes and timeouts.
+  It also selects all six `smk` tests.
+- **`smk`** — runs the six existing model/weight update tests with their original
+  resource classes and timeouts. The standalone TMS smoke test was removed
+  with the synced Ascend baseline.
 - **`migration-basic`** — runs seven shared GPU test scenarios with NPU launch
   settings. Select it together with **`image-build`** to test a new PR image;
   `image-build` does not automatically select `migration-basic`.
@@ -52,7 +52,7 @@ NPU suites to run via a multi-select field:
 - **`nightly`** — reserved for future coverage; currently empty. Selecting only
   this suite fails with an explicit error rather than uploading zero tests.
 
-Selecting only `image-build` or `smk` runs all seven smoke tests.
+Selecting only `image-build` or `smk` runs all six smoke tests.
 Select the migration groups separately to exercise model and rollout scenarios.
 
 The optional **Existing NPU image** field (`npu-ci-image` metadata, or
@@ -81,10 +81,19 @@ individual test jobs via [`npu_suites.py`](./npu_suites.py).
 
 The serving patches now target vLLM `a98247a` and vLLM-Ascend `007abb8`,
 with base image `v0.31.0-007abb8-a3`. Build a new image for the first run of
-this revision: the patched TMS preload wheel is build-only, and images based
-on the previous serving pair cannot be upgraded by Python patch reconciliation.
+this revision: Megatron `4b4acac9`, MegatronAdaptor `c7e52b2c` and TE-NPU
+`d405be23` replace the previous training sources, and MindSpeed must be absent.
+Runtime patch reconciliation cannot upgrade the dependency checkouts or remove
+installed packages. The patched TMS preload wheel also requires an image build.
 The migration suites retain their native HF initialization, PD recovery,
 CaMem mapping-state guards, temporary-directory cleanup and concurrency of four.
+
+TE-NPU now normalizes global packed CP sequence lengths before ring attention,
+so the old `transformer-engine-npu.patch` and its patch-specific CPU tests have
+been retired. Keep the optional fused Ring Attention update disabled: its TND
+provider still requires a MindSpeed extension. The default non-fused path remains
+available. Revalidate CP2/CP4 with `migration-parallel`; previous hardware passes
+were recorded against the older dependency stack.
 
 ## Triggers
 
@@ -103,7 +112,7 @@ configuration), which lists suite names from the `SUITES` dict.
 
 For a PR containing the sync-s10 baseline and test changes, select
 **`image-build` + `migration-basic`** in the NPU gate. CI builds the image tagged
-with that PR's commit, then runs these seven migration scenarios plus all seven
+with that PR's commit, then runs these seven migration scenarios plus all six
 smoke tests. No change to the default image is needed.
 
 | Shared test | Scenario | Resource class |
