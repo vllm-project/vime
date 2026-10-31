@@ -28,7 +28,25 @@ NUM_GPUS = 0
 @pytest.fixture(autouse=True)
 def _patch_vllm_server_fields(monkeypatch):
     """Stub _VLLM_SERVER_FIELDS so tests don't need a real vllm install."""
-    monkeypatch.setattr(mod, "_VLLM_SERVER_FIELDS", frozenset())
+    monkeypatch.setattr(
+        mod,
+        "_VLLM_SERVER_FIELDS",
+        frozenset(
+            {
+                "tensor_parallel_size",
+                "pipeline_parallel_size",
+                "prefill_context_parallel_size",
+                "data_parallel_size",
+                "enable_expert_parallel",
+                "enable_prefix_caching",
+                "speculative_config",
+                "per_request_spec_decode_metrics",
+                "max_num_seqs",
+                "kv_transfer_config",
+                "logprobs_mode",
+            }
+        ),
+    )
 
 
 @pytest.fixture
@@ -157,10 +175,11 @@ def test_launch_config_single_node(vllm_args):
     )
     assert sa["nnodes"] == 1
     assert sa["node_rank"] == 0
-    assert sa["_tp_size"] == 4
-    assert sa["_pp_size"] == 1
-    assert sa["_pcp_size"] == 1
-    assert sa["_dp_size"] == 1
+    assert sa["tensor_parallel_size"] == 4
+    assert sa["pipeline_parallel_size"] == 1
+    assert sa["prefill_context_parallel_size"] == 1
+    assert sa["data_parallel_size"] == 1
+    assert {"_rank", "_tp_size", "_pp_size", "_pcp_size", "_dp_size"}.isdisjoint(sa)
     assert sa["enable_per_request_metrics"] is True
     assert sa["enable_scale_out"] is True
     assert "enable_scale_out" not in external_check_fields
@@ -275,6 +294,46 @@ def test_compute_server_args_ignores_unrecognized_vllm_attrs(vllm_args, monkeypa
     vllm_args.vllm_nonexistent_flag = "keep-out"
     sa, _ = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
     assert "nonexistent_flag" not in sa
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("global_spec,group_spec", [(None, True), (True, False), (True, None), (None, False)])
+@pytest.mark.parametrize("metrics", [None, "none", "summary", "detailed"])
+@pytest.mark.parametrize("metrics_source", ["cli", "yaml"])
+def test_spec_metrics_use_effective_group_config(vllm_args, global_spec, group_spec, metrics, metrics_source):
+    speculative = {"method": "mtp", "num_speculative_tokens": 3}
+    vllm_args.vllm_speculative_config = speculative if global_spec else None
+    overrides = {} if group_spec is None else {"speculative_config": speculative if group_spec else None}
+    if metrics_source == "cli":
+        vllm_args.vllm_per_request_spec_decode_metrics = metrics
+    elif metrics is not None:
+        overrides["per_request_spec_decode_metrics"] = metrics
+    server_args, checks = mod._compute_server_args(
+        vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000, vllm_overrides=overrides
+    )
+    effective_spec = global_spec if group_spec is None else group_spec
+    expected = metrics
+    if effective_spec and metrics in (None, "none") and "per_request_spec_decode_metrics" not in overrides:
+        expected = "summary"
+    assert server_args.get("per_request_spec_decode_metrics") == expected
+    assert checks.count("per_request_spec_decode_metrics") == (expected is not None)
+
+
+@pytest.mark.unit
+def test_yaml_overrides_drop_unsupported_fields(vllm_args, monkeypatch, caplog):
+    monkeypatch.setattr(mod, "_VLLM_SERVER_FIELDS", frozenset({"max_num_seqs"}))
+    overrides = {"max-num-seqs": 12, "unknown-field": True, "model_path": "/group", "disaggregation_mode": "null"}
+    server_args, _ = mod._compute_server_args(
+        vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000, vllm_overrides=overrides
+    )
+    assert server_args["max_num_seqs"] == 12
+    assert server_args["model"] == "/group"
+    assert "unknown_field" not in server_args
+    assert "disaggregation_mode" not in server_args
+    assert "unsupported field 'unknown_field' dropped (rank=0)" in caplog.text
+    assert "model_path" not in caplog.text
+    assert "disaggregation_mode" not in caplog.text
+    assert "unknown-field" in overrides
 
 
 @pytest.mark.unit
@@ -1200,7 +1259,7 @@ def test_pull_weights_posts_collective_rpc(vllm_engine, monkeypatch):
     vllm_engine.args.update_weight_disk_dir = "/shared/checkpoints"
     seen = []
 
-    def fake_post(url, *, json=None):
+    def fake_post(url, *, json=None, timeout=None):
         seen.append((url, json))
         return _MockResponse(json_data={"success": True, "weight_version": "8"})
 
@@ -1230,18 +1289,19 @@ def test_disk_update_does_not_advance_version_on_failure(vllm_engine, monkeypatc
     set_version = Mock()
     monkeypatch.setattr(vllm_engine, "set_weight_version", set_version)
 
-    def fake_post(url, *, json=None):
+    def fake_post(url, *, json=None, timeout=None):
         del url, json
-        return _MockResponse(status_code=500)
+        return _MockResponse(status_code=500, text="disk update failed")
 
     monkeypatch.setattr(mod.requests, "post", fake_post)
 
-    with pytest.raises(requests.exceptions.HTTPError):
+    with pytest.raises(requests.exceptions.HTTPError) as error:
         if operation == "pull":
             vllm_engine.pull_weights(8)
         else:
             vllm_engine.update_weights_from_disk("/local/checkpoint", weight_version="8")
     set_version.assert_not_called()
+    assert "disk update failed" in str(error.value.__notes__)
 
 
 @pytest.mark.unit
@@ -1251,6 +1311,62 @@ def test_profile_worker_rank_skips_http(vllm_engine, monkeypatch):
 
     assert vllm_engine.start_profile() is None
     assert vllm_engine.stop_profile() is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("node_rank", [0, 1])
+def test_check_weights_explicitly_unsupported(vllm_engine, monkeypatch, node_rank):
+    vllm_engine.node_rank = node_rank
+    monkeypatch.setattr(mod.requests, "post", lambda *args, **kwargs: pytest.fail("unexpected HTTP request"))
+    with pytest.raises(NotImplementedError, match="vLLM weight checking is not implemented"):
+        vllm_engine.check_weights("compare")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("operation", ["pull", "reload"])
+@pytest.mark.parametrize("response_kind", ["empty", "json", "invalid", "connection_error"])
+def test_disk_update_response_and_version_order(vllm_engine, monkeypatch, operation, response_kind):
+    vllm_engine.args.update_weight_local_checkpoint_dir = "/local"
+    vllm_engine.args.update_weight_disk_dir = "/shared"
+    calls = []
+
+    def post(url, *, json, timeout):
+        assert timeout is None
+        calls.append(json["method"])
+        if response_kind == "connection_error":
+            raise requests.ConnectionError("disconnected")
+        if response_kind == "invalid":
+            return _MockResponse(text="not JSON")
+        return _MockResponse(json_data={"success": True} if response_kind == "json" else None)
+
+    monkeypatch.setattr(mod.requests, "post", post)
+    monkeypatch.setattr(vllm_engine, "set_weight_version", lambda version: calls.append(("version", version)))
+    if response_kind in ("invalid", "connection_error"):
+        with pytest.raises(ValueError if response_kind == "invalid" else requests.ConnectionError):
+            if operation == "pull":
+                vllm_engine.pull_weights(8)
+            else:
+                vllm_engine.update_weights_from_disk("/local", weight_version="8")
+    else:
+        result = (
+            vllm_engine.pull_weights(8)
+            if operation == "pull"
+            else vllm_engine.update_weights_from_disk("/local", weight_version="8")
+        )
+        assert result == ({"success": True} if response_kind == "json" else {"ok": True})
+    expected = ["pull_weights" if operation == "pull" else "reload_weights"]
+    if operation == "reload" and response_kind in ("empty", "json"):
+        expected.append(("version", "8"))
+    assert calls == expected
+
+
+@pytest.mark.unit
+def test_pull_weights_worker_rank_skips_http(vllm_engine, monkeypatch):
+    vllm_engine.node_rank = 1
+    vllm_engine.args.update_weight_local_checkpoint_dir = "/local"
+    vllm_engine.args.update_weight_disk_dir = "/shared"
+    monkeypatch.setattr(mod.requests, "post", lambda *args, **kwargs: pytest.fail("unexpected HTTP request"))
+    assert vllm_engine.pull_weights(8) is None
 
 
 @pytest.mark.unit
@@ -1282,7 +1398,7 @@ def test_launch_config_heterogeneous_per_group_tp(vllm_args):
     sa, _ = mod._compute_server_args(
         vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000, num_gpus_per_engine=2
     )
-    assert sa["_tp_size"] == 2
+    assert sa["tensor_parallel_size"] == 2
     assert sa["nnodes"] == 1
 
 

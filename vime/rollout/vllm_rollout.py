@@ -116,9 +116,9 @@ async def prime_encoder(
 ) -> dict[str, Any]:
     """Make EC producers compute media and return their transfer parameters."""
     media = _get_multimodal_parts(messages)
-    encoders = (getattr(args, "vllm_model_encoder_endpoints", None) or {}).get(model_name)
+    metadata = getattr(args, "vllm_model_encoder_endpoints", None) or {}
+    encoders = metadata.get(model_name)
     if encoders is None and model_name == "default":
-        metadata = getattr(args, "vllm_model_encoder_endpoints", None) or {}
         if len(metadata) == 1:
             encoders = next(iter(metadata.values()))
     if not media or encoders is None or not encoders[1]:
@@ -249,16 +249,22 @@ def _build_inference_sampling_params(sampling_params: dict[str, Any], logprobs: 
 
 
 def _inference_generate_tokens_and_logprobs(choice: dict[str, Any]) -> tuple[list[int], list[float]]:
-    """Extract aligned token ids and log probabilities from a vLLM choice."""
+    """Require one log probability per token, allowing empty terminal tails."""
     token_ids = choice.get("token_ids")
+    if token_ids is None:
+        token_ids = []
     if not isinstance(token_ids, list) or not all(isinstance(token_id, int) for token_id in token_ids):
-        return [], []
+        raise ValueError("vLLM token_ids must be a list of integers")
 
     logprobs = choice.get("logprobs")
     content = logprobs.get("content") if isinstance(logprobs, dict) else []
-    content = content or []
-    pairs = list(zip(token_ids, content, strict=False))
-    return [token_id for token_id, _ in pairs], [float(item["logprob"]) for _, item in pairs]
+    if content is None:
+        content = []
+    if not isinstance(content, list):
+        raise ValueError("vLLM logprobs.content must be a list")
+    if len(token_ids) != len(content):
+        raise ValueError(f"vLLM token/logprob count mismatch: {len(token_ids)} tokens, {len(content)} logprobs")
+    return token_ids, [float(item["logprob"]) for item in content]
 
 
 def _mm_render_response_to_generate_body(render_data: Any, model: str) -> dict[str, Any]:
@@ -694,39 +700,49 @@ async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
         task.cancel()
 
     urls = []
-    if state.active_server_generations:
-        router_url = f"http://{args.vllm_router_ip}:{args.vllm_router_port}"
-        if args.rollout_external:
-            workers = (await get(f"{router_url}/workers"))["workers"]
-        else:
-            # The manager's final health check runs only after this function
-            # returns. Prune dead URLs now so abort/drain itself can finish.
-            workers = await get_live_router_workers(router_url, timeout=args.rollout_health_check_timeout)
-        urls = [worker["url"] for worker in workers]
-        await set_servers_paused(urls, paused=True)
-
-    await asyncio.gather(*cancellable_tasks, return_exceptions=True)
-
-    # make sure all the pending tasks are finished
+    failed = False
     count = 0
-    while state.pendings:
-        done, state.pendings = await asyncio.wait(state.pendings, return_when=asyncio.FIRST_COMPLETED)
+    try:
+        if state.active_server_generations:
+            router_url = f"http://{args.vllm_router_ip}:{args.vllm_router_port}"
+            if args.rollout_external:
+                workers = (await get(f"{router_url}/workers"))["workers"]
+            else:
+                # The manager's final health check runs only after this function
+                # returns. Prune dead URLs now so abort/drain itself can finish.
+                workers = await get_live_router_workers(router_url, timeout=args.rollout_health_check_timeout)
+            urls = [worker["url"] for worker in workers]
+            await set_servers_paused(urls, paused=True)
 
-        if not args.partial_rollout:
-            continue
+        await asyncio.gather(*cancellable_tasks, return_exceptions=True)
 
-        # for partial rollout, collect the partial samples into the data buffer
-        for task in done:
-            group = task.result()
-            if not any(sample.status == Sample.Status.ABORTED and sample.response_length > 0 for sample in group):
+        # make sure all the pending tasks are finished
+        while state.pendings:
+            done, state.pendings = await asyncio.wait(state.pendings, return_when=asyncio.FIRST_COMPLETED)
+
+            if not args.partial_rollout:
                 continue
-            for sample in group:
-                if sample.response and "start_rollout_id" not in sample.metadata:
-                    sample.metadata["start_rollout_id"] = rollout_id
-            aborted_samples.append(group)
-            count += len(group)
 
-    await set_servers_paused(urls, paused=False)
+            # for partial rollout, collect the partial samples into the data buffer
+            for task in done:
+                group = task.result()
+                if not any(sample.status == Sample.Status.ABORTED and sample.response_length > 0 for sample in group):
+                    continue
+                for sample in group:
+                    if sample.response and "start_rollout_id" not in sample.metadata:
+                        sample.metadata["start_rollout_id"] = rollout_id
+                aborted_samples.append(group)
+                count += len(group)
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        try:
+            await set_servers_paused(urls, paused=False)
+        except Exception:
+            if not failed:
+                raise
+            logger.exception("Failed to resume vLLM servers while handling rollout abort failure")
 
     if args.partial_rollout:
         logger.info(f"Collected {count} partial samples into the data buffer")

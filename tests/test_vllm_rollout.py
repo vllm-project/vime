@@ -390,10 +390,10 @@ def test_build_inference_sampling_params_forwards_disabled_top_k():
 
 
 @pytest.mark.unit
-def test_inference_generate_tokens_and_logprobs_aligns_partial_content():
+def test_inference_generate_tokens_and_logprobs_aligns_content():
     token_ids, log_probs = mod._inference_generate_tokens_and_logprobs(
         {
-            "token_ids": [11, 12, 13],
+            "token_ids": [11, 12],
             "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
         }
     )
@@ -402,8 +402,39 @@ def test_inference_generate_tokens_and_logprobs_aligns_partial_content():
 
 
 @pytest.mark.unit
-def test_inference_generate_tokens_and_logprobs_rejects_invalid_token_ids():
-    assert mod._inference_generate_tokens_and_logprobs({"token_ids": [1, "2"]}) == ([], [])
+@pytest.mark.parametrize("token_ids", [[1, "2"], "12", 12])
+def test_inference_generate_tokens_and_logprobs_rejects_invalid_token_ids(token_ids):
+    with pytest.raises(ValueError, match="token_ids must be a list of integers"):
+        mod._inference_generate_tokens_and_logprobs({"token_ids": token_ids})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("token_ids", [[], [11], [11, 12, 13]])
+def test_inference_generate_tokens_and_logprobs_rejects_count_mismatch(token_ids):
+    with pytest.raises(ValueError, match="token/logprob count mismatch"):
+        mod._inference_generate_tokens_and_logprobs(
+            {"token_ids": token_ids, "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]}}
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("logprobs", [None, {}, {"content": None}, {"content": []}])
+@pytest.mark.parametrize("token_ids", [None, [], [11]])
+def test_inference_generate_tokens_and_logprobs_empty_tails(token_ids, logprobs):
+    choice = {"token_ids": token_ids, "logprobs": logprobs}
+    if token_ids:
+        with pytest.raises(ValueError, match="token/logprob count mismatch"):
+            mod._inference_generate_tokens_and_logprobs(choice)
+    else:
+        assert mod._inference_generate_tokens_and_logprobs(choice) == ([], [])
+    assert mod._inference_generate_tokens_and_logprobs({}) == ([], [])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("content", ["", {}, 0])
+def test_inference_generate_tokens_and_logprobs_rejects_invalid_content(content):
+    with pytest.raises(ValueError, match="logprobs.content must be a list"):
+        mod._inference_generate_tokens_and_logprobs({"token_ids": [], "logprobs": {"content": content}})
 
 
 @pytest.mark.unit
@@ -1365,6 +1396,69 @@ def test_abort_resumes_only_after_pending_groups_finish(patch_generate_state, mo
     assert state.pendings == set()
     # partial_rollout is off by default, so drained groups are discarded, not returned.
     assert aborted_samples == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("partial_rollout, failure_stage", [(False, "pause"), (True, "pause"), (True, "collect")])
+@pytest.mark.parametrize("resume_fails", [False, True])
+def test_abort_failure_resumes_and_preserves_primary_error(
+    patch_generate_state, monkeypatch, partial_rollout, failure_stage, resume_fails, caplog
+):
+    args = _rollout_args(partial_rollout=partial_rollout)
+    state = _PatchedGenerateState(args)
+    state.active_server_generations = 2
+    monkeypatch.setattr(mod, "GenerateState", lambda args: state)
+    urls = ["http://w0:9000", "http://w1:9000"]
+    monkeypatch.setattr(mod, "get_live_router_workers", AsyncMock(return_value=[{"url": url} for url in urls]))
+    primary_error = RuntimeError(f"{failure_stage} failed")
+    paused_urls = set()
+    calls = []
+
+    async def control(control_urls, *, paused):
+        calls.append((list(control_urls), paused))
+        if paused:
+            paused_urls.add(control_urls[0])
+            if failure_stage == "pause":
+                raise primary_error
+            paused_urls.update(control_urls)
+        else:
+            paused_urls.difference_update(control_urls)
+            if resume_fails:
+                raise RuntimeError("resume failed")
+
+    monkeypatch.setattr(mod, "set_servers_paused", control)
+
+    async def failing_group():
+        raise primary_error
+
+    async def exercise():
+        if failure_stage == "collect":
+            state.pendings.add(asyncio.create_task(failing_group()))
+        with pytest.raises(RuntimeError) as caught:
+            await mod.abort(args, rollout_id=7)
+        assert caught.value is primary_error
+
+    async def run():
+        await asyncio.wait_for(exercise(), timeout=5)
+
+    asyncio.run(run())
+    assert calls == [(urls, True), (urls, False)]
+    assert not paused_urls
+    if resume_fails:
+        assert "Failed to resume vLLM servers" in caplog.text
+
+
+@pytest.mark.unit
+def test_abort_resume_failure_is_not_swallowed(patch_generate_state, monkeypatch):
+    state = _PatchedGenerateState(_rollout_args())
+    state.active_server_generations = 1
+    monkeypatch.setattr(mod, "GenerateState", lambda args: state)
+    monkeypatch.setattr(mod, "get_live_router_workers", AsyncMock(return_value=[{"url": "http://w0:9000"}]))
+    control = AsyncMock(side_effect=[None, RuntimeError("resume failed")])
+    monkeypatch.setattr(mod, "set_servers_paused", control)
+    with pytest.raises(RuntimeError, match="resume failed"):
+        asyncio.run(mod.abort(_rollout_args(), rollout_id=0))
+    assert control.await_count == 2
 
 
 @pytest.mark.unit

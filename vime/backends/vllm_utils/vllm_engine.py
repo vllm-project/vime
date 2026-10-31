@@ -433,8 +433,7 @@ class VLLMEngine(RayActor):
         return response.json()
 
     def check_weights(self, action: str):
-        del action
-        return {"ok": True, "supported": False}
+        raise NotImplementedError("vLLM weight checking is not implemented")
 
     def init_weight_transfer_engine(self, payload: dict) -> dict:
         return self._make_request("init_weight_transfer_engine", payload)
@@ -450,11 +449,9 @@ class VLLMEngine(RayActor):
         return self._make_request("finish_weight_update", payload)
 
     def pull_weights(self, target_version: int):
-        if self.node_rank != 0:
-            return
-        response = requests.post(
-            f"http://{self.server_host}:{self.server_port}/collective_rpc",
-            json={
+        return self._make_request(
+            "collective_rpc",
+            {
                 "method": "pull_weights",
                 "kwargs": {
                     "local_checkpoint_dir": self.args.update_weight_local_checkpoint_dir,
@@ -463,8 +460,6 @@ class VLLMEngine(RayActor):
                 },
             },
         )
-        response.raise_for_status()
-        return response.json()
 
     def update_weights_from_disk(
         self,
@@ -476,18 +471,13 @@ class VLLMEngine(RayActor):
         del load_format, flush_cache
         if self.node_rank != 0:
             return
-        response = requests.post(
-            f"http://{self.server_host}:{self.server_port}/collective_rpc",
-            json={"method": "reload_weights", "kwargs": {"weights_path": model_path, "is_checkpoint_format": True}},
+        result = self._make_request(
+            "collective_rpc",
+            {"method": "reload_weights", "kwargs": {"weights_path": model_path, "is_checkpoint_format": True}},
         )
-        try:
-            response.raise_for_status()
-        except requests.exceptions.HTTPError as e:
-            e.add_note(f"{response.text=}")
-            raise
         if weight_version is not None:
             self.set_weight_version(str(weight_version))
-        return response.json()
+        return result
 
     def init_weights_update_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
         del group_name, backend
@@ -778,8 +768,6 @@ def _compute_server_args(
 
     if args.use_rollout_routing_replay:
         kwargs["enable_return_routed_experts"] = True
-    if getattr(args, "vllm_speculative_config", None) is not None:
-        kwargs["per_request_spec_decode_metrics"] = "summary"
     if getattr(args, "rollout_top_p", 1.0) != 1.0:
         kwargs["return_sampling_mask"] = True
         if getattr(args, "use_score_centering", False):
@@ -833,6 +821,9 @@ def _compute_server_args(
         for key, value in vllm_overrides.items():
             if key in ("model_path",) or key.startswith("disaggregation"):
                 continue
+            if key not in _VLLM_SERVER_FIELDS:
+                logger.warning("vllm_overrides: unsupported field %r dropped (rank=%s)", key, rank)
+                continue
             if key in kwargs:
                 logger.info(f"vllm_overrides: overriding {key}={kwargs[key]} -> {value} (rank={rank})")
             kwargs[key] = value
@@ -840,6 +831,17 @@ def _compute_server_args(
             kwargs["model"] = str(vllm_overrides["model_path"])
 
     speculative = kwargs.get("speculative_config")
+    if (
+        speculative is not None
+        and "per_request_spec_decode_metrics" not in vllm_overrides
+        and kwargs.get("per_request_spec_decode_metrics") in (None, "none")
+    ):
+        kwargs["per_request_spec_decode_metrics"] = "summary"
+    if (
+        "per_request_spec_decode_metrics" in kwargs
+        and "per_request_spec_decode_metrics" not in external_engine_need_check_fields
+    ):
+        external_engine_need_check_fields.append("per_request_spec_decode_metrics")
     draft_tokens = speculative.get("num_speculative_tokens") if isinstance(speculative, dict) else None
     if (
         kwargs.get("max_num_seqs") is None
@@ -862,13 +864,8 @@ def _compute_server_args(
     # vLLM-specific: topology metadata consumed by launch_server_process / _build_subprocess_env.
     # These keys are stripped before passing to vLLM's argparse.
     kwargs["_args"] = args
-    kwargs["_rank"] = rank
     kwargs["_worker_type"] = worker_type
     kwargs["_visible_devices"] = _engine_visible_devices(base, local_num_gpus, args.num_gpus_per_node)
-    kwargs["_tp_size"] = tp
-    kwargs["_pp_size"] = pp
-    kwargs["_pcp_size"] = pcp
-    kwargs["_dp_size"] = dp
     kwargs["_disaggregation_bootstrap_port"] = disaggregation_bootstrap_port
 
     return kwargs, external_engine_need_check_fields
