@@ -18,8 +18,9 @@ class ServerGroupConfig:
                      "placeholder" reserves GPU slots without creating engines.
                      "encoder" creates encoder-only engines for EPD
                      (Encoder-Prefill-Decode) disaggregation; encoder engines
-                     are started first and their URLs are automatically
-                     injected into prefill groups as ``encoder_urls``.
+                     are started first and their URLs are collected in
+                     ``args.vllm_model_encoder_endpoints`` for rollout-side
+                     ``prime_encoder``.
         num_gpus: Total number of GPUs for this group.
         num_gpus_per_engine: GPUs per engine for this group.  Overrides the
                              model-level or global ``--rollout-num-gpus-per-engine``.

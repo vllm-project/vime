@@ -231,6 +231,7 @@ class ExternalRolloutServer:
     engine_parallel_configs: list[dict[str, int]]
     router_ip: str | None = None
     router_port: int | None = None
+    prometheus_port: int | None = None
     model_name: str = "default"
     update_weights: bool = True
     num_new_engines: int = 0
@@ -274,7 +275,7 @@ def start_external_rollout_servers(args, *, start_router) -> tuple[dict[str, Ext
 
     infos = external_engine_infos_from_args(args)
     has_pd_disaggregation = any(info.is_pd_worker for info in infos)
-    router_ip, router_port, _ = start_router(
+    router_ip, router_port, prometheus_port = start_router(
         args,
         has_pd_disaggregation=has_pd_disaggregation,
     )
@@ -321,6 +322,7 @@ def start_external_rollout_servers(args, *, start_router) -> tuple[dict[str, Ext
             router_ip=router_ip,
             router_port=router_port,
             model_name="default",
+            prometheus_port=prometheus_port,
             update_weights=True,
             num_new_engines=len(engines),
         )

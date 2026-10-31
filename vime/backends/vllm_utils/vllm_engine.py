@@ -317,6 +317,17 @@ class VLLMEngine(RayActor):
         return response.json()
 
     def health_generate(self, timeout: float = 5.0) -> bool:
+        """Run /health_generate on the underlying vLLM HTTP server.
+
+        Args:
+            timeout: Timeout for the health request in seconds.
+
+        Returns:
+            True if the server responds with HTTP 200.
+
+        Raises:
+            requests.RequestException: If the request fails for any reason, including timeout.
+        """
         if self.node_rank != 0:
             return True
 
@@ -346,6 +357,7 @@ class VLLMEngine(RayActor):
         return self._make_request("update_weights", {"update_info": payload})
 
     def flush_cache(self):
+        """Flush the cache of the server."""
         if self.node_rank != 0:
             return
         params = {"reset_running_requests": "true", "reset_external": "true"}
@@ -449,6 +461,10 @@ class VLLMEngine(RayActor):
         return self._make_request("finish_weight_update", payload)
 
     def pull_weights(self, target_version: int):
+        """Have the engine sync every host it spans to target_version: each host pulls the
+        published weights (a full checkpoint copied as-is, or deltas verified per-tensor and
+        applied onto the local checkpoint) into its local checkpoint dir. The engine reloads
+        it afterwards via update_weights_from_disk."""
         return self._make_request(
             "collective_rpc",
             {
@@ -468,6 +484,7 @@ class VLLMEngine(RayActor):
         weight_version: str | None = None,
         flush_cache: bool = True,
     ):
+        """Reload weights from the checkpoint at *model_path* without restarting the engine."""
         del load_format, flush_cache
         if self.node_rank != 0:
             return

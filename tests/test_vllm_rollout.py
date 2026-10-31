@@ -922,7 +922,7 @@ def test_generate_streaming_rejects_unexpected_eof(patch_generate_state, monkeyp
     error, message = (
         (RuntimeError, "without a terminal finish_reason")
         if logprob_count == 1
-        else (ValueError, "token IDs and logprob pairs must have matching lengths")
+        else (ValueError, "vLLM token/logprob count mismatch")
     )
     with pytest.raises(error, match=message):
         asyncio.run(

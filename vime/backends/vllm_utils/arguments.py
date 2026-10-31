@@ -87,6 +87,9 @@ def add_vllm_arguments(parser):
 
     def _wrap_add_argument(target_add_argument):
         def wrapper(*name_or_flags, **kwargs):
+            """
+            Add arguments to the parser, ensuring that the server arguments are prefixed and skippable.
+            """
             canonical = kwargs.get("dest")
             if canonical is None:
                 for s in name_or_flags:
@@ -96,6 +99,7 @@ def add_vllm_arguments(parser):
             if canonical in skipped_args:
                 return None
 
+            # If not skipped, proceed to prefix flags and dest
             new_flags = []
             for s in name_or_flags:
                 if isinstance(s, str) and s.startswith("-"):
@@ -103,6 +107,8 @@ def add_vllm_arguments(parser):
                 else:
                     new_flags.append(s)
 
+            # Prepare kwargs for the actual add_argument call.
+            # Make a copy to avoid modifying the original kwargs dict.
             new_kwargs = kwargs.copy()
             if canonical == "kv_transfer_config":
                 native_type = new_kwargs["type"]
@@ -119,6 +125,8 @@ def add_vllm_arguments(parser):
                     }
 
                 new_kwargs["type"] = parse_kv_transfer_config
+            # If 'dest' is explicitly provided and is a string, prefix it.
+            # This ensures the attribute on the args namespace becomes, e.g., args.vllm_dest_name.
             if "dest" in new_kwargs and isinstance(new_kwargs["dest"], str):
                 if not new_kwargs["dest"].startswith("vllm_"):
                     new_kwargs["dest"] = f"vllm_{new_kwargs['dest']}"
@@ -150,7 +158,7 @@ def add_vllm_arguments(parser):
         "--prefill-num-servers",
         type=int,
         default=None,
-        help="Number of prefill servers for PD disaggregation.",
+        help="Number of prefill servers for disaggregation.",
     )
     parser.add_argument(
         "--vllm-config",
@@ -158,7 +166,11 @@ def add_vllm_arguments(parser):
         default=None,
         dest="vllm_config",
         help=(
-            "Path to a YAML config file for fine-grained vLLM rollout engine deployment. "
+            "Path to a YAML config for vLLM engine deployment. "
+            "Defines server_groups with worker_type (regular/prefill/decode/placeholder), "
+            "num_gpus per group, and optional per-group 'overrides' dict of "
+            "AsyncEngineArgs / FrontendArgs field names that override the base --vllm-* CLI args. "
+            "Placeholder groups reserve GPU slots without creating engines. "
             "Mutually exclusive with --prefill-num-servers and --rollout-external."
         ),
     )
@@ -187,9 +199,13 @@ def validate_args(args):
 
 
 def vllm_parse_args():
-    """Parse vLLM flags via an independent ArgumentParser + parse_known_args.
+    """
+    Parse vllm server arguments independently using a separate ArgumentParser.
+    Uses parse_known_args() to only consume vllm-related arguments from sys.argv,
+    allowing the remaining arguments to be parsed by megatron separately.
 
-    Returns a Namespace with all attrs prefixed ``vllm_``.
+    Returns:
+        argparse.Namespace: Parsed vllm arguments (all attributes prefixed with vllm_).
     """
     parser = FlexibleArgumentParser(add_help=False)
     add_vllm_arguments(parser)
