@@ -261,7 +261,6 @@ def gpu_step(suite: str, test_file: str, num_gpus: int, extra_args: str, env: di
             ".agent-e2e/run/node/.trash/*/supervisor.log",
         ]
         step["plugins"][0]["kubernetes"]["podSpec"]["containers"][0]["securityContext"] = {"privileged": True}
-        step["plugins"][0]["kubernetes"]["podSpec"]["nodeSelector"]["kubernetes.io/hostname"] = "inf-4x8h100-1"
     return step
 
 
