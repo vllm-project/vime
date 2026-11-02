@@ -10,6 +10,7 @@ This page is a roadmap. Use it to decide when to use `--rollout-external-engine-
 | :--- | :--- |
 | Engines are already launched externally and vime should only connect for rollout | `--rollout-external-engine-addrs` |
 | vime should still launch engines, but you need PD disaggregation, multi-model serving, heterogeneous server groups, or per-group overrides | [vLLM Config](vllm-config.md) |
+| vime should launch engines using a separate Python or activated conda environment | [`--vllm-python-executable`](vllm-config.md#independent-vllm-python-environment) |
 | Trainer and external engines can form an NCCL group | Default `--update-weight-mode full --update-weight-transport nccl` |
 | Trainer and external engines cannot form an NCCL group, but can see the same filesystem path | `--update-weight-mode full --update-weight-transport disk` |
 | Full checkpoints are too heavy for large-model cross-cluster or cross-DC sync | `--update-weight-mode delta --update-weight-transport disk` |

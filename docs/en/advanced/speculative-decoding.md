@@ -9,25 +9,17 @@ which vime forwards via `--vllm-speculative-config`. For models with MTP layers
 (e.g., GLM-4.7, DeepSeek-V3/R1), pass:
 
 ```bash
---vllm-speculative-config '{"method":"mtp","num_speculative_tokens":4}'
+--vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 ```
 
-To use a separately trained draft model, set `model` (and optionally `draft_tensor_parallel_size`)
-in the same JSON:
+If you want to use a separately trained draft model (e.g., one trained with
+[SpecForge](https://docs.sglang.ai/SpecForge/)), also set `model` in the same JSON:
 
 ```bash
---vllm-speculative-config '{"method":"eagle","num_speculative_tokens":4,"model":"/your/draft/model/path"}'
+--vllm-speculative-config '{"method":"eagle","num_speculative_tokens":3,"model":"/your/draft/model/path"}'
 ```
 
-To train a draft model from scratch, see [TorchSpec](https://github.com/lightseekorg/TorchSpec)
-and [vllm-project/speculators](https://github.com/vllm-project/speculators).
-TorchSpec provides torch-native, disaggregated draft training.
-Speculators supports EAGLE-3, DFlash, and MTP-style drafts, ships pre-trained
-checkpoints on Hugging Face (see the `RedHatAI/*-speculator.*` collection), and
-saves drafts in a format that `vllm serve <speculator_model>` can deploy directly.
-
-For the full list of `SpeculativeConfig` fields (including `num_speculative_tokens`
-and `draft_tensor_parallel_size`), see vLLM's speculative-decoding
+For detailed parameter meanings and configuration, see vLLM’s speculative decoding
 [documentation](https://docs.vllm.ai/en/latest/features/speculative_decoding/).
 
 ## Configure EAGLE in the interactive builder

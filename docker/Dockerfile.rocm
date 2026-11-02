@@ -97,13 +97,12 @@ RUN pip install --no-cache-dir "numpy==1.26.4" "scipy==1.17.1" "pyarrow==25.0.1"
 
 # ====================================== Patches ============================================
 
-# vLLM is a pip install, so `patch` not `git apply`. These 3 are ROCm-rebased for the
+# vLLM is a pip install, so `patch` not `git apply`. These 2 are ROCm-rebased for the
 # nightly base (docker/amd_patch/); the shared docker/patch/ copies are CUDA-only.
 COPY docker/amd_patch/${PATCH_VERSION}/vllm-pull_weights.patch /tmp/vllm-pull_weights.patch
 COPY docker/amd_patch/${PATCH_VERSION}/vllm.patch /tmp/vllm.patch
-COPY docker/amd_patch/${PATCH_VERSION}/vllm-inflight-queue-diagnostics.patch /tmp/vllm-inflight.patch
 # Adds the /health_generate route the rollout health monitor polls. Shared with CUDA
-# (docker/patch/); applied after inflight since check_health_generate() calls its diagnostics.
+# (docker/patch/); requires the native engine utility fanout API.
 COPY docker/patch/${PATCH_VERSION}/vllm-generation-health.patch /tmp/vllm-generation-health.patch
 # Base already carries Qwen3-Omni/PD-metrics and lacks SamplingMaskLists.merge, so those
 # hunks (and tests/ hunks) are dropped; the guards below fail the build once that changes.
@@ -116,16 +115,13 @@ RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirn
       exit 1; \
     fi && \
     if [ -e vllm/entrypoints/openai/engine/protocol.py ]; then \
-      echo "Base converged on the CUDA protocol layout — apply vllm-pd-request-metrics.patch here." && \
+      echo "Base converged on the CUDA protocol layout — port PD metrics from vllm-fine-grained-tracing.patch here." && \
       exit 1; \
     fi && \
     awk '/^diff --git /{keep = ($0 !~ /qwen3_omni_moe_thinker|v1\/engine\/output_processor/)} keep' \
       /tmp/vllm.patch > /tmp/vllm-rocm.patch && \
-    awk '/^diff --git /{keep = ($0 !~ / b\/tests\//)} keep' \
-      /tmp/vllm-inflight.patch > /tmp/vllm-inflight-rocm.patch && \
     patch -p1 --forward --fuzz=1 --no-backup-if-mismatch < /tmp/vllm-pull_weights.patch && \
     patch -p1 --forward --fuzz=1 --no-backup-if-mismatch < /tmp/vllm-rocm.patch && \
-    patch -p1 --forward --fuzz=1 --no-backup-if-mismatch < /tmp/vllm-inflight-rocm.patch && \
     patch -p1 --forward --fuzz=1 --no-backup-if-mismatch < /tmp/vllm-generation-health.patch && \
     if find . -name '*.rej' | grep -q .; then \
       echo "A vLLM patch did not apply cleanly — rebase docker/patch/${PATCH_VERSION}/." && \
@@ -138,7 +134,7 @@ RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirn
       exit 1; \
     fi && \
     rm /tmp/vllm-pull_weights.patch /tmp/vllm.patch /tmp/vllm-rocm.patch \
-       /tmp/vllm-inflight.patch /tmp/vllm-inflight-rocm.patch /tmp/vllm-generation-health.patch
+       /tmp/vllm-generation-health.patch
 
 # ====================================== Install main package ============================================
 

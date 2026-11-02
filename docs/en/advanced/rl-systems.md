@@ -90,12 +90,6 @@ Use tensor dimensions after sharding for a per-GPU estimate. DSA/MLA uses differ
 
 Changing only BF16 attention KV to FP8 yields $B'\approx Nc_A/2+Kc_R$, so total cache memory does not generally halve. Similarly, BF16 SSM affects only the recurrent term, leaving convolution state untouched.
 
-SGLang’s separate-pool memory control sets $r=B_R/B_A$ through `--sglang-mamba-full-memory-ratio`. For an ideal two-pool budget $B$, solve $B_A+B_R=B$ and $B_R=rB_A$:
-
-$$B_A=\frac{B}{1+r},\qquad B_R=\frac{rB}{1+r}.$$
-
-This describes SGLang’s separate-pool allocator, not vLLM’s shared paged cache. vLLM has no equivalent pool-split ratio; the builder uses the total GPU cache budget and rejects imported nonempty pool ratios. Use allocation logs and workload measurements to assess actual capacity. External deployments receive dtype options in `serving-reference.sh`; managed engines receive the `--vllm-` flags.
-
 The runnable Flash preset is **GLM-4.7-Flash**. GLM-5.3-Flash's hybrid design above does not make it interchangeable with that preset or with the GLM-5.3 DSA recipe.
 
 ## Deterministic
@@ -132,7 +126,7 @@ $$\Delta t\approx h\,t_{\rm avoided\ prefill}-t_{\rm cache\ IO}-t_{\rm bookkeepi
 
 where $h$ is the reusable-prefix hit rate. A positive hit rate alone does not prove speedup; large transfer cost can dominate. Useful metrics include prefix hit rate, host RAM, cache I/O time, and TTFT.
 
-The lab uses `--vllm-enable-prefix-caching` and a `SimpleCPUOffloadConnector` configured with `cpu_to_gpu_ratio=2`, configuring host cache without an L3 storage service. Under managed PD, it enables HiCache on prefill only, matching the engine builder's behavior. It does not configure decode offload or distributed cache storage. KV represents activations under specific weights; reuse across actor weight updates needs correct invalidation. Measure useful hits within that validity window.
+The lab uses `--vllm-enable-prefix-caching` and a `SimpleCPUOffloadConnector` with an explicitly chosen native `cpu_bytes_to_use` budget, without an L3 storage service. No byte budget is inferred from an unknown GPU KV allocation; a fixed absolute budget is not equivalent to a dynamic host/device ratio. Native `cpu_bytes_to_use_per_rank` is available for explicit per-rank configuration. Under managed PD, it enables HiCache on prefill only, matching the engine builder's behavior. It does not configure decode offload or distributed cache storage. KV represents activations under specific weights; reuse across actor weight updates needs correct invalidation. Measure useful hits within that validity window.
 
 ## Debug before optimizing
 

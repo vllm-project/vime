@@ -20,6 +20,7 @@ stdlib only — runs with the agent host's python3.
 
 import json
 import os
+import shlex
 import subprocess
 
 GPU_QUEUE = "mithril-h100-pool"
@@ -44,6 +45,7 @@ SUITES = {
         ("test_full_disk_weight_update.py", 4, "", {}),
         ("test_quick_start_glm4_9B.py", 8, "", {"ENABLE_EVAL": "0"}),
         ("test_glm4.7_30B_A3B_pd_mooncake.py", 8, "", {}),
+        ("test_mooncake_memory_reregister.py", 2, "", {}),
         (
             "test_qwen3_30B_A3B.py",
             8,
@@ -57,13 +59,16 @@ SUITES = {
         ("test_qwen3_4B_ppo_disaggregate.py", 8, "", {"ENABLE_EVAL": "0"}),
         ("test_qwen3_4B_ppo_train_critic_only.py", 8, "", {"ENABLE_EVAL": "0"}),
         ("test_ppo_logprob_entropy_gpu.py", 2, "", {}),
+        ("test_vllm_top_p_copy.py", 1, "", {}),
+        ("test_glm5_next_gpu.py", 1, "", {}),
+        ("test_glm5_next_cp.py", 4, "", {}),
         ("test_release_train.py", 4, "", {}),
         ("test_qwen3_4B_streaming_partial_rollout.py", 8, "", {}),
         ("test_moonlight_16B_A3B.py", 8, "", {"ENABLE_EVAL": "0"}),
         ("test_moonlight_16B_A3B_r3.py", 8, "", {"ENABLE_EVAL": "0"}),
         ("test_mimo_7B_mtp_only_grad.py", 8, "", {}),
         ("test_qwen2.5_0.5B_debug_rollout_then_train.py", 8, "", {}),
-        ("test_straw_checkpoint_fork.py", 4, "", {}),
+        ("test_straw_checkpoint_rewind.py", 4, "", {}),
         ("test_qwen2.5_0.5B_opd_vllm.py", 8, "", {}),
         ("test_qwen2.5_0.5B_fanout_short.py", 4, "", {}),
         ("test_qwen2.5_0.5B_pipeline_rl.py", 4, "--transport nccl", {}),
@@ -224,15 +229,49 @@ def gpu_step(suite: str, test_file: str, num_gpus: int, extra_args: str, env: di
             }
         ],
     }
+    if test_file in {
+        "test_glm4.7_30B_A3B_pd_mooncake.py",
+        "test_qwen3.6_35B_A3B_pd_mooncake.py",
+        "test_mooncake_memory_reregister.py",
+        "test_qwen3_4B_external_pd.py",
+        "test_qwen2.5_vl_3B_ep_disaggregation.py",
+    } or (test_file == "test_qwen2.5_0.5B_training_recovery.py" and "--pd" in extra_args.split()):
+        pod = step["plugins"][0]["kubernetes"]["podSpec"]
+        pod["hostNetwork"] = True
+        pod["dnsPolicy"] = "ClusterFirstWithHostNet"
+        pod["containers"][0]["securityContext"] = {"capabilities": {"add": ["IPC_LOCK", "SYS_RESOURCE"]}}
+        pod["volumes"].append({"name": "rdma", "hostPath": {"path": "/dev/infiniband", "type": "Directory"}})
+        pod["containers"][0]["volumeMounts"].append({"name": "rdma", "mountPath": "/dev/infiniband"})
+    if test_file == "test_mooncake_memory_reregister.py":
+        pod["volumes"].append({"name": "host-sys", "hostPath": {"path": "/sys", "type": "Directory"}})
+        pod["containers"][0]["volumeMounts"].append({"name": "host-sys", "mountPath": "/host-sys", "readOnly": True})
+        step["command"] = (
+            "ls -l /dev/infiniband /sys/class/infiniband /host-sys/class/infiniband || true\n"
+            "grep -E '^(Cap|Seccomp|NoNewPrivs)' /proc/self/status\n" + step["command"]
+        )
     if agent_e2e:
+        step["command"] = "bash -c " + shlex.quote(command)
         step["timeout_in_minutes"] = 35
-        step["artifact_paths"] = ".agent-e2e/**/*"
+        step["artifact_paths"] = [
+            f".agent-e2e/run/{directory}*.{suffix}"
+            for directory in ("", "agents/**/", "sandboxes/**/")
+            for suffix in ("json", "jsonl", "log", "pt")
+        ] + [
+            ".agent-e2e/run/node/*/supervisor.log",
+            ".agent-e2e/run/node/.trash/*/supervisor.log",
+        ]
         step["plugins"][0]["kubernetes"]["podSpec"]["containers"][0]["securityContext"] = {"privileged": True}
     return step
 
 
 def main() -> None:
-    steps = [gpu_step(suite, *entry) for suite in selected_suites() for entry in SUITES[suite]]
+    test_files = set(os.environ.get("VIME_CI_TESTS", "").split())
+    steps = [
+        gpu_step(suite, *entry)
+        for suite in selected_suites()
+        for entry in SUITES[suite]
+        if not test_files or entry[0] in test_files
+    ]
     if not steps:
         raise SystemExit("no GPU suites selected")
     print(json.dumps({"steps": steps}, indent=2))

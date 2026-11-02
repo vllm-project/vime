@@ -7,6 +7,7 @@ import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 _tests_root = Path(__file__).resolve().parents[1]
 if str(_tests_root) not in sys.path:
@@ -180,6 +181,95 @@ def test_compute_server_args_preserves_non_topology_vllm_flags(vllm_args, monkey
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("method", ["mtp", "eagle", "eagle3", "draft_model", "ngram", "ngram_gpu", "dflash", "dspark"])
+@pytest.mark.parametrize("dp", [1, 2])
+@pytest.mark.parametrize("prefix_caching", [True, False])
+def test_compute_server_args_spec_request_default_is_per_domain(vllm_args, method, dp, prefix_caching):
+    server_args, checks = mod._compute_server_args(
+        vllm_args,
+        rank=0,
+        dist_init_addr=None,
+        host="127.0.0.1",
+        port=8000,
+        num_gpus_per_engine=dp,
+        vllm_overrides={
+            "data_parallel_size": dp,
+            "enable_prefix_caching": prefix_caching,
+            "speculative_config": {"method": method, "num_speculative_tokens": 3},
+        },
+    )
+    assert server_args["max_num_seqs"] == 48
+    assert "max_num_seqs" in checks
+    assert "mamba_fixed_requests" not in server_args
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "limit_override,expected_limit",
+    [({}, 24), ({"max_num_seqs": None}, 24), ({"max_num_seqs": 12}, 12), ({"max_num_seqs": 48}, 48)],
+)
+def test_compute_server_args_spec_default_with_dp_ep(vllm_args, limit_override, expected_limit):
+    overrides = {
+        "data_parallel_size": 2,
+        "enable_expert_parallel": True,
+        "speculative_config": {"method": "eagle3", "num_speculative_tokens": 3},
+    }
+    overrides.update(limit_override)
+    server_args, checks = mod._compute_server_args(
+        vllm_args,
+        rank=0,
+        dist_init_addr=None,
+        host="127.0.0.1",
+        port=8000,
+        num_gpus_per_engine=4,
+        vllm_overrides=overrides,
+    )
+    assert server_args["max_num_seqs"] == expected_limit
+    assert ("max_num_seqs" in checks) == (limit_override.get("max_num_seqs") is None)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("limit", [None, 0, 12])
+def test_compute_server_args_spec_request_null_uses_default(vllm_args, limit):
+    server_args, checks = mod._compute_server_args(
+        vllm_args,
+        rank=0,
+        dist_init_addr=None,
+        host="127.0.0.1",
+        port=8000,
+        vllm_overrides={
+            "max_num_seqs": limit,
+            "speculative_config": {"method": "mtp", "num_speculative_tokens": 3},
+        },
+    )
+    assert server_args["max_num_seqs"] == (48 if limit is None else limit)
+    assert ("max_num_seqs" in checks) == (limit is None)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "speculative",
+    [
+        None,
+        {},
+        {"method": "extract_hidden_states", "num_speculative_tokens": 3},
+        {"method": "mtp", "num_speculative_tokens": 0},
+        {"method": "mtp", "num_speculative_tokens": True},
+    ],
+)
+def test_compute_server_args_does_not_invent_a_speculative_request_limit(vllm_args, speculative):
+    server_args, _ = mod._compute_server_args(
+        vllm_args,
+        rank=0,
+        dist_init_addr=None,
+        host="127.0.0.1",
+        port=8000,
+        vllm_overrides={"speculative_config": speculative},
+    )
+    assert "max_num_seqs" not in server_args
+
+
+@pytest.mark.unit
 def test_compute_server_args_ignores_unrecognized_vllm_attrs(vllm_args, monkeypatch):
     monkeypatch.setattr(mod, "_VLLM_SERVER_FIELDS", frozenset({"server_concurrency"}))
     vllm_args.vllm_nonexistent_flag = "keep-out"
@@ -222,6 +312,7 @@ def test_distributed_flags_only_when_multi_node(vllm_args):
 
 @pytest.mark.unit
 def test_compute_server_args_applies_worker_type_and_bootstrap_port(vllm_args):
+    vllm_args.rollout_external = False
     sa_prefill, _ = mod._compute_server_args(
         vllm_args,
         rank=0,
@@ -232,7 +323,7 @@ def test_compute_server_args_applies_worker_type_and_bootstrap_port(vllm_args):
         disaggregation_bootstrap_port=12345,
     )
     assert sa_prefill["kv_transfer_config"] == {
-        "kv_connector": "NixlConnector",
+        "kv_connector": "MooncakeConnector",
         "kv_role": "kv_producer",
     }
 
@@ -245,7 +336,7 @@ def test_compute_server_args_applies_worker_type_and_bootstrap_port(vllm_args):
         worker_type="decode",
     )
     assert sa_decode["kv_transfer_config"] == {
-        "kv_connector": "NixlConnector",
+        "kv_connector": "MooncakeConnector",
         "kv_role": "kv_consumer",
     }
 
@@ -271,7 +362,58 @@ def test_compute_server_args_allows_mooncake_group_override(vllm_args):
 
 
 @pytest.mark.unit
-def test_compute_server_args_prefill_requires_bootstrap_port(vllm_args):
+@pytest.mark.parametrize("worker_type", ["prefill", "decode"])
+@pytest.mark.parametrize("yaml_override", [False, True])
+def test_kv_transfer_cli_replaces_pd_default_but_yaml_wins(vllm_args, monkeypatch, worker_type, yaml_override):
+    monkeypatch.setattr(mod, "_VLLM_SERVER_FIELDS", frozenset({"kv_transfer_config"}))
+    cli_config = {"kv_connector": "MooncakeConnector", "kv_role": "kv_both"}
+    yaml_config = {"kv_connector": "NixlConnector", "kv_role": "kv_both", "engine_id": "yaml-engine"}
+    vllm_args.vllm_kv_transfer_config = cli_config
+    server_args, checks = mod._compute_server_args(
+        vllm_args,
+        rank=0,
+        dist_init_addr=None,
+        host="127.0.0.1",
+        port=8000,
+        worker_type=worker_type,
+        disaggregation_bootstrap_port=12345,
+        vllm_overrides={"kv_transfer_config": yaml_config} if yaml_override else None,
+    )
+    assert server_args["kv_transfer_config"] == (yaml_config if yaml_override else cli_config)
+    assert "kv_transfer_config" in checks
+    assert vllm_args.vllm_kv_transfer_config == cli_config
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("worker_type", ["prefill", "decode"])
+def test_external_attach_rejects_changed_declared_mode(vllm_engine, monkeypatch, worker_type):
+    from vime.backends.vllm_utils.external import _normalize_server_info
+
+    vllm_engine.worker_type = worker_type
+    actual = _normalize_server_info(
+        {
+            "tensor_parallel_size": 1,
+            "kv_transfer_config": {"kv_connector": "NixlConnector", "kv_role": "kv_both"},
+            "disaggregation_mode": worker_type,
+        }
+    )
+    monkeypatch.setattr(mod, "get_server_info", lambda url: actual)
+    register = Mock()
+    monkeypatch.setattr(vllm_engine, "_register_to_router", register)
+    expected = {"tensor_parallel_size": 1}
+    vllm_engine._init_external(expected, ["tensor_parallel_size"])
+    register.assert_called_once_with(actual)
+    register.reset_mock()
+    actual["disaggregation_mode"] = "decode" if worker_type == "prefill" else "prefill"
+    with pytest.raises(ValueError, match="disaggregation_mode"):
+        vllm_engine._init_external(expected, ["tensor_parallel_size"])
+    register.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("external", [False, True])
+def test_compute_server_args_prefill_requires_bootstrap_port(vllm_args, external):
+    vllm_args.rollout_external = external
     with pytest.raises(AssertionError, match="disaggregation_bootstrap_port"):
         mod._compute_server_args(
             vllm_args,
@@ -281,6 +423,48 @@ def test_compute_server_args_prefill_requires_bootstrap_port(vllm_args):
             port=8000,
             worker_type="prefill",
         )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("worker_type, role", [("prefill", "kv_producer"), ("decode", "kv_consumer")])
+def test_external_attach_only_checks_explicit_kv_config(vllm_args, vllm_engine, monkeypatch, worker_type, role):
+    from vime.backends.vllm_utils.external import _normalize_server_info
+
+    monkeypatch.setattr(mod, "_VLLM_SERVER_FIELDS", frozenset({"kv_transfer_config"}))
+    vllm_engine.worker_type = worker_type
+    expected, checks = mod._compute_server_args(
+        vllm_args,
+        rank=0,
+        dist_init_addr=None,
+        host="127.0.0.1",
+        port=8000,
+        worker_type=worker_type,
+        disaggregation_bootstrap_port=12345,
+    )
+    assert "kv_transfer_config" not in expected
+    assert "kv_transfer_config" not in checks
+    config = {"kv_connector": "MooncakeConnector", "kv_role": role, "engine_id": "external-id"}
+    actual = _normalize_server_info({**expected, "kv_transfer_config": config})
+    monkeypatch.setattr(mod, "get_server_info", lambda url: actual)
+    register = Mock()
+    monkeypatch.setattr(vllm_engine, "_register_to_router", register)
+    vllm_engine._init_external(expected, checks)
+    register.assert_called_once_with(actual)
+    register.reset_mock()
+    vllm_args.vllm_kv_transfer_config = {**config, "engine_id": "requested-id"}
+    expected, checks = mod._compute_server_args(
+        vllm_args,
+        rank=0,
+        dist_init_addr=None,
+        host="127.0.0.1",
+        port=8000,
+        worker_type=worker_type,
+        disaggregation_bootstrap_port=12345,
+    )
+    assert "kv_transfer_config" in checks
+    with pytest.raises(AssertionError, match="kv_transfer_config"):
+        vllm_engine._init_external(expected, checks)
+    register.assert_not_called()
 
 
 @pytest.mark.unit
@@ -376,7 +560,22 @@ def test_build_vllm_subprocess_env_colocate(vllm_args, monkeypatch):
 
 
 @pytest.mark.unit
-def test_launch_server_process_drops_trainer_allocator_config(vllm_args, monkeypatch):
+@pytest.mark.parametrize(
+    "rpc_range",
+    [
+        {},
+        {"MC_MIN_RPC_PORT": "31000", "MC_MAX_RPC_PORT": "32000"},
+        {"MC_MIN_PRC_PORT": "31000", "MC_MAX_PRC_PORT": "32000"},
+        {"MC_MIN_RPC_PORT": "16000"},
+        {"MC_MAX_PRC_PORT": "25000"},
+    ],
+)
+def test_launch_server_process_drops_trainer_allocator_config(vllm_args, monkeypatch, rpc_range):
+    for bound in ("MIN", "MAX"):
+        for spelling in ("RPC", "PRC"):
+            monkeypatch.delenv(f"MC_{bound}_{spelling}_PORT", raising=False)
+    for name, value in rpc_range.items():
+        monkeypatch.setenv(name, value)
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     monkeypatch.setenv("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
@@ -390,6 +589,9 @@ def test_launch_server_process_drops_trainer_allocator_config(vllm_args, monkeyp
     assert "PYTORCH_ALLOC_CONF" not in env
     assert "PYTORCH_CUDA_ALLOC_CONF" not in os.environ
     assert "PYTORCH_ALLOC_CONF" not in os.environ
+    assert {name: value for name, value in env.items() if name.startswith(("MC_MIN_", "MC_MAX_"))} == (
+        rpc_range or {"MC_MIN_PRC_PORT": "27000", "MC_MAX_PRC_PORT": "28000"}
+    )
 
 
 @pytest.mark.unit
@@ -415,19 +617,22 @@ def test_build_vllm_subprocess_env_no_batch_invariant_by_default(vllm_args, monk
 
 
 @pytest.mark.unit
-def test_build_vllm_subprocess_env_sets_disaggregation_side_channel(vllm_args):
+@pytest.mark.parametrize("node_rank", [0, 1])
+def test_build_vllm_subprocess_env_sets_disaggregation_side_channel(vllm_args, node_rank):
     env = mod._build_subprocess_env(
         {
             "_args": vllm_args,
             "_visible_devices": "0",
             "_worker_type": "prefill",
             "_disaggregation_bootstrap_port": 29999,
-            "node_rank": 0,
+            "node_rank": node_rank,
             "host": "10.0.0.8",
         }
     )
-    assert env["VLLM_NIXL_SIDE_CHANNEL_HOST"] == "10.0.0.8"
-    assert env["VLLM_NIXL_SIDE_CHANNEL_PORT"] == "29999"
+    assert env["VLLM_MOONCAKE_BOOTSTRAP_PORT"] == "29999"
+    if node_rank == 0:
+        assert env["VLLM_NIXL_SIDE_CHANNEL_HOST"] == "10.0.0.8"
+        assert env["VLLM_NIXL_SIDE_CHANNEL_PORT"] == "29999"
 
 
 @pytest.mark.unit
@@ -517,7 +722,24 @@ def test_finish_weight_update_commits_version(vllm_engine, monkeypatch):
 
     assert vllm_engine.finish_weight_update(weight_version="42") == {"done": True}
     assert calls == [("finish_weight_update", {"weight_version": "42"})]
-    assert vllm_engine._weight_version == "42"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("status_code", [200, 400, 500])
+def test_finish_weight_update_propagates_http_result(vllm_engine, monkeypatch, status_code):
+    calls = []
+
+    def fake_post(url, *, json, timeout):
+        calls.append((url, json, timeout))
+        return _MockResponse(json_data={"done": status_code == 200}, status_code=status_code)
+
+    monkeypatch.setattr(mod.requests, "post", fake_post)
+    if status_code == 200:
+        assert vllm_engine.finish_weight_update(weight_version="42") == {"done": True}
+    else:
+        with pytest.raises(requests.exceptions.HTTPError):
+            vllm_engine.finish_weight_update(weight_version="42")
+    assert calls == [("http://127.0.0.1:8765/finish_weight_update", {"weight_version": "42"}, None)]
 
 
 @pytest.mark.unit
@@ -529,7 +751,6 @@ def test_update_weights_posts_ipc_payload(vllm_engine, monkeypatch):
         return {"ok": True}
 
     monkeypatch.setattr(vllm_engine, "_make_request", fake_post)
-    assert vllm_engine._weight_version is None
 
     vllm_engine.update_weights(
         {
@@ -550,7 +771,6 @@ def test_update_weights_posts_ipc_payload(vllm_engine, monkeypatch):
     assert sent["shapes"] == [[2], [1]]
     assert sent["tensor_sizes"] == [4, 4]
     assert "packed" not in sent
-    assert vllm_engine._weight_version is None
 
 
 @pytest.mark.unit
@@ -588,20 +808,16 @@ def test_update_weights_serializes_rank_local_payloads(vllm_engine, monkeypatch)
 
 
 @pytest.mark.unit
-def test_update_weights_does_not_advance_version_on_failure(vllm_engine, monkeypatch):
-    """Chunk POST failure must not modify the engine's committed version cache."""
-
+def test_update_weights_propagates_failure(vllm_engine, monkeypatch):
     def fake_post_fail(endpoint: str, payload: dict) -> dict:
         raise RuntimeError("simulated POST failure")
 
     monkeypatch.setattr(vllm_engine, "_make_request", fake_post_fail)
 
-    vllm_engine._weight_version = "old"
     with pytest.raises(RuntimeError, match="simulated POST failure"):
         vllm_engine.update_weights(
             {"names": [], "dtype_names": [], "shapes": [], "ipc_handles": {}, "tensor_sizes": []}
         )
-    assert vllm_engine._weight_version == "old"
 
 
 @pytest.mark.unit
@@ -613,7 +829,6 @@ def test_get_weight_version_reads_vllm_weight_info(vllm_engine, monkeypatch):
     )
 
     assert vllm_engine.get_weight_version() == "7"
-    assert vllm_engine._weight_version == "7"
 
 
 @pytest.mark.unit
@@ -625,11 +840,10 @@ def test_get_weight_version_preserves_uninitialized_none(vllm_engine, monkeypatc
     )
 
     assert vllm_engine.get_weight_version() is None
-    assert vllm_engine._weight_version is None
 
 
 @pytest.mark.unit
-def test_set_weight_version_updates_vllm_and_local_cache(vllm_engine, monkeypatch):
+def test_set_weight_version_updates_vllm(vllm_engine, monkeypatch):
     calls: list[tuple] = []
 
     def fake_post(endpoint: str, payload: dict):
@@ -640,14 +854,12 @@ def test_set_weight_version_updates_vllm_and_local_cache(vllm_engine, monkeypatc
 
     assert vllm_engine.set_weight_version("9") == {"success": True}
     assert calls == [("update_weight_version", {"new_version": "9"})]
-    assert vllm_engine._weight_version == "9"
 
 
 @pytest.mark.unit
 def test_get_weight_version_worker_rank_returns_none_without_raise(vllm_engine):
     """Worker ranks short-circuit (matches the class-wide idiom)."""
     vllm_engine.node_rank = 1
-    vllm_engine._weight_version = None
     assert vllm_engine.get_weight_version() is None
 
 
@@ -679,7 +891,6 @@ def test_update_weights_from_distributed_posts_update_weights_without_checkpoint
     assert info["shapes"] == [[2, 2]]
     assert info["packed"] is True
     assert "is_checkpoint_format" not in info
-    assert vllm_engine._weight_version is None
 
 
 @pytest.mark.unit
@@ -691,23 +902,68 @@ def test_update_weights_from_distributed_posts_update_weights_without_checkpoint
         ("[2001:db8::1]", "[2001:db8::1]"),
     ],
 )
-def test_init_formats_server_and_router_hosts_for_urls(vllm_engine, monkeypatch, host, expected_host):
+@pytest.mark.parametrize("use_args_router", [False, True])
+def test_init_formats_server_and_router_hosts_for_urls(vllm_engine, monkeypatch, host, expected_host, use_args_router):
     server_args = {}
     monkeypatch.setattr(vllm_engine, "_init_external", lambda args, **kwargs: server_args.update(args))
+    vllm_engine.args.vllm_router_ip = host
+    vllm_engine.args.vllm_router_port = 30000
 
     vllm_engine.init(
         dist_init_addr="127.0.0.1:29500",
         port=8765,
         nccl_port=None,
         host=host,
-        router_ip=host,
-        router_port=30000,
+        router_ip=None if use_args_router else host,
+        router_port=None if use_args_router else 30000,
     )
 
     assert server_args["host"] == expected_host
     assert vllm_engine.server_host == expected_host
     assert vllm_engine.router_ip == expected_host
+    assert vllm_engine.router_port == 30000
     assert vllm_engine.get_url() == f"http://{expected_host}:8765"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("actual_tp", [1, 2])
+def test_external_registration_uses_verified_actual_metadata(vllm_engine, monkeypatch, actual_tp):
+    vllm_engine.server_host = "127.0.0.1"
+    vllm_engine.server_port = 8000
+    actual = {"tensor_parallel_size": actual_tp, "disaggregation_bootstrap_port": 22000}
+    monkeypatch.setattr(mod, "get_server_info", lambda url: actual)
+    register = Mock()
+    monkeypatch.setattr(vllm_engine, "_register_to_router", register)
+    expected = {"tensor_parallel_size": 1, "_disaggregation_bootstrap_port": 12000}
+    if actual_tp == 1:
+        vllm_engine._init_external(expected, ["tensor_parallel_size"])
+        register.assert_called_once_with(actual)
+    else:
+        with pytest.raises(AssertionError):
+            vllm_engine._init_external(expected, ["tensor_parallel_size"])
+        register.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("multi", [False, True])
+@pytest.mark.parametrize("address, expected_port", [(None, 12000), ("127.0.0.1:8998", 8998)])
+def test_prefill_registration_preserves_explicit_bootstrap(vllm_engine, monkeypatch, multi, address, expected_port):
+    vllm_engine.worker_type = "prefill"
+    vllm_engine.router_ip = "127.0.0.1"
+    vllm_engine.router_port = 30000
+    connector = {
+        "kv_connector": "MooncakeConnector",
+        "kv_connector_extra_config": {} if address is None else {"bootstrap_server_address": address},
+    }
+    config = (
+        {"kv_connector": "MultiConnector", "kv_connector_extra_config": {"connectors": [connector]}}
+        if multi
+        else connector
+    )
+    register = Mock()
+    monkeypatch.setattr(mod, "register_worker", register)
+    vllm_engine._register_to_router({"kv_transfer_config": config, "_disaggregation_bootstrap_port": 12000})
+    assert register.call_args.args[1]["bootstrap_port"] == expected_port
 
 
 @pytest.mark.unit
@@ -738,6 +994,35 @@ def test_launch_server_process_brackets_ipv6_health_url(vllm_args, monkeypatch):
     assert launched_process is process
     assert subprocess_args["host"] == "2001:db8::1"
     assert base_urls == ["http://[2001:db8::1]:8000"]
+
+
+@pytest.mark.parametrize("encoder_only", [False, True])
+@pytest.mark.parametrize("parent_alive", [False, True])
+def test_spawned_server_selects_current_entrypoint(monkeypatch, encoder_only, parent_alive):
+    from vllm.entrypoints.cli.serve import ServeSubcommand
+    from vllm.entrypoints.common import cli_args
+
+    calls = []
+    watchers = []
+    parent = SimpleNamespace(is_alive=lambda: parent_alive, join=lambda: calls.append("joined"))
+    monkeypatch.setattr(mod.multiprocessing, "parent_process", lambda: parent)
+    monkeypatch.setattr(
+        mod, "Thread", lambda *, target, daemon: SimpleNamespace(start=lambda: watchers.append(target))
+    )
+    monkeypatch.setattr(mod, "kill_process_tree", lambda pid: calls.append(pid))
+    monkeypatch.setattr(mod, "_prepare_server_stdin", lambda: None)
+    monkeypatch.setattr(mod.os, "getpid", lambda: 123)
+    monkeypatch.setattr(
+        cli_args, "make_arg_parser", lambda _: SimpleNamespace(parse_args=lambda *, args, namespace: namespace)
+    )
+    monkeypatch.setattr(cli_args, "validate_parsed_serve_args", lambda args: None)
+    monkeypatch.setattr(ServeSubcommand, "cmd", lambda args: calls.append(vars(args)), raising=False)
+    kwargs = {"ec_transfer_config": {"ec_role": "ec_producer"}} if encoder_only else {}
+    mod._run_vllm_server(kwargs, {})
+    assert calls == ([kwargs] if parent_alive else [])
+    assert len(watchers) == 1
+    watchers[0]()
+    assert calls[-2:] == ["joined", 123]
 
 
 @pytest.mark.unit
@@ -788,7 +1073,8 @@ def test_resume_memory_occupation_returns_none_for_unsupported_tags(vllm_engine,
 
 
 @pytest.mark.unit
-def test_release_memory_occupation_keeps_requests_during_sleep(vllm_engine, monkeypatch):
+@pytest.mark.parametrize("node_rank", [0, 1])
+def test_release_memory_occupation_keeps_requests_during_sleep(vllm_engine, monkeypatch, node_rank):
     calls: list[str] = []
 
     def fake_post(url, *, params=None, timeout=30, json=None):
@@ -799,14 +1085,18 @@ def test_release_memory_occupation_keeps_requests_during_sleep(vllm_engine, monk
         return _MockResponse(json_data={"ok": True, "sleep_mode": True})
 
     vllm_engine.args.vllm_enable_sleep_mode = False
+    vllm_engine.node_rank = node_rank
     monkeypatch.setattr(mod.requests, "post", fake_post)
 
-    assert vllm_engine.release_memory_occupation(level=2) == {"ok": True, "sleep_mode": True}
-    assert calls == ["http://127.0.0.1:8765/sleep"]
+    assert vllm_engine.release_memory_occupation(level=2) == (
+        {"ok": True, "sleep_mode": True} if node_rank == 0 else None
+    )
+    assert calls == (["http://127.0.0.1:8765/sleep"] if node_rank == 0 else [])
 
 
 @pytest.mark.unit
-def test_resume_memory_occupation_posts_wake_even_when_sleep_disabled(vllm_engine, monkeypatch):
+@pytest.mark.parametrize("node_rank", [0, 1])
+def test_resume_memory_occupation_posts_wake_even_when_sleep_disabled(vllm_engine, monkeypatch, node_rank):
     seen: list[tuple] = []
 
     def fake_post(url, *, params=None, timeout=30, json=None):
@@ -814,10 +1104,11 @@ def test_resume_memory_occupation_posts_wake_even_when_sleep_disabled(vllm_engin
         return _MockResponse(json_data={"ok": True, "sleep_mode": True})
 
     vllm_engine.args.vllm_enable_sleep_mode = False
+    vllm_engine.node_rank = node_rank
     monkeypatch.setattr(mod.requests, "post", fake_post)
 
-    assert vllm_engine.resume_memory_occupation() == {"ok": True, "sleep_mode": True}
-    assert seen == [("http://127.0.0.1:8765/wake_up", None, 30, None)]
+    assert vllm_engine.resume_memory_occupation() == ({"ok": True, "sleep_mode": True} if node_rank == 0 else None)
+    assert seen == ([("http://127.0.0.1:8765/wake_up", None, 30, None)] if node_rank == 0 else [])
 
 
 @pytest.mark.unit
@@ -861,7 +1152,6 @@ def test_update_weights_from_disk_posts_collective_rpc(vllm_engine, monkeypatch)
     assert seen[0][3]["method"] == "reload_weights"
     assert seen[1][0] == "http://127.0.0.1:8765/update_weight_version"
     assert seen[1][3] == {"new_version": "8"}
-    assert vllm_engine._weight_version == "8"
 
 
 @pytest.mark.unit
@@ -908,7 +1198,6 @@ def test_pipeline_rl_worker_rank_does_not_send_control_requests(vllm_engine, mon
 def test_pull_weights_posts_collective_rpc(vllm_engine, monkeypatch):
     vllm_engine.args.update_weight_local_checkpoint_dir = "/local/checkpoint"
     vllm_engine.args.update_weight_disk_dir = "/shared/checkpoints"
-    vllm_engine._weight_version = "old"
     seen = []
 
     def fake_post(url, *, json=None):
@@ -931,7 +1220,6 @@ def test_pull_weights_posts_collective_rpc(vllm_engine, monkeypatch):
             },
         ),
     ]
-    assert vllm_engine._weight_version == "old"
 
 
 @pytest.mark.unit
@@ -939,7 +1227,8 @@ def test_pull_weights_posts_collective_rpc(vllm_engine, monkeypatch):
 def test_disk_update_does_not_advance_version_on_failure(vllm_engine, monkeypatch, operation):
     vllm_engine.args.update_weight_local_checkpoint_dir = "/local/checkpoint"
     vllm_engine.args.update_weight_disk_dir = "/shared/checkpoints"
-    vllm_engine._weight_version = "old"
+    set_version = Mock()
+    monkeypatch.setattr(vllm_engine, "set_weight_version", set_version)
 
     def fake_post(url, *, json=None):
         del url, json
@@ -952,7 +1241,7 @@ def test_disk_update_does_not_advance_version_on_failure(vllm_engine, monkeypatc
             vllm_engine.pull_weights(8)
         else:
             vllm_engine.update_weights_from_disk("/local/checkpoint", weight_version="8")
-    assert vllm_engine._weight_version == "old"
+    set_version.assert_not_called()
 
 
 @pytest.mark.unit

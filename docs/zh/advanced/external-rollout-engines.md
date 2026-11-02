@@ -9,6 +9,7 @@ External rollout engine 指的是：vLLM engine 不由 vime 训练任务启动�
 | 目标 | 推荐入口 |
 | :--- | :--- |
 | engine 已经由外部系统启动，只想让 vime 连接并做 rollout | `--rollout-external-engine-addrs` |
+| 希望 vime 使用独立 Python 或激活后的 conda 环境启动 engine | [`--vllm-python-executable`](vllm-config.md#独立的-vllm-python-环境) |
 | engine 仍由 vime 启动，但需要 PD 分离、多模型、异构 server group 或 per-group overrides | [vLLM Config](vllm-config.md) |
 | 训练器和 external engine 可以建立 NCCL group | 默认的 `--update-weight-mode full --update-weight-transport nccl` |
 | 训练器和 external engine 不能建立 NCCL group，但能共享同一路径的文件系统 | `--update-weight-mode full --update-weight-transport disk` |

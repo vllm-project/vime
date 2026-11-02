@@ -1,7 +1,9 @@
 import argparse
+import json
 import logging
+from dataclasses import fields
 
-from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.arg_utils import AsyncEngineArgs, _expand_json_human_readable_numbers
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm_router.launch_router import RouterArgs
 
@@ -10,34 +12,49 @@ from vime.utils.http_utils import _wrap_ipv6
 logger = logging.getLogger(__name__)
 
 
+# TODO: use all vllm router arguments with `--vllm-router` prefix
 def add_vllm_router_arguments(parser):
+    """
+    Add arguments to the parser for the vLLM router.
+    """
     parser.add_argument(
         "--vllm-router-ip",
         type=str,
         default=None,
-        help="IP address of the vllm router",
+        help="IP address of the vLLM router",
     )
     parser.add_argument(
         "--vllm-router-port",
         type=int,
         default=None,
-        help="Port of the vllm router",
+        help="Port of the vLLM router",
     )
     parser.add_argument(
         "--vllm-router-request-timeout-secs",
         type=int,
         default=14400,
-        help="Timeout for requests to the vllm router in seconds",
+        help="Timeout for requests to the vLLM router in seconds",
     )
     RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
-    parser.set_defaults(router_log_level="warning")
+    # Keep driver logs quiet by default while allowing --router-log-level to
+    # expose router dispatch and retry details when needed.
+    parser.set_defaults(router_log_level="warning", router_kv_connector="mooncake")
     return parser
 
 
 def add_vllm_arguments(parser):
+    """
+    Add arguments to the parser for the vLLM server.
+    """
     parser = add_vllm_router_arguments(parser)
     parser.set_defaults(router_balance_abs_threshold=10, router_balance_rel_threshold=1.2)
     parser.add_argument("--vllm-server-concurrency", type=int, default=512)
+    parser.add_argument(
+        "--vllm-python-executable",
+        default=None,
+        help="Python executable or activation wrapper used to start vLLM server subprocesses. "
+        "Must exist on every rollout node. Ray actors remain in the training environment.",
+    )
     parser.add_argument(
         "--vllm-enable-deterministic-inference",
         action="store_true",
@@ -87,6 +104,21 @@ def add_vllm_arguments(parser):
                     new_flags.append(s)
 
             new_kwargs = kwargs.copy()
+            if canonical == "kv_transfer_config":
+                native_type = new_kwargs["type"]
+
+                def parse_kv_transfer_config(value):
+                    parsed = native_type(value)
+                    if parsed is None:
+                        return None
+                    explicit = json.loads(_expand_json_human_readable_numbers(value))
+                    return {
+                        field.name: getattr(parsed, field.name)
+                        for field in fields(parsed)
+                        if field.name in explicit and not (field.name == "engine_id" and explicit[field.name] is None)
+                    }
+
+                new_kwargs["type"] = parse_kv_transfer_config
             if "dest" in new_kwargs and isinstance(new_kwargs["dest"], str):
                 if not new_kwargs["dest"].startswith("vllm_"):
                     new_kwargs["dest"] = f"vllm_{new_kwargs['dest']}"
@@ -103,9 +135,13 @@ def add_vllm_arguments(parser):
     parser.add_argument = _wrap_add_argument(old_add_argument)
     parser.add_argument_group = patched_add_argument_group
     AsyncEngineArgs.add_cli_args(parser)
-    from vllm.entrypoints.launchers.cli_args import FrontendArgs
+    parser.set_defaults(vllm_watchdog_config={"abort_on_timeout": True})
+    from vllm.entrypoints.common.cli_args import FrontendArgs
 
     FrontendArgs.add_cli_args(parser)
+    parser.set_defaults(
+        **{f"vllm_{field.name}": None for field in fields(FrontendArgs) if field.name not in skipped_args}
+    )
     parser.add_argument = old_add_argument
     parser.add_argument_group = old_add_argument_group
 

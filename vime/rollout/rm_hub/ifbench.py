@@ -53,17 +53,11 @@ def _ensure_ifbench_dependencies(repo_path: Path) -> None:
         logger.debug("Local IFBench requirements file not found at %s; skipping install.", requirements_file)
         return
 
-    sentinel = repo_path / ".deps_installed"
-    if sentinel.exists():
-        return
-
     install_cmd = [sys.executable, "-m", "pip", "install", "-r", str(requirements_file)]
     try:
         subprocess.run(install_cmd, check=True)
     except Exception as exc:
         logger.warning("Failed to install IFBench dependencies automatically: %s", exc)
-    else:
-        sentinel.write_text("installed\n")
 
 
 def _load_evaluation_lib():

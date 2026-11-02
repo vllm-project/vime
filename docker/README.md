@@ -42,10 +42,10 @@ files, behind on others. The ROCm build therefore applies them with
 Two things the CUDA image gets that this one does not, because the base does not
 carry the vLLM code they are written against:
 
-- the delta sampling-mask hunk in `vllm.patch` (needs `SamplingMaskLists.merge`),
+- per-chunk sampling-mask output (needs `SamplingMaskLists.merge`),
   so ROCm keeps emitting sampling masks only on finish;
-- `vllm-pd-request-metrics.patch`, which targets a protocol module this base
-  splits differently, so per-request PD telemetry is absent. vime reads those
+- per-request PD telemetry in `vllm-fine-grained-tracing.patch`, which targets
+  a protocol module this base splits differently, so per-request PD telemetry is absent. vime reads those
   fields defensively, so rollouts are unaffected.
 
 Both are guarded: the build fails once the base converges, at which point the

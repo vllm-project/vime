@@ -3,6 +3,7 @@
   'use strict';
   const models = {
     qwen38: {
+      context: 262144,
       name: 'Qwen3.8-27B',
       mtp: true,
       size: '27B · Hybrid Dense',
@@ -26,25 +27,8 @@
       maxTokens: 8192,
       extra: ['--decoder-last-pipeline-num-layers 30']
     },
-    deepseek: {
-      name: 'DeepSeek-R1',
-      mtp: true,
-      size: '671B · A37B · MoE',
-      repo: 'deepseek-ai/DeepSeek-R1',
-      model: 'deepseek-v3',
-      recipe: 'deepseek-r1',
-      nodes: 16,
-      engine: 64,
-      tp: 8,
-      pp: 4,
-      cp: 4,
-      ep: 32,
-      dp: 8,
-      moe: true,
-      maxTokens: 8192,
-      extra: ['--decoder-last-pipeline-num-layers 13']
-    },
     flash: {
+      context: 202752,
       name: 'GLM-4.7-Flash',
       mtp: true,
       size: '30B · A3B · MoE',
@@ -54,32 +38,16 @@
       nodes: 1,
       engine: 8,
       tp: 2,
-      pp: 2,
-      cp: 2,
-      ep: 4,
+      pp: 1,
+      cp: 4,
+      ep: 8,
       dp: 8,
       moe: true,
       maxTokens: 8192,
-      extra: ['--decoder-last-pipeline-num-layers 23']
-    },
-    dense: {
-      name: 'GLM-4-9B',
-      size: '9B · Dense',
-      repo: 'THUDM/GLM-Z1-9B-0414',
-      model: 'glm4-9B',
-      recipe: 'glm4-9B',
-      nodes: 1,
-      engine: 2,
-      tp: 2,
-      pp: 1,
-      cp: 2,
-      ep: 1,
-      dp: 1,
-      moe: false,
-      maxTokens: 4608,
       extra: []
     },
     glm47: {
+      context: 202752,
       name: 'GLM-4.7',
       mtp: true,
       size: '355B · A32B · MoE',
@@ -98,12 +66,14 @@
       extra: []
     },
     glm5: {
+      context: 1048576,
+      response: 262144,
       name: 'GLM-5.3',
       mtp: true,
       size: '744B · A40B · MoE',
       repo: 'zai-org/GLM-5.3',
       model: 'glm5.2-744B-A40B',
-      recipe: 'glm5.2-744B-A40B',
+      recipe: 'glm5.3-744B-A40B',
       nodes: 32,
       engine: 64,
       tp: 4,
@@ -114,7 +84,7 @@
       moe: true,
       maxTokens: 8192,
       extra: ['--decoder-first-pipeline-num-layers 14', '--decoder-last-pipeline-num-layers 16',
-        '--data-pad-size-multiplier 1024', '--log-probs-chunk-size 16384'
+        '--data-pad-size-multiplier 1024'
       ]
     },
   };
@@ -128,19 +98,20 @@
     cpuAdam: true,
     recompute: true,
     model: 'flash',
+    hardware: 'unspecified',
     task: 'math',
     layout: 'colocate',
     schedule: 'sync',
     precision: 'bf16',
     kv: 'auto',
     mambaDtype: 'auto',
-    mambaRatio: '',
     correction: 'tis',
-    r3: false,
-    sc: false,
+    r3: true,
+    sc: true,
     deterministic: false,
     pd: false,
     hicache: false,
+    cpuBytes: '',
     speculative: false,
     draftSource: 'builtin',
     draft: '',
@@ -149,7 +120,7 @@
     rollout: 8,
     prefill: 8,
     concurrency: 128,
-    response: 4096,
+    response: 131072,
     rounds: 3,
     transport: 'nccl',
     hf: '/data/GLM-4.7-Flash',
@@ -166,6 +137,7 @@
     step: 0
   };
   const enums = {
+    hardware: ['unspecified', 'hopper', 'blackwell'],
     model: Object.keys(models),
     task: ['math', 'custom'],
     layout: ['colocate', 'separate', 'external'],
@@ -182,23 +154,28 @@
     rollout: [1, 8192],
     prefill: [1, 8192],
     concurrency: [1, 8192],
-    response: [128, 131072],
+    response: [128, 262144],
     rounds: [1, 100000],
     specSteps: [1, 8],
     step: [0, 5]
   };
   const textKeys = ['hf', 'train', 'data', 'save', 'megatron', 'endpoints', 'shared', 'local', 'ib',
     'generate',
-    'reward', 'queueDir', 'queueRun', 'declaration', 'mambaRatio', 'draft'
+    'reward', 'queueDir', 'queueRun', 'declaration', 'draft', 'cpuBytes'
   ];
 
   function sanitize(input) {
+    if (input?.schema === 1 && input.choices) input = input.choices;
+    // Retired recipes must not leave their checkpoint paths on the default model.
+    if (['dense', 'deepseek'].includes(input?.model)) input = {};
     const s = {
       ...defaults
     };
     if (input && Object.hasOwn(models, input.model)) {
       const m = models[input.model];
       Object.assign(s, {
+        r3: m.moe,
+        response: m.response ?? defaults.response,
         nodes: m.nodes,
         rollout: m.nodes * 8,
         prefill: m.engine,
@@ -221,7 +198,6 @@
         '').trim();
     if (!models[s.model].hybrid) {
       s.mambaDtype = 'auto';
-      s.mambaRatio = '';
     }
     return s;
   }
@@ -241,12 +217,12 @@
       s.train = s.hf + '_torch_dist';
       s.kv = 'auto';
       s.mambaDtype = 'auto';
-      s.mambaRatio = '';
       s.draftSource = m.mtp ? 'builtin' : 'external';
       s.draft = '';
       s.specSteps = value === 'glm5' ? 4 : 3;
-      if (!m.moe) s.r3 = false;
-      if (value === 'glm5' || value === 'deepseek') {
+      s.r3 = m.moe;
+      s.response = m.response ?? defaults.response;
+      if (value === 'glm5') {
         s.precision = 'fp8';
         s.kv = 'fp8';
       }
@@ -292,8 +268,16 @@
   function validate(s, lang = 'en') {
     const m = models[s.model],
       errors = [],
-      notes = [];
+      notes = [],
+      issues = [];
     const t = (en, zh) => lang === 'zh' ? zh : en;
+    const reject = (code, message, fields, actions = []) => {
+      errors.push(message);
+      issues.push({code, message, fields, actions});
+    };
+    if (s.response >= m.context) reject('response-context', t(
+      `The response limit must leave room for the prompt within this checkpoint's ${m.context}-token context.`,
+      `回复上限需在此 checkpoint 的 ${m.context} token 上下文内为 prompt 留出空间。`), ['response']);
     const total = s.nodes * 8,
       rollout = s.layout === 'colocate' ? total : s.rollout;
     if (total % (m.tp * m.pp * m.cp) !== 0 || total % (m.ep * m.pp) !== 0) errors.push(t(
@@ -302,9 +286,26 @@
     if (s.layout !== 'external' && rollout % m.engine !== 0) errors.push(t(
       `Rollout GPUs must be a multiple of ${m.engine} (GPUs per engine).`,
       `Rollout GPU 数必须是 ${m.engine}（每个引擎的 GPU 数）的倍数。`));
-    if (s.layout !== 'external' && s.pd && (s.prefill % m.engine !== 0 || s.prefill >= rollout)) errors.push(t(
-      `PD needs at least one prefill and one decode engine. Prefill GPUs must be a multiple of ${m.engine} and less than the rollout pool.`,
-      `PD 至少需要一个 prefill 和一个 decode 引擎；prefill GPU 数须为 ${m.engine} 的倍数，且小于 rollout 总 GPU 数。`));
+    if (s.layout !== 'external' && s.pd && (s.prefill % m.engine !== 0 || s.prefill >= rollout)) {
+      const prefill = Math.ceil(s.prefill / m.engine) * m.engine;
+      const needed = Math.max(rollout, prefill + m.engine);
+      const changes = {prefill};
+      if (s.layout === 'colocate') {
+        // Find an integer node count satisfying this model's training AND serving groups.
+        let nodes = Math.max(s.nodes, Math.ceil(needed / 8));
+        while (nodes <= numberLimits.nodes[1] &&
+          (nodes * 8 % (m.tp * m.pp * m.cp) || nodes * 8 % (m.ep * m.pp) || nodes * 8 % m.engine)) nodes++;
+        changes.nodes = nodes;
+      } else changes.rollout = Math.ceil(needed / m.engine) * m.engine;
+      const actions = [{id: 'pd-off', label: t('Keep resources; turn PD off', '保留资源分配，关闭 PD'), changes: {pd: false}}];
+      if (Object.entries(changes).every(([key, value]) => value <= numberLimits[key][1])) actions.push({
+        id: 'pd-resources', label: t('Allocate complete prefill / decode engines', '分配完整的 prefill / decode 引擎'), changes
+      });
+      reject('pd-capacity', t(
+        `PD needs complete prefill and decode engines, each using ${m.engine} GPUs in this recipe.`,
+        `此配方的 PD 需要完整的 prefill 和 decode 引擎，每个引擎使用 ${m.engine} 张 GPU。`),
+        ['prefill', s.layout === 'colocate' ? 'nodes' : 'rollout'], actions);
+    }
     if (s.layout === 'colocate' && s.schedule === 'async') errors.push(t(
       'Fully async requires separate training and rollout GPUs.', 'Fully async 需要独立的训练与 rollout GPU。'));
     if (s.layout === 'colocate' && s.transport !== 'nccl') errors.push(t(
@@ -321,7 +322,7 @@
         ['save', 'output directory', '输出目录'],
         ['megatron', 'Megatron directory', 'Megatron 目录']
       ])
-      if (!s[key]) errors.push(t(`Enter the ${en} path.`, `请填写${zh}路径。`));
+      if (!s[key]) reject('path-' + key, t(`Enter the ${en} path.`, `请填写${zh}路径。`), [key]);
     if (s.task === 'custom') {
       if (!/^\w+(?:\.\w+)+$/.test(s.generate)) errors.push(t(
         'Enter an importable generation hook, e.g. my_agent.generate.', '请填写可导入的生成 hook，例如 my_agent.generate。'));
@@ -330,9 +331,9 @@
     }
     if (s.layout === 'external') {
       if (!s.endpoints || !s.endpoints.split(/\s+/).every(v => /^(?:https?:\/\/)?[a-zA-Z0-9._-]+:\d{1,5}$/.test(v) &&
-          Number(v.split(':').at(-1)) > 0 && Number(v.split(':').at(-1)) < 65536)) errors.push(t(
+          Number(v.split(':').at(-1)) > 0 && Number(v.split(':').at(-1)) < 65536)) reject('endpoints', t(
         'Enter engine addresses as host:port separated by spaces (not a router URL).',
-        '填写以空格分隔的引擎 host:port（不是 router 地址）。'));
+        '填写以空格分隔的引擎 host:port（不是 router 地址）。'), ['endpoints']);
       notes.push(t(
         'External vLLM is configured by its owner. Use the generated serving reference on every engine; vime discovers existing regular/prefill/decode roles and cannot switch them from the training CLI.',
         '外部 vLLM 由部署方配置。请将生成的 serving 参考应用到各引擎；vime 发现已有 regular/prefill/decode 角色，无法通过训练 CLI 改变它们。'));
@@ -342,9 +343,9 @@
     if (s.transport === 'delta' && !s.local) errors.push(t(
       'Delta transport needs a local checkpoint directory on every serving host.',
       'Delta 传输需要每台推理主机上的本地 checkpoint 目录。'));
-    if (s.pd && !s.ib) errors.push(t(
+    if (s.pd && !s.ib) reject('rdma', t(
       'Enter the RDMA device(s) for this Mooncake PD recipe, e.g. mlx5_0. Check these names on every host.',
-      '此 Mooncake PD 配方需要 RDMA 网卡名，例如 mlx5_0；请核对每台主机。'));
+      '此 Mooncake PD 配方需要 RDMA 网卡名，例如 mlx5_0；请核对每台主机。'), ['ib']);
     if (s.speculative) {
       if (s.draftSource === 'builtin' && !m.mtp) errors.push(t(
         'This model has no built-in MTP recipe here. Select a separate EAGLE head and provide its checkpoint.',
@@ -385,23 +386,21 @@
       'Qwen3.8-27B 使用 qwen3_5 架构，尺寸匹配现有 27B 配置。此文本 RL 配方复用该后端，checkpoint 仍需 GPU 验证。'));
     if (m.hybrid) {
       notes.push(t(
-        'Hybrid cache contains attention KV and recurrent state managed by a shared paged cache. KV dtype applies only to attention layers; Mamba SSM dtype controls recurrent state separately. Check backend support and log-prob accuracy for each change.',
-        'Hybrid cache 的 attention KV 和递归状态由共享分页缓存管理。KV dtype 只作用于 attention 层；Mamba SSM dtype 单独控制递归状态精度。每项调整都需核对后端支持与 log-prob 精度。'
+        'Hybrid cache has attention KV and recurrent state budgets. KV dtype applies only to attention layers. Mamba SSM dtype affects recurrent state; convolution state has its own dtype. Check backend support and log-prob accuracy for each change.',
+        'Hybrid cache 包含 attention KV 和递归状态预算。KV dtype 只作用于 attention 层；Mamba SSM 精度作用于递归状态，卷积状态保留自身的 dtype。每项调整都需核对后端支持与 log-prob 精度。'
         ));
-      if (s.mambaRatio && (!/^(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(s.mambaRatio) ||
-          !Number.isFinite(Number(s.mambaRatio)) || Number(s.mambaRatio) <= 0)) errors.push(t(
-        'Mamba / attention KV memory ratio must be a positive number, or left blank for the serving default.',
-        'Mamba / attention KV 内存比例须为正数，或留空沿用推理栈默认值。'));
-      else if (s.mambaRatio) errors.push(t(
-        'vLLM uses a shared paged cache rather than independently sized Mamba and attention pools. Clear the imported pool-split ratio; use the total GPU cache budget.',
-        'vLLM 使用共享分页缓存，而非独立定容的 Mamba 与 attention 池。请清除导入的分池比例，使用总 GPU 缓存预算。'));
     }
     if (s.sc) notes.push(t(
       'SC selects REINFORCE with GRPO advantages and no standard-deviation normalization. Sampling is fixed to temperature=1, top_p=1, top_k=-1, without penalties, constraints, or streaming.',
       'SC 使用 REINFORCE、GRPO advantage，关闭标准差归一化。采样固定为 temperature=1、top_p=1、top_k=-1，不使用惩罚、约束解码或 streaming。'));
-    if (s.hicache) notes.push(t(
-      'HiCache consumes host RAM as well as GPU cache. The recipe uses a host/device cache ratio of 2; PD enables it on prefill only. Cache reuse is limited by weight-update invalidation.',
-      'HiCache 还会占用主机内存；配方的 host/device cache 比例为 2，PD 时只在 prefill 启用。权重更新后的缓存失效会限制复用收益。'));
+    if (s.hicache) {
+      if (!s.cpuBytes || !Number.isSafeInteger(Number(s.cpuBytes)) || Number(s.cpuBytes) <= 0) errors.push(t(
+        'HiCache requires an explicit CPU byte budget. GPU KV capacity is unknown; no ratio is converted automatically.',
+        'HiCache 需要显式填写 CPU 字节预算。GPU KV 容量未知，不自动换算比例。'));
+      notes.push(t(
+        'HiCache uses the native absolute cpu_bytes_to_use budget; PD enables it on prefill only. This fixed budget is not equivalent to a dynamic host/device ratio. Cache reuse is limited by weight-update invalidation.',
+        'HiCache 使用原生 cpu_bytes_to_use 绝对预算，PD 时仅在 prefill 启用。固定预算不等价于动态 host/device 比例，权重更新后的缓存失效会限制复用收益。'));
+    }
     if (s.deterministic) notes.push(t(
       'Deterministic execution is not cross-engine equality. Install the deterministic vLLM/Megatron stack and remove FlashAttention 3 as documented. Exact GLM-5 alignment has a separate six-layer EP8 regression gate.',
       '确定性执行不等于训推数值相等。按文档安装 deterministic vLLM/Megatron 依赖并移除 FlashAttention 3。GLM-5 精确对齐另有六层 EP8 回归验证。'));
@@ -417,8 +416,12 @@
     if (s.precision === 'int4') notes.push(t(
       'INT4 rollout is beta and has no maintained GLM end-to-end recipe here. Validate your model and installed kernels with a short run before scaling; training remains BF16.',
       'INT4 rollout 为 beta，仓库尚无维护中的 GLM 端到端配方。扩容前先用短实验验证模型和当前 kernel；训练仍为 BF16。'));
+    if (s.hardware === 'blackwell') notes.push(t(
+      'B200/B300 uses the CUDA 13 image, with different kernel builds. GPU CI primarily covers H100/H200; this hardware choice does not certify the selected model or memory fit.',
+      'B200/B300 使用 CUDA 13 镜像，kernel 构建不同。GPU CI 主要覆盖 H100/H200；选择硬件不会认证此模型配方或显存容量。'));
     return {
       errors,
+      issues,
       notes,
       total,
       rollout,
@@ -428,7 +431,7 @@
 
   function kvTransferConfig(s, role) {
     const host = {kv_connector: 'SimpleCPUOffloadConnector', kv_role: 'kv_both',
-      kv_connector_extra_config: {cpu_to_gpu_ratio: 2}};
+      kv_connector_extra_config: {cpu_bytes_to_use: s.cpuBytes ? Number(s.cpuBytes) : null}};
     if (!s.pd) return host;
     const transfer = {kv_connector: 'MooncakeConnector',
       kv_role: role === 'prefill' ? 'kv_producer' : 'kv_consumer',
@@ -450,14 +453,12 @@
       s.draftSource === 'builtin' ? {method: 'mtp', num_speculative_tokens: s.specSteps} :
       {method: 'eagle', model: s.draft, num_speculative_tokens: s.specSteps}
     ))}`);
-    if (!s.pd && (s.model === 'deepseek' || s.model === 'glm5'))
+    if (!s.pd && s.model === 'glm5')
       args.push('--vllm-all2all-backend deepep_high_throughput');
-    if (s.model === 'glm5') args.push('--no-vllm-async-scheduling');
+    if (s.model === 'glm5') args.push('--no-vllm-async-scheduling',
+      '--vllm-block-size 64', '--vllm-attention-backend FLASHMLA_SPARSE');
     if (s.kv === 'fp8') args.push('--vllm-kv-cache-dtype fp8_e4m3');
-    if (s.deterministic) {
-      args.push('--vllm-enable-deterministic-inference');
-      if (s.model === 'dense') args.push('--vllm-attention-backend FLASHINFER');
-    }
+    if (s.deterministic) args.push('--vllm-enable-deterministic-inference');
     if (s.hicache && !s.pd) args.push('--vllm-enable-prefix-caching',
       `--vllm-kv-transfer-config ${quote(JSON.stringify(kvTransferConfig(s)))}`);
     return args;
@@ -475,7 +476,7 @@
       out += `      - worker_type: ${role}\n        num_gpus: ${count}\n        num_gpus_per_engine: ${m.engine}\n`;
       const overrides = [`kv_transfer_config: ${JSON.stringify(kvTransferConfig(s, role))}`];
       if (s.hicache && role === 'prefill') overrides.push('enable_prefix_caching: true');
-      if (s.model === 'glm5' || s.model === 'deepseek')
+      if (s.model === 'glm5')
         overrides.push(`all2all_backend: deepep_${role==='decode'?'low_latency':'high_throughput'}`);
       if (s.model === 'glm5' && role === 'decode') overrides.push('kernel_config: {"moe_backend":"deep_gemm"}',
         'async_scheduling: false');
@@ -484,11 +485,95 @@
     return out;
   }
 
-  function generate(s, lang = 'en') {
+  function fieldLabel(key, lang = 'en') {
+    const labels = {
+      model: ['Model', '模型'], hardware: ['Hardware context', '硬件条件'], task: ['Learning signal', '训练信号'],
+      layout: ['GPU placement', 'GPU 布局'], schedule: ['Schedule', '调度'], nodes: ['Training nodes × 8 GPU', '训练节点 × 8 GPU'],
+      rollout: ['Rollout GPUs', 'Rollout GPU'], prefill: ['Prefill GPUs', 'Prefill GPU'],
+      precision: ['Weight precision', '权重精度'], kv: ['Attention KV dtype', 'Attention KV 精度'],
+      mambaDtype: ['SSM dtype', 'SSM 精度'],
+      cpuBytes: ['CPU KV budget (bytes)', 'CPU KV 预算（字节）'],
+      correction: ['Behavior correction', 'Behavior 修正'], r3: ['R3', 'R3'], sc: ['SC', 'SC'],
+      deterministic: ['Deterministic execution', '确定性执行'], cpuAdam: ['CPU Adam', 'CPU Adam'],
+      recompute: ['Activation recomputation', '激活重计算'], pd: ['PD', 'PD'], hicache: ['HiCache', 'HiCache'],
+      speculative: ['EAGLE', 'EAGLE'], draftSource: ['Draft head source', '投机头来源'], draft: ['Draft head path', '投机头路径'],
+      specSteps: ['Draft steps', '草拟步数'], partial: ['Partial rollout', 'Partial rollout'],
+      maskPartial: ['Mask old prefix', 'Mask 旧前缀'], straw: ['straw', 'straw'],
+      transport: ['Weight transport', '权重传输'], concurrency: ['Concurrency', '并发数'], response: ['Response tokens', '回复 token 数'],
+      rounds: ['Training rounds', '训练轮数'], hf: ['HF checkpoint', 'HF checkpoint'], train: ['Training checkpoint', '训练 checkpoint'],
+      data: ['Prompt data', 'Prompt 数据'], save: ['Output path', '输出路径'], megatron: ['Megatron path', 'Megatron 路径'],
+      endpoints: ['Engine addresses', '引擎地址'], shared: ['Shared weight path', '共享权重路径'], local: ['Serving checkpoint path', '推理 checkpoint 路径'],
+      ib: ['RDMA devices', 'RDMA 网卡'], generate: ['Generation hook', '生成 hook'], reward: ['Reward hook', '奖励 hook'],
+      queueDir: ['straw data path', 'straw 数据路径'], queueRun: ['straw run ID', 'straw run ID'], declaration: ['JuiceFS declaration', 'JuiceFS 声明']
+    };
+    return labels[key]?.[lang === 'zh' ? 1 : 0] || key;
+  }
+
+  function compare(a, b, lang = 'en') {
+    a = sanitize(a);
+    b = sanitize(b);
+    const t = (en, zh) => lang === 'zh' ? zh : en;
+    const differences = Object.keys(defaults).filter(key => key !== 'step' && a[key] !== b[key])
+      .map(key => ({key, label: fieldLabel(key, lang), before: a[key], after: b[key]}));
+    const changed = key => differences.some(item => item.key === key);
+    const insights = [];
+    if (changed('layout') || changed('transport')) insights.push(t(
+      'Colocation reuses one GPU pool in alternating phases. Separate pools reserve training and rollout GPUs independently; external engine GPUs are outside the Ray allocation. Separate pools may still run synchronously. Compare idle time, weight-transfer time and total reserved GPUs.',
+      '同卡布局在两个阶段复用 GPU；分离布局分别占用训练与 rollout GPU，外部引擎 GPU 不计入本地 Ray 分配。分离布局仍可同步执行。比较空闲时间、权重传输耗时和总占用 GPU。'));
+    if (changed('schedule') || changed('partial') || changed('straw')) insights.push(t(
+      'Fully async overlaps generation and training on separate GPUs, but mixes weight versions. Partial rollout saves unfinished prefixes; straw persists queue payloads and enables distributed producers with fully async. Measure staleness/mean, staleness/max, queue waits, rollout time and held-out reward.',
+      'Fully async 在独立 GPU 上重叠生成与训练，但会混合权重版本。Partial rollout 保留未完成前缀；straw 持久化队列数据，搭配 fully async 启用分布式 producer。观察 staleness/mean、staleness/max、队列等待、rollout 耗时和独立评估 reward。'));
+    if (['precision', 'kv', 'mambaDtype'].some(changed)) insights.push(t(
+      'BF16 → FP8 changes rollout weight storage and arithmetic; FP8 training also changes the trainer. Attention KV and recurrent state have different storage requirements. Measure train_rollout_logprob_abs_diff, reward, rollout time and peak memory; bit width alone does not predict total memory or speed.',
+      'BF16 → FP8 改变 rollout 权重存储与运算，FP8 training 还改变训练侧。Attention KV 与递归状态具有不同的存储需求。观察 train_rollout_logprob_abs_diff、reward、rollout 耗时及显存峰值；位宽不能直接换算总显存或速度。'));
+    if (changed('correction')) insights.push(t(
+      'For the same illustrative ratio p/q = 0.4/0.1 = 4, TIS with upper bound 2 uses weight 2; ICE-POP outside [0.5, 2] uses 0. This is behavior correction, separate from PPO update clipping. Compare clipping/masking fractions, mismatch and held-out reward.',
+      '同一示例 p/q = 0.4/0.1 = 4：TIS 上界 2 时权重为 2；ICE-POP 在 [0.5, 2] 外权重为 0。这是 behavior 修正，与 PPO 更新裁剪独立。比较 clipping/masking 比例、训推差异与独立评估 reward。'));
+    if (['pd', 'prefill', 'hicache', 'cpuBytes', 'speculative', 'draftSource', 'draft', 'specSteps'].some(changed)) insights.push(t(
+      'PD separates prefill and decode with cache transfer; HiCache trades host memory and I/O for prefix reuse; EAGLE adds draft work and batch verification. Measure prefill/decode time, cache hit rate, host RAM, spec_accept_rate and spec_accept_length for your workload.',
+      'PD 拆分 prefill/decode 并传输缓存；HiCache 用主机内存与 I/O 换取前缀复用；EAGLE 增加草拟与批量验证。按工作负载测量 prefill/decode 耗时、缓存命中率、主机内存、spec_accept_rate 和 spec_accept_length。'));
+    if (['cpuAdam', 'recompute', 'nodes', 'rollout', 'response', 'concurrency'].some(changed)) insights.push(t(
+      'More GPUs and lower concurrency can relieve different constraints. CPU Adam uses host RAM and transfers; recomputation saves activations by repeating work. Measure peak GPU/host memory and train/rollout time; allocation is not a memory-fit guarantee.',
+      '增加 GPU 和降低并发缓解不同约束。CPU Adam 需要主机内存与传输，重计算通过重复计算节省激活。测量 GPU/主机内存峰值及训推耗时；分配数量不保证显存足够。'));
+    if (differences.length && !insights.length) insights.push(t(
+      'Check the changed fields and each configuration’s assumptions. Run a short controlled experiment and compare held-out reward and stage timings.',
+      '核对变化字段及两套配置的条件，用短对照实验比较独立评估 reward 和各阶段耗时。'));
+    return {differences, insights, a: validate(a, lang), b: validate(b, lang)};
+  }
+
+  function shareChoices(state) {
+    const shared = {...sanitize(state)};
+    for (const key of ['hf', 'train', 'data', 'save', 'megatron', 'endpoints', 'shared', 'local', 'ib',
+      'generate', 'reward', 'queueDir', 'queueRun', 'declaration', 'draft']) delete shared[key];
+    return shared;
+  }
+
+  function sourceRecord(s, build = {}) {
+    const commit = /^[a-f0-9]{40}$/.test(build.commit || '') ? build.commit : null;
+    const recipe = 'scripts/run-' + models[s.model].recipe + '.sh';
+    const model = 'scripts/models/' + models[s.model].model + '.sh';
+    const source = path => ({path, sha256: build.sourceHashes?.[path] || null,
+      url: commit ? `https://github.com/vllm-project/vime/blob/${commit}/${path}` : null});
+    return {
+      schema: 1,
+      page: {commit, dirty: typeof build.dirty === 'boolean' ? build.dirty : null,
+        generator: source('docs/_static/js/experiment-engine.js')},
+      recipe: source(recipe), modelConfig: source(model),
+      environment: {recipeVersions: build.environment || null,
+        suggestedImageTag: s.hardware === 'unspecified' ? null : 'vllm/vime:latest',
+        imageDigest: null, installedCommit: null},
+      checkpoint: {id: models[s.model].repo, revision: null},
+      staticChecksPassed: validate(s).errors.length === 0,
+      runtimeEvidence: []
+    };
+  }
+
+  function generate(s, lang = 'en', build = {}) {
     s = sanitize(s);
     const m = models[s.model],
       v = validate(s, lang),
       t = (en, zh) => lang === 'zh' ? zh : en;
+    const provenance = sourceRecord(s, build);
     const arg = [`--actor-num-nodes ${s.nodes}`, '--actor-num-gpus-per-node 8'];
     if (s.pd) {
       arg.push('--router-kv-connector mooncake');
@@ -534,7 +619,7 @@
       `--context-parallel-size ${m.cp}`, `--expert-model-parallel-size ${m.ep}`, '--expert-tensor-parallel-size 1',
       ...m.extra, ...(s.recompute ? ['--recompute-granularity full', '--recompute-method uniform',
         '--recompute-num-layers 1'
-      ] : []), '--use-dynamic-batch-size', `--max-tokens-per-gpu ${m.maxTokens}`);
+      ] : []), '--use-dynamic-batch-size', `--max-tokens-per-gpu ${m.maxTokens}`, '--log-probs-chunk-size 1024');
     arg.push('--optimizer adam', '--lr 1e-6', '--lr-decay-style constant', '--weight-decay 0.1', '--adam-beta1 0.9',
       '--adam-beta2 0.98');
     if (s.cpuAdam) arg.push('--optimizer-cpu-offload', '--overlap-cpu-optimizer-d2h-h2d',
@@ -568,34 +653,35 @@
     const config = yaml(s);
     const header =
       `#!/usr/bin/env bash\n# Generated by vime experiment lab. Run from the vime repository root.\n# Recipe basis: scripts/run-${m.recipe}.sh\n# ${m.name} | ${s.layout} | ${s.schedule} | ${s.precision} | ${s.correction}\n# Allocated Ray GPUs: ${v.localGpus}. Memory fit depends on your GPU and context.\n# Usage: bash experiment.sh prepare | convert | check | train\nset -euo pipefail\n\nHF_MODEL=${quote(s.hf)}\nTRAIN_CHECKPOINT=${quote(s.train)}\nPROMPT_DATA=${quote(s.data)}\nSAVE_DIR=${quote(s.save)}\nMEGATRON_DIR=${quote(s.megatron)}\nROLLOUT_MODEL="$HF_MODEL${s.precision==='bf16'?'':s.precision==='int4'?'-int4':'-fp8'}"\n# Same repository and data paths must be accessible on every participating node.\nexport PYTHONPATH="$PWD:$MEGATRON_DIR\${PYTHONPATH:+:$PYTHONPATH}"\nsource ${quote('scripts/models/'+m.model+'.sh')}\n\n`;
-    const conversionNodes = ['glm5', 'glm47', 'deepseek'].includes(s.model) ? 4 : 1;
+    const conversionNodes = ['glm5', 'glm47'].includes(s.model) ? 4 : 1;
     const conversionArgs = s.model === 'glm5' ?
       '--tensor-model-parallel-size 8 --pipeline-model-parallel-size 2 --decoder-last-pipeline-num-layers 40 --expert-model-parallel-size 16 --expert-tensor-parallel-size 1' :
-      s.model === 'deepseek' ?
-      '--tensor-model-parallel-size 1 --pipeline-model-parallel-size 8 --decoder-first-pipeline-num-layers 7 --decoder-last-pipeline-num-layers 6 --expert-model-parallel-size 4 --expert-tensor-parallel-size 1' :
       s.model === 'glm47' ?
       '--tensor-model-parallel-size 8 --pipeline-model-parallel-size 4 --expert-model-parallel-size 8 --expert-tensor-parallel-size 1' :
       '';
     const prep =
-      `if [[ "\${1:-check}" == prepare ]]; then\n  # Run once on the shared filesystem. Conversion is a separate distributed step.\n${['deepseek','glm5'].includes(s.model)?`  hf download ${quote(m.repo)} --local-dir "$HF_MODEL-source-fp8"\n  python tools/fp8_cast_bf16.py --input-fp8-hf-path "$HF_MODEL-source-fp8" --output-bf16-hf-path "$HF_MODEL"\n  python - "$HF_MODEL/config.json" <<'VIME_BF16_CONFIG'\nimport json, sys\nfrom pathlib import Path\np = Path(sys.argv[1])\ncfg = json.loads(p.read_text())\ncfg.pop('quantization_config', None)\np.write_text(json.dumps(cfg, indent=2))\nVIME_BF16_CONFIG\n`:`  hf download ${quote(m.repo)} --local-dir "$HF_MODEL"\n`}${s.task==='math'?'  hf download --repo-type dataset zhuzilin/dapo-math-17k --local-dir "$(dirname -- "$PROMPT_DATA")"\n':'  # Supply your prompt JSONL and importable custom hooks before training.\n'}${s.precision==='bf16'?'':s.precision==='int4'?'  python tools/convert_hf_to_int4_direct.py --model-dir "$HF_MODEL" --save-dir "$ROLLOUT_MODEL"\n':'  python tools/convert_hf_to_fp8.py --model-dir "$HF_MODEL" --save-dir "$ROLLOUT_MODEL" \\\n    --strategy block --block-size 128 128 --max-workers 4\n'}  printf '%s\\n' 'Next: run bash experiment.sh convert on ${conversionNodes} node(s), 8 GPUs each.'\n  exit 0\nfi\n\nif [[ "\${1:-check}" == convert ]]; then\n${conversionNodes>1?'  : "\${CONVERT_MASTER_ADDR:?Set the conversion head IP on all 4 nodes}"\n  : "\${CONVERT_NODE_RANK:?Set this node rank: 0, 1, 2, or 3}"\n':''}  torchrun --nproc-per-node 8 ${conversionNodes===1?'--standalone':'--nnodes 4 --node-rank "$CONVERT_NODE_RANK" --master-addr "$CONVERT_MASTER_ADDR" --master-port 12345'} \\\n    tools/convert_hf_to_torch_dist.py "\${MODEL_ARGS[@]}" \\\n    ${conversionArgs?conversionArgs+' \\\n    ':''}--hf-checkpoint "$HF_MODEL" --save "$TRAIN_CHECKPOINT"\n  exit 0\nfi\n\nfor path in "$ROLLOUT_MODEL/config.json" "$TRAIN_CHECKPOINT/latest_checkpointed_iteration.txt" "$PROMPT_DATA"${s.straw?' '+quote(s.declaration):''}; do\n  if [[ ! -f "$path" ]]; then\n    printf 'Missing input: %s\\nRun prepare and convert, or edit the paths at the top of this script.\\n' "$path" >&2\n    exit 1\n  fi\ndone\n\nif [[ "\${1:-check}" == check ]]; then\n  printf '%s\\n' 'Input files exist. Verify Ray capacity, serving dependencies, and the selected model recipe before training.'\n  exit 0\nfi\nif [[ "\${1:-}" != train ]]; then\n  printf '%s\\n' 'Usage: bash experiment.sh prepare | convert | check | train' >&2\n  exit 1\nfi\n\n`;
+      `if [[ "\${1:-check}" == prepare ]]; then\n  # Run once on the shared filesystem. Conversion is a separate distributed step.\n${s.model === 'glm5'?`  hf download ${quote(m.repo)} --local-dir "$HF_MODEL-source-fp8"\n  python tools/fp8_cast_bf16.py --input-fp8-hf-path "$HF_MODEL-source-fp8" --output-bf16-hf-path "$HF_MODEL"\n  python - "$HF_MODEL/config.json" <<'VIME_BF16_CONFIG'\nimport json, sys\nfrom pathlib import Path\np = Path(sys.argv[1])\ncfg = json.loads(p.read_text())\ncfg.pop('quantization_config', None)\np.write_text(json.dumps(cfg, indent=2))\nVIME_BF16_CONFIG\n`:`  hf download ${quote(m.repo)} --local-dir "$HF_MODEL"\n`}${s.task==='math'?'  hf download --repo-type dataset zhuzilin/dapo-math-17k --local-dir "$(dirname -- "$PROMPT_DATA")"\n':'  # Supply your prompt JSONL and importable custom hooks before training.\n'}${s.precision==='bf16'?'':s.precision==='int4'?'  python tools/convert_hf_to_int4_direct.py --model-dir "$HF_MODEL" --save-dir "$ROLLOUT_MODEL"\n':'  python tools/convert_hf_to_fp8.py --model-dir "$HF_MODEL" --save-dir "$ROLLOUT_MODEL" \\\n    --strategy block --block-size 128 128 --max-workers 4\n'}  printf '%s\\n' 'Next: run bash experiment.sh convert on ${conversionNodes} node(s), 8 GPUs each.'\n  exit 0\nfi\n\nif [[ "\${1:-check}" == convert ]]; then\n${conversionNodes>1?'  : "\${CONVERT_MASTER_ADDR:?Set the conversion head IP on all 4 nodes}"\n  : "\${CONVERT_NODE_RANK:?Set this node rank: 0, 1, 2, or 3}"\n':''}  torchrun --nproc-per-node 8 ${conversionNodes===1?'--standalone':'--nnodes 4 --node-rank "$CONVERT_NODE_RANK" --master-addr "$CONVERT_MASTER_ADDR" --master-port 12345'} \\\n    tools/convert_hf_to_torch_dist.py "\${MODEL_ARGS[@]}" \\\n    ${conversionArgs?conversionArgs+' \\\n    ':''}--hf-checkpoint "$HF_MODEL" --save "$TRAIN_CHECKPOINT"\n  exit 0\nfi\n\nfor path in "$ROLLOUT_MODEL/config.json" "$TRAIN_CHECKPOINT/latest_checkpointed_iteration.txt" "$PROMPT_DATA"${s.straw?' '+quote(s.declaration):''}; do\n  if [[ ! -f "$path" ]]; then\n    printf 'Missing input: %s\\nRun prepare and convert, or edit the paths at the top of this script.\\n' "$path" >&2\n    exit 1\n  fi\ndone\n\nif [[ "\${1:-check}" == check ]]; then\n  printf '%s\\n' 'Input files exist. Verify Ray capacity, serving dependencies, and the selected model recipe before training.'\n  exit 0\nfi\nif [[ "\${1:-}" != train ]]; then\n  printf '%s\\n' 'Usage: bash experiment.sh prepare | convert | check | train' >&2\n  exit 1\nfi\n\n`;
     const runtime = JSON.stringify({
       env_vars: env
     }, null, 2);
     const launch =
       `# Ray must already be running. Join workers before submitting this job.\n# RAY_DASHBOARD can point at an existing head (default: localhost).\nLAB_CONFIG=$(mktemp -d "$PWD/.vime-lab.XXXXXX")\ntrap 'rm -rf -- "$LAB_CONFIG"' EXIT\ncat > "$LAB_CONFIG/runtime-env.json" <<'VIME_RUNTIME'\n${runtime}\nVIME_RUNTIME\npython - "$LAB_CONFIG/runtime-env.json" "$PWD" <<'VIME_PATH'\nimport json, sys\nfrom pathlib import Path\np = Path(sys.argv[1])\ncfg = json.loads(p.read_text())\ncfg['env_vars']['PYTHONPATH'] = sys.argv[2] + ':' + cfg['env_vars']['PYTHONPATH']\np.write_text(json.dumps(cfg))\nVIME_PATH\n${config?`cat > "$LAB_CONFIG/vllm.yaml" <<'VIME_VLLM'\n${config}VIME_VLLM\n`:''}\nray job submit --address="\${RAY_DASHBOARD:-http://127.0.0.1:8265}" \\\n  --runtime-env "$LAB_CONFIG/runtime-env.json" -- python train.py \\\n  "\${MODEL_ARGS[@]}" \\\n  ${arg.join(' \\\n  ')}\n`;
     const external = s.layout === 'external' ?
-      `# External vLLM launch reference — apply before submitting experiment.sh.\n# One command per engine; multi-node engines also need --nnodes, --node-rank\n# and --master-addr and --master-port. Use each engine's real host, ports and visible devices.\n# Model, dtype, TP/EP/DP, cache and routed-expert reporting must match the trainer.\n# Pass engine host:port addresses, not a router URL, to vime.\n\nVLLM_SERVER_DEV_MODE=1${s.deterministic?' VLLM_BATCH_INVARIANT=1':''} vllm serve \\\n  ${quote(s.hf+(s.precision==='bf16'?'':s.precision==='int4'?'-int4':'-fp8'))} \\\n  --tensor-parallel-size ${m.engine / m.dp} \\\n  ${servingArgs(s).filter(a=>!a.startsWith('--rollout-') && !a.startsWith('--vllm-disaggregation-') && a !== '--vllm-enable-deterministic-inference').map(a=>a.replace(/^--(no-)?vllm-/, '--$1')).concat(['--logprobs-mode processed_logprobs', '--enable-scale-out', '--enable-prompt-tokens-details', '--enable-server-load-tracking', '--enable-per-request-metrics', `--max-logprobs ${s.sc?129:1}`, `--weight-transfer-config ${quote(JSON.stringify({backend:'nccl'}))}`], s.r3?['--enable-return-routed-experts']:[], s.pd?[...(s.hicache?['--enable-prefix-caching']:[]), `--kv-transfer-config ${quote(JSON.stringify(kvTransferConfig(s, 'prefill')))}`]:[]).join(' \\\n  ')}\n\n${s.pd?'# Launch a matching decode group with kv_role=kv_consumer.\n# Keep host KV offloading on prefill only.\n# Configure connector handshake ports, RDMA routing, and multi-node engine ranks.\n':''}# Disk sync: expose ${s.shared} at the SAME path on trainer and serving hosts.\n${s.transport==='delta'?'# Delta requires vime-patched vLLM /pull_weights and local checkpoint paths.\n':''}` :
+      `# External vLLM launch reference — apply before submitting experiment.sh.\n# One command per engine; multi-node engines also need --nnodes, --node-rank\n# and --master-addr and --master-port. Use each engine's real host, ports and visible devices.\n# Model, dtype, TP/EP/DP, cache and routed-expert reporting must match the trainer.\n# Pass engine host:port addresses, not a router URL, to vime.\n\nVLLM_USE_V2_MODEL_RUNNER=1 VLLM_SERVER_DEV_MODE=1${s.deterministic?' VLLM_BATCH_INVARIANT=1':''} vllm serve \\\n  ${quote(s.hf+(s.precision==='bf16'?'':s.precision==='int4'?'-int4':'-fp8'))} \\\n  --tensor-parallel-size ${m.engine / m.dp} \\\n  ${servingArgs(s).filter(a=>!a.startsWith('--rollout-') && !a.startsWith('--vllm-disaggregation-') && a !== '--vllm-enable-deterministic-inference').map(a=>a.replace(/^--(no-)?vllm-/, '--$1')).concat(['--logprobs-mode processed_logprobs', '--enable-scale-out', '--enable-prompt-tokens-details', '--enable-server-load-tracking', '--enable-per-request-metrics', `--max-logprobs ${s.sc?129:1}`, `--weight-transfer-config ${quote(JSON.stringify({backend:'nccl'}))}`], s.speculative?['--per-request-spec-decode-metrics summary']:[], s.r3?['--enable-return-routed-experts']:[], s.pd?[...(s.hicache?['--enable-prefix-caching']:[]), `--kv-transfer-config ${quote(JSON.stringify(kvTransferConfig(s, 'prefill')))}`]:[]).join(' \\\n  ')}\n\n${s.pd?'# Launch a matching decode group with kv_role=kv_consumer.\n# Keep host KV offloading on prefill only.\n# Configure connector handshake ports, RDMA routing, and multi-node engine ranks.\n':''}# Disk sync: expose ${s.shared} at the SAME path on trainer and serving hosts.\n${s.transport==='delta'?'# Delta requires vime-patched vLLM /pull_weights and local checkpoint paths.\n':''}` :
       '';
     const plan = {
       schema: 1,
       choices: s,
       model: m.name,
-      validation: v
+      validation: v,
+      provenance
     };
     return {
       validation: v,
+      provenance,
       files: {
-        'experiment.sh': header + prep + launch,
+        'experiment.sh': header.replace('# Recipe basis:',
+          `# Generator source commit: ${provenance.page.commit || 'not recorded'}; local changes: ${provenance.page.dirty ?? 'unknown'}\n# Source: ${provenance.recipe.url || 'commit not recorded'}\n# Runtime image digest and model revision: not recorded. Verify the installed checkout with git rev-parse HEAD.\n# Static checks do not establish GPU memory fit or a tested training run.\n# Recipe basis:`) + prep + launch,
         ...(config ? {
           'vllm.yaml': config
         } : {}),
@@ -616,6 +702,10 @@
     preset,
     validate,
     generate,
+    fieldLabel,
+    compare,
+    shareChoices,
+    sourceRecord,
     quote
   };
 })(typeof window === 'undefined' ? globalThis : window);

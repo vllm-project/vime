@@ -87,12 +87,6 @@ $$
 
 只把 BF16 attention KV 改成 FP8 时，$B'\approx Nc_A/2+Kc_R$，因此总缓存通常不会减半。同理，BF16 SSM 只改变递归状态项，卷积状态保持自身的 dtype。
 
-SGLang 的独立分池内存比例通过 `--sglang-mamba-full-memory-ratio` 设置 $r=B_R/B_A$。理想化地给两个池分配预算 $B$，联立 $B_A+B_R=B$ 与 $B_R=rB_A$，得到：
-
-$$B_A=\frac{B}{1+r},\qquad B_R=\frac{rB}{1+r}.$$
-
-上述比例描述 SGLang 的独立分池分配器，并非 vLLM 的共享分页缓存。vLLM 没有等价的分池比例；向导使用总 GPU 缓存预算，并明确拒绝导入非空分池比例。应结合分配日志和实际负载评估容量。外部引擎的 dtype 参数写入 `serving-reference.sh`，Vime 托管的引擎则使用 `--vllm-` 参数。
-
 向导里可运行的 Flash 起点是 **GLM-4.7-Flash**。上面的 GLM-5.3-Flash hybrid 结构不能直接套用该起点或 GLM-5.3 的 DSA 配方。
 
 ## Deterministic
@@ -129,7 +123,7 @@ $$\Delta t\approx h\,t_{\rm avoided\ prefill}-t_{\rm cache\ IO}-t_{\rm bookkeepi
 
 $h$ 为可复用 prefix 的命中率。命中率大于零也不证明加速，因为传输可能更贵。应测量 prefix 命中率、主机内存、cache I/O 时间和 TTFT。
 
-向导使用 `--vllm-enable-prefix-caching`，并配置 `cpu_to_gpu_ratio=2` 的 `SimpleCPUOffloadConnector`，只配置主机缓存，不创建 L3 存储服务。vime 管理的 PD 仅在 prefill 开启，与当前 engine builder 一致；不自动配置 decode offload 或分布式存储。KV 是特定权重下的激活，跨 actor 权重更新必须正确失效。因此要在有效权重窗口内测量可用命中。
+向导使用 `--vllm-enable-prefix-caching`，并为 `SimpleCPUOffloadConnector` 显式指定原生 `cpu_bytes_to_use` 字节预算，不创建 L3 存储服务。GPU KV 分配未知时不推算容量，固定绝对预算不等价于动态 host/device 比例；需要逐 rank 配置时可显式使用原生 `cpu_bytes_to_use_per_rank`。vime 管理的 PD 仅在 prefill 开启，与当前 engine builder 一致；不自动配置 decode offload 或分布式存储。KV 是特定权重下的激活，跨 actor 权重更新必须正确失效。因此要在有效权重窗口内测量可用命中。
 
 ## 先 Debug，再优化
 
