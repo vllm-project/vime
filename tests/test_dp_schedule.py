@@ -339,6 +339,7 @@ def test_memagent_turns_preserve_parent_rollout_groups(indices, parent_ids, expe
 
     import torch
 
+    monkeypatch.syspath_prepend(Path(__file__).resolve().parents[1])
     from examples.mem_agent.custom_convert import custom_convert
     from vime.utils.types import Sample
 
