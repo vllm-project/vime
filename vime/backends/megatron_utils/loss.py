@@ -1521,8 +1521,8 @@ def loss_function(
     Returns:
         Tuple of `(scaled_loss, normalizer, logging_dict)` where:
         - `scaled_loss` is the loss tensor (scalar) rescaled for Megatron.
-        - `normalizer` is `num_tokens` (scalar tensor) if
-          `args.calculate_per_token_loss` is True, else `1` (int).
+        - `normalizer` is `num_tokens` if per-token loss is enabled, otherwise
+          a device scalar equal to one for Megatron's clamp/reduction path.
         - `logging_dict` has keys "keys" (list of str metric names) and
           "values" (1D tensor: [count, metric1, metric2, ...]).
     """
@@ -1572,9 +1572,20 @@ def loss_function(
     else:
         loss = loss * mpu.get_context_parallel_world_size()
 
+    metric_values = list(log.values())
+    if args.calculate_per_token_loss:
+        metric_count = num_tokens
+    else:
+        # The non-token denominator is ignored by reduce_train_step_metrics.
+        # Derive its placeholder from an existing device scalar instead of
+        # allocating torch.tensor(0, device=...) in Megatron's final
+        # microbatch synchronization context. That allocation can stall on
+        # Ascend when distributed gradient synchronization is enabled.
+        metric_count = metric_values[0].detach() * 0 if metric_values else loss.detach() * 0
+
     return (
         loss,
-        (num_tokens if args.calculate_per_token_loss else torch.ones((), dtype=torch.int64, device=logits.device)),
+        (num_tokens if args.calculate_per_token_loss else num_tokens.detach() * 0 + 1),
         {
             "keys": list(log.keys()),
             # values[0] is the consumer's reporting denominator after
@@ -1584,16 +1595,12 @@ def loss_function(
             # so we leave a 0 placeholder here and let ``train_one_step``
             # substitute the constant directly, instead of routing it through
             # per-mb fractions.
-            # Keep GPU scalars on device. Constructing a tensor from their
-            # Python list reads them back individually and synchronizes CUDA.
+            # Keep the device scalars on device: convert each logged value
+            # in place instead of stacking the raw Python list, and use the
+            # allocation-free placeholder above instead of allocating a new
+            # zero/one tensor inside Megatron's final sync context.
             "values": torch.stack(
-                [
-                    (
-                        num_tokens.detach()
-                        if args.calculate_per_token_loss
-                        else torch.zeros((), dtype=torch.int64, device=logits.device)
-                    ),
-                ]
+                [metric_count]
                 + [
                     (
                         value.detach().reshape(()).to(logits.device)
