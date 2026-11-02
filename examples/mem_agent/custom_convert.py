@@ -119,6 +119,11 @@ def custom_convert(args, samples):
         "sample_indices": sample_indices,
         "rollout_ids": rollout_ids,
     }
+    mask_sums_per_sample = [sum(mask) for mask in loss_masks]
+    rollout_total_mask: dict[int, int] = {}
+    for rollout_id, mask_sum in zip(rollout_ids, mask_sums_per_sample, strict=True):
+        rollout_total_mask[rollout_id] = rollout_total_mask.get(rollout_id, 0) + mask_sum
+    train_data["rollout_mask_sums"] = [rollout_total_mask[rollout_id] for rollout_id in rollout_ids]
     if has_rollout_log_probs:
         train_data["rollout_log_probs"] = rollout_log_probs_list
 
