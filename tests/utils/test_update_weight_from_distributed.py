@@ -281,6 +281,10 @@ def _updater_for_transfer(update_module, *, mtp=False, dspark=False, fail=False)
     updater.quantization_config = None
     updater.weight_version = 0
     updater.update_weight_metrics = {}
+    # Draft-publication state is set in __init__; this object.__new__ fixture
+    # must mirror it so update_weights() sees the no-pending-Draft baseline.
+    updater._external_draft_named_tensors = None
+    updater._external_draft_version = None
     updater.rollout_engines = [RecordingEngine()]
     client = update_module.VimeRayWeightSyncClient(updater.rollout_engines, lambda: updater.weight_version)
     updater._source = types.SimpleNamespace(draft=False)
