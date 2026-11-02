@@ -2,6 +2,7 @@ import socket
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
+from typing import Any
 
 import ray
 import torch
@@ -33,21 +34,24 @@ class UpdateWeightFromDistributed:
         self.quantization_config = quantization_config
         self.weight_version = 0
         self.update_weight_metrics: dict[str, float] = {}
+        self._external_draft_named_tensors = None
+        self._external_draft_version = None
         iterator = HfWeightIteratorDirect(
             args=args,
             model=model,
             model_name=model_name,
             quantization_config=quantization_config,
         )
-        draft_weights_getter = (
-            partial(
+        if self.args.dspark_enabled:
+            draft_weights_getter = partial(
                 export_dspark_model_weights,
                 model,
                 use_policy_embedding=not self.args.dspark_pretrained_model,
             )
-            if self.args.dspark_enabled
-            else None
-        )
+        elif bool(getattr(self.args, "enable_external_draft_training", False)):
+            draft_weights_getter = self._get_external_draft_named_tensors
+        else:
+            draft_weights_getter = None
         self._source = HfWeightSource(iterator, weights_getter, draft_weights_getter)
         self._trainer = None
 
@@ -85,6 +89,26 @@ class UpdateWeightFromDistributed:
         metrics, self.update_weight_metrics = self.update_weight_metrics, {}
         return metrics
 
+    def set_external_draft_weights(self, payload: dict[str, Any] | None, draft_version: str | None) -> None:
+        """Stage a CPU Draft state for publication in the next Target update pause."""
+        self._external_draft_named_tensors = payload
+        self._external_draft_version = None if draft_version is None else str(draft_version)
+
+    def _get_external_draft_named_tensors(self):
+        """Yield the staged external Draft snapshot for the draft publication round.
+
+        Only the sender rank carries a staged payload; other ranks replay an
+        empty iteration (reading the staged snapshot involves no collectives).
+        """
+        payload = self._external_draft_named_tensors
+        if not isinstance(payload, dict) or not payload.get("named_tensors"):
+            return []
+        device = torch.npu.current_device() if current_platform().is_npu else torch.cuda.current_device()
+        return [
+            (str(name), value.detach().to(device=device, non_blocking=False).contiguous())
+            for name, value in payload["named_tensors"]
+        ]
+
     @torch.no_grad()
     def update_weights(self) -> None:
         assert self._trainer is not None
@@ -92,6 +116,7 @@ class UpdateWeightFromDistributed:
         flush_cache = should_flush_cache(
             self.args.flush_cache_interval, self.weight_version, getattr(self.args, "update_weight_start_version", 0)
         )
+        external_draft_pending = self._external_draft_version is not None
 
         if dist.get_rank() == 0:
             ray.get(
@@ -113,15 +138,30 @@ class UpdateWeightFromDistributed:
         client = self._trainer.client
         client.draft = False
         self._trainer.send_weights()
-        update_draft = self.args.dspark_enabled or (
-            self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp"
-        )
-        if update_draft:
-            self._source.draft = self.args.dspark_enabled
-            client.draft = True
-            self._trainer.send_weights()
-            self._source.draft = False
-            client.draft = False
+
+        if external_draft_pending:
+            # One full draft round through the trainer: client.draft routes
+            # start_weight_update to the engine's start_draft_weight_update,
+            # and source.draft yields the staged external snapshot.
+            try:
+                self._source.draft = True
+                client.draft = True
+                self._trainer.send_weights()
+            finally:
+                self._source.draft = False
+                client.draft = False
+                self._external_draft_named_tensors = None
+                self._external_draft_version = None
+        else:
+            update_draft = self.args.dspark_enabled or (
+                self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp"
+            )
+            if update_draft:
+                self._source.draft = self.args.dspark_enabled
+                client.draft = True
+                self._trainer.send_weights()
+                self._source.draft = False
+                client.draft = False
 
         if dist.get_rank() == 0:
             if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
