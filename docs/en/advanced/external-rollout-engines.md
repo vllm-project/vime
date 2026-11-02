@@ -67,9 +67,9 @@ Full-checkpoint update from disk is the simplest fallback path for external depl
 --update-weight-disk-dir /shared/fs/full-updates
 ```
 
-At every weight sync, the trainer writes a complete HF checkpoint directory under `--update-weight-disk-dir`, such as `weight_v000123/`, then calls each vLLM engine's `update_weights_from_disk` endpoint over HTTP so the engine reloads the checkpoint without a process restart.
+At every weight sync, the trainer writes a complete HF checkpoint directory under `--update-weight-disk-dir`, such as `weight_v000123/`, then calls each engine adapter's `update_weights_from_disk` method, which invokes vLLM's `reload_weights` worker RPC over HTTP `/collective_rpc`, so the engine reloads the checkpoint without a process restart.
 
-Adding `--update-weight-local-checkpoint-dir` makes each engine first pull the published checkpoint onto every host it spans (`/pull_weights`, shipped in vime's vllm patch) and reload from local disk (e.g. NVMe) — one shared-filesystem read per host instead of one per rank, which matters when the shared dir is object-store-backed or the engine spans several nodes.
+Adding `--update-weight-local-checkpoint-dir` makes each engine first pull the published checkpoint onto every host it spans (`pull_weights` worker RPC, shipped in vime's vllm patch) and reload from local disk (e.g. NVMe) — one shared-filesystem read per host instead of one per rank, which matters when the shared dir is object-store-backed or the engine spans several nodes.
 
 This mode has a simple control plane: it does not require an NCCL group between trainer and engines. It only requires both sides to see the same shared filesystem path. The tradeoff is size: every sync writes the full actor weights, which is expensive for large models or frequent updates.
 
@@ -83,7 +83,7 @@ This keeps the full-checkpoint directories after engines acknowledge the load.
 
 ## Update With Delta
 
-Delta update targets large-model training/inference disaggregation across clusters or datacenters. Instead of writing a full checkpoint every sync, the trainer keeps a CPU snapshot of the previous sync, diffs each parameter against it, and publishes only the changed bytes; each engine's `/pull_weights` endpoint (shipped in vime's vllm patch) applies the delta into a host-local checkpoint on every host the engine spans, and the engine reloads via the vanilla `update_weights_from_disk` endpoint. vime only calls the engine's HTTP endpoint, so multi-node external engines work the same as vime-launched ones.
+Delta update targets large-model training/inference disaggregation across clusters or datacenters. Instead of writing a full checkpoint every sync, the trainer keeps a CPU snapshot of the previous sync, diffs each parameter against it, and publishes only the changed bytes; each engine's `pull_weights` worker RPC (shipped in vime's vllm patch) applies the delta into a host-local checkpoint on every host the engine spans, and the engine reloads via the `update_weights_from_disk` adapter method. Both worker RPCs use HTTP `/collective_rpc`, so multi-node external engines work the same as vime-launched ones.
 
 ```bash
 --update-weight-mode delta

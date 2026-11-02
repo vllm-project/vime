@@ -100,7 +100,7 @@ steps:
           set -euo pipefail
           pip install -q torch --index-url https://download.pytorch.org/whl/cpu
           pip install -q pytest numpy msgspec==0.22.0 packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle blake3 xxhash zstandard psutil wandb
-          pip install -q --upgrade --no-deps --only-binary=straw-queue "straw-queue>=0.1.3"
+          pip install -q --upgrade --no-deps --only-binary=straw-queue "straw-queue==0.1.6"
           pip install -q -e . --no-deps
           python tests/test_megatron_argument_validation.py
           python tests/test_megatron_tokenizer_init.py
@@ -193,7 +193,7 @@ steps:
         -v "$$PWD:/workspace" -w /workspace \
         "$${VIME_CI_IMAGE:-vllm/vime:latest}" bash -lc '
           set -euo pipefail
-          pip install -q --upgrade --no-deps --only-binary=straw-queue "straw-queue>=0.1.3" --break-system-packages
+          pip install -q --upgrade --no-deps --only-binary=straw-queue "straw-queue==0.1.6" --break-system-packages
           pip install -q -e . --no-deps --break-system-packages
           for test_file in \
             tests/test_advantage_whiten_cp.py \

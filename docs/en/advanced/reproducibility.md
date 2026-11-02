@@ -2,7 +2,8 @@
 
 Reproducibility is a bedrock of scientific progress. By combining vLLM's [batch-invariant deterministic inference](https://vllm.ai/blog/2025-11-10-bitwise-consistent-train-inference) with Megatron-LM's deterministic mode, vime supports bitwise experiment reproduction.
 
-To enable deterministic training, you need to first uninstall the flash attention 3 in the docker with `pip uninstall flash_attn_3 -y` and set:
+To enable deterministic training, uninstall FlashAttention 3 with `pip uninstall flash_attn_3 -y`, then set:
+
 ```bash
   # vLLM config
   --vllm-enable-deterministic-inference
@@ -12,7 +13,7 @@ To enable deterministic training, you need to first uninstall the flash attentio
   --deterministic-mode
 ```
 
-And set the following environment variables:
+Also set the following environment variables:
 
 ```bash
      "env_vars": {
@@ -25,7 +26,7 @@ And set the following environment variables:
 
 The GSM8K example enables deterministic training for Qwen3-4B-Instruct-2507, with CP=4 and a 128K response limit.
 
-For data and checkpoint preparation, please run:
+Use the following commands to initialize the training data and checkpoint:
 
 ```bash
 # download
@@ -42,7 +43,7 @@ PYTHONPATH=/root/Megatron-LM/ python \
    --save /root/Qwen3-4B-Instruct-2507_torch_dist/
 ```
 
-And to run training,
+Run training with:
 
 ```bash
 bash scripts/run-qwen3-4B-reproducibility.sh

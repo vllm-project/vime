@@ -67,9 +67,9 @@ full checkpoint update from disk 是 external 场景最简单的兜底路径：
 --update-weight-disk-dir /shared/fs/full-updates
 ```
 
-每次权重同步时，训练端会在 `--update-weight-disk-dir` 下写一个完整 HF checkpoint 目录，例如 `weight_v000123/`，然后通过 HTTP 调用每个 vLLM engine 的 `update_weights_from_disk`，让 engine 在不重启进程的情况下重新加载 checkpoint。
+每次权重同步时，训练端会在 `--update-weight-disk-dir` 下写一个完整 HF checkpoint 目录，例如 `weight_v000123/`，然后调用每个 engine 适配器的 `update_weights_from_disk` 方法，经 HTTP `/collective_rpc` 调用 vLLM 的 `reload_weights` worker RPC，让 engine 在不重启进程的情况下重新加载 checkpoint。
 
-额外设置 `--update-weight-local-checkpoint-dir` 后，每个 engine 会先把发布的 checkpoint pull 到它覆盖的每个 host 的本地磁盘（`/pull_weights`，随 vime 的 vllm patch 提供），再从本地（如 NVMe）reload——共享文件系统每个 host 只读一次，而不是每个 rank 读一次；当共享目录是对象存储或 engine 跨多个节点时尤其重要。
+额外设置 `--update-weight-local-checkpoint-dir` 后，每个 engine 会先把发布的 checkpoint pull 到它覆盖的每个 host 的本地磁盘（`pull_weights` worker RPC，随 vime 的 vllm patch 提供），再从本地（如 NVMe）reload——共享文件系统每个 host 只读一次，而不是每个 rank 读一次；当共享目录是对象存储或 engine 跨多个节点时尤其重要。
 
 这个模式的优点是控制面简单：不要求训练器和 engine 建 NCCL group，只要求二者能看到同一个共享文件系统路径。缺点也直接：每次同步都写完整 actor 权重，对大模型和高频同步来说非常重。
 
@@ -83,7 +83,7 @@ full checkpoint update from disk 是 external 场景最简单的兜底路径：
 
 ## Update With Delta
 
-delta update 面向大模型、跨集群或跨数据中心训推解耦。它不每次都写完整 checkpoint，而是在训练端保留上一次同步的 CPU snapshot，逐参数比对，只发布变化的字节；每个 engine 的 `/pull_weights` 端点（随 vime 的 vllm patch 提供）把 delta apply 进 engine 覆盖的每个 host 的本地 checkpoint，再通过原生 `update_weights_from_disk` 端点 reload。vime 只调用 engine 的 HTTP 端点，所以多节点 external engine 与 vime 拉起的 engine 行为一致。
+delta update 面向大模型、跨集群或跨数据中心训推解耦。它不每次都写完整 checkpoint，而是在训练端保留上一次同步的 CPU snapshot，逐参数比对，只发布变化的字节；每个 engine 的 `pull_weights` worker RPC（随 vime 的 vllm patch 提供）把 delta apply 进 engine 覆盖的每个 host 的本地 checkpoint，再通过 `update_weights_from_disk` 适配方法 reload。两个 worker RPC 都使用 HTTP `/collective_rpc`，所以多节点 external engine 与 vime 拉起的 engine 行为一致。
 
 ```bash
 --update-weight-mode delta

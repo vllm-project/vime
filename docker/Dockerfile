@@ -176,7 +176,7 @@ COPY requirements.txt /tmp/requirements.txt
 COPY --from=sunabako-wheel /wheels/ /tmp/sunabako-wheels/
 RUN if ls /tmp/sunabako-wheels/*.whl >/dev/null 2>&1; then pip install --no-deps /tmp/sunabako-wheels/*.whl; fi
 RUN pip install --ignore-installed PyJWT && \
-    pip install -r /tmp/requirements.txt "wandb==0.31.0" "opentelemetry-exporter-otlp==1.45.1"
+    pip install -r /tmp/requirements.txt "straw-queue==0.1.6" "wandb==0.31.0" "opentelemetry-exporter-otlp==1.45.1"
 RUN pip install --no-deps --force-reinstall "mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}"
 COPY --from=vllm-router-wheel /wheels/ /tmp/router-wheels/
 RUN pip install --no-deps --force-reinstall /tmp/router-wheels/*.whl && rm -rf /tmp/router-wheels

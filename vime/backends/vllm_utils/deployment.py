@@ -21,7 +21,7 @@ def _start_router(
     has_pd_disaggregation: bool = False,
     force_new: bool = False,
 ) -> tuple[str, int, int | None]:
-    """Start the rollout HTTP gateway (vllm-router)."""
+    """Start vllm_router and return (router_ip, router_port, prometheus_port)."""
     if not force_new and args.vllm_router_ip is not None:
         return args.vllm_router_ip, args.vllm_router_port, None
     router_ip = _wrap_ipv6(get_host_info()[1])

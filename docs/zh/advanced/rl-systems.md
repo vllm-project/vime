@@ -12,7 +12,7 @@
 
 $$t_W\approx S_W/B_W+t_0.$$
 
-Delta 传输用变化字节 $S_\Delta$ 替代全量，但增加 snapshot、diff、编码和重建开销。只有节约的传输时间超过这些成本才有收益。vime 同卡使用 CUDA IPC；分离全量更新支持 NCCL 或磁盘。Delta 需要磁盘传输、共享目录、推理主机本地 checkpoint 和带补丁的 vLLM `/pull_weights` 接口。
+Delta 传输用变化字节 $S_\Delta$ 替代全量，但增加 snapshot、diff、编码和重建开销。只有节约的传输时间超过这些成本才有收益。vime 同卡使用 CUDA IPC；分离全量更新支持 NCCL 或磁盘。Delta 需要磁盘传输、共享目录、推理主机本地 checkpoint 和带补丁的 vLLM `pull_weights` worker RPC。
 
 相关系统研究：[HybridFlow](https://arxiv.org/abs/2409.19256)。实际接口见[外部引擎](external-rollout-engines.md)、[增量同步](delta-weight-sync.md)和[训练拓扑](megatron-config.md)。
 

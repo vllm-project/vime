@@ -196,10 +196,6 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
                     finish_reason = choice["finish_reason"]
 
                 # Each chunk carries only its delta tokens + logprobs; accumulate.
-                delta_tokens = choice.get("token_ids") or []
-                content = (choice.get("logprobs") or {}).get("content") or []
-                if len(content) != len(delta_tokens):
-                    raise ValueError("Streaming token IDs and logprob pairs must have matching lengths.")
                 delta_tokens, delta_log_probs = _inference_generate_tokens_and_logprobs(choice)
                 if delta_tokens:
                     call_tokens += delta_tokens

@@ -101,7 +101,8 @@ def test_discover_external_native_ec_roles(monkeypatch, nested, ec_connector, ec
 
 
 @pytest.mark.parametrize("worker_type", ["regular", "prefill", "decode"])
-def test_start_external_rollout_servers_exposes_parallel_configs(monkeypatch, worker_type):
+@pytest.mark.parametrize("prometheus_port", [None, 31000])
+def test_start_external_rollout_servers_exposes_parallel_configs(monkeypatch, worker_type, prometheus_port):
     class FakeActor:
         init = Namespace(remote=lambda **kwargs: kwargs)
 
@@ -140,7 +141,7 @@ def test_start_external_rollout_servers_exposes_parallel_configs(monkeypatch, wo
 
     servers, init_handles = start_external_rollout_servers(
         args,
-        start_router=lambda *args, **kwargs: ("host1", 30000, None),
+        start_router=lambda *args, **kwargs: ("host1", 30000, prometheus_port),
     )
 
     assert servers["default"].engine_parallel_configs == [
@@ -153,6 +154,7 @@ def test_start_external_rollout_servers_exposes_parallel_configs(monkeypatch, wo
             "ep_size": 4,
         }
     ]
+    assert servers["default"].prometheus_port == prometheus_port
     assert len(init_handles) == 1
     assert init_handles[0]["router_ip"] == "host1"
     assert init_handles[0]["router_port"] == 30000
