@@ -102,9 +102,11 @@ def add_vllm_arguments(parser):
     parser.add_argument = _wrap_add_argument(old_add_argument)
     parser.add_argument_group = patched_add_argument_group
     AsyncEngineArgs.add_cli_args(parser)
-    from vllm.entrypoints.launchers.cli_args import FrontendArgs
+    from vllm.entrypoints.common.cli_args import FrontendArgs
 
     FrontendArgs.add_cli_args(parser)
+    # Vime rollout uses the opt-in /inference/v1/generate endpoint.
+    parser.set_defaults(vllm_enable_scale_out=True)
     parser.add_argument = old_add_argument
     parser.add_argument_group = old_add_argument_group
 
