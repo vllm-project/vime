@@ -640,6 +640,9 @@ def _compute_server_args(
         "enable_prompt_tokens_details": True,
         "enable_server_load_tracking": True,
     }
+    if current_platform().is_npu:
+        # Ascend V2 must retain the reloadable weights used by RL updates.
+        kwargs["enable_scale_out"] = True
 
     if pp > 1:
         kwargs["pipeline_parallel_size"] = pp
@@ -774,4 +777,5 @@ _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS = [
     "logprobs_mode",
     "enable_prompt_tokens_details",
     "enable_server_load_tracking",
+    "enable_scale_out",
 ]

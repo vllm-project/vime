@@ -104,14 +104,18 @@ class HuggingfaceAttention(MegatronModule, ABC):
         assert packed_seq_params is not None
         cu_seqlens = packed_seq_params.cu_seqlens_q
 
+        tp_sharded = getattr(self, "tensor_parallel_sharded", False)
         if self.args.sequence_parallel:
-            # tensor_parallel_output_grad=False: the linear attention after this
-            # gather is NOT TP-sharded (duplicated on all ranks), so the backward
-            # should split (not reduce-scatter) to avoid inflating gradients by TP.
+            # Sharded heads contribute different input gradients and require a sum;
+            # the legacy duplicated GDN must only split to avoid TP-fold scaling.
             hidden_states = tensor_parallel.gather_from_sequence_parallel_region(
                 hidden_states,
-                tensor_parallel_output_grad=False,
+                tensor_parallel_output_grad=tp_sharded,
                 group=mpu.get_tensor_model_parallel_group(),
+            )
+        elif tp_sharded:
+            hidden_states = tensor_parallel.copy_to_tensor_model_parallel_region(
+                hidden_states, group=mpu.get_tensor_model_parallel_group()
             )
 
         if mpu.get_context_parallel_world_size() > 1:
@@ -161,7 +165,15 @@ class HuggingfaceAttention(MegatronModule, ABC):
                 output_list.append(chunks[2 * cp_size - 1 - cp_rank])
             output = torch.cat(output_list, dim=0)
 
-        if self.args.sequence_parallel:
+        if tp_sharded and self.args.sequence_parallel:
+            output = tensor_parallel.reduce_scatter_to_sequence_parallel_region(
+                output, group=mpu.get_tensor_model_parallel_group()
+            )
+        elif tp_sharded:
+            output = tensor_parallel.reduce_from_tensor_model_parallel_region(
+                output, group=mpu.get_tensor_model_parallel_group()
+            )
+        elif self.args.sequence_parallel:
             output = tensor_parallel.scatter_to_sequence_parallel_region(
                 output, group=mpu.get_tensor_model_parallel_group()
             )

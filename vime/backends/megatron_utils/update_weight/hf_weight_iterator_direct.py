@@ -222,6 +222,7 @@ def _get_megatron_local_param_infos(args: Namespace, model: Sequence[torch.nn.Mo
                 "partition_dim": getattr(param, "partition_dim", -1),
                 "partition_stride": getattr(param, "partition_stride", 1),
                 "parallel_mode": getattr(param, "parallel_mode", None),
+                "tensor_parallel_split_sizes": getattr(param, "tensor_parallel_split_sizes", None),
             },
             size=param.numel() * param.element_size(),
             src_rank=rank,

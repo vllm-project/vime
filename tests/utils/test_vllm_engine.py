@@ -362,10 +362,12 @@ def test_compute_server_args_uses_native_platform_backend(vllm_args, monkeypatch
     vllm_args.colocate = colocate
     monkeypatch.setattr(mod, "current_platform", lambda: get_platform(platform_name))
 
-    sa, _ = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
+    sa, check_fields = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
 
     assert not sa.get("worker_extension_cls")
     assert sa["weight_transfer_config"] == {"backend": backend}
+    assert sa.get("enable_scale_out") is (True if platform_name == "npu" else None)
+    assert "enable_scale_out" not in check_fields
 
 
 @pytest.mark.unit
