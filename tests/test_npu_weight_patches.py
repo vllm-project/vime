@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 REPO = Path(__file__).resolve().parents[1]
 NUM_GPUS = 0
@@ -174,10 +174,11 @@ class TestNPUWeightPatches(unittest.TestCase):
             return SimpleNamespace(**kwargs)
 
         stats = {"num_draft_tokens": 4, "num_accepted_draft_tokens": 3, "num_spec_steps": 1}
+        build_metrics = Mock(return_value=SimpleNamespace(model_dump=lambda: stats))
         namespace = {
             "UsageInfo": record,
             "PerRequestMetrics": record,
-            "build_spec_decoding_metrics": lambda result: SimpleNamespace(model_dump=lambda: stats),
+            "build_spec_decoding_metrics": build_metrics,
             "clamp_prompt_logprobs": lambda value: value,
         }
         subject = _load_definitions(
@@ -203,6 +204,7 @@ class TestNPUWeightPatches(unittest.TestCase):
         self.assertEqual(fields["weight_version"], "7")
         self.assertEqual(fields["request_spec_decode_stats"], stats)
         self.assertIsNotNone(fields["metrics"].speculative_decoding)
+        build_metrics.assert_called_once_with(result)
 
     def _packed(self):
         try:

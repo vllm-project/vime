@@ -171,7 +171,7 @@ index a74a0d2..49efac4 100644
      kv_transfer_params: dict[str, Any] | None = Field(
          default=None,
 diff --git a/vllm/entrypoints/scale_out/token_in_token_out/serving.py b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
-index b46720e..358d0b9 100644
+index b46720e..7cb6235 100644
 --- a/vllm/entrypoints/scale_out/token_in_token_out/serving.py
 +++ b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
 @@ -399,6 +399,7 @@ class ServingTokens(GenerateBaseServing):
@@ -222,7 +222,7 @@ index b46720e..358d0b9 100644
      ) -> dict[str, Any]:
          """Build the fields shared by every non-streaming response level."""
          assert final_res.prompt_token_ids is not None
-@@ -616,6 +622,11 @@ class ServingTokens(GenerateBaseServing):
+@@ -616,15 +622,22 @@ class ServingTokens(GenerateBaseServing):
                  cached_tokens=final_res.num_cached_tokens
              )
  
@@ -234,8 +234,14 @@ index b46720e..358d0b9 100644
          request_metadata.final_usage_info = usage
  
          per_request_metrics = None
-@@ -625,6 +636,8 @@ class ServingTokens(GenerateBaseServing):
-                 per_request_metrics = PerRequestMetrics(speculative_decoding=spec_stats)
+-        if request.sampling_params.n == 1:
+-            spec_stats = build_spec_decoding_metrics(final_res)
+-            if spec_stats is not None:
+-                per_request_metrics = PerRequestMetrics(speculative_decoding=spec_stats)
++        if request.sampling_params.n == 1 and spec_decode_metrics is not None:
++            per_request_metrics = PerRequestMetrics(
++                speculative_decoding=spec_decode_metrics
++            )
          return dict(
              request_id=request_id,
 +            weight_version=weight_version,

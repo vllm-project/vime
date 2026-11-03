@@ -185,6 +185,14 @@ def test_add_vllm_arguments_overrides_router_balance_threshold_defaults(args_mod
     assert parsed.router_balance_rel_threshold == 1.2
 
 
+@pytest.mark.unit
+def test_add_vllm_arguments_enables_scale_out_by_default(args_mod, monkeypatch):
+    _patch_device_config(monkeypatch)
+    parser = argparse.ArgumentParser(add_help=False)
+    args_mod.add_vllm_arguments(parser)
+    assert parser.parse_args([]).vllm_enable_scale_out is True
+
+
 def _patch_device_config(monkeypatch):
     """Avoid device detection and third-party plugin loading in parser tests."""
     try:

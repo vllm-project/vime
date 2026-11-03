@@ -273,9 +273,9 @@ def install_vllm_cli_stubs() -> None:
     entrypoints_mod.__path__ = []
     openai_mod = types.ModuleType("vllm.entrypoints.openai")
     openai_mod.__path__ = []
-    launchers_mod = types.ModuleType("vllm.entrypoints.launchers")
-    launchers_mod.__path__ = []
-    cli_args_mod = types.ModuleType("vllm.entrypoints.launchers.cli_args")
+    common_mod = types.ModuleType("vllm.entrypoints.common")
+    common_mod.__path__ = []
+    cli_args_mod = types.ModuleType("vllm.entrypoints.common.cli_args")
 
     import dataclasses as _dc
 
@@ -288,9 +288,9 @@ def install_vllm_cli_stubs() -> None:
     cli_args_mod.FrontendArgs = FrontendArgs
     cli_args_mod.make_arg_parser = lambda parser=None: parser
     cli_args_mod.validate_parsed_serve_args = lambda args: args
-    launchers_mod.cli_args = cli_args_mod
+    common_mod.cli_args = cli_args_mod
     entrypoints_mod.openai = openai_mod
-    entrypoints_mod.launchers = launchers_mod
+    entrypoints_mod.common = common_mod
     vllm_mod.entrypoints = entrypoints_mod
 
     cli_mod = types.ModuleType("vllm.entrypoints.cli")
@@ -316,8 +316,8 @@ def install_vllm_cli_stubs() -> None:
     sys.modules["vllm.engine.arg_utils"] = arg_utils
     sys.modules["vllm.entrypoints"] = entrypoints_mod
     sys.modules["vllm.entrypoints.openai"] = openai_mod
-    sys.modules["vllm.entrypoints.launchers"] = launchers_mod
-    sys.modules["vllm.entrypoints.launchers.cli_args"] = cli_args_mod
+    sys.modules["vllm.entrypoints.common"] = common_mod
+    sys.modules["vllm.entrypoints.common.cli_args"] = cli_args_mod
     sys.modules["vllm.entrypoints.cli"] = cli_mod
     sys.modules["vllm.entrypoints.cli.serve"] = serve_mod
 

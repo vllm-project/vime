@@ -72,12 +72,31 @@ names = [
 ]
 with open(os.environ["PIP_CONSTRAINT"], "w") as constraints:
     constraints.write("\n".join(f"{name}=={metadata.version(name)}" for name in names) + "\n")
+    # PyArrow 26 requires NumPy 2, while the NPU Triton stack uses NumPy 1.26.4.
+    constraints.write("pyarrow==21.0.0\n")
+    constraints.write("datasets==4.4.2\n")
 PY
 ```
 
+PyArrow 21.0.0 with datasets 4.4.2 supports the image's NumPy 1.26.4 and Parquet rollout datasets.
+Keep this constraint when installing Vime dependencies; upgrading NumPy to satisfy
+PyArrow 26 conflicts with the image's Triton requirements. datasets 5.1 requires
+PyArrow >=24, so it must be constrained together with PyArrow.
+
 ### 1. vLLM and vLLM-Ascend
 
-Both packages are installed in editable mode in the base image. Apply the patches to their existing source trees:
+Apply the patches to source trees at the pinned commits above. If serving packages
+are installed in editable mode, these edits take effect through that installation.
+If they were installed as ordinary wheels, rebuild and reinstall both packages
+from the patched trees before testing; changing the checkout alone is insufficient.
+Check the imported package paths and run a Vime parser/server smoke test.
+
+The pinned vLLM uses `vllm.entrypoints.common.cli_args`. Vime must use that
+module for frontend CLI imports. Its rollout also requires the scale-out
+endpoint: keep `vllm_enable_scale_out=True` for Vime-launched servers, or
+supply `--enable-scale-out` when launching an external vLLM server.
+
+Apply the source patches:
 
 ```bash
 git -C /vllm-workspace/vllm apply --check "${PATCH_DIR}/vllm.patch"

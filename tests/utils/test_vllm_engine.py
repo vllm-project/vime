@@ -29,6 +29,20 @@ def _patch_vllm_server_fields(monkeypatch):
     monkeypatch.setattr(mod, "_VLLM_SERVER_FIELDS", frozenset())
 
 
+@pytest.mark.unit
+@pytest.mark.skipif(not _unit_stubs.real_module_available("vllm"), reason="requires real vllm install")
+def test_server_field_names_include_frontend_and_engine_options():
+    """Resolve real CLI dataclasses so an upstream module move breaks this test."""
+    from dataclasses import fields
+
+    from vllm.engine.arg_utils import AsyncEngineArgs
+    from vllm.entrypoints.common.cli_args import FrontendArgs
+
+    names = mod._vllm_server_field_names()
+    assert {field.name for field in fields(AsyncEngineArgs)} <= names
+    assert {field.name for field in fields(FrontendArgs)} <= names
+
+
 @pytest.fixture
 def vllm_args() -> SimpleNamespace:
     return SimpleNamespace(
@@ -117,12 +131,16 @@ def test_launch_config_single_node(vllm_args):
 
 @pytest.mark.unit
 def test_compute_server_args_preserves_non_topology_vllm_flags(vllm_args, monkeypatch):
-    monkeypatch.setattr(mod, "_VLLM_SERVER_FIELDS", frozenset({"server_concurrency", "tool_call_parser"}))
+    monkeypatch.setattr(
+        mod, "_VLLM_SERVER_FIELDS", frozenset({"server_concurrency", "tool_call_parser", "enable_scale_out"})
+    )
     vllm_args.vllm_server_concurrency = 256
     vllm_args.vllm_tool_call_parser = "qwen3_coder"
+    vllm_args.vllm_enable_scale_out = True
     sa, _ = mod._compute_server_args(vllm_args, rank=0, dist_init_addr=None, host="127.0.0.1", port=8000)
     assert sa["server_concurrency"] == 256
     assert sa["tool_call_parser"] == "qwen3_coder"
+    assert sa["enable_scale_out"] is True
 
 
 @pytest.mark.unit

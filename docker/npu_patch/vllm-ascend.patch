@@ -297,3 +297,43 @@ index 8bad234..a930d4e 100644
      def check_health(self) -> None:
          import subprocess
  
+diff --git a/tests/ut/distributed/weight_transfer/test_packed_tensor.py b/tests/ut/distributed/weight_transfer/test_packed_tensor.py
+--- a/tests/ut/distributed/weight_transfer/test_packed_tensor.py
++++ b/tests/ut/distributed/weight_transfer/test_packed_tensor.py
+@@ -58,4 +58,7 @@
+     """
+
++    def wait_stream(self, stream) -> None:
++        self.waited_for = stream
++
+     def synchronize(self) -> None:
+         return None
+@@ -120,4 +123,18 @@
+     group.broadcast = MagicMock()
+     return group
++
++
++def test_packed_producer_waits_for_source_stream(monkeypatch):
++    """Packing must observe writes enqueued on the caller's stream."""
++    source_stream = _FakeNpuStream()
++    monkeypatch.setattr(torch.npu, "current_stream", lambda: source_stream)
++    group = _make_group_mock()
++
++    def broadcast(tensor, *, src, stream):
++        assert stream.waited_for is source_stream
++
++    group.broadcast.side_effect = broadcast
++    packed_broadcast_producer(iter([("w", torch.ones(4))]), group, src=0, post_iter_func=lambda item: item[1])
++    group.broadcast.assert_called_once()
+
+
+diff --git a/tests/ut/distributed/weight_transfer/test_npu_ipc_engine.py b/tests/ut/distributed/weight_transfer/test_npu_ipc_engine.py
+--- a/tests/ut/distributed/weight_transfer/test_npu_ipc_engine.py
++++ b/tests/ut/distributed/weight_transfer/test_npu_ipc_engine.py
+@@ -333,5 +333,5 @@
+         pytest.raises(ValueError, match="tensor_sizes.*required"),
+     ):
+-        engine.receive_weights(types.SimpleNamespace(tensor_sizes=None))
++        engine.receive_weights(types.SimpleNamespace(names=["w"], tensor_sizes=None))
+     engine.model.load_weights.assert_not_called()
+
