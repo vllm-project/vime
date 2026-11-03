@@ -144,7 +144,7 @@ RUN git clone https://gitcode.com/Ascend/MegatronAdaptor.git /root/MegatronAdapt
     git clone https://gitcode.com/Ascend/TransformerEngineNPU.git /root/TransformerEngineNPU && \
     git -C /root/TransformerEngineNPU checkout "${TRANSFORMER_ENGINE_NPU_COMMIT}"
 
-# Apply the shared Megatron patch and NPU adapter patches.
+# Apply the training dependency patches.
 RUN git -C /root/Megatron-LM apply --check --whitespace=nowarn \
       /opt/npu_patch/megatron.patch && \
     git -C /root/Megatron-LM apply --whitespace=nowarn \
@@ -152,7 +152,11 @@ RUN git -C /root/Megatron-LM apply --check --whitespace=nowarn \
     git -C /root/MegatronAdaptor apply --check --whitespace=nowarn \
       /opt/npu_patch/megatron-adaptor.patch && \
     git -C /root/MegatronAdaptor apply --whitespace=nowarn \
-      /opt/npu_patch/megatron-adaptor.patch
+      /opt/npu_patch/megatron-adaptor.patch && \
+    git -C /root/TransformerEngineNPU apply --check --whitespace=nowarn \
+      /opt/npu_patch/transformer-engine-npu.patch && \
+    git -C /root/TransformerEngineNPU apply --whitespace=nowarn \
+      /opt/npu_patch/transformer-engine-npu.patch
 
 RUN pip install --constraint /tmp/vime-npu-constraints.txt --no-build-isolation \
       "nvidia-modelopt==0.46.0" "nvdlfw-inspect==0.2.2" && \

@@ -14,7 +14,7 @@ This guide provides instructions for installing Vime with NPU support, including
 | FLA (serving, included in base image) | `flash-linear-attention-npu-a3==26.9.1+dev5cc6990` | [v26.9.1-20261020-020004](https://github.com/flashserve/flash-linear-attention-npu/releases/tag/v26.9.1-20261020-020004) |
 | Megatron-LM | `4b4acac9a1d28ea6829c8d4f566d75698a21249d` | [GitHub](https://github.com/NVIDIA/Megatron-LM) |
 | MegatronAdaptor | `c7e52b2c8482105e6ec7fcd8cdef364e7c7b22c5` | [GitCode](https://gitcode.com/Ascend/MegatronAdaptor) |
-| TransformerEngineNPU | `d405be23773968bf7fdc567854005054550830fc` | [GitCode](https://gitcode.com/Ascend/TransformerEngineNPU) |
+| TransformerEngineNPU | `d405be23773968bf7fdc567854005054550830fc` + `transformer-engine-npu.patch` | [GitCode](https://gitcode.com/Ascend/TransformerEngineNPU) |
 | torch_memory_saver (NPU) | `sgl-kernel-npu` tag `2026.6.0` + `torch-memory-saver.patch` | [GitHub](https://github.com/sgl-project/sgl-kernel-npu) |
 
 ## Preparing the Running Environment
@@ -82,12 +82,16 @@ pip install --no-deps --no-build-isolation -e "${VIME_INSTALL_ROOT}/Megatron-LM"
 ### 3. TransformerEngineNPU and MegatronAdaptor
 
 Use TransformerEngineNPU, not the CUDA TransformerEngine package.
+The patch removes device-to-host equality checks from fused RoPE backward by
+constructing the transposed rotation coefficients directly.
 
 ```bash
 pip install --no-build-isolation "nvidia-modelopt==0.46.0" "nvdlfw-inspect==0.2.2"
 
 git clone https://gitcode.com/Ascend/TransformerEngineNPU.git "${VIME_INSTALL_ROOT}/TransformerEngineNPU"
 git -C "${VIME_INSTALL_ROOT}/TransformerEngineNPU" checkout d405be23773968bf7fdc567854005054550830fc
+git -C "${VIME_INSTALL_ROOT}/TransformerEngineNPU" apply --check "${PATCH_DIR}/transformer-engine-npu.patch"
+git -C "${VIME_INSTALL_ROOT}/TransformerEngineNPU" apply "${PATCH_DIR}/transformer-engine-npu.patch"
 pip install --no-deps --no-build-isolation -e "${VIME_INSTALL_ROOT}/TransformerEngineNPU"
 
 git clone https://gitcode.com/Ascend/MegatronAdaptor.git "${VIME_INSTALL_ROOT}/MegatronAdaptor"
