@@ -31,6 +31,9 @@ documented in [`docker/npu_patch/README.md`](https://github.com/vllm-project/vim
 
 ## Quick Start
 
+For a dense hybrid-attention model with GDN head tensor parallelism, see the
+[Qwen3.8-27B example and E2E test](../examples/qwen3.8-27B-npu.md).
+
 ### Environment Setup
 
 Start the container, mounting the Ascend devices and driver files. Device names

@@ -12,6 +12,7 @@ from megatron.core.transformer.transformer_layer import get_transformer_layer_of
 
 from vime.platforms import current_platform
 from vime.utils.distributed_utils import get_gloo_group
+from vime.utils.gdn_tp import merge_gdn_qkv
 from vime.utils.types import ParamInfo
 
 
@@ -43,6 +44,9 @@ def all_gather_param(name: str, param: torch.nn.Parameter) -> torch.Tensor:
 
     param_partitions = [torch.empty_like(param.data) for _ in range(tp_size)]
     dist.all_gather(param_partitions, param.data, group=tp_group)
+    split_sizes = getattr(param, "tensor_parallel_split_sizes", None)
+    if split_sizes is not None:
+        return merge_gdn_qkv(param_partitions, split_sizes)
     partition_dim = param.partition_dim
     assert param.partition_stride == 1 or (
         param.partition_stride == 2 and "linear_fc1" in name
@@ -114,6 +118,10 @@ def all_gather_params_async(
             param = direct_param
         else:
             # Process the gathered partitions (same logic as original all_gather_param)
+            split_sizes = info.attrs.get("tensor_parallel_split_sizes")
+            if split_sizes is not None:
+                gathered_params.append(merge_gdn_qkv(param_partitions, split_sizes))
+                continue
             assert partition_dim is not None, "partition_stride != 1 is not supported"
             # TODO: here we did an extra copy during concat, maybe merge this with convert_to_hf is better?
             # TODO: check only GLU is used.

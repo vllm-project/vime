@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from safetensors import safe_open
 
 from vime.platforms import current_platform
+from vime.utils.gdn_tp import shard_gdn_qkv
 
 
 class SafetensorReader:
@@ -125,6 +126,10 @@ def shard_mcore_tensor(name: str, tensor: torch.Tensor, parameter: torch.Tensor)
     else:
         parallel_size = mpu.get_tensor_model_parallel_world_size()
         parallel_rank = mpu.get_tensor_model_parallel_rank()
+
+    split_sizes = getattr(parameter, "tensor_parallel_split_sizes", None)
+    if split_sizes is not None:
+        return shard_gdn_qkv(tensor, split_sizes, parallel_size, parallel_rank)
 
     return _tensor_parallel_shard(
         name,

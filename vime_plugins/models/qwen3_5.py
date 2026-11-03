@@ -3,6 +3,7 @@ import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from megatron.core import mpu
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_block import get_num_layers_to_build
@@ -42,6 +43,15 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         self.hidden_size = config.hidden_size
         self.num_v_heads = config.linear_num_value_heads
         self.num_k_heads = config.linear_num_key_heads
+        self.tp_size = (
+            mpu.get_tensor_model_parallel_world_size() if getattr(args, "qwen_gdn_tensor_parallel", False) else 1
+        )
+        if self.num_k_heads % self.tp_size or self.num_v_heads % self.tp_size:
+            raise ValueError("GDN K and V head counts must both be divisible by tensor parallel size")
+        if self.tp_size > 1 and mpu.get_context_parallel_world_size() != 1:
+            raise ValueError("Qwen GDN head tensor parallelism currently requires context parallel size 1")
+        self.num_v_heads //= self.tp_size
+        self.num_k_heads //= self.tp_size
         self.head_k_dim = config.linear_key_head_dim
         self.head_v_dim = config.linear_value_head_dim
         self.key_dim = self.head_k_dim * self.num_k_heads
@@ -84,6 +94,84 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         )
 
         self.out_proj = nn.Linear(self.value_dim, self.hidden_size, bias=False)
+
+        if self.tp_size > 1:
+            for parameter in [
+                self.dt_bias,
+                self.A_log,
+                self.conv1d.weight,
+                self.in_proj_qkv.weight,
+                self.in_proj_z.weight,
+                self.in_proj_b.weight,
+                self.in_proj_a.weight,
+                self.out_proj.weight,
+            ]:
+                parameter.tensor_model_parallel = True
+                parameter.partition_dim = 1 if parameter is self.out_proj.weight else 0
+                parameter.partition_stride = 1
+            # HF stores [Q_all,K_all,V_all]; each rank owns [Q_local,K_local,V_local].
+            sizes = (self.key_dim * self.tp_size, self.key_dim * self.tp_size, self.value_dim * self.tp_size)
+            self.in_proj_qkv.weight.tensor_parallel_split_sizes = sizes
+            self.conv1d.weight.tensor_parallel_split_sizes = sizes
+            if getattr(args, "sequence_parallel", False):
+                # Standard Megatron finalize_model_grads sums this shared head-norm gradient.
+                self.norm.weight.sequence_parallel = True
+            else:
+                self.norm.weight.register_hook(self._sum_shared_norm_grad)
+
+    @staticmethod
+    def _sum_shared_norm_grad(gradient):
+        gradient = gradient.contiguous()
+        torch.distributed.all_reduce(gradient, group=mpu.get_tensor_model_parallel_group())
+        return gradient
+
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        from megatron.core.dist_checkpointing.mapping import ShardedTensor, ShardedTensorFactory
+        from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
+
+        parameters = dict(self.named_parameters())
+        axis_map = {
+            name: p.partition_dim for name, p in parameters.items() if getattr(p, "tensor_model_parallel", False)
+        }
+        result = make_sharded_tensors_for_checkpoint(
+            self.state_dict(keep_vars=True),
+            prefix,
+            axis_map,
+            sharded_offsets,
+            tp_group=mpu.get_tensor_model_parallel_group(),
+            dp_cp_group=(metadata or {}).get("dp_cp_group", mpu.get_data_parallel_group(with_context_parallel=True)),
+        )
+        for name, parameter in parameters.items():
+            sizes = getattr(parameter, "tensor_parallel_split_sizes", None)
+            if sizes is None:
+                continue
+            local_sizes = tuple(n // self.tp_size for n in sizes)
+            original = result[prefix + name]
+            rank, world = mpu.get_tensor_model_parallel_rank(), self.tp_size
+
+            def build(key, data, replica_id, flattened_range, sizes=local_sizes, rank=rank, world=world):
+                if flattened_range is not None:
+                    raise ValueError("This Megatron build does not support flattened GDN checkpoint shards")
+                return [
+                    ShardedTensor.from_rank_offsets(
+                        key + "." + label,
+                        part,
+                        *sharded_offsets,
+                        (len(sharded_offsets), rank, world),
+                        replica_id=replica_id,
+                        prepend_axis_num=len(sharded_offsets),
+                    )
+                    for label, part in zip(("q", "k", "v"), data.split(sizes, dim=0), strict=True)
+                ]
+
+            result[prefix + name] = ShardedTensorFactory(
+                original.key,
+                original.data,
+                build,
+                lambda parts: torch.cat(parts, dim=0),
+                original.replica_id,
+            )
+        return result
 
     def forward(
         self,
@@ -175,6 +263,7 @@ class Attention(HuggingfaceAttention):
         self.hf_config._attn_implementation = "flash_attention_2"
 
         self.linear_attn = Qwen3_5GatedDeltaNet(self.hf_config, self.hf_layer_idx, args=args)
+        self.tensor_parallel_sharded = self.linear_attn.tp_size > 1
 
         # Use a simple RMSNorm
         try:
@@ -185,6 +274,13 @@ class Attention(HuggingfaceAttention):
             from torch.nn import RMSNorm
 
             self.input_layernorm = RMSNorm(self.hf_config.hidden_size, eps=self.hf_config.rms_norm_eps)
+
+        if self.tensor_parallel_sharded:
+            # Head shards also contribute different gradients to the input norm.
+            if args.sequence_parallel:
+                self.input_layernorm.weight.sequence_parallel = True
+            else:
+                self.input_layernorm.weight.register_hook(self.linear_attn._sum_shared_norm_grad)
 
     def hf_forward(self, hidden_states, packed_seq_params):
         hidden_states = self.input_layernorm(hidden_states)

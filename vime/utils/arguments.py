@@ -105,6 +105,12 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
             return parser
 
         def add_train_arguments(parser):
+            parser.add_argument(
+                "--qwen-gdn-tensor-parallel",
+                action="store_true",
+                default=False,
+                help="Shard Qwen3.5/3.8 GDN heads, projections and convolution across the tensor parallel group.",
+            )
             # --train-backend is parsed early in _pre_parse_mode() and merged later.
             parser.add_argument(
                 "--qwen-gdn-backend",
