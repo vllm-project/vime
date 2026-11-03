@@ -3,11 +3,18 @@
 vime ships one image based on the official vllm image, published as
 `vllm/vime:latest`. Supports GB200/300 and H100/200.
 
-Build locally:
+Build and publish from the `docker/` directory:
 
 
 ```bash
-just release
+just build
+```
+
+Run `just build` on both native AMD64 and ARM64 hosts. After both digests are
+available, publish the version tag and `latest`:
+
+```bash
+just manifest "" sha256:AMD64_DIGEST sha256:ARM64_DIGEST
 ```
 
 Before each update, we will test the following models with 64xH100:
@@ -42,10 +49,10 @@ files, behind on others. The ROCm build therefore applies them with
 Two things the CUDA image gets that this one does not, because the base does not
 carry the vLLM code they are written against:
 
-- the delta sampling-mask hunk in `vllm.patch` (needs `SamplingMaskLists.merge`),
+- per-chunk sampling-mask output (needs `SamplingMaskLists.merge`),
   so ROCm keeps emitting sampling masks only on finish;
-- `vllm-pd-request-metrics.patch`, which targets a protocol module this base
-  splits differently, so per-request PD telemetry is absent. vime reads those
+- per-request PD telemetry in `vllm-fine-grained-tracing.patch`, which targets
+  a protocol module this base splits differently, so per-request PD telemetry is absent. vime reads those
   fields defensively, so rollouts are unaffected.
 
 Both are guarded: the build fails once the base converges, at which point the

@@ -133,6 +133,31 @@ def test_ray_client_selects_draft_lifecycle(update_module):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("draft", [False, True])
+@pytest.mark.parametrize("payload", [{"names": ["weight"]}, [{"names": ["weight"]}, {"names": []}]])
+def test_ray_client_preserves_bucket_session(update_module, draft, payload):
+    engines = [RecordingEngine() for _ in range(3)]
+    client = update_module.VimeRayWeightSyncClient(engines, lambda: 7)
+    client.draft = draft
+
+    client.start_weight_update()
+    for _ in range(2):
+        client.update_weights(payload)
+    for engine in engines:
+        assert engine.finish_weight_update.calls == []
+    client.finish_weight_update()
+
+    for engine in engines:
+        selected = engine.start_draft_weight_update if draft else engine.start_weight_update
+        unselected = engine.start_weight_update if draft else engine.start_draft_weight_update
+        assert selected.calls == [RemoteCall((), {})]
+        assert unselected.calls == []
+        assert engine.update_weights.calls == [RemoteCall((payload,), {})] * 2
+        assert engine.finish_weight_update.calls == [RemoteCall((), {"weight_version": "7"})]
+        assert engine.post_process_weights.calls == []
+
+
+@pytest.mark.unit
 def test_weight_source_caches_metadata_and_reiterates(update_module, monkeypatch):
     class ParamMeta:
         def __init__(self, name, dtype, shape):

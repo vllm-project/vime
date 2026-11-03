@@ -1,0 +1,943 @@
+diff --git a/README.md b/README.md
+index c6bdf12..3123f2c 100644
+--- a/README.md
++++ b/README.md
+@@ -78,8 +78,15 @@ vllm-router \
+ ```
+ 
+ #### Prefill-Decode Disaggregation
++
++For router-before-engine startup, omit both `--prefill` and `--decode`, then
++register each role through `POST /workers` with `worker_type: "prefill"` or
++`worker_type: "decode"`. Generation returns HTTP 503 until both roles are
++available. Without service discovery, supplying initial URLs for only one role
++is rejected; supplied URLs and bootstrap ports are still validated.
++
+ ```bash
+-# When vLLM runs the NIXL connector, prefill/decode URLs are required.
++# Static NIXL startup uses both prefill and decode URLs.
+ # See a working example in scripts/llama3.1/ folder.
+ cargo run --release -- \
+     --policy consistent_hash \
+diff --git a/py_src/vllm_router/router_args.py b/py_src/vllm_router/router_args.py
+index 4f11bca..7153c29 100644
+--- a/py_src/vllm_router/router_args.py
++++ b/py_src/vllm_router/router_args.py
+@@ -527,8 +527,11 @@ class RouterArgs:
+     def _validate_router_args(self):
+         # Validate configuration based on mode
+         if self.vllm_pd_disaggregation:
+-            # Validate PD configuration - skip URL requirements if using service discovery
+-            if not self.service_discovery and not self.vllm_discovery_address:
++            if (
++                not self.service_discovery
++                and not self.vllm_discovery_address
++                and (self.prefill_urls or self.decode_urls)
++            ):
+                 if not self.prefill_urls:
+                     raise ValueError("PD disaggregation mode requires --prefill")
+                 if not self.decode_urls:
+diff --git a/py_test/unit/test_arg_parser.py b/py_test/unit/test_arg_parser.py
+index 14f00fd..2df93f4 100644
+--- a/py_test/unit/test_arg_parser.py
++++ b/py_test/unit/test_arg_parser.py
+@@ -52,7 +52,9 @@ class TestRouterArgs:
+         parser = argparse.ArgumentParser()
+         RouterArgs.add_cli_args(parser, use_router_prefix=bool(prefix))
+         parsed = parser.parse_args([f"--{prefix}disable-health-check"])
+-        assert RouterArgs.from_cli_args(parsed, use_router_prefix=bool(prefix)).disable_health_check
++        assert RouterArgs.from_cli_args(
++            parsed, use_router_prefix=bool(prefix)
++        ).disable_health_check
+ 
+     def test_parse_selector_valid(self):
+         """Test parsing valid selector arguments."""
+@@ -450,6 +452,39 @@ class TestParseRouterArgs:
+         assert router_args.worker_urls == ["http://worker1:8000", "http://worker2:8000"]
+         assert router_args.policy == "round_robin"
+ 
++    @pytest.mark.parametrize(
++        "seeds, missing",
++        [
++            ([], None),
++            (["--prefill", "http://prefill:8000"], "--decode"),
++            (["--decode", "http://decode:8000"], "--prefill"),
++            (
++                ["--prefill", "http://prefill:8000", "--decode", "http://decode:8000"],
++                None,
++            ),
++        ],
++    )
++    def test_validate_pd_initial_workers(self, seeds, missing):
++        router_args = parse_router_args(["--vllm-pd-disaggregation", *seeds])
++        if missing:
++            with pytest.raises(ValueError, match=f"requires {missing}"):
++                router_args._validate_router_args()
++        else:
++            router_args._validate_router_args()
++        assert not router_args.service_discovery
++        assert router_args.vllm_discovery_address is None
++
++    @pytest.mark.parametrize(
++        "discovery",
++        [["--service-discovery"], ["--vllm-discovery-address", "127.0.0.1:9000"]],
++    )
++    @pytest.mark.parametrize("role", ["--prefill", "--decode"])
++    def test_validate_pd_discovery_allows_one_initial_role(self, discovery, role):
++        router_args = parse_router_args(
++            ["--vllm-pd-disaggregation", *discovery, role, "http://worker:8000"]
++        )
++        router_args._validate_router_args()
++
+     def test_parse_pd_args(self):
+         """Test parsing PD disaggregated mode arguments."""
+         args = [
+diff --git a/src/config/validation.rs b/src/config/validation.rs
+index bf678a5..51df434 100644
+--- a/src/config/validation.rs
++++ b/src/config/validation.rs
+@@ -58,8 +58,7 @@ impl ConfigValidator {
+                 decode_policy,
+                 discovery_address: _,
+             } => {
+-                // Only require URLs if service discovery is disabled
+-                if !has_service_discovery {
++                if !has_service_discovery && (!prefill_urls.is_empty() || !decode_urls.is_empty()) {
+                     if prefill_urls.is_empty() {
+                         return Err(ConfigError::ValidationFailed {
+                             reason: "vLLM PD mode requires at least one prefill worker URL"
+@@ -630,6 +629,75 @@ mod tests {
+         assert!(ConfigValidator::validate(&config).is_ok());
+     }
+ 
++    #[test]
++    fn test_validate_pd_initial_workers() {
++        for (has_prefill, has_decode, valid) in [
++            (false, false, true),
++            (true, true, true),
++            (true, false, false),
++            (false, true, false),
++        ] {
++            let config = RouterConfig::new(
++                RoutingMode::VllmPrefillDecode {
++                    prefill_urls: if has_prefill {
++                        vec![("http://prefill:8000".to_string(), Some(8081))]
++                    } else {
++                        vec![]
++                    },
++                    decode_urls: if has_decode {
++                        vec!["http://decode:8000".to_string()]
++                    } else {
++                        vec![]
++                    },
++                    prefill_policy: None,
++                    decode_policy: None,
++                    discovery_address: None,
++                },
++                PolicyConfig::Random,
++            );
++            assert_eq!(
++                ConfigValidator::validate(&config).is_ok(),
++                valid,
++                "prefill={has_prefill}, decode={has_decode}"
++            );
++        }
++    }
++
++    #[test]
++    fn test_validate_pd_supplied_workers() {
++        for (prefill_url, decode_url, bootstrap_port, valid) in [
++            (
++                "http://prefill:8000",
++                "https://decode:8000",
++                Some(8081),
++                true,
++            ),
++            ("", "http://decode:8000", None, false),
++            ("invalid", "http://decode:8000", None, false),
++            ("http://", "http://decode:8000", None, false),
++            ("http://prefill:8000", "", None, false),
++            ("http://prefill:8000", "ftp://decode:8000", None, false),
++            ("http://prefill:8000", "http://", None, false),
++            ("http://prefill:8000", "http://decode:8000", Some(0), false),
++        ] {
++            let config = RouterConfig::new(
++                RoutingMode::VllmPrefillDecode {
++                    prefill_urls: vec![(prefill_url.to_string(), bootstrap_port)],
++                    decode_urls: vec![decode_url.to_string()],
++                    prefill_policy: None,
++                    decode_policy: None,
++                    discovery_address: None,
++                },
++                PolicyConfig::Random,
++            );
++            assert_eq!(
++                ConfigValidator::validate(&config).is_ok(),
++                valid,
++                "prefill={prefill_url}, decode={decode_url}, bootstrap={bootstrap_port:?}"
++            );
++        }
++    }
++
+     #[test]
+     fn test_validate_roundrobin_with_pd_mode() {
+         // RoundRobin with PD mode is now supported
+diff --git a/src/main.rs b/src/main.rs
+index 176e9bf..1e106a1 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -409,7 +409,11 @@ impl CliArgs {
+             let use_k8s_discovery = self.service_discovery
+                 && (!self.prefill_selector.is_empty() || !self.decode_selector.is_empty());
+ 
+-            if !use_static_urls && !use_vllm_discovery && !use_k8s_discovery {
++            if self.service_discovery
++                && !use_static_urls
++                && !use_vllm_discovery
++                && !use_k8s_discovery
++            {
+                 return Err(ConfigError::ValidationFailed {
+                     reason: "vLLM PD disaggregation mode requires one of: --vllm-discovery-address, --prefill/--decode URLs, or --service-discovery with --prefill-selector/--decode-selector".to_string(),
+                 });
+@@ -438,9 +442,13 @@ impl CliArgs {
+                 eprintln!("ℹ️  INFO: Using static URL mode without service discovery.");
+                 eprintln!("   Prefill URLs: {:?}", prefill_urls);
+                 eprintln!("   Decode URLs: {:?}", final_decode_urls);
+-            } else {
++            } else if use_vllm_discovery {
+                 eprintln!("ℹ️  INFO: Using vLLM ZMQ service discovery mode.");
+                 eprintln!("   Discovery address: {:?}", self.vllm_discovery_address);
++            } else {
++                eprintln!(
++                    "ℹ️  INFO: Starting empty vLLM PD pools; waiting for HTTP worker registration."
++                );
+             }
+ 
+             RoutingMode::VllmPrefillDecode {
+diff --git a/src/routers/http/pd_router.rs b/src/routers/http/pd_router.rs
+index 8475d91..5f28b93 100644
+--- a/src/routers/http/pd_router.rs
++++ b/src/routers/http/pd_router.rs
+@@ -39,7 +39,7 @@ pub struct PdRouterBase {
+ 
+ impl PdRouterBase {
+     // Private helper method to perform health check on a new server
+-    async fn wait_for_server_health(&self, url: &str) -> Result<(), PDRouterError> {
++    pub(crate) async fn wait_for_server_health(&self, url: &str) -> Result<(), PDRouterError> {
+         if self.disable_health_check {
+             return Ok(());
+         }
+@@ -242,6 +242,14 @@ impl PdRouterBase {
+         // Wait for the new server to be healthy
+         self.wait_for_server_health(&url).await?;
+ 
++        self.register_prefill_server(url, bootstrap_port)
++    }
++
++    pub(crate) fn register_prefill_server(
++        &self,
++        url: String,
++        bootstrap_port: Option<u16>,
++    ) -> Result<String, PDRouterError> {
+         let worker_type = WorkerType::Prefill { bootstrap_port };
+ 
+         if self.dp_size > 1 {
+diff --git a/src/routers/http/vllm_pd_router.rs b/src/routers/http/vllm_pd_router.rs
+index 8e40aed..bc72008 100644
+--- a/src/routers/http/vllm_pd_router.rs
++++ b/src/routers/http/vllm_pd_router.rs
+@@ -95,6 +95,47 @@ fn build_prefill_request_builder(
+ }
+ 
+ impl VllmPDRouter {
++    async fn load_mooncake_prefill_info(
++        client: &reqwest::Client,
++        url: &str,
++        bootstrap_port: Option<u16>,
++    ) -> Result<(String, MooncakePrefillInfo), String> {
++        let (url, _) = dp_utils::parse_worker_url(url);
++        let parsed = url::Url::parse(&url)
++            .map_err(|error| format!("Invalid prefill URL '{}': {}", url, error))?;
++        let host = parsed.host_str().unwrap_or("127.0.0.1");
++        let port = bootstrap_port.unwrap_or(8998);
++        let bootstrap_addr = format!("http://{}:{}", host, port);
++        let base_url = format!(
++            "{}://{}:{}",
++            parsed.scheme(),
++            host,
++            parsed.port().unwrap_or(8000)
++        );
++        info!(
++            "Querying Mooncake bootstrap at {} for prefill {}",
++            bootstrap_addr, base_url
++        );
++        let dp_engine_ids = Self::query_mooncake_bootstrap(client, &bootstrap_addr).await?;
++        if dp_engine_ids.is_empty() {
++            return Err(format!(
++                "Mooncake bootstrap at {} returned no engine IDs",
++                bootstrap_addr
++            ));
++        }
++        info!(
++            "Got Mooncake engine_ids for {}: {:?}",
++            base_url, dp_engine_ids
++        );
++        Ok((
++            base_url,
++            MooncakePrefillInfo {
++                bootstrap_addr,
++                dp_engine_ids,
++            },
++        ))
++    }
++
+     /// Query the Mooncake bootstrap server on a prefill node to get engine_id per dp_rank.
+     /// Retries with backoff since the prefill server may not be ready at router startup.
+     async fn query_mooncake_bootstrap(
+@@ -1609,41 +1650,10 @@ impl VllmPDRouter {
+             if matches!(kv_connector, KvConnector::Mooncake) {
+                 info!("Mooncake connector enabled, querying prefill bootstrap servers...");
+                 for (url, bootstrap_port) in &prefill_urls {
+-                    let parsed = url::Url::parse(url)
+-                        .map_err(|e| format!("Invalid prefill URL '{}': {}", url, e))?;
+-                    let host = parsed.host_str().unwrap_or("127.0.0.1");
+-                    let port = bootstrap_port.unwrap_or(8998);
+-                    let bootstrap_addr = format!("http://{}:{}", host, port);
+-                    let base_url = format!(
+-                        "{}://{}:{}",
+-                        parsed.scheme(),
+-                        host,
+-                        parsed.port().unwrap_or(8000)
+-                    );
+-
+-                    info!(
+-                        "Querying Mooncake bootstrap at {} for prefill {}",
+-                        bootstrap_addr, base_url
+-                    );
+-                    match Self::query_mooncake_bootstrap(&http_client, &bootstrap_addr).await {
+-                        Ok(dp_engine_ids) => {
+-                            info!(
+-                                "Got Mooncake engine_ids for {}: {:?}",
+-                                base_url, dp_engine_ids
+-                            );
+-                            mooncake_prefill_info.lock().await.insert(
+-                                base_url,
+-                                MooncakePrefillInfo {
+-                                    bootstrap_addr,
+-                                    dp_engine_ids,
+-                                },
+-                            );
+-                        }
+-                        Err(e) => {
+-                            error!("Failed to query Mooncake bootstrap for {}: {}", base_url, e);
+-                            return Err(e);
+-                        }
+-                    }
++                    let (base_url, info) =
++                        Self::load_mooncake_prefill_info(&http_client, url, *bootstrap_port)
++                            .await?;
++                    mooncake_prefill_info.lock().await.insert(base_url, info);
+                 }
+                 info!("Mooncake bootstrap query complete for all prefill nodes");
+             }
+@@ -1671,6 +1681,19 @@ impl VllmPDRouter {
+         url: String,
+         bootstrap_port: Option<u16>,
+     ) -> Result<String, PDRouterError> {
++        if matches!(self.kv_connector, KvConnector::Mooncake) {
++            let (base_url, info) =
++                Self::load_mooncake_prefill_info(&self.http_client, &url, bootstrap_port)
++                    .await
++                    .map_err(|message| PDRouterError::NetworkError { message })?;
++            self.pd_router.wait_for_server_health(&url).await?;
++            let mut prefill_info = self.mooncake_prefill_info.lock().await;
++            let message = self
++                .pd_router
++                .register_prefill_server(url, bootstrap_port)?;
++            prefill_info.insert(base_url, info);
++            return Ok(message);
++        }
+         self.pd_router.add_prefill_server(url, bootstrap_port).await
+     }
+ 
+diff --git a/src/server.rs b/src/server.rs
+index 3c6130c..928dae7 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -14,6 +14,7 @@ use crate::{
+         worker_spec::{WorkerApiResponse, WorkerConfigRequest, WorkerErrorResponse},
+     },
+     routers::{
++        http::vllm_pd_router::VllmPDRouter,
+         router_manager::{RouterId, RouterManager},
+         RouterFactory, RouterTrait,
+     },
+@@ -540,7 +541,22 @@ async fn create_worker(
+         }
+     } else {
+         // In single router mode, use the router's add_worker with basic config
+-        match state.router.add_worker(&config.url).await {
++        let result = if let Some(router) = state.router.as_any().downcast_ref::<VllmPDRouter>() {
++            match config.worker_type.as_deref() {
++                Some("prefill") => router
++                    .add_prefill_server(config.url, config.bootstrap_port)
++                    .await
++                    .map_err(|error| error.to_string()),
++                Some("decode") => router
++                    .add_decode_server(config.url)
++                    .await
++                    .map_err(|error| error.to_string()),
++                _ => Err("PD workers must specify prefill or decode worker_type".to_string()),
++            }
++        } else {
++            state.router.add_worker(&config.url).await
++        };
++        match result {
+             Ok(message) => {
+                 let response = WorkerApiResponse {
+                     success: true,
+diff --git a/tests/pd_worker_registration_test.rs b/tests/pd_worker_registration_test.rs
+new file mode 100644
+index 0000000..551ce48
+--- /dev/null
++++ b/tests/pd_worker_registration_test.rs
+@@ -0,0 +1,539 @@
++use axum::{
++    body::{to_bytes, Body},
++    extract::State,
++    http::{HeaderMap, Request, StatusCode},
++    routing::{get, post},
++    Json, Router,
++};
++use serde_json::{json, Value};
++use std::sync::{
++    atomic::{AtomicBool, AtomicUsize, Ordering},
++    Arc, Mutex,
++};
++use tokio::{net::TcpListener, sync::Notify, task::JoinHandle, time::Duration};
++use tower::ServiceExt;
++use vllm_router_rs::{
++    config::{ConfigValidator, KvConnector, RouterConfig, RoutingMode},
++    routers::http::vllm_pd_router::VllmPDRouter,
++    server::{build_app_with_request_tracing, AppContext, AppState},
++};
++
++#[derive(Clone)]
++struct BackendState {
++    bootstrap: Arc<Mutex<String>>,
++    queries: Arc<AtomicUsize>,
++    failures: Arc<AtomicUsize>,
++    requests: Arc<Mutex<Vec<(HeaderMap, Value)>>>,
++    health_paused: Arc<AtomicBool>,
++    health_started: Arc<Notify>,
++    health_release: Arc<Notify>,
++}
++
++struct Backend {
++    url: String,
++    port: u16,
++    state: BackendState,
++    task: JoinHandle<()>,
++}
++
++impl Backend {
++    async fn new() -> Self {
++        let state = BackendState {
++            bootstrap: Arc::new(Mutex::new(json!({"0": {"engine_id": "old"}}).to_string())),
++            queries: Arc::new(AtomicUsize::new(0)),
++            failures: Arc::new(AtomicUsize::new(0)),
++            requests: Arc::new(Mutex::new(Vec::new())),
++            health_paused: Arc::new(AtomicBool::new(false)),
++            health_started: Arc::new(Notify::new()),
++            health_release: Arc::new(Notify::new()),
++        };
++        let app = Router::new()
++            .route("/health", get(health))
++            .route("/query", get(bootstrap))
++            .route("/v1/completions", post(completion))
++            .with_state(state.clone());
++        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let port = listener.local_addr().unwrap().port();
++        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
++        Self {
++            url: format!("http://127.0.0.1:{port}"),
++            port,
++            state,
++            task,
++        }
++    }
++
++    fn set_bootstrap(&self, body: Value) {
++        *self.state.bootstrap.lock().unwrap() = body.to_string();
++    }
++
++    fn last_request(&self) -> (HeaderMap, Value) {
++        self.state.requests.lock().unwrap().last().unwrap().clone()
++    }
++}
++
++impl Drop for Backend {
++    fn drop(&mut self) {
++        self.task.abort();
++    }
++}
++
++async fn health(State(state): State<BackendState>) -> StatusCode {
++    if state.health_paused.load(Ordering::SeqCst) {
++        state.health_started.notify_one();
++        state.health_release.notified().await;
++    }
++    StatusCode::OK
++}
++
++async fn bootstrap(State(state): State<BackendState>) -> (StatusCode, String) {
++    state.queries.fetch_add(1, Ordering::SeqCst);
++    if state
++        .failures
++        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
++            remaining.checked_sub(1)
++        })
++        .is_ok()
++    {
++        return (StatusCode::SERVICE_UNAVAILABLE, "not ready".to_owned());
++    }
++    let body = state.bootstrap.lock().unwrap().clone();
++    (StatusCode::OK, body)
++}
++
++async fn completion(
++    State(state): State<BackendState>,
++    headers: HeaderMap,
++    Json(body): Json<Value>,
++) -> Json<Value> {
++    state.requests.lock().unwrap().push((headers, body));
++    Json(json!({
++        "choices": [{"text": "ok", "index": 0, "finish_reason": "stop"}],
++        "kv_transfer_params": {"remote_engine_id": "nixl-response", "opaque": [1, 2]}
++    }))
++}
++
++async fn app(
++    connector: KvConnector,
++    dp_size: usize,
++    prefill: Option<&Backend>,
++    decode: Option<&Backend>,
++) -> (Router, Arc<AppContext>) {
++    let prefill_urls = prefill
++        .map(|worker| vec![(worker.url.clone(), Some(worker.port))])
++        .unwrap_or_default();
++    let decode_urls = decode
++        .map(|worker| vec![worker.url.clone()])
++        .unwrap_or_default();
++    let config = RouterConfig {
++        mode: RoutingMode::VllmPrefillDecode {
++            prefill_urls: prefill_urls.clone(),
++            decode_urls: decode_urls.clone(),
++            prefill_policy: None,
++            decode_policy: None,
++            discovery_address: None,
++        },
++        kv_connector: connector,
++        intra_node_data_parallel_size: dp_size,
++        worker_startup_timeout_secs: 1,
++        worker_startup_check_interval_secs: 1,
++        ..Default::default()
++    };
++    ConfigValidator::validate(&config).unwrap();
++    let context =
++        Arc::new(AppContext::new(config, reqwest::Client::new(), 64, None, vec![]).unwrap());
++    let router = Arc::new(
++        VllmPDRouter::new(prefill_urls, decode_urls, None, &context)
++            .await
++            .unwrap(),
++    );
++    let state = Arc::new(AppState {
++        router,
++        context: context.clone(),
++        concurrency_queue_tx: None,
++        router_manager: None,
++    });
++    (
++        build_app_with_request_tracing(state, 1024 * 1024, vec![], vec![], true, false),
++        context,
++    )
++}
++
++async fn request(app: &Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
++    let response = tokio::time::timeout(
++        Duration::from_secs(10),
++        app.clone().oneshot(
++            Request::builder()
++                .method(method)
++                .uri(path)
++                .header("content-type", "application/json")
++                .body(Body::from(body.to_string()))
++                .unwrap(),
++        ),
++    )
++    .await
++    .expect("bounded HTTP request")
++    .unwrap();
++    let status = response.status();
++    let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
++    let body = serde_json::from_slice(&bytes)
++        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
++    (status, body)
++}
++
++async fn add(app: &Router, url: &str, kind: &str, port: Option<u16>) -> (StatusCode, Value) {
++    request(
++        app,
++        "POST",
++        "/workers",
++        json!({"url": url, "worker_type": kind, "bootstrap_port": port}),
++    )
++    .await
++}
++
++async fn delete(app: &Router, url: &str) {
++    let encoded: String = url::form_urlencoded::byte_serialize(url.as_bytes()).collect();
++    let response = request(app, "DELETE", &format!("/workers/{encoded}"), Value::Null).await;
++    assert_eq!(response.0, StatusCode::OK, "{response:?}");
++}
++
++async fn generate(app: &Router) {
++    let response = request(
++        app,
++        "POST",
++        "/v1/completions",
++        json!({"model": "test", "prompt": "hello", "max_tokens": 2, "stream": false}),
++    )
++    .await;
++    assert_eq!(response.0, StatusCode::OK, "{response:?}");
++    assert_eq!(response.1["choices"][0]["text"], "ok");
++}
++
++#[tokio::test]
++async fn empty_pd_startup_serves_only_after_both_roles_register() {
++    for connector in [KvConnector::Nixl, KvConnector::Mooncake] {
++        for prefill_first in [true, false] {
++            let prefill = Backend::new().await;
++            let decode = Backend::new().await;
++            let (app, context) = app(connector, 1, None, None).await;
++            let registrations = if prefill_first {
++                [(&prefill, "prefill"), (&decode, "decode")]
++            } else {
++                [(&decode, "decode"), (&prefill, "prefill")]
++            };
++            for (worker, kind) in registrations {
++                let response = request(
++                    &app,
++                    "POST",
++                    "/v1/completions",
++                    json!({"model": "test", "prompt": "hello", "max_tokens": 2}),
++                )
++                .await;
++                assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE, "{response:?}");
++                assert!(prefill.state.requests.lock().unwrap().is_empty());
++                assert!(decode.state.requests.lock().unwrap().is_empty());
++                let response = add(&app, &worker.url, kind, Some(prefill.port)).await;
++                assert_eq!(response.0, StatusCode::OK, "{response:?}");
++            }
++            assert_eq!(context.worker_registry.get_all().len(), 2);
++            generate(&app).await;
++            assert_eq!(prefill.state.requests.lock().unwrap().len(), 1);
++            assert_eq!(decode.state.requests.lock().unwrap().len(), 1);
++        }
++    }
++}
++
++#[tokio::test]
++async fn nixl_delete_then_typed_readd_preserves_prefill_and_decode() {
++    let prefill = Backend::new().await;
++    let decode = Backend::new().await;
++    let (app, context) = app(KvConnector::Nixl, 1, Some(&prefill), Some(&decode)).await;
++    for (worker, kind) in [(&prefill, "prefill"), (&decode, "decode")] {
++        delete(&app, &worker.url).await;
++        assert!(context.worker_registry.get_by_url(&worker.url).is_none());
++        assert_eq!(context.worker_registry.get_all().len(), 1);
++        let response = add(&app, &worker.url, kind, Some(9123)).await;
++        assert_eq!(response.0, StatusCode::OK, "{response:?}");
++        let (_, listing) = request(&app, "GET", "/workers", Value::Null).await;
++        assert_eq!(listing["stats"]["prefill_count"], 1);
++        assert_eq!(listing["stats"]["decode_count"], 1);
++        assert_eq!(listing["stats"]["regular_count"], 0);
++        let registered = listing["workers"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .find(|entry| entry["url"] == worker.url)
++            .unwrap();
++        assert_eq!(registered["worker_type"], kind);
++        if kind == "prefill" {
++            assert_eq!(registered["bootstrap_port"], 9123);
++        }
++        generate(&app).await;
++        assert_eq!(
++            decode.last_request().1["kv_transfer_params"],
++            json!({"remote_engine_id": "nixl-response", "opaque": [1, 2]})
++        );
++    }
++    assert_eq!(prefill.state.queries.load(Ordering::SeqCst), 0);
++    assert_eq!(decode.state.queries.load(Ordering::SeqCst), 0);
++}
++
++#[tokio::test]
++async fn pd_create_requires_worker_type() {
++    let worker = Backend::new().await;
++    let (app, context) = app(KvConnector::Nixl, 1, None, None).await;
++    for body in [
++        json!({"url": worker.url}),
++        json!({"url": worker.url, "worker_type": "regular"}),
++    ] {
++        let (status, error) = request(&app, "POST", "/workers", body).await;
++        assert_eq!(status, StatusCode::BAD_REQUEST);
++        assert_eq!(error["code"], "ADD_WORKER_FAILED");
++        assert!(error["error"].as_str().unwrap().contains("worker_type"));
++        assert!(context.worker_registry.get_all().is_empty());
++    }
++}
++
++#[tokio::test]
++async fn mooncake_readd_refreshes_startup_engine_and_bootstrap_address() {
++    let prefill = Backend::new().await;
++    let decode = Backend::new().await;
++    let replacement_bootstrap = Backend::new().await;
++    replacement_bootstrap.set_bootstrap(json!({"0": {"engine_id": "replacement"}}));
++    let (app, context) = app(KvConnector::Mooncake, 1, Some(&prefill), Some(&decode)).await;
++    generate(&app).await;
++    assert_eq!(
++        decode.last_request().1["kv_transfer_params"]["remote_engine_id"],
++        "old"
++    );
++    delete(&app, &prefill.url).await;
++    assert!(context.worker_registry.get_by_url(&prefill.url).is_none());
++    let response = add(
++        &app,
++        &prefill.url,
++        "prefill",
++        Some(replacement_bootstrap.port),
++    )
++    .await;
++    assert_eq!(response.0, StatusCode::OK, "{response:?}");
++    generate(&app).await;
++    let params = decode.last_request().1["kv_transfer_params"].clone();
++    assert_eq!(params["remote_engine_id"], "replacement");
++    assert_eq!(params["remote_bootstrap_addr"], replacement_bootstrap.url);
++    assert_eq!(params["do_remote_prefill"], true);
++    assert_eq!(
++        params["transfer_id"],
++        prefill.last_request().1["kv_transfer_params"]["transfer_id"]
++    );
++    assert_eq!(prefill.state.queries.load(Ordering::SeqCst), 1);
++    assert_eq!(
++        replacement_bootstrap.state.queries.load(Ordering::SeqCst),
++        1
++    );
++}
++
++#[tokio::test]
++async fn mooncake_failed_bootstrap_does_not_register_and_can_retry() {
++    let prefill = Backend::new().await;
++    let decode = Backend::new().await;
++    let (app, context) = app(KvConnector::Mooncake, 1, Some(&prefill), Some(&decode)).await;
++    delete(&app, &prefill.url).await;
++    let counts = context.policy_registry.get_worker_counts();
++    for invalid in [
++        "not-json",
++        "{\"0\":{}}",
++        "{\"invalid-rank\":{\"engine_id\":\"new\"}}",
++        "{}",
++        "null",
++        "[]",
++    ] {
++        *prefill.state.bootstrap.lock().unwrap() = invalid.to_owned();
++        let response = add(&app, &prefill.url, "prefill", Some(prefill.port)).await;
++        assert_eq!(response.0, StatusCode::BAD_REQUEST, "{response:?}");
++        assert_eq!(response.1["code"], "ADD_WORKER_FAILED");
++        assert!(context.worker_registry.get_by_url(&prefill.url).is_none());
++        assert_eq!(context.worker_registry.get_all().len(), 1);
++        assert_eq!(context.policy_registry.get_worker_counts(), counts);
++    }
++    prefill.set_bootstrap(json!({"0": {"engine_id": "recovered"}}));
++    assert_eq!(
++        add(&app, &prefill.url, "prefill", Some(prefill.port))
++            .await
++            .0,
++        StatusCode::OK
++    );
++    generate(&app).await;
++    assert_eq!(
++        decode.last_request().1["kv_transfer_params"]["remote_engine_id"],
++        "recovered"
++    );
++}
++
++#[tokio::test]
++async fn mooncake_readd_reuses_bootstrap_retry() {
++    let prefill = Backend::new().await;
++    let decode = Backend::new().await;
++    let (app, context) = app(KvConnector::Mooncake, 1, Some(&prefill), Some(&decode)).await;
++    delete(&app, &prefill.url).await;
++    prefill.set_bootstrap(json!({"0": {"engine_id": "after-retry"}}));
++    prefill.state.failures.store(1, Ordering::SeqCst);
++    let request_app = app.clone();
++    let url = prefill.url.clone();
++    let port = prefill.port;
++    let pending = tokio::spawn(async move { add(&request_app, &url, "prefill", Some(port)).await });
++    tokio::time::timeout(Duration::from_secs(5), async {
++        while prefill.state.queries.load(Ordering::SeqCst) < 2 {
++            tokio::task::yield_now().await;
++        }
++    })
++    .await
++    .unwrap();
++    assert!(context.worker_registry.get_by_url(&prefill.url).is_none());
++    assert_eq!(pending.await.unwrap().0, StatusCode::OK);
++    assert_eq!(prefill.state.queries.load(Ordering::SeqCst), 3);
++    generate(&app).await;
++    assert_eq!(
++        decode.last_request().1["kv_transfer_params"]["remote_engine_id"],
++        "after-retry"
++    );
++}
++
++#[tokio::test]
++async fn mooncake_duplicate_does_not_overwrite_live_metadata() {
++    let prefill = Backend::new().await;
++    let decode = Backend::new().await;
++    let (app, context) = app(KvConnector::Mooncake, 1, Some(&prefill), Some(&decode)).await;
++    prefill.set_bootstrap(json!({"0": {"engine_id": "unregistered"}}));
++    let counts = context.policy_registry.get_worker_counts();
++    let response = add(&app, &prefill.url, "prefill", Some(prefill.port)).await;
++    assert_eq!(response.0, StatusCode::CONFLICT);
++    assert!(response.1["error"]
++        .as_str()
++        .unwrap()
++        .contains("already exists"));
++    assert_eq!(context.policy_registry.get_worker_counts(), counts);
++    generate(&app).await;
++    assert_eq!(
++        decode.last_request().1["kv_transfer_params"]["remote_engine_id"],
++        "old"
++    );
++}
++
++#[tokio::test]
++async fn mooncake_health_failure_does_not_register() {
++    let bootstrap = Backend::new().await;
++    let (app, context) = app(KvConnector::Mooncake, 1, None, None).await;
++    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let url = format!("http://{}", listener.local_addr().unwrap());
++    drop(listener);
++    let response = add(&app, &url, "prefill", Some(bootstrap.port)).await;
++    assert_eq!(response.0, StatusCode::BAD_REQUEST, "{response:?}");
++    assert!(response.1["error"]
++        .as_str()
++        .unwrap()
++        .contains("Health check failed"));
++    assert_eq!(bootstrap.state.queries.load(Ordering::SeqCst), 1);
++    assert!(context.worker_registry.get_all().is_empty());
++    assert!(context.policy_registry.get_worker_counts().is_empty());
++}
++
++#[tokio::test]
++async fn mooncake_dp_rank_delete_readd_uses_base_bootstrap_and_rank_engine() {
++    let prefill = Backend::new().await;
++    let decode = Backend::new().await;
++    prefill.set_bootstrap(json!({"0": {"engine_id": "rank-0"}, "1": {"engine_id": "rank-1"}}));
++    let (app, context) = app(KvConnector::Mooncake, 2, None, None).await;
++    for (worker, kind) in [(&prefill, "prefill"), (&decode, "decode")] {
++        assert_eq!(
++            add(&app, &worker.url, kind, Some(prefill.port)).await.0,
++            StatusCode::OK
++        );
++        for rank in 0..2 {
++            let ranked_url = format!("{}@{rank}", worker.url);
++            assert!(context.worker_registry.get_by_url(&ranked_url).is_some());
++            delete(&app, &ranked_url).await;
++            assert!(context.worker_registry.get_by_url(&ranked_url).is_none());
++        }
++        let ranked_url = format!("{}@1", worker.url);
++        assert_eq!(
++            add(&app, &ranked_url, kind, Some(prefill.port)).await.0,
++            StatusCode::OK
++        );
++        assert!(context
++            .worker_registry
++            .get_by_url(&format!("{}@0", worker.url))
++            .is_none());
++        assert!(context.worker_registry.get_by_url(&ranked_url).is_some());
++    }
++    generate(&app).await;
++    assert_eq!(prefill.last_request().0["x-data-parallel-rank"], "1");
++    assert_eq!(decode.last_request().0["x-data-parallel-rank"], "1");
++    assert_eq!(
++        decode.last_request().1["kv_transfer_params"]["remote_engine_id"],
++        "rank-1"
++    );
++    assert_eq!(
++        decode.last_request().1["kv_transfer_params"]["remote_bootstrap_addr"],
++        prefill.url
++    );
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn mooncake_pending_prefill_health_does_not_block_live_generation() {
++    let prefill = Backend::new().await;
++    let decode = Backend::new().await;
++    let new_prefill = Backend::new().await;
++    new_prefill.set_bootstrap(json!({"0": {"engine_id": "new-prefill"}}));
++    new_prefill
++        .state
++        .health_paused
++        .store(true, Ordering::SeqCst);
++    let (app, context) = app(KvConnector::Mooncake, 1, Some(&prefill), Some(&decode)).await;
++    generate(&app).await;
++
++    let request_app = app.clone();
++    let url = new_prefill.url.clone();
++    let port = new_prefill.port;
++    let pending = tokio::spawn(async move { add(&request_app, &url, "prefill", Some(port)).await });
++    tokio::time::timeout(
++        Duration::from_secs(5),
++        new_prefill.state.health_started.notified(),
++    )
++    .await
++    .expect("registration must reach the gated health request");
++    assert!(context
++        .worker_registry
++        .get_by_url(&new_prefill.url)
++        .is_none());
++    assert!(!pending.is_finished());
++
++    let serving = tokio::time::timeout(Duration::from_millis(500), generate(&app)).await;
++    let admission_pending = !pending.is_finished();
++    new_prefill
++        .state
++        .health_paused
++        .store(false, Ordering::SeqCst);
++    new_prefill.state.health_release.notify_one();
++    let admission = pending.await.unwrap();
++    assert_eq!(admission.0, StatusCode::OK, "{admission:?}");
++    assert!(
++        serving.is_ok(),
++        "existing Mooncake generation blocked behind unrelated prefill health"
++    );
++    assert!(admission_pending);
++    assert_eq!(
++        decode.last_request().1["kv_transfer_params"]["remote_engine_id"],
++        "old"
++    );
++    assert!(context
++        .worker_registry
++        .get_by_url(&new_prefill.url)
++        .is_some());
++
++    delete(&app, &prefill.url).await;
++    generate(&app).await;
++    assert_eq!(
++        decode.last_request().1["kv_transfer_params"]["remote_engine_id"],
++        "new-prefill"
++    );
++}

@@ -56,6 +56,14 @@ def test_vllm_layer_output_reconstructs_the_visible_residual_sum():
     torch.testing.assert_close(output, torch.tensor([[4.0, 6.0]], dtype=torch.bfloat16))
 
 
+def test_vllm_layer_output_accepts_a_residual_stream_snapshot():
+    snapshot = torch.tensor([[4.0, 6.0]], dtype=torch.bfloat16)
+
+    output = _vllm_layer_token_rows({"residual_sum": snapshot}, 1, "layer0")
+
+    torch.testing.assert_close(output, snapshot, rtol=0, atol=0)
+
+
 def test_layerwise_comparison_excludes_terminal_causal_state(tmp_path):
     dump_file = tmp_path / "Chunk00000.pt"
     torch.save(

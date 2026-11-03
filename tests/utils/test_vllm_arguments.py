@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import ast
-import logging
-import random
+import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from unittest.mock import MagicMock
 
 _tests_root = Path(__file__).resolve().parents[1]
 if str(_tests_root) not in sys.path:
@@ -23,6 +22,97 @@ requires_vllm = pytest.mark.skipif(not _real_vllm, reason="requires real vllm in
 _unit_stubs.install_vllm_cli_stubs()
 
 NUM_GPUS = 0
+
+
+@pytest.mark.parametrize("module", [ModuleType("unit_stub"), SimpleNamespace(), MagicMock(), None])
+def test_real_module_available_rejects_test_stubs(monkeypatch, module):
+    monkeypatch.setitem(sys.modules, "unit_stub", module)
+    assert not _unit_stubs.real_module_available("unit_stub")
+
+
+def test_real_module_available_preserves_installed_modules(monkeypatch):
+    assert _unit_stubs.real_module_available("json")
+    monkeypatch.delitem(sys.modules, "json")
+    assert _unit_stubs.real_module_available("json")
+    assert not _unit_stubs.real_module_available("_vime_missing_unit_dependency")
+
+
+@requires_vllm
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [([], None), (["--vllm-log-error-stack"], True), (["--no-vllm-log-error-stack"], False)],
+)
+def test_frontend_defaults_are_resolved_by_the_server(args_mod, monkeypatch, flags, expected):
+    _patch_device_config(monkeypatch)
+    parser = argparse.ArgumentParser()
+    args_mod.add_vllm_arguments(parser)
+    assert parser.parse_args(flags).vllm_log_error_stack is expected
+
+
+@requires_vllm
+@pytest.mark.parametrize(
+    ("flags", "timeout", "abort"),
+    [
+        ([], 300, True),
+        (["--vllm-watchdog-config", '{"timeout":3600,"abort_on_timeout":true}'], 3600, True),
+        (["--vllm-watchdog-config", '{"abort_on_timeout":false}'], 300, False),
+        (["--vllm-watchdog-config", '{"timeout":3600}'], 3600, False),
+    ],
+)
+def test_watchdog_defaults_and_explicit_native_config(args_mod, monkeypatch, flags, timeout, abort):
+    from vllm.config import WatchdogConfig
+    from vime.backends.vllm_utils.runtime import _json_default
+
+    _patch_device_config(monkeypatch)
+    parser = argparse.ArgumentParser()
+    args_mod.add_vllm_arguments(parser)
+    wire = json.loads(json.dumps(parser.parse_args(flags).vllm_watchdog_config, default=_json_default))
+    config = WatchdogConfig(**wire)
+    assert config.timeout == timeout
+    assert config.abort_on_timeout is abort
+
+
+def test_python_executable_is_a_launcher_option(args_mod, monkeypatch):
+    _patch_device_config(monkeypatch)
+    parser = argparse.ArgumentParser()
+    args_mod.add_vllm_arguments(parser)
+    assert parser.parse_args([]).vllm_python_executable is None
+    executable = "/path with spaces/serve-python.sh"
+    assert parser.parse_args(["--vllm-python-executable", executable]).vllm_python_executable == executable
+
+
+@requires_vllm
+@pytest.mark.parametrize("engine_id", ["omitted", None, "explicit-engine"])
+def test_kv_transfer_cli_retains_only_explicit_validated_fields(args_mod, monkeypatch, engine_id):
+    from dataclasses import is_dataclass
+
+    from pydantic import TypeAdapter
+    from vllm.config import KVTransferConfig
+    from vllm.engine.arg_utils import AsyncEngineArgs
+
+    _patch_device_config(monkeypatch)
+    config = {"kv_connector": "MooncakeConnector", "kv_role": "kv_both", "kv_port": "12000"}
+    if engine_id != "omitted":
+        config["engine_id"] = engine_id
+    native_parser = argparse.ArgumentParser()
+    AsyncEngineArgs.add_cli_args(native_parser)
+    native = native_parser.parse_args(["--kv-transfer-config", json.dumps(config)]).kv_transfer_config
+    assert is_dataclass(native)
+    assert native.kv_port == 12000
+    assert isinstance(native.engine_id, str)
+    parser = argparse.ArgumentParser()
+    args_mod.add_vllm_arguments(parser)
+    forwarded = parser.parse_args(["--vllm-kv-transfer-config", json.dumps(config)]).vllm_kv_transfer_config
+    expected = {"kv_connector": "MooncakeConnector", "kv_role": "kv_both", "kv_port": 12000}
+    if engine_id == "explicit-engine":
+        expected["engine_id"] = engine_id
+    assert forwarded == expected
+    first = TypeAdapter(KVTransferConfig).validate_python(forwarded)
+    second = TypeAdapter(KVTransferConfig).validate_python(forwarded)
+    if engine_id == "explicit-engine":
+        assert native.engine_id == first.engine_id == second.engine_id == engine_id
+    else:
+        assert first.engine_id != second.engine_id
 
 
 @pytest.fixture(scope="module")
@@ -161,18 +251,26 @@ def test_add_vllm_router_arguments_defaults_to_cache_aware(args_mod):
     args_mod.add_vllm_router_arguments(parser)
     parsed, _ = parser.parse_known_args([])
     assert parsed.router_policy == "cache_aware"
+    assert parsed.router_kv_connector == "mooncake"
+    parsed = parser.parse_args(["--router-kv-connector", "nixl"])
+    assert parsed.router_kv_connector == "nixl"
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("flags, expected", [([], "warning"), (["--router-log-level", "debug"], "debug")])
-def test_router_log_level_survives_launch(args_mod, monkeypatch, flags, expected):
+@pytest.mark.parametrize("has_pd_disaggregation", [False, True])
+def test_router_log_level_survives_launch(args_mod, monkeypatch, flags, expected, has_pd_disaggregation):
     from vllm_router.router_args import RouterArgs
+
+    from vime.backends.vllm_utils import deployment
 
     parser = argparse.ArgumentParser(add_help=False)
     args_mod.add_vllm_router_arguments(parser)
     args = parser.parse_args(flags)
     assert args.router_log_level == expected
-    router_args = SimpleNamespace(log_level=args.router_log_level)
+    router_args = SimpleNamespace(
+        log_level=args.router_log_level, kv_connector="mooncake", intra_node_data_parallel_size=1
+    )
     monkeypatch.setattr(RouterArgs, "from_cli_args", lambda *args, **kwargs: router_args)
     launches = []
 
@@ -180,19 +278,16 @@ def test_router_log_level_survives_launch(args_mod, monkeypatch, flags, expected
         launches.append(args[0])
         return SimpleNamespace(start=lambda: None, is_alive=lambda: True)
 
-    source_path = Path(args_mod.__file__).with_name("deployment.py")
-    source = ast.parse(source_path.read_text())
-    function = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "_start_router")
-    namespace = {
-        "random": random,
-        "logger": logging.getLogger(__name__),
-        "find_available_port": lambda port: port,
-        "time": SimpleNamespace(sleep=lambda seconds: None),
-        "multiprocessing": SimpleNamespace(Process=make_process),
-    }
-    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), namespace)
-    namespace["_start_router"](args, bind=("127.0.0.1", 30000))
+    monkeypatch.setattr(deployment, "find_available_port", lambda port: port)
+    monkeypatch.setattr(deployment.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(deployment.multiprocessing, "Process", make_process)
+    monkeypatch.setattr(deployment, "get_host_info", lambda: (None, "127.0.0.1"))
+    args.vllm_router_ip = None
+    args.vllm_router_port = 30000
+    args.vllm_data_parallel_size = 4
+    deployment._start_router(args, has_pd_disaggregation=has_pd_disaggregation)
     assert launches[0].log_level == expected
+    assert launches[0].intra_node_data_parallel_size == (4 if has_pd_disaggregation else 1)
 
 
 @pytest.mark.unit

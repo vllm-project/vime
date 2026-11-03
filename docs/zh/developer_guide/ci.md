@@ -71,8 +71,8 @@ Buildkite 的 `megatron` 套件包含这项 GPU e2e，自动 `agent-adapter`
 步骤覆盖 CPU 合约检查。
 
 `tests/ci/setup_agent_e2e.sh` 按 `examples/coding_agent_rl/requirements-sunabako.txt`
-安装 PyPI 发布的 `sunabako==0.1.1` wheel，并在启动 Ray head 前准备认证 token；
-已有 token 会复用，其内容不会打印到 CI 日志。该版本通过 `uid_range_size` 支持 native 用户，
+安装 PyPI 发布的 `sunabako>=0.1.2` wheel，并在启动 Ray head 前准备认证 token；
+已有 token 会复用，其内容不会打印到 CI 日志。Sunabako 通过 `uid_range_size` 支持 native 用户，
 本地节点为 8 个沙箱分别保留 65,536 个 UID/GID，
 state 挂载到 `/workspace`，保证映射后的用户能遍历父目录。测试在特权 Buildkite test pod
 中运行，无需内层 Docker daemon 或 PRoot。RSS 模式只用于有界功能验证，
@@ -107,7 +107,7 @@ Buildkite 在成功或失败后都会上传这些产物。
 - R3：`test_qwen3_30B_A3B_r3.py` 和 `test_moonlight_16B_A3B_r3.py`。
 - SC：`test_qwen2.5_0.5B_score_centering.py`，分别检查 top-k 和 top-p 数据。
 - 全异步 rollout、fanout、PPO、MTP、PD/NIXL、分布式 vLLM、混合显存卸载后的故障恢复、调试数据重放，以及释放训练资源后继续 rollout。
-- Checkpoint 保存与加载：不同阶段共用 straw 存储池，检查队列和训练状态能否恢复。`test_straw_checkpoint_fork.py` 还检查指定恢复步骤、多次回退、自动选择分支和调试数据重放。
+- Checkpoint 保存与加载：不同阶段共用 straw 存储池，检查队列和训练状态能否恢复。`test_straw_checkpoint_rewind.py` 还检查指定恢复步骤、原目录多次回退、重新生成和调试数据重放。
 
 R3、SC 和全异步测试同时开启在线 GC。普通 straw 测试使用独立的临时目录，并在结束后清理。单机 GPU 测试使用本地文件系统配置；多机 JuiceFS 的持久性需要单独验证。其他端到端测试继续覆盖 Ray object-store 和 NIXL 传输。
 

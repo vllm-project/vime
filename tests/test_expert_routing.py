@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from vime.backends.megatron_utils.update_weight.expert_routing import (
+    _build_expert_params,
     _build_expert_transfer_plan,
     _can_route_experts,
     _expert_transfer_size,
@@ -96,6 +97,28 @@ def test_vllm_rank_local_expert_routing_accepts_linear_static_ep(monkeypatch):
 )
 def test_vllm_rank_local_expert_routing_rejects_non_static_placement(monkeypatch, overrides):
     assert not _can_route_with_args(monkeypatch, **overrides)
+
+
+@pytest.mark.parametrize("prefix", ["module.module.", "module.module.language_model."])
+def test_expert_targets_cover_language_model_wrappers(prefix):
+    infos = [
+        replace(
+            _param(expert=expert, projection=projection, source_rank=0, target_rank=0, size=60).info,
+            name=f"{prefix}decoder.layers.3.mlp.experts.linear_fc{projection}.weight{expert}",
+        )
+        for expert in range(4)
+        for projection in (1, 2)
+    ]
+    params = _build_expert_params(infos, [(0, 2), (1, 3)], num_experts=4)
+    assert len(params) == 8
+    for param in params:
+        assert param.layer == 3
+        assert param.target_ranks == ((0, 2) if param.expert < 2 else (1, 3))
+
+    plan = _build_expert_transfer_plan(params, buffer_size=240)
+    assert {
+        param.info.name for group in plan for batch in group for transfer in batch for param in transfer.params
+    } == {info.name for info in infos}
 
 
 def _param(*, expert: int, projection: int, source_rank: int, target_rank: int, size: int) -> _ExpertParam:

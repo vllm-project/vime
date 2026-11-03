@@ -2,6 +2,7 @@ import asyncio
 import sys
 import types
 from argparse import Namespace
+from unittest.mock import AsyncMock
 
 import pytest
 import torch
@@ -29,6 +30,25 @@ def test_opd_teacher_uses_rollout_temperature(monkeypatch):
     asyncio.run(on_policy_distillation.reward_func(args, sample))
 
     assert captured["payload"]["sampling_params"]["temperature"] == 0.7
+
+
+@pytest.mark.parametrize("modality", ["audio", "videos"])
+@pytest.mark.parametrize("with_images", [False, True])
+def test_opd_rejects_unsupported_modalities_before_http(monkeypatch, modality, with_images):
+    from vime.rollout import on_policy_distillation
+
+    post = AsyncMock(side_effect=AssertionError("Unsupported modalities must be rejected before HTTP"))
+    monkeypatch.setattr(on_policy_distillation, "post", post)
+    multimodal_inputs = {modality: ["unsupported-media"]}
+    if with_images:
+        multimodal_inputs["images"] = ["image"]
+    args = Namespace(rm_url="http://teacher:8000/inference/v1/generate", rollout_temperature=0.7)
+    sample = Namespace(tokens=[1, 2], prompt="prompt", multimodal_inputs=multimodal_inputs)
+
+    with pytest.raises(NotImplementedError, match=f"unsupported modalities:.*{modality}"):
+        asyncio.run(on_policy_distillation.reward_func(args, sample))
+
+    post.assert_not_awaited()
 
 
 def test_get_values_does_not_apply_rollout_temperature(monkeypatch):

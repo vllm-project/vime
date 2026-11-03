@@ -1,7 +1,9 @@
 import argparse
+import json
 import logging
+from dataclasses import fields
 
-from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.arg_utils import AsyncEngineArgs, _expand_json_human_readable_numbers
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm_router.launch_router import RouterArgs
 
@@ -10,34 +12,49 @@ from vime.utils.http_utils import _wrap_ipv6
 logger = logging.getLogger(__name__)
 
 
+# TODO: use all vllm router arguments with `--vllm-router` prefix
 def add_vllm_router_arguments(parser):
+    """
+    Add arguments to the parser for the vLLM router.
+    """
     parser.add_argument(
         "--vllm-router-ip",
         type=str,
         default=None,
-        help="IP address of the vllm router",
+        help="IP address of the vLLM router",
     )
     parser.add_argument(
         "--vllm-router-port",
         type=int,
         default=None,
-        help="Port of the vllm router",
+        help="Port of the vLLM router",
     )
     parser.add_argument(
         "--vllm-router-request-timeout-secs",
         type=int,
         default=14400,
-        help="Timeout for requests to the vllm router in seconds",
+        help="Timeout for requests to the vLLM router in seconds",
     )
     RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
-    parser.set_defaults(router_log_level="warning")
+    # Keep driver logs quiet by default while allowing --router-log-level to
+    # expose router dispatch and retry details when needed.
+    parser.set_defaults(router_log_level="warning", router_kv_connector="mooncake")
     return parser
 
 
 def add_vllm_arguments(parser):
+    """
+    Add arguments to the parser for the vLLM server.
+    """
     parser = add_vllm_router_arguments(parser)
     parser.set_defaults(router_balance_abs_threshold=10, router_balance_rel_threshold=1.2)
     parser.add_argument("--vllm-server-concurrency", type=int, default=512)
+    parser.add_argument(
+        "--vllm-python-executable",
+        default=None,
+        help="Python executable or activation wrapper used to start vLLM server subprocesses. "
+        "Must exist on every rollout node. Ray actors remain in the training environment.",
+    )
     parser.add_argument(
         "--vllm-enable-deterministic-inference",
         action="store_true",
@@ -70,6 +87,9 @@ def add_vllm_arguments(parser):
 
     def _wrap_add_argument(target_add_argument):
         def wrapper(*name_or_flags, **kwargs):
+            """
+            Add arguments to the parser, ensuring that the server arguments are prefixed and skippable.
+            """
             canonical = kwargs.get("dest")
             if canonical is None:
                 for s in name_or_flags:
@@ -79,6 +99,7 @@ def add_vllm_arguments(parser):
             if canonical in skipped_args:
                 return None
 
+            # If not skipped, proceed to prefix flags and dest
             new_flags = []
             for s in name_or_flags:
                 if isinstance(s, str) and s.startswith("-"):
@@ -86,7 +107,26 @@ def add_vllm_arguments(parser):
                 else:
                     new_flags.append(s)
 
+            # Prepare kwargs for the actual add_argument call.
+            # Make a copy to avoid modifying the original kwargs dict.
             new_kwargs = kwargs.copy()
+            if canonical == "kv_transfer_config":
+                native_type = new_kwargs["type"]
+
+                def parse_kv_transfer_config(value):
+                    parsed = native_type(value)
+                    if parsed is None:
+                        return None
+                    explicit = json.loads(_expand_json_human_readable_numbers(value))
+                    return {
+                        field.name: getattr(parsed, field.name)
+                        for field in fields(parsed)
+                        if field.name in explicit and not (field.name == "engine_id" and explicit[field.name] is None)
+                    }
+
+                new_kwargs["type"] = parse_kv_transfer_config
+            # If 'dest' is explicitly provided and is a string, prefix it.
+            # This ensures the attribute on the args namespace becomes, e.g., args.vllm_dest_name.
             if "dest" in new_kwargs and isinstance(new_kwargs["dest"], str):
                 if not new_kwargs["dest"].startswith("vllm_"):
                     new_kwargs["dest"] = f"vllm_{new_kwargs['dest']}"
@@ -103,9 +143,13 @@ def add_vllm_arguments(parser):
     parser.add_argument = _wrap_add_argument(old_add_argument)
     parser.add_argument_group = patched_add_argument_group
     AsyncEngineArgs.add_cli_args(parser)
-    from vllm.entrypoints.launchers.cli_args import FrontendArgs
+    parser.set_defaults(vllm_watchdog_config={"abort_on_timeout": True})
+    from vllm.entrypoints.common.cli_args import FrontendArgs
 
     FrontendArgs.add_cli_args(parser)
+    parser.set_defaults(
+        **{f"vllm_{field.name}": None for field in fields(FrontendArgs) if field.name not in skipped_args}
+    )
     parser.add_argument = old_add_argument
     parser.add_argument_group = old_add_argument_group
 
@@ -114,7 +158,7 @@ def add_vllm_arguments(parser):
         "--prefill-num-servers",
         type=int,
         default=None,
-        help="Number of prefill servers for PD disaggregation.",
+        help="Number of prefill servers for disaggregation.",
     )
     parser.add_argument(
         "--vllm-config",
@@ -122,7 +166,11 @@ def add_vllm_arguments(parser):
         default=None,
         dest="vllm_config",
         help=(
-            "Path to a YAML config file for fine-grained vLLM rollout engine deployment. "
+            "Path to a YAML config for vLLM engine deployment. "
+            "Defines server_groups with worker_type (regular/prefill/decode/placeholder), "
+            "num_gpus per group, and optional per-group 'overrides' dict of "
+            "AsyncEngineArgs / FrontendArgs field names that override the base --vllm-* CLI args. "
+            "Placeholder groups reserve GPU slots without creating engines. "
             "Mutually exclusive with --prefill-num-servers and --rollout-external."
         ),
     )
@@ -151,9 +199,13 @@ def validate_args(args):
 
 
 def vllm_parse_args():
-    """Parse vLLM flags via an independent ArgumentParser + parse_known_args.
+    """
+    Parse vLLM server arguments independently using a separate ArgumentParser.
+    Uses parse_known_args() to only consume vLLM-related arguments from sys.argv,
+    allowing the remaining arguments to be parsed by megatron separately.
 
-    Returns a Namespace with all attrs prefixed ``vllm_``.
+    Returns:
+        argparse.Namespace: Parsed vLLM arguments (all attributes prefixed with vllm_).
     """
     parser = FlexibleArgumentParser(add_help=False)
     add_vllm_arguments(parser)

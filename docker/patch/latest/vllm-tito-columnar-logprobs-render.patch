@@ -1,0 +1,1246 @@
+From: Aaron Hao <aaronhao@inferact.ai>
+Subject: [PATCH] TITO columnar logprobs and cooperative JSON rendering
+
+Source: https://github.com/vllm-project/vllm/pull/60542
+Frozen upstream head: 8a7177498c1d9c17883a2cda5b607b66dc28906d (hao-aaron).
+Rebased onto selected tree 8b3e217050829e360b2c22395b594287b8d96bc4.
+Local compatibility adaptation: retain the original public FlatLogprobs
+ dataclass and explicit flat API; select separate private column storage
+ only for the existing large-k nonstreaming TITO path. Keep native k0/1.
+The public-Flat compatibility adaptation is not attributed to upstream60542.
+Exact runtime delta: serializer-public-flat-20261026/runtime.patch,
+SHA256 3ed9ae9ace6d43a4736a62192c11794510b6517183fde8c1c798c2d0d4210a2b.
+
+diff --git a/vllm/entrypoints/scale_out/token_in_token_out/api_router.py b/vllm/entrypoints/scale_out/token_in_token_out/api_router.py
+--- a/vllm/entrypoints/scale_out/token_in_token_out/api_router.py
++++ b/vllm/entrypoints/scale_out/token_in_token_out/api_router.py
+@@ -5,6 +5,7 @@
+ import asyncio
+ import json
+ from http import HTTPStatus
++from typing import Any
+ 
+ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
+ from fastapi.responses import JSONResponse, StreamingResponse
+@@ -22,6 +23,7 @@
+ from .protocol import (
+     GenerateRequest,
+     GenerateResponseBase,
++    RenderedGenerateResponse,
+ )
+ from .serving import ServingTokens
+ 
+@@ -41,6 +43,13 @@
+ 
+ 
+ router = APIRouter()
++
++
++class _RenderedJSONResponse(JSONResponse):
++    """A body already rendered to JSON, sent with ``JSONResponse`` headers."""
++
++    def render(self, content: Any) -> bytes:
++        return content
+ 
+ 
+ @router.post(
+@@ -66,6 +75,9 @@
+         return JSONResponse(
+             content=generator.model_dump(), status_code=generator.error.code
+         )
++
++    elif isinstance(generator, RenderedGenerateResponse):
++        return _RenderedJSONResponse(content=generator.body)
+ 
+     elif isinstance(generator, GenerateResponseBase):
+         return JSONResponse(content=generator.model_dump())
+diff --git a/vllm/entrypoints/scale_out/token_in_token_out/logprobs_render.py b/vllm/entrypoints/scale_out/token_in_token_out/logprobs_render.py
+new file mode 100644
+--- /dev/null
++++ b/vllm/entrypoints/scale_out/token_in_token_out/logprobs_render.py
+@@ -0,0 +1,284 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""Object-free rendering of ``/inference/v1/generate`` sample logprobs.
++
++:func:`render_tokens_logprobs` reads the engine rows of a
++:class:`~vllm.logprobs._ColumnarLogprobs` and produces exactly the JSON that
++``ServingTokens._create_tokens_logprobs`` + ``model_dump`` + Starlette's
++``JSONResponse.render`` produce for the same rows, without a Python object
++per entry, yielding to the event loop between blocks of rows.
++:func:`render_json_with_fragments` splices such pre-rendered values into the
++JSON of the remaining (small) response.
++"""
++
++import asyncio
++import json
++import secrets
++from collections.abc import Mapping, Sequence
++from typing import Any
++
++import msgspec
++import numpy as np
++
++from vllm.logprobs import _ColumnarLogprobs
++
++# Logprob entries (rows x slots) rendered between yields to the event loop,
++# about 2 ms of work; also bounds the per-block arrays.
++RENDER_BLOCK_ENTRIES = 1 << 13
++
++
++class _LeadTable:
++    """token id -> ``prefix + str(id) + suffix`` as a numpy object array, so a
++    block of ids maps to its JSON pieces with one fancy index.
++
++    Covers ids below ``max_ids``, kept for the process lifetime (a few MB per
++    table at a 150k vocabulary); blocks with other ids are formatted per call.
++    """
++
++    max_ids = 1 << 18
++
++    def __init__(self, prefix: bytes, suffix: bytes):
++        self.prefix = prefix
++        self.suffix = suffix
++        self._values = np.empty(0, dtype=object)
++        self._filled = np.zeros(0, dtype=bool)
++
++    def _formatted(self, ids: np.ndarray) -> np.ndarray:
++        result = np.empty(ids.size, dtype=object)
++        result[:] = [b"%s%d%s" % (self.prefix, i, self.suffix) for i in ids.tolist()]
++        return result
++
++    def lookup(self, ids: np.ndarray) -> np.ndarray:
++        """The pieces of a non-empty array of ids, in its shape."""
++        lo, hi = int(ids.min()), int(ids.max())
++        if lo < 0 or hi >= self.max_ids:
++            return self._formatted(ids.ravel()).reshape(ids.shape)
++        if hi >= len(self._values):
++            size = min(self.max_ids, max(hi + 1, 2 * len(self._values)))
++            values = np.empty(size, dtype=object)
++            values[: len(self._values)] = self._values
++            filled = np.zeros(size, dtype=bool)
++            filled[: len(self._filled)] = self._filled
++            self._values, self._filled = values, filled
++        missing = np.unique(ids[~self._filled[ids]])
++        if missing.size:
++            self._values[missing] = self._formatted(missing)
++            self._filled[missing] = True
++        return self._values[ids]
++
++
++# Pieces before each logprob value: the content entry, the first top-k entry
++# (the sampled token again) and every further top-k entry.
++_CONTENT_LEADS = _LeadTable(b'{"token_id":', b',"logprob":')
++_FIRST_TOP_LEADS = _LeadTable(b',"top_logprobs":[{"token_id":', b',"logprob":')
++_NEXT_TOP_LEADS = _LeadTable(b'},{"token_id":', b',"logprob":')
++
++
++def _rank_pieces(ranks: list[int]) -> list[bytes]:
++    """``,"rank":<rank>`` with a rank of 0 sent as null, like ``rank or None``."""
++    return [b',"rank":%d' % r if r else b',"rank":null' for r in ranks]
++
++
++def format_float_reprs(values: np.ndarray) -> list[bytes]:
++    """``[repr(float(v)).encode() for v in values]`` for a non-empty 1-D
++    float64 array of finite values that float32 represents exactly.
++
++    ``repr`` is what ``json.dumps`` emits. msgspec's shortest round-trip
++    encoder is used instead where it gives the same digits: for
++    ``1e-4 <= |v| < 1e16`` and zeros; other magnitudes, where the exponent
++    notation differs (``1e-05`` vs ``0.00001``), use ``repr``. The fast path
++    is disabled if an import-time probe finds msgspec formatting that differs
++    from ``repr``.
++    """
++    floats = values.tolist()
++    if not _MSGSPEC_FLOATS_MATCH_REPR:
++        return [repr(v).encode("ascii") for v in floats]
++    return _format_fast(values, floats)
++
++
++def _format_fast(values: np.ndarray, floats: list[float]) -> list[bytes]:
++    out = msgspec.json.encode(floats)[1:-1].split(b",")
++    magnitude = np.abs(values)
++    for i in np.flatnonzero(
++        ~(((magnitude >= 1e-4) & (magnitude < 1e16)) | (magnitude == 0))
++    ).tolist():
++        out[i] = repr(floats[i]).encode("ascii")
++    return out
++
++
++def _msgspec_floats_match_repr() -> bool:
++    """Probe the msgspec fast path against ``repr`` once at import: float32
++    boundaries of the fast range, powers of ten, extremes and a fixed
++    pseudo-random sample."""
++    probe: list[float] = [0.0, -0.0, 0.1, 0.5, 1.0, 9999.0, 123.456, -1.2e-7]
++    for edge in (1e-4, 1e16, 1.0, 1e-3, 1e6, 1e15, 3.4028235e38, 1e-45):
++        e = np.float32(edge)
++        probe += [
++            float(e),
++            float(np.nextafter(e, np.float32(0))),
++            float(np.nextafter(e, np.float32(3.4028235e38))),
++        ]
++    probe += [float(np.float32(10.0**p)) for p in range(-45, 39)]
++    bits = np.random.default_rng(1234).integers(0, 2**32, 4096, dtype=np.uint64)
++    sample = bits.astype(np.uint32).view(np.float32)
++    probe += sample[np.isfinite(sample)].astype(np.float64).tolist()
++    probe += [-v for v in probe]
++    values = np.array(probe, dtype=np.float64)
++    values = values[np.isfinite(values)]
++    probe = values.tolist()
++    try:
++        return _format_fast(values, probe) == [repr(v).encode("ascii") for v in probe]
++    except Exception:
++        return False
++
++
++_MSGSPEC_FLOATS_MATCH_REPR = _msgspec_floats_match_repr()
++
++
++async def render_tokens_logprobs(
++    sampled_token_ids: Sequence[int],
++    container: _ColumnarLogprobs,
++    lock: asyncio.Lock | None = None,
++) -> list[bytes] | None:
++    """See :func:`_render_tokens_logprobs`. Renders of more than one block
++    hold ``lock``: they all run on the event loop's thread, so interleaving
++    them adds no throughput, only memory, as each holds its partial output.
++    """
++    rows = container.rows()
++    if lock is None or rows is None or rows[0].size <= RENDER_BLOCK_ENTRIES:
++        return await _render_tokens_logprobs(sampled_token_ids, container)
++    async with lock:
++        return await _render_tokens_logprobs(sampled_token_ids, container)
++
++
++async def _render_tokens_logprobs(
++    sampled_token_ids: Sequence[int],
++    container: _ColumnarLogprobs,
++) -> list[bytes] | None:
++    """Render the ``GenerateLogProbs`` JSON of one choice, as parts whose
++    concatenation is the JSON.
++
++    Per position, the per-entry path builds a dict from the row (keys keep
++    their first occurrence's order, values come from the last occurrence;
++    slot 0 has the engine rank, slot ``j`` rank ``j``), looks the sampled
++    entry up by the sampled id, and lists every dict item as ``top_logprobs``
++    (one fewer when the sampled id repeats in the top-k); logprobs are clamped
++    (NaN and values below -9999 are -9999.0) and a rank of 0 is null.
++
++    Returns None when the rows do not map to that shape directly (sampled id
++    not in slot 0, repeated top-k ids, a value JSON cannot represent): the
++    caller then uses the per-entry path.
++    """
++    engine_rows = container.rows()
++    if engine_rows is None:
++        return None
++    token_ids, logprobs, engine_ranks = engine_rows
++    n = len(sampled_token_ids)
++    if n != len(token_ids):
++        return None
++    if n == 0:
++        return [b'{"content":[]}']
++    if not np.array_equal(token_ids[:, 0], np.asarray(sampled_token_ids)):
++        return None
++
++    num_slots = token_ids.shape[1]
++    cols = np.arange(num_slots)
++    rank_pieces = np.array(_rank_pieces(list(range(num_slots + 1))), dtype=object)
++    block_rows = max(1, RENDER_BLOCK_ENTRIES // num_slots)
++    parts: list[bytes] = [b'{"content":[']
++    for start in range(0, n, block_rows):
++        if start:
++            await asyncio.sleep(0)
++        ids = token_ids[start : start + block_rows]
++        rows = len(ids)
++        if num_slots > 2:
++            # Repeated top-k ids: logprob_token_ids may repeat an id, and a
++            # co-batched logprob_token_ids request pads other rows with id 0.
++            top = np.sort(ids[:, 1:], axis=1)
++            if (top[:, 1:] == top[:, :-1]).any():
++                return None
++        # The slot (>= 1) repeating the sampled id, at most one per row here.
++        if num_slots > 1:
++            eq = ids[:, 1:] == ids[:, :1]
++            has_dup = eq.any(axis=1)
++            dup_col = np.where(has_dup, eq.argmax(axis=1) + 1, num_slots)
++        else:
++            has_dup = np.zeros(rows, dtype=bool)
++            dup_col = np.full(rows, num_slots)
++        # Slots of the top-k entries: the duplicate's slot is skipped, so a
++        # row with a duplicate has no last entry.
++        src = cols[None, :] + (cols[None, :] >= dup_col[:, None])
++        missing = src == num_slots
++        src = np.minimum(src, num_slots - 1)
++        # The sampled entry's value and rank come from the duplicate's slot.
++        sampled_src = np.where(has_dup, dup_col, 0)
++        value_src = np.where(src == 0, sampled_src[:, None], src)
++        values = np.take_along_axis(
++            logprobs[start : start + rows], value_src, axis=1
++        ).astype(np.float64)
++        values = np.where(np.isnan(values), -9999.0, np.maximum(values, -9999.0))
++        if not np.isfinite(values).all():
++            return None
++        sampled_ranks = np.where(has_dup, dup_col, engine_ranks[start : start + rows])
++
++        # Per row: content lead, value, rank; first top lead, value, rank;
++        # lead, value, rank per further top entry; the row end. Built as one
++        # object array: per-row lists would be GC-tracked objects.
++        floats = np.empty(rows * num_slots, dtype=object)
++        floats[:] = format_float_reprs(values.ravel())
++        floats = floats.reshape(rows, num_slots)
++        sampled_rank_pieces = np.empty(rows, dtype=object)
++        sampled_rank_pieces[:] = _rank_pieces(sampled_ranks.tolist())
++        out = np.empty((rows, 3 * (num_slots + 1) + 1), dtype=object)
++        out[:, 0] = _CONTENT_LEADS.lookup(ids[:, 0])
++        out[:, 1] = floats[:, 0]
++        out[:, 2] = sampled_rank_pieces
++        out[:, 3] = _FIRST_TOP_LEADS.lookup(ids[:, 0])
++        out[:, 4] = floats[:, 0]
++        out[:, 5] = sampled_rank_pieces
++        if num_slots > 1:
++            top_src = src[:, 1:]
++            out[:, 6:-1:3] = _NEXT_TOP_LEADS.lookup(
++                np.take_along_axis(ids, top_src, axis=1)
++            )
++            out[:, 7:-1:3] = floats[:, 1:]
++            out[:, 8:-1:3] = rank_pieces[top_src]
++            for start_col in (6, 7, 8):
++                out[:, start_col:-1:3][missing[:, 1:]] = b""
++        out[:, -1] = b"}]},"
++        parts.append(b"".join(out.ravel().tolist()))
++    parts[-1] = parts[-1][:-1]  # the last row has no separator
++    parts.append(b"]}")
++    return parts
++
++
++def _dumps(content: Any) -> bytes:
++    """Same serialization as ``starlette.responses.JSONResponse.render``."""
++    return json.dumps(
++        content,
++        ensure_ascii=False,
++        allow_nan=False,
++        indent=None,
++        separators=(",", ":"),
++    ).encode("utf-8")
++
++
++def render_json_with_fragments(
++    content: dict[str, Any], key: str, fragments: Mapping[int, list[bytes]]
++) -> list[bytes]:
++    """Render ``content`` like ``JSONResponse``, with the value of
++    ``content["choices"][i][key]`` replaced by the pre-rendered JSON
++    ``fragments[i]`` (parts to concatenate), as parts whose concatenation is
++    the body. ``content`` is modified in place."""
++    token = secrets.token_hex(16)
++    for index in fragments:
++        content["choices"][index][key] = token
++    pieces = _dumps(content).split(f'"{token}"'.encode())
++    if len(pieces) != len(fragments) + 1:
++        raise AssertionError("Fragment placeholder collision")
++    # Choices, hence placeholders, appear in index order.
++    out = [pieces[0]]
++    for index, piece in zip(sorted(fragments), pieces[1:]):
++        out += fragments[index]
++        out.append(piece)
++    return out
+diff --git a/vllm/entrypoints/scale_out/token_in_token_out/protocol.py b/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
+--- a/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
++++ b/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
+@@ -1,5 +1,6 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++from dataclasses import dataclass
+ from typing import Annotated, Any, Literal, TypeAlias
+ 
+ from pydantic import (
+@@ -637,6 +638,14 @@
+     choices: list[GenerateDerenderChoice]
+ 
+ 
++@dataclass
++class RenderedGenerateResponse:
++    """A non-streaming generate response already rendered to its JSON body:
++    the bytes ``JSONResponse`` gives for the equivalent ``GenerateResponse``."""
++
++    body: bytes
++
++
+ def output_mode_or_tokens(value: Any) -> Any:
+     """Discriminator for `GenerateResponse` and `GenerateStreamResponse`.
+ 
+diff --git a/vllm/entrypoints/scale_out/token_in_token_out/serving.py b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
+--- a/vllm/entrypoints/scale_out/token_in_token_out/serving.py
++++ b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
+@@ -43,7 +43,7 @@
+ from vllm.exceptions import GenerationError, VLLMValidationError
+ from vllm.inputs import EngineInput, TokensPrompt, mm_input
+ from vllm.logger import init_logger
+-from vllm.logprobs import Logprob
++from vllm.logprobs import Logprob, _ColumnarLogprobs
+ from vllm.multimodal.inputs import (
+     MultiModalKwargsItem,
+     MultiModalKwargsItems,
+@@ -58,6 +58,7 @@
+ from vllm.utils.collection_utils import as_list
+ from vllm.utils.serial_utils import numpy2base64
+ 
++from .logprobs_render import render_json_with_fragments, render_tokens_logprobs
+ from .mm_features import (
+     mm_kwargs_from_features,
+     placeholder_ranges_from_engine_input,
+@@ -78,6 +79,7 @@
+     GenerateTokensResponse,
+     GenerateTokensStreamChoice,
+     GenerateTokensStreamResponse,
++    RenderedGenerateResponse,
+ )
+ 
+ logger = init_logger(__name__)
+@@ -143,6 +145,7 @@
+         )
+         self.online_renderer = online_renderer
+         self.online_derenderer = online_derenderer
++        self.render_lock = asyncio.Lock()
+         self.enable_prompt_tokens_details = enable_prompt_tokens_details
+         self.enable_per_request_metrics = enable_per_request_metrics
+         self.enable_log_outputs = enable_log_outputs
+@@ -189,7 +192,12 @@
+         self,
+         request: GenerateRequest,
+         raw_request: Request | None = None,
+-    ) -> GenerateResponse | ErrorResponse | AsyncGenerator[str, None]:
++    ) -> (
++        GenerateResponse
++        | RenderedGenerateResponse
++        | ErrorResponse
++        | AsyncGenerator[str, None]
++    ):
+         error_check_ret = await self._check_model(request)
+         if error_check_ret is not None:
+             logger.error("Error with model %s", error_check_ret)
+@@ -366,6 +374,18 @@
+         sampling_params.output_kind = (
+             RequestOutputKind.DELTA if request.stream else RequestOutputKind.FINAL_ONLY
+         )
++        if (
++            not request.stream
++            and request.output_mode == "tokens"
++            and sampling_params.logprobs is not None
++            and sampling_params.logprobs > 1
++            and sampling_params.prompt_logprobs is None
++        ):
++            # Keep the top-k rows as numpy columns without decoded tokens: the
++            # response is rendered from them without a Python object per
++            # entry. Prompt logprobs stay lists, as the response returns them.
++            sampling_params._columnar_logprobs = True
++            sampling_params._detokenize_logprobs = False
+ 
+         self._log_inputs(
+             request_id,
+@@ -429,7 +449,7 @@
+         model_name: str,
+         request_metadata: RequestResponseMetadata,
+         derender_request: ChatCompletionRequest | None = None,
+-    ) -> ErrorResponse | GenerateResponse:
++    ) -> ErrorResponse | GenerateResponse | RenderedGenerateResponse:
+         created_time = int(time.time())
+         final_res: RequestOutput | None = None
+         sampling_params: SamplingParams = request.sampling_params
+@@ -455,6 +475,8 @@
+ 
+         assert final_res is not None
+ 
++        # choice position -> pre-rendered JSON of its logprobs
++        fragments: dict[int, list[bytes]] = {}
+         tokens_choices: list[GenerateTokensChoice] = []
+         text_choices: list[GenerateTextChoice] = []
+         derender_choice_fields: list[dict[str, Any]] = []
+@@ -466,10 +488,22 @@
+             out_logprobs = output.logprobs
+ 
+             # This is top_logprobs in completions API
++            logprobs: GenerateLogProbs | ChatCompletionLogProbs | None = None
+             if num_logprobs is not None:
+                 assert out_logprobs is not None, "Did not output logprobs"
+-                logprobs: GenerateLogProbs | ChatCompletionLogProbs | None
+-                if text_mode:
++                rendered = None
++                top_logprobs: GenericSequence[dict[int, Logprob] | None] = out_logprobs
++                if isinstance(out_logprobs, _ColumnarLogprobs) and not text_mode:
++                    rendered = await render_tokens_logprobs(
++                        token_ids, out_logprobs, self.render_lock
++                    )
++                    if rendered is None:
++                        # Irregular rows: the per-entry path. Iterating once
++                        # is cheaper than indexing each position.
++                        top_logprobs = list(out_logprobs)
++                if rendered is not None:
++                    fragments[len(tokens_choices)] = rendered
++                elif text_mode:
+                     logprobs = self._create_text_logprobs(
+                         token_ids=token_ids,
+                         top_logprobs=out_logprobs,
+@@ -479,10 +513,8 @@
+                 else:
+                     logprobs = self._create_tokens_logprobs(
+                         token_ids=token_ids,
+-                        top_logprobs=out_logprobs,
+-                    )
+-            else:
+-                logprobs = None
++                        top_logprobs=top_logprobs,
++                    )
+ 
+             routed_experts_b64 = (
+                 numpy2base64(output.routed_experts)
+@@ -604,6 +636,11 @@
+                         delta=False,
+                     )
+ 
++        if fragments:
++            parts = render_json_with_fragments(
++                response.model_dump(), "logprobs", fragments
++            )
++            return RenderedGenerateResponse(b"".join(parts))
+         return response
+ 
+     def _build_response_fields(
+diff --git a/vllm/logprobs.py b/vllm/logprobs.py
+--- a/vllm/logprobs.py
++++ b/vllm/logprobs.py
+@@ -1,9 +1,12 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ import itertools
+-from collections.abc import Iterable, Iterator, MutableSequence
++import operator
++from collections.abc import Callable, Iterable, Iterator, MutableSequence, Sequence
+ from dataclasses import dataclass, field
+-from typing import overload
++from typing import Any, overload
++
++import numpy as np
+ 
+ 
+ # We use dataclass for now because it is used for
+@@ -26,6 +29,114 @@
+ 
+ 
+ LogprobsOnePosition = dict[int, Logprob]
++
++
++_NO_RANK = np.iinfo(np.int64).min
++
++
++def _fits(values: np.ndarray, dtype: np.dtype) -> bool:
++    """Whether ``values`` round-trip through ``dtype``."""
++    if dtype.kind == values.dtype.kind and dtype.itemsize >= values.dtype.itemsize:
++        return True
++    with np.errstate(over="ignore", invalid="ignore"):
++        cast = values.astype(dtype)
++    # values != values marks NaN, which round-trips as NaN.
++    return bool(((cast == values) | (values != values)).all())
++
++
++class _Column:
++    """An append-only 1-D array in a buffer that doubles when full. Values
++    that ``dtype`` cannot hold exactly widen the column to ``wide``.
++
++    Appends only write past the current length and growing allocates a new
++    buffer, so views returned earlier stay valid.
++    """
++
++    def __init__(self, dtype: str, wide: str | None = None) -> None:
++        self.dtype = np.dtype(dtype)
++        self.wide = np.dtype(wide or dtype)
++        self._buf = np.empty(0, dtype=self.dtype)
++        self._len = 0
++
++    def __len__(self) -> int:
++        return self._len
++
++    def append(self, values: np.ndarray | Sequence[int] | Sequence[float]) -> None:
++        values = np.asarray(values)
++        if not values.size:
++            return
++        start = self._len
++        end = start + values.size
++        if values.dtype != self.dtype and not _fits(values, self.dtype):
++            self.dtype = self.wide
++            self._buf = self.view().astype(self.wide)
++        if end > self._buf.size:
++            buf = np.empty(max(end, 2 * self._buf.size), dtype=self.dtype)
++            buf[:start] = self._buf[:start]
++            self._buf = buf
++        self._buf[start:end] = values
++        self._len = end
++
++    def view(self) -> np.ndarray:
++        return self._buf[: self._len]
++
++    def item(self, index: int) -> int | float:
++        return self._buf[index].item()
++
++    def read(self, start: int, stop: int) -> list:
++        return self._buf[start:stop].tolist()
++
++
++class _ColumnView(Sequence[Any]):
++    """A read-only view of one ``FlatLogprobs`` column that converts only the
++    elements read, so indexing it in a loop costs O(1) per element and no
++    copy is kept. It follows later appends."""
++
++    # Elements converted per step while iterating.
++    _BLOCK = 1024
++
++    def __init__(
++        self,
++        length: Callable[[], int],
++        read: Callable[[int, int], list],
++        item: Callable[[int], Any] | None = None,
++    ) -> None:
++        self._length = length
++        # read(start, stop) -> elements [start, stop) as Python values.
++        self._read = read
++        self._item = item or (lambda index: read(index, index + 1)[0])
++
++    def __len__(self) -> int:
++        return self._length()
++
++    def __getitem__(self, index):
++        n = len(self)
++        if isinstance(index, slice):
++            start, stop, step = index.indices(n)
++            if step == 1:
++                return self._read(start, max(start, stop))
++            return [self[i] for i in range(start, stop, step)]
++        i = operator.index(index)
++        if i < 0:
++            i += n
++        if not 0 <= i < n:
++            raise IndexError("FlatLogprobs column index out of range")
++        return self._item(i)
++
++    def __iter__(self) -> Iterator[Any]:
++        n = len(self)
++        for start in range(0, n, self._BLOCK):
++            yield from self[start : min(start + self._BLOCK, n)]
++
++    def __eq__(self, other: object) -> bool:
++        if not isinstance(other, Sequence) or isinstance(other, (str, bytes)):
++            return NotImplemented
++        return len(self) == len(other) and list(self) == list(other)
++
++    __hash__ = None  # type: ignore[assignment]
++
++    def __repr__(self) -> str:
++        return repr(list(self))
+ 
+ 
+ @dataclass
+@@ -155,6 +266,431 @@
+             yield self.__getitem__(i)
+ 
+ 
++class _ColumnarLogprobs(FlatLogprobs):
++    """Logprobs of a request stored as flat numpy columns.
++
++    Compared to list[dict[int, Logprob]], this creates no Python object per
++    position or entry: entries (position, candidate) are kept in a few
++    append-only numpy columns, about 8.5 bytes per entry.
++
++    Token ids and logprobs are kept as int32 / float32, the engine's dtypes,
++    and a column widens to int64 / float64 when a value would not round-trip.
++    The rank of each position's first entry is kept per position, and entry
++    ``j > 0`` has rank ``j``, as ``append_logprobs_for_next_position`` gives;
++    other ranks switch to a per-entry rank column. Decoded tokens are only
++    kept once one is not None.
++
++    NOTE: To reduce the migration overhead and improve backward compatibility,
++    we support the key Sequence APIs of list, so it could act as
++    list[LogprobsOnePosition]. The column attributes (``start_indices``,
++    ``end_indices``, ``token_ids``, ``logprobs``, ``ranks``,
++    ``decoded_tokens``) are read-only views that convert only the elements
++    read; use ``list(...)`` for a list.
++    """
++
++    def __init__(
++        self,
++        start_indices: Sequence[int] | None = None,
++        end_indices: Sequence[int] | None = None,
++        token_ids: Sequence[int] | None = None,
++        logprobs: Sequence[float] | None = None,
++        ranks: Sequence[int | None] | None = None,
++        decoded_tokens: Sequence[str | None] | None = None,
++    ) -> None:
++        self._num_positions = 0
++        # Entries per position while all positions have the same number.
++        self._width = 0
++        # Position i spans entries [ends[i - 1], ends[i]); kept once
++        # positions have different widths.
++        self._ends: _Column | None = None
++        self._token_ids = _Column("<i4", "<i8")
++        self._logprobs = _Column("<f4", "<f8")
++        # Rank of each position's first entry.
++        self._first_ranks = _Column("<i8")
++        # Rank of every entry (_NO_RANK for None), once an entry j > 0 of
++        # some position had another rank than j.
++        self._ranks: _Column | None = None
++        self._decoded: list[str | None] | None = None
++        if start_indices is not None:
++            assert end_indices is not None
++            assert token_ids is not None and logprobs is not None
++            assert ranks is not None and decoded_tokens is not None
++            for start, end in zip(start_indices, end_indices):
++                self._append_position(
++                    token_ids[start:end],
++                    logprobs[start:end],
++                    ranks[start:end],
++                    decoded_tokens[start:end],
++                )
++
++    def append(self, logprobs_one_position: LogprobsOnePosition | None) -> None:
++        """Appends the container with logprobs for the next position."""
++        entries = logprobs_one_position or {}
++        self._append_position(
++            list(entries),
++            [logprob.logprob for logprob in entries.values()],
++            [logprob.rank for logprob in entries.values()],
++            [logprob.decoded_token for logprob in entries.values()],
++        )
++
++    def append_fast(
++        self,
++        token_ids: list[int],
++        logprobs: list[float],
++        ranks: Iterable[int | None],
++        decoded_tokens: Iterable[str | None],
++    ) -> None:
++        """Appends logprobs for the next position without creating
++        the intermediate logprob dictionary. Like ``zip``, stops at the
++        shortest input.
++        """
++        ranks = list(ranks)
++        n = min(len(token_ids), len(logprobs), len(ranks))
++        decoded = list(itertools.islice(decoded_tokens, n))
++        n = len(decoded)
++        self._append_position(token_ids[:n], logprobs[:n], ranks[:n], decoded)
++
++    def append_rows(
++        self,
++        token_ids: np.ndarray,
++        logprobs: np.ndarray,
++        first_ranks: np.ndarray,
++        decoded_tokens: Sequence[str | None] | None = None,
++    ) -> None:
++        """Appends ``n`` positions given as engine rows: ``[n, S]`` token ids
++        and logprobs and the ``[n]`` ranks of slot 0 (slot ``j > 0`` has rank
++        ``j``), optionally with the ``n * S`` decoded tokens."""
++        self._append(
++            token_ids.shape[1],
++            token_ids.reshape(-1),
++            logprobs.reshape(-1),
++            first_ranks,
++            decoded_tokens=decoded_tokens,
++        )
++
++    def _append_position(
++        self,
++        token_ids: Sequence[int],
++        logprobs: Sequence[float],
++        ranks: Sequence[int | None],
++        decoded_tokens: Sequence[str | None],
++    ) -> None:
++        width = len(token_ids)
++        canonical = width == 0 or (
++            ranks[0] is not None and list(ranks[1:]) == list(range(1, width))
++        )
++        first_rank = ranks[0] if width and canonical else 0
++        entry_ranks = (
++            None
++            if canonical
++            else np.array([_NO_RANK if r is None else r for r in ranks], np.int64)
++        )
++        self._append(
++            width,
++            token_ids,
++            logprobs,
++            np.array([first_rank]),
++            entry_ranks,
++            decoded_tokens,
++        )
++
++    def _append(
++        self,
++        widths: int | np.ndarray,
++        token_ids: np.ndarray | Sequence[int],
++        logprobs: np.ndarray | Sequence[float],
++        first_ranks: np.ndarray,
++        ranks: np.ndarray | None = None,
++        decoded_tokens: Sequence[str | None] | None = None,
++    ) -> None:
++        """Appends ``len(first_ranks)`` positions with ``widths`` entries
++        (one for all, or per position). ``ranks`` gives every entry's rank
++        when they are not the canonical ones."""
++        n = len(first_ranks)
++        if n == 0:
++            return
++        base = len(self._token_ids)
++        if ranks is not None and self._ranks is None:
++            self._ranks = _Column("<i8")
++            self._ranks.append(self._canonical_ranks(0, base))
++        if (
++            self._ends is None
++            and isinstance(widths, int)
++            and (self._num_positions == 0 or widths == self._width)
++        ):
++            self._width = widths
++        else:
++            if self._ends is None:
++                uniform_ends = self._ends_range(0, self._num_positions)
++                self._ends = _Column("<i8")
++                self._ends.append(uniform_ends)
++            if not isinstance(widths, int):
++                ends = base + np.cumsum(widths)
++            elif n == 1:
++                ends = np.array([base + widths])
++            else:
++                ends = base + widths * np.arange(1, n + 1)
++            self._ends.append(ends)
++        self._num_positions += n
++        self._token_ids.append(token_ids)
++        self._logprobs.append(logprobs)
++        self._first_ranks.append(first_ranks)
++        count = len(self._token_ids) - base
++        if self._ranks is not None:
++            self._ranks.append(
++                self._canonical_ranks(base, base + count) if ranks is None else ranks
++            )
++        if (
++            self._decoded is None
++            and decoded_tokens is not None
++            and any(token is not None for token in decoded_tokens)
++        ):
++            self._decoded = [None] * base
++        if self._decoded is not None:
++            self._decoded.extend(
++                itertools.repeat(None, count)
++                if decoded_tokens is None
++                else decoded_tokens
++            )
++
++    def _ends_range(self, start: int, stop: int) -> np.ndarray:
++        """End offsets of positions ``[start, stop)``."""
++        if self._ends is None:
++            return self._width * np.arange(start + 1, stop + 1)
++        return self._ends.view()[start:stop]
++
++    def _start(self, position: int) -> int:
++        if self._ends is None:
++            return position * self._width
++        return int(self._ends.view()[position - 1]) if position else 0
++
++    def _entry_ranks(self, start: int, stop: int) -> np.ndarray:
++        """Ranks of entries ``[start, stop)``, int64 with ``_NO_RANK`` for
++        None."""
++        if self._ranks is not None:
++            return self._ranks.view()[start:stop]
++        return self._canonical_ranks(start, stop)
++
++    def _canonical_ranks(self, start: int, stop: int) -> np.ndarray:
++        """Ranks of entries ``[start, stop)`` from their position's first
++        rank: entry ``j > 0`` of a position has rank ``j``."""
++        entries = np.arange(start, stop)
++        if self._ends is None:
++            positions = entries // max(self._width, 1)
++            begins = positions * self._width
++        else:
++            ends = self._ends.view()
++            positions = np.searchsorted(ends, entries, side="right")
++            begins = np.where(positions > 0, ends[positions - 1], 0)
++        return np.where(
++            entries == begins, self._first_ranks.view()[positions], entries - begins
++        )
++
++    def _extend_from(self, source: "_ColumnarLogprobs", start: int, stop: int) -> None:
++        """Appends positions ``[start, stop)`` of ``source``."""
++        if start >= stop:
++            return
++        begin, end = source._start(start), source._start(stop)
++        widths: int | np.ndarray = source._width
++        if source._ends is not None:
++            widths = np.diff(source._ends.view()[start:stop], prepend=begin)
++            if (widths == widths[0]).all():
++                widths = int(widths[0])
++        self._append(
++            widths,
++            source._token_ids.view()[begin:end],
++            source._logprobs.view()[begin:end],
++            source._first_ranks.view()[start:stop],
++            None if source._ranks is None else source._ranks.view()[begin:end],
++            None if source._decoded is None else source._decoded[begin:end],
++        )
++
++    def extend(self, logprobs_multi_positions) -> None:
++        """Extends the container with logprobs for the next multiple positions."""
++        if isinstance(logprobs_multi_positions, _ColumnarLogprobs):
++            self._extend_from(
++                logprobs_multi_positions, 0, len(logprobs_multi_positions)
++            )
++            return
++        for logprobs_one_position in logprobs_multi_positions:
++            self.append(logprobs_one_position)
++
++    @property
++    def num_entries(self) -> int:
++        """Number of (position, candidate) entries."""
++        return len(self._token_ids)
++
++    def rows(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
++        """The entries as engine rows: ``token_ids[N, S]`` (int32),
++        ``logprobs[N, S]`` (float32) and the ranks of slot 0 ``[N]`` (int64).
++
++        None unless every position has the same ``S > 0`` entries, entry
++        ``j > 0`` of each has rank ``j`` and no column was widened.
++        """
++        n = len(self)
++        if n and (
++            self._ends is not None
++            or self._width < 1
++            or self._ranks is not None
++            or self._token_ids.dtype != np.dtype("<i4")
++            or self._logprobs.dtype != np.dtype("<f4")
++        ):
++            return None
++        return (
++            self._token_ids.view().reshape(n, self._width),
++            self._logprobs.view().reshape(n, self._width),
++            self._first_ranks.view(),
++        )
++
++    def first_token_ids(self, start: int, stop: int) -> list[int]:
++        """Token id of the first entry of each position in ``[start, stop)``
++        that has entries."""
++        if start >= stop:
++            return []
++        ends = self._ends_range(start, stop)
++        begins = np.concatenate(([self._start(start)], ends[:-1]))
++        return self._token_ids.view()[begins[begins < ends]].tolist()
++
++    @property
++    def start_indices(self) -> Sequence[int]:
++        return _ColumnView(self.__len__, self._start_list, self._start)
++
++    @property
++    def end_indices(self) -> Sequence[int]:
++        return _ColumnView(self.__len__, self._end_list, self._end)
++
++    @property
++    def token_ids(self) -> Sequence[int]:
++        column = self._token_ids
++        return _ColumnView(column.__len__, column.read, column.item)
++
++    @property
++    def logprobs(self) -> Sequence[float]:
++        column = self._logprobs
++        return _ColumnView(column.__len__, column.read, column.item)
++
++    @property
++    def ranks(self) -> Sequence[int | None]:
++        return _ColumnView(self._token_ids.__len__, self._rank_list)
++
++    @property
++    def decoded_tokens(self) -> Sequence[str | None]:
++        return _ColumnView(self._token_ids.__len__, self._decoded_list)
++
++    def _start_list(self, start: int, stop: int) -> list[int]:
++        if start >= stop:
++            return []
++        return [self._start(start), *self._ends_range(start, stop - 1).tolist()]
++
++    def _end_list(self, start: int, stop: int) -> list[int]:
++        return self._ends_range(start, stop).tolist()
++
++    def _end(self, position: int) -> int:
++        return self._start(position + 1)
++
++    def _rank_list(self, start: int, stop: int) -> list[int | None]:
++        ranks = self._entry_ranks(start, stop).tolist()
++        return [None if rank == _NO_RANK else rank for rank in ranks]
++
++    def _decoded_list(self, start: int, stop: int) -> list[str | None]:
++        if self._decoded is None:
++            return [None] * (stop - start)
++        return self._decoded[start:stop]
++
++    def __len__(self) -> int:
++        """Gets number of positions stored in the container."""
++        return self._num_positions
++
++    @overload
++    def __getitem__(self, position: int) -> LogprobsOnePosition: ...
++
++    @overload
++    def __getitem__(self, s: slice, /) -> "_ColumnarLogprobs": ...
++
++    def __getitem__(self, index: int | slice):
++        """Extracts logprobs of a given position or slice."""
++        if isinstance(index, slice):
++            start, stop, step = index.indices(len(self))
++            sliced = _ColumnarLogprobs()
++            if step == 1:
++                sliced._extend_from(self, start, stop)
++            else:
++                for position in range(start, stop, step):
++                    sliced._extend_from(self, position, position + 1)
++            return sliced
++        if not isinstance(index, int):
++            raise TypeError(f"Invalid index type: {type(index)}")
++        position = range(len(self))[index]
++        return self._position(position, self._start(position), self._end(position))
++
++    def _position(self, position: int, begin: int, end: int) -> LogprobsOnePosition:
++        """Position ``position``, whose entries are ``[begin, end)``."""
++        if self._ranks is not None:
++            ranks = self._ranks.read(begin, end)
++        else:
++            ranks = [self._first_ranks.item(position), *range(1, end - begin)]
++        decoded: Iterable[str | None] = (
++            itertools.repeat(None)
++            if self._decoded is None
++            else self._decoded[begin:end]
++        )
++        return {
++            token_id: Logprob(
++                logprob=logprob,
++                rank=None if rank == _NO_RANK else rank,
++                decoded_token=decoded_token,
++            )
++            for token_id, logprob, rank, decoded_token in zip(
++                self._token_ids.read(begin, end),
++                self._logprobs.read(begin, end),
++                ranks,
++                decoded,
++            )
++        }
++
++    def __setitem__(self, item, value) -> None:
++        raise TypeError("Cannot set logprobs in _ColumnarLogprobs")
++
++    def __delitem__(self, item) -> None:
++        raise TypeError("Cannot delete logprobs from _ColumnarLogprobs")
++
++    def insert(self, index: int, value: dict[int, Logprob] | None) -> None:
++        raise TypeError("Cannot insert logprobs to _ColumnarLogprobs")
++
++    def __iter__(self) -> Iterator[LogprobsOnePosition]:
++        """Iterates the container and yields LogprobsOnePosition for
++        each position.
++        """
++        begin = 0
++        for position, end in enumerate(self._ends_range(0, len(self)).tolist()):
++            yield self._position(position, begin, end)
++            begin = end
++
++    def __eq__(self, other: object) -> bool:
++        if not isinstance(other, _ColumnarLogprobs):
++            return NotImplemented
++        return (
++            np.array_equal(
++                self._ends_range(0, len(self)), other._ends_range(0, len(other))
++            )
++            and np.array_equal(self._token_ids.view(), other._token_ids.view())
++            and np.array_equal(
++                self._logprobs.view(), other._logprobs.view(), equal_nan=True
++            )
++            and np.array_equal(
++                self._entry_ranks(0, self.num_entries),
++                other._entry_ranks(0, other.num_entries),
++            )
++            and self.decoded_tokens == other.decoded_tokens
++        )
++
++    def __repr__(self) -> str:
++        return (
++            f"_ColumnarLogprobs(num_positions={len(self)}, "
++            f"num_entries={self.num_entries})"
++        )
++
++
+ # {token_id -> logprob} per each sequence group. None if the corresponding
+ # sequence group doesn't require prompt logprob.
+ PromptLogprobs = FlatLogprobs | list[LogprobsOnePosition | None]
+@@ -170,8 +706,12 @@
+     return logprobs
+ 
+ 
+-def create_sample_logprobs(flat_logprobs: bool) -> SampleLogprobs:
++def create_sample_logprobs(
++    flat_logprobs: bool, *, _columnar: bool = False
++) -> SampleLogprobs:
+     """Creates a container to store decode logprobs for a request."""
++    if _columnar:
++        return _ColumnarLogprobs()
+     return FlatLogprobs() if flat_logprobs else []
+ 
+ 
+diff --git a/vllm/sampling_params.py b/vllm/sampling_params.py
+--- a/vllm/sampling_params.py
++++ b/vllm/sampling_params.py
+@@ -422,6 +422,10 @@
+     last token of a corresponding token sequence is not allowed when the next
+     generated token can complete the sequence."""
+     _bad_words_token_ids: list[list[int]] | None = None
++    # Set False by the generate endpoint in tokens mode: sample logprobs keep
++    # no decoded token strings.
++    _detokenize_logprobs: bool = True
++    _columnar_logprobs: bool = False
+ 
+     skip_reading_prefix_cache: bool | None = None
+     thinking_token_budget: int | None = None
+diff --git a/vllm/v1/engine/logprobs.py b/vllm/v1/engine/logprobs.py
+--- a/vllm/v1/engine/logprobs.py
++++ b/vllm/v1/engine/logprobs.py
+@@ -12,6 +12,7 @@
+     FlatLogprobs,
+     PromptLogprobs,
+     SampleLogprobs,
++    _ColumnarLogprobs,
+     append_logprobs_for_next_position,
+     create_prompt_logprobs,
+     create_sample_logprobs,
+@@ -28,6 +29,11 @@
+ NONES = itertools.repeat(None)
+ 
+ 
++def _row_width(num_logprobs: int, num_slots: int) -> int:
++    """Engine slots kept per position: the sampled token and the top-k."""
++    return num_slots if num_logprobs == -1 else num_logprobs + 1
++
++
+ @dataclass
+ class LogprobsProcessor:
+     # Tokenizer for this request,
+@@ -42,6 +48,8 @@
+     num_prompt_logprobs: int | None
+     # [num_scored_rows, num_token_ids], set once on the final prefill chunk.
+     prompt_token_id_logprobs: np.ndarray | None = None
++    # False keeps sample logprobs without decoded token strings.
++    detokenize_sample_logprobs: bool = True
+ 
+     @classmethod
+     def from_new_request(
+@@ -59,7 +67,10 @@
+             logprobs=(
+                 None
+                 if num_logprobs is None
+-                else create_sample_logprobs(sampling_params.flat_logprobs)
++                else create_sample_logprobs(
++                    sampling_params.flat_logprobs,
++                    _columnar=sampling_params._columnar_logprobs,
++                )
+             ),
+             prompt_logprobs=(
+                 None
+@@ -68,6 +79,7 @@
+             ),
+             num_prompt_logprobs=num_prompt_logprobs,
+             num_logprobs=num_logprobs,
++            detokenize_sample_logprobs=sampling_params._detokenize_logprobs,
+         )
+ 
+     def _update_sample_logprobs(self, logprobs_lists: LogprobsLists) -> None:
+@@ -85,21 +97,28 @@
+         assert self.cumulative_logprob is not None
+ 
+         token_ids_lst, logprobs_lst, ranks_lst, _ = logprobs_lists
+-
+-        for rank_np, logprobs_np, token_ids_np in zip(
+-            ranks_lst, logprobs_lst, token_ids_lst
++        tokenizer = self.tokenizer if self.detokenize_sample_logprobs else None
++        width = _row_width(self.num_logprobs, token_ids_lst.shape[1])
++        if tokenizer is None and isinstance(self.logprobs, _ColumnarLogprobs):
++            self.logprobs.append_rows(
++                token_ids_lst[:, :width], logprobs_lst[:, :width], ranks_lst
++            )
++            for sampled_token_logprob in logprobs_lst[:, 0].tolist():
++                self.cumulative_logprob += sampled_token_logprob
++            return
++
++        for i, (rank_np, logprobs_np, token_ids_np) in enumerate(
++            zip(ranks_lst, logprobs_lst, token_ids_lst)
+         ):
+             rank = rank_np.tolist()
+             logprobs = logprobs_np.tolist()
+             token_ids = token_ids_np.tolist()
+             # Detokenize (non-incrementally).
+             decoded_tokens: list[str] | Iterable[None]
+-            if self.tokenizer is None:
++            if tokenizer is None:
+                 decoded_tokens = NONES
+             else:
+-                decoded_tokens_list = convert_ids_list_to_tokens(
+-                    self.tokenizer, token_ids
+-                )
++                decoded_tokens_list = convert_ids_list_to_tokens(tokenizer, token_ids)
+                 context_token_ids = self._get_sampled_context_ids(self.logprobs)
+                 decoded_tokens = self._verify_tokens(
+                     decoded_tokens_list=decoded_tokens_list,
+@@ -112,14 +131,22 @@
+             self.cumulative_logprob += sampled_token_logprob
+ 
+             # Update with the Logprob container for this pos.
+-            append_logprobs_for_next_position(
+-                self.logprobs,
+-                token_ids,
+-                logprobs,
+-                decoded_tokens,
+-                rank,
+-                self.num_logprobs,
+-            )
++            if isinstance(self.logprobs, _ColumnarLogprobs):
++                self.logprobs.append_rows(
++                    token_ids_lst[i : i + 1, :width],
++                    logprobs_lst[i : i + 1, :width],
++                    ranks_lst[i : i + 1],
++                    list(decoded_tokens)[:width],
++                )
++            else:
++                append_logprobs_for_next_position(
++                    self.logprobs,
++                    token_ids,
++                    logprobs,
++                    decoded_tokens,
++                    rank,
++                    self.num_logprobs,
++                )
+ 
+     def _update_prompt_logprobs(
+         self,
+@@ -140,6 +167,17 @@
+ 
+         # Recover shapes.
+         num_prompt_tokens, num_logprobs = logprobs.shape
++
++        if self.tokenizer is None and isinstance(
++            self.prompt_logprobs, _ColumnarLogprobs
++        ):
++            width = _row_width(self.num_prompt_logprobs, num_logprobs)
++            self.prompt_logprobs.append_rows(
++                token_ids[:, :width].numpy(),
++                logprobs[:, :width].numpy(),
++                ranks.numpy(),
++            )
++            return
+ 
+         # Detokenize non-incrementally.
+         # Output is flat: [num_tok, num_lps] -> [num_tok * num_lps]
+@@ -241,6 +279,8 @@
+         start = max(0, n - max_context)
+ 
+         # Efficient path for FlatLogprobs: access token_ids directly.
++        if isinstance(logprobs_source, _ColumnarLogprobs):
++            return logprobs_source.first_token_ids(start, n)
+         if isinstance(logprobs_source, FlatLogprobs):
+             return [
+                 logprobs_source.token_ids[logprobs_source.start_indices[i]]
