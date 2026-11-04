@@ -353,8 +353,14 @@ def test_expert_parallel_hf_load_and_export(
     from vime.backends.megatron_utils.megatron_to_hf import convert_to_hf
 
     common = importlib.import_module(COMMON_MODULE)
-    monkeypatch.setattr(common.mpu, "get_expert_model_parallel_world_size", lambda: ep_size)
-    monkeypatch.setattr(common.mpu, "get_expert_model_parallel_rank", lambda: ep_rank)
+    monkeypatch.setattr(
+        common,
+        "mpu",
+        types.SimpleNamespace(
+            get_expert_model_parallel_world_size=lambda: ep_size,
+            get_expert_model_parallel_rank=lambda: ep_rank,
+        ),
+    )
     monkeypatch.setattr(common, "get_transformer_layer_offset", lambda config: 0)
     args = types.SimpleNamespace(
         num_experts=64, num_layers=47, kv_channels=2, num_attention_heads=1, num_query_groups=1, vocab_size=2

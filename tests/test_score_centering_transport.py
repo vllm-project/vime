@@ -1,6 +1,7 @@
 """Sampler heads survive the real rollout-manager, DP and microbatch boundaries."""
 
 import asyncio
+import inspect
 import json
 import sys
 import types
@@ -26,10 +27,13 @@ def test_score_centering_reads_native_tito_integer_token_ids():
     from vime.rollout.vllm_rollout import _score_centering_metadata
 
     serving = object.__new__(ServingTokens)
+    kwargs = {}
+    if "num_output_top_logprobs" in inspect.signature(serving._create_tokens_logprobs).parameters:
+        kwargs["num_output_top_logprobs"] = 3
     logprobs = serving._create_tokens_logprobs(
         [42],
         [{42: Logprob(-3.0, 3), 4: Logprob(-0.1, 1), 7: Logprob(-0.2, 2)}],
-        num_output_top_logprobs=3,
+        **kwargs,
     )
     wire = {"logprobs": json.loads(logprobs.model_dump_json())}
     assert wire["logprobs"]["content"][0]["token_id"] == 42
@@ -160,19 +164,31 @@ def test_npu_sampling_support_empty_batch_preserves_score_layout(npu_sampling_ma
 @pytest.mark.parametrize("delta", [False, True])
 def test_sampling_masks_are_trimmed_and_drained_with_output_tokens(delta):
     from vllm.sampling_params import RequestOutputKind
-    from vllm.v1.engine.output_processor import RequestState
+    from vllm.v1.engine.output_processor import OutputProcessor, RequestState
     from vllm.v1.outputs import SamplingMaskLists
 
     state = SimpleNamespace(
         request_index=0,
         output_kind=RequestOutputKind.DELTA if delta else RequestOutputKind.FINAL_ONLY,
-        detokenizer=SimpleNamespace(get_next_output_text=lambda *_: "", output_token_ids=[2, 3]),
+        detokenizer=SimpleNamespace(
+            get_next_output_text=lambda *_: "", output_token_ids=[2, 3], num_output_tokens=lambda: 2
+        ),
         logprobs_processor=SimpleNamespace(logprobs=None, cumulative_logprob=None),
-        sampling_mask_chunks=[SamplingMaskLists(np.array([token]), logprobs=np.array([0.0])) for token in (2, 3, 4)],
+        sampling_mask_chunks=[],
         routed_experts_chunks=[],
         spec_decode_metrics=None,
+        _weight_version_spans=lambda: None,
     )
-    output = RequestState._new_completion_output(state, [2, 3], None if delta else "abort", None)
+    engine_output = SimpleNamespace(
+        new_token_ids=[2, 3, 4],
+        new_logprobs=None,
+        new_sampling_mask=SamplingMaskLists(np.array([2, 3, 4]), np.arange(4), logprobs=np.zeros(3)),
+        routed_experts=None,
+    )
+    OutputProcessor._trim_surplus_tokens(state, engine_output, num_prev_tokens=0)
+    assert engine_output.new_token_ids == [2, 3]
+    state.sampling_mask_chunks.append(engine_output.new_sampling_mask)
+    output = RequestState._new_completion_output(state, engine_output.new_token_ids, None if delta else "abort", None)
     assert output.sampling_mask.token_ids == [[2], [3]]
     assert output.sampling_mask.logprobs == [[0.0], [0.0]]
     if delta:
