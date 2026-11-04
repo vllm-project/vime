@@ -1,7 +1,6 @@
 import gc
 import os
 import shutil
-from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
@@ -133,14 +132,7 @@ def main():
     gc.collect()
     accelerator.empty_cache()
 
-    # TEST ONLY: remove this probe after the NPU CI checkpoint investigation.
-    probe = nullcontext()
-    if current_platform().is_npu and os.environ.get("VIME_TEST_NPU_CHECKPOINT_PROBE") == "1":
-        from npu_checkpoint_probe import observe_checkpoint_save
-
-        probe = observe_checkpoint_save(args.save)
-    with probe:
-        save_checkpoint(1, model, None, None, 0)
+    save_checkpoint(1, model, None, None, 0)
 
     if dist.get_rank() == 0:
         # change to release ckpt
