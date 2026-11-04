@@ -26,6 +26,8 @@ COMMAND_PATH_RE = re.compile(r"\b(?:bash|python)\s+((?:scripts?|tests)/[A-Za-z0-
 LOCAL_ANCHOR_RE = re.compile(r"\]\(#([A-Za-z0-9_-]+)\)")
 HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
 RELEASE_CHECK = ROOT / ".claude/skills/release/scripts/check_release.py"
+DOCKER_ARG_RE = re.compile(r"^ARG ([A-Z][A-Z0-9_]*)=(\S+)$", re.MULTILINE)
+VLLM_PATCH_APPLY_RE = re.compile(r"\bgit apply -v /tmp/(vllm-[\w.-]+\.patch)")
 
 
 def _markdown_files():
@@ -92,6 +94,15 @@ def test_customization_anchor_links_exist(language):
 def test_release_metadata_check():
     result = subprocess.run([sys.executable, str(RELEASE_CHECK), "--repo", str(ROOT)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_rocm_image_tracks_cuda_vllm_commit():
+    cuda = (ROOT / "docker/Dockerfile").read_text()
+    rocm = (ROOT / "docker/Dockerfile.rocm").read_text()
+    commit = dict(DOCKER_ARG_RE.findall(cuda))["VLLM_COMMIT"]
+    base = dict(DOCKER_ARG_RE.findall(rocm))["BASE_IMAGE"]
+    assert re.fullmatch(rf"vllm/vllm-openai-rocm:nightly-rocm\d+-{commit}@sha256:[0-9a-f]{{64}}", base), base
+    assert VLLM_PATCH_APPLY_RE.findall(rocm) == VLLM_PATCH_APPLY_RE.findall(cuda)
 
 
 @pytest.fixture
