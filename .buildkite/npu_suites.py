@@ -102,6 +102,11 @@ def npu_step(
             "  source /workspace/build/buildkite/.buildkite/scripts/update-npu-environment.sh",
             "fi",
             "export HF_HUB_OFFLINE=0",
+            # TEST ONLY: checkpoint timeout/host-resource diagnosis; remove after CI verification.
+            'echo "HCCL_CONNECT_TIMEOUT before=$${HCCL_CONNECT_TIMEOUT:-unset}"',
+            'export HCCL_CONNECT_TIMEOUT="$${HCCL_CONNECT_TIMEOUT:-600}"',
+            'echo "HCCL_CONNECT_TIMEOUT effective=$${HCCL_CONNECT_TIMEOUT}"',
+            "export VIME_TEST_NPU_CHECKPOINT_PROBE=1",
             f"python tests/{test_name}{' ' + extra_args if extra_args else ''}",
         ]
     )
