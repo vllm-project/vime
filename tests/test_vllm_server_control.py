@@ -29,8 +29,8 @@ def test_weight_operation_routes_record_success_and_failure(monkeypatch, operati
     from prometheus_client import CollectorRegistry
 
     pytest.importorskip("vllm")
-    from vllm.entrypoints.serve.dev.rlhf import api_router
-    from vllm.entrypoints.serve.dev.rlhf import metrics as metrics_module
+    from vllm.entrypoints.rl.online import api_router
+    from vllm.entrypoints.rl.online import metrics as metrics_module
 
     registry = CollectorRegistry()
     metrics = metrics_module.WeightOperationMetrics(registry)
