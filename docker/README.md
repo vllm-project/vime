@@ -29,12 +29,11 @@ Before each update, we will test the following models with 64xH100:
 
 `docker/Dockerfile.rocm` builds the AMD image, published as `vllm/vime-rocm:latest`
 and consumed by `.buildkite/pipeline-rocm.yaml`. It layers on AMD's vLLM ROCm
-nightly image for the vLLM commit that `docker/Dockerfile` pins
-(`vllm/vllm-openai-rocm:nightly-rocm100-<VLLM_COMMIT>`, by digest), which already
-carries ROCm 10 (`rocm_sdk` wheels), a ROCm PyTorch build, triton, aiter and
-flash-attn, and adds only the training half: TransformerEngine (built from
-`ROCm/TransformerEngine`), apex, Megatron-LM plus the `docker/amd_patch/` patches,
-torch_memory_saver, and vime.
+nightly image for one vLLM commit (`vllm/vllm-openai-rocm:nightly-rocm100-<commit>`,
+pinned by digest), which already carries ROCm 10 (`rocm_sdk` wheels), a ROCm
+PyTorch build, triton, aiter and flash-attn, and adds only the training half:
+TransformerEngine (built from `ROCm/TransformerEngine`), apex, Megatron-LM plus
+the `docker/amd_patch/` patches, torch_memory_saver, and vime.
 
 Targets gfx950 (MI350X/MI355X); pass `--build-arg GPU_ARCH=` for another CDNA arch.
 
@@ -42,7 +41,9 @@ Targets gfx950 (MI350X/MI355X); pass `--build-arg GPU_ARCH=` for another CDNA ar
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm/vime-rocm:latest .
 ```
 
-Because both images sit on the same vLLM commit, the ROCm build applies the same
-`docker/patch/latest/` vLLM patches as `docker/Dockerfile`, in the same order and
-with the same strict `git apply`. Move `VLLM_COMMIT` and the ROCm `BASE_IMAGE`
-together; `tests/test_docs_consistency.py` fails when they diverge.
+The ROCm build applies its own copies of the vLLM patches from
+`docker/amd_patch/latest/`, with strict `git apply`, so changes to `docker/patch/`
+or `docker/Dockerfile` do not affect it. Today the base sits on the vLLM commit
+that `docker/Dockerfile` pins, and the copies match `docker/patch/latest/`. To move
+the ROCm image to another vLLM commit, change `BASE_IMAGE` and refresh the copies
+in the same ROCm PR.
