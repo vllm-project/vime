@@ -1,7 +1,6 @@
 """Sampler heads survive the real rollout-manager, DP and microbatch boundaries."""
 
 import asyncio
-import inspect
 import json
 import sys
 import types
@@ -24,16 +23,12 @@ def test_score_centering_reads_native_tito_integer_token_ids():
     from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
     from vllm.logprobs import Logprob
 
-    from vime.rollout.vllm_rollout import _score_centering_metadata
+    from vime.utils.score_centering import _score_centering_metadata
 
     serving = object.__new__(ServingTokens)
-    kwargs = {}
-    if "num_output_top_logprobs" in inspect.signature(serving._create_tokens_logprobs).parameters:
-        kwargs["num_output_top_logprobs"] = 3
     logprobs = serving._create_tokens_logprobs(
         [42],
         [{42: Logprob(-3.0, 3), 4: Logprob(-0.1, 1), 7: Logprob(-0.2, 2)}],
-        **kwargs,
     )
     wire = {"logprobs": json.loads(logprobs.model_dump_json())}
     assert wire["logprobs"]["content"][0]["token_id"] == 42
@@ -310,7 +305,7 @@ def test_generate_requests_sampler_topk(monkeypatch):
 
     async def post(url, payload, **kwargs):
         captured.append((payload, kwargs))
-        return {
+        response = {
             "choices": [
                 {
                     "token_ids": [3],
@@ -332,12 +327,15 @@ def test_generate_requests_sampler_topk(monkeypatch):
             ],
             "usage": {},
         }
+        from vime.utils.score_centering import decode_score_centering_response
+
+        return decode_score_centering_response(json.dumps(response), kwargs["score_centering_top_k"])
 
     monkeypatch.setattr(rollout, "post", post)
     sample = asyncio.run(rollout.generate(a, Sample(prompt="test"), {"max_new_tokens": 8}))
     payload, kwargs = captured[0]
     assert payload["sampling_params"]["logprobs"] == 4
-    assert kwargs == {"headers": None}
+    assert kwargs == {"headers": None, "score_centering_top_k": 3}
     assert sample.rollout_topk_token_ids.tolist() == [[3, 1, 4]]
 
 
@@ -378,7 +376,7 @@ def test_r3_resume_preserves_routes_and_score_centering_heads(monkeypatch, retur
         capture = io.BytesIO()
         np.save(capture, np.array([[[5, 6], [7, 8]]] * returned_rows, dtype=np.int32))
         head_ids, head_logprobs = meta()["score_centering_topk"]
-        return {
+        response = {
             "choices": [
                 {
                     "token_ids": [3],
@@ -389,7 +387,7 @@ def test_r3_resume_preserves_routes_and_score_centering_heads(monkeypatch, retur
                             {
                                 "logprob": -0.5,
                                 "top_logprobs": [
-                                    {"token_id": token_id, "logprob": float(logprob)}
+                                    {"token_id": int(token_id), "logprob": float(logprob)}
                                     for token_id, logprob in zip(head_ids[0], head_logprobs[0], strict=True)
                                 ],
                             }
@@ -398,6 +396,9 @@ def test_r3_resume_preserves_routes_and_score_centering_heads(monkeypatch, retur
                 }
             ]
         }
+        from vime.utils.score_centering import decode_score_centering_response
+
+        return decode_score_centering_response(json.dumps(response), kwargs["score_centering_top_k"])
 
     monkeypatch.setattr(rollout, "post", post)
     if returned_rows == 2:
@@ -586,8 +587,8 @@ def test_generate_requests_complete_top_p_probabilities(monkeypatch):
 
     async def post(url, payload, **kwargs):
         assert payload["sampling_params"]["logprobs"] == 1
-        assert kwargs == {"headers": None}
-        return {
+        assert kwargs == {"headers": None, "score_centering_top_k": 0}
+        response = {
             "choices": [
                 {
                     "token_ids": [4, 2],
@@ -610,6 +611,9 @@ def test_generate_requests_complete_top_p_probabilities(monkeypatch):
             ],
             "usage": {},
         }
+        from vime.utils.score_centering import decode_score_centering_response
+
+        return decode_score_centering_response(json.dumps(response), kwargs["score_centering_top_k"])
 
     monkeypatch.setattr(rollout, "post", post)
     sample = asyncio.run(rollout.generate(a, Sample(prompt="test"), {"max_new_tokens": 8}))
@@ -877,6 +881,96 @@ def test_top_p_published_captures_need_only_metadata_checks(tmp_path, monkeypatc
         validate_sampler_top_p(*fields, count, tokens=[4] * count, sampled_logps=[0.0] * count)
         with pytest.raises(ValueError, match="align"):
             validate_sampler_top_p(*fields, count, tokens=[4], sampled_logps=[0.0])
+
+
+@pytest.mark.parametrize("k", [0, 3])
+@pytest.mark.parametrize(
+    "mask_fields", [{}, {"sampling_mask": None}, {"sampling_mask": [], "sampling_mask_logprobs": []}]
+)
+@pytest.mark.parametrize(
+    "logprob_fields",
+    [{}, {"logprobs": None}, {"logprobs": {}}, {"logprobs": {"content": None}}, {"logprobs": {"content": []}}],
+)
+def test_score_centering_http_decode_empty_completion(k, mask_fields, logprob_fields):
+    from vime.utils.score_centering import decode_score_centering_response
+
+    choice = {"token_ids": [], **mask_fields, **logprob_fields}
+    output = decode_score_centering_response(json.dumps({"choices": [choice]}), k)
+    assert output["meta_info"] == {}
+    assert output["choices"][0]["token_ids"] == []
+
+
+@pytest.mark.parametrize("k", [0, 3])
+@pytest.mark.parametrize("token_count,logprob_count", [(0, 1), (0, 2), (1, 0), (1, 2), (2, 0), (2, 1)])
+def test_score_centering_http_decode_rejects_misaligned_tokens(k, token_count, logprob_count):
+    from vime.utils.score_centering import decode_score_centering_response
+
+    choice = {
+        "token_ids": [1] * token_count,
+        "logprobs": {"content": [{"logprob": -1.0}] * logprob_count},
+    }
+    with pytest.raises(ValueError, match="every generated token"):
+        decode_score_centering_response(json.dumps({"choices": [choice]}), k)
+
+
+def test_score_centering_bytes_preserve_fields_duplicate_last_and_stable_ties():
+    from vime.utils.score_centering import decode_score_centering_response
+
+    entries = [
+        {"token_id": token, "logprob": value}
+        for token, value in [(7, -2.0), (3, -1.0), (7, -0.5), (5, -0.5), (3, -0.5)]
+    ]
+    response = {
+        "choices": [
+            {
+                "token_ids": [7],
+                "logprobs": {
+                    "content": [
+                        {"token_id": 7, "logprob": -0.5, "rank": 1, "extra": ["雪", None], "top_logprobs": entries}
+                    ]
+                },
+                "finish_reason": "length",
+                "version_spans": [{"start": 0, "end": 1, "version": 4}],
+            },
+            {"token_ids": [3], "logprobs": {"content": [{"top_logprobs": [{"keep": True}]}]}},
+        ],
+        "unknown": {"bigint": 10**40, "signed_zero": -0.0},
+        "meta_info": {"score_centering_top_p": "stale", "keep": True},
+    }
+    output = decode_score_centering_response(json.dumps(response).encode(), 2)
+    ids, probabilities = output["meta_info"].pop("score_centering_topk")
+    np.testing.assert_array_equal(ids, np.asarray([[7, 3]], dtype=np.int32))
+    np.testing.assert_array_equal(
+        probabilities.view(np.uint32), np.asarray([[-0.5, -0.5]], dtype=np.float32).view(np.uint32)
+    )
+    response["choices"][0]["logprobs"]["content"][0].pop("top_logprobs")
+    response["meta_info"].pop("score_centering_top_p")
+    assert output == response
+    assert type(output["unknown"]["bigint"]) is int
+    assert np.signbit(output["unknown"]["signed_zero"])
+
+
+@pytest.mark.parametrize("payload", [b'{"choices":', b"not-json", b'{"x":"\\ud800"'])
+def test_score_centering_bytes_preserve_json_error_class_and_message(payload):
+    from vime.utils.score_centering import decode_score_centering_response
+
+    with pytest.raises(json.JSONDecodeError) as expected:
+        json.loads(payload)
+    with pytest.raises(type(expected.value)) as actual:
+        decode_score_centering_response(payload, 2)
+    assert actual.value.args == expected.value.args
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf"), "\ud800"])
+def test_score_centering_bytes_preserve_legacy_scalar_values(value):
+    from vime.utils.score_centering import decode_score_centering_response
+
+    response = {"choices": [{"token_ids": [], "logprobs": {"content": []}}], "unknown": value}
+    output = decode_score_centering_response(json.dumps(response).encode(), 2)
+    if isinstance(value, float) and np.isnan(value):
+        assert np.isnan(output["unknown"])
+    else:
+        assert output["unknown"] == value
 
 
 if __name__ == "__main__":

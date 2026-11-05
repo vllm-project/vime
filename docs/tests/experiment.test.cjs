@@ -14,6 +14,106 @@ const E = globalThis.VimeExperiment;
 const repo = path.resolve(__dirname, '../..');
 const shell = state => E.generate(state).files['experiment.sh'];
 
+test('maintained recipes default to SC and replay only MoE routes', () => {
+  for (const model of Object.keys(E.models)) {
+    const state = E.change(E.defaults, 'model', model);
+    assert.equal(state.sc, true);
+    assert.equal(state.response, E.models[model].response ?? 131072);
+    assert.ok(E.models[model].cp > 1);
+    assert.match(shell(state), /--log-probs-chunk-size 1024/);
+    assert.ok(shell(state).includes(`--rollout-max-response-len ${state.response}`));
+    assert.ok(E.validate({...state, response: 262144}).errors.some(e => e.includes('context')) === (model !== 'glm5'));
+    assert.match(shell(state), new RegExp(`--context-parallel-size ${E.models[model].cp}\\b`));
+    assert.equal(state.r3, E.models[model].moe);
+    assert.match(shell(state), /--use-score-centering/);
+    assert.equal(shell(state).includes('--use-rollout-routing-replay'), E.models[model].moe);
+    assert.doesNotMatch(shell({...state, sc: false, r3: false}), /--use-score-centering|--use-rollout-routing-replay/);
+  }
+  for (const model of ['dense', 'deepseek']) {
+    assert(!Object.hasOwn(E.models, model));
+    assert.deepEqual(E.sanitize({model, hf: '/old/model', train: '/old/checkpoint', nodes: 16}), E.defaults);
+  }
+});
+
+test('A/B comparison includes dependency changes and validates both sides without mutating snapshots', () => {
+  const a = E.sanitize({...E.defaults, hf: '/private/baseline'});
+  const saved = JSON.stringify(a);
+  let b = E.change(a, 'schedule', 'async');
+  b = E.change(b, 'precision', 'fp8');
+  b = E.change(b, 'correction', 'icepop');
+  const result = E.compare(a, b);
+  assert.deepEqual(result.differences.map(d => d.key).sort(), ['correction', 'layout', 'precision', 'schedule']);
+  assert.equal(result.a.localGpus, 8);
+  assert.equal(result.b.localGpus, 16);
+  assert.equal(JSON.stringify(a), saved);
+  assert(result.insights.some(text => text.includes('staleness/mean')));
+  assert(result.insights.some(text => text.includes('p/q = 0.4/0.1 = 4')));
+  assert.deepEqual(E.compare(a, {...a, step: 4}).differences, []);
+  b = {...b, pd: true, ib: ''};
+  assert(E.compare(a, b).b.errors.length > 0);
+  assert.equal(E.compare(a, b).a.errors.length, 0);
+  for (const state of [a, b]) {
+    const shared = E.shareChoices({...state, endpoints: 'private:1234', draft: '/private/head', queueDir: '/private/queue'});
+    for (const key of ['hf', 'endpoints', 'draft', 'queueDir', 'reward', 'ib']) assert(!Object.hasOwn(shared, key));
+    assert.equal(E.sanitize(shared).model, state.model);
+  }
+});
+
+test('PD repairs derive whole engines and training groups from each current model', () => {
+  for (const model of Object.keys(E.models)) {
+    for (const layout of ['colocate', 'separate']) {
+      const m = E.models[model];
+      const s = E.sanitize({...E.change(E.defaults, 'model', model), layout, pd: true, prefill: m.nodes * 8 + 1, rollout: m.nodes * 8, ib: ''});
+      const before = JSON.stringify(s);
+      const issue = E.validate(s).issues.find(issue => issue.code === 'pd-capacity');
+      assert(issue, model);
+      const action = issue.actions.find(action => action.id === 'pd-resources');
+      assert(action, model);
+      const next = E.sanitize({...s, ...action.changes});
+      const result = E.validate(next);
+      assert(!result.issues.some(issue => issue.code === 'pd-capacity'), model);
+      assert.equal(next.prefill % m.engine, 0);
+      assert(result.rollout - next.prefill >= m.engine);
+      assert.equal(result.rollout % m.engine, 0);
+      assert.equal(result.total % (m.tp * m.pp * m.cp), 0);
+      assert.equal(result.total % (m.ep * m.pp), 0);
+      assert(result.issues.some(issue => issue.code === 'rdma'));
+      assert.equal(JSON.stringify(s), before);
+      const off = E.sanitize({...s, ...issue.actions.find(action => action.id === 'pd-off').changes});
+      assert.equal(E.validate(off).localGpus, E.validate(s).localGpus);
+      assert.equal(off.pd, false);
+    }
+  }
+  const flash = {...E.defaults, layout: 'separate', pd: true};
+  const fix = E.validate(flash).issues.find(i => i.code === 'pd-capacity').actions.find(a => a.id === 'pd-resources');
+  assert.equal(E.validate(flash).localGpus, 16);
+  assert.equal(E.validate({...flash, ...fix.changes}).localGpus, 24);
+  assert(!E.validate({...flash, layout: 'external'}).issues.some(i => i.code === 'pd-capacity'));
+});
+
+test('provenance describes generation, preserves unknown runtime facts and accepts old schema 1 exports', () => {
+  const build = {commit: 'a'.repeat(40), dirty: false, environment: {BASE_IMAGE: 'vllm/vllm-openai@sha256:' + 'c'.repeat(64)},
+    sourceHashes: {'scripts/run-glm4.7-30B-A3B.sh': 'b'.repeat(64)}};
+  const generated = E.generate({...E.defaults, hardware: 'blackwell'}, 'en', build);
+  const plan = JSON.parse(generated.files['experiment.json']);
+  assert.equal(plan.schema, 1);
+  assert.equal(plan.provenance.recipe.sha256, 'b'.repeat(64));
+  assert(plan.provenance.recipe.url.includes('/' + build.commit + '/'));
+  assert(generated.files['experiment.sh'].includes(plan.provenance.recipe.url));
+  assert.equal(plan.provenance.environment.suggestedImageTag, 'vllm/vime:latest');
+  assert.equal(plan.provenance.environment.imageDigest, null);
+  assert.equal(plan.provenance.environment.installedCommit, null);
+  assert.equal(plan.provenance.checkpoint.revision, null);
+  assert.deepEqual(plan.provenance.runtimeEvidence, []);
+  const modified = E.generate({...plan.choices, schedule: 'async', layout: 'separate'}, 'en', build);
+  assert.deepEqual(modified.provenance.runtimeEvidence, []);
+  assert.equal(E.generate(E.defaults).provenance.page.commit, null);
+  assert.equal(E.generate(E.defaults, 'en', {...build, dirty: true}).provenance.page.dirty, true);
+  assert.deepEqual(E.sanitize({schema: 1, choices: {model: 'qwen38'}}), E.sanitize({model: 'qwen38'}));
+  assert.equal(E.sanitize({model: 'qwen38'}).hardware, 'unspecified');
+  assert.equal(E.generate(E.defaults, 'en', {commit: 'bad\ncommand'}).provenance.page.commit, null);
+});
+
 test('memory controls alter optimizer and activation settings independently', () => {
   const cpu = shell({
     ...E.defaults,
@@ -112,7 +212,7 @@ test('PD partitions whole engines and external ownership excludes managed YAML',
   assert.match(generated.files['vllm.yaml'], /"kv_role":"kv_producer"/);
   assert.match(generated.files['vllm.yaml'], /"kv_role":"kv_consumer"/);
   assert.match(generated.files['vllm.yaml'], /"device_name":"mlx5_0"/);
-  for (const model of ['deepseek', 'glm5']) {
+  for (const model of ['glm5']) {
     const state = E.change(E.defaults, 'model', model);
     assert.match(shell(state), /--vllm-all2all-backend deepep_high_throughput/);
     assert.doesNotMatch(shell(state), /deepep_auto/);
@@ -166,7 +266,7 @@ test('SC uses current-policy REINFORCE with compatible sampling and composes wit
 
 test('dense R3, async determinism, missing hooks and transport requirements are explained', () => {
   assert.ok(E.validate({
-    ...E.change(E.defaults, 'model', 'dense'),
+    ...E.change(E.defaults, 'model', 'qwen38'),
     r3: true
   }).errors.some(s => s.includes('MoE')));
   assert.ok(E.validate({
@@ -201,14 +301,16 @@ test('cache, routing replay, and precision settings survive export at the right 
     transport: 'disk',
     r3: true,
     hicache: true,
+    cpuBytes: '1073741824',
     kv: 'fp8',
     precision: 'fp8'
   };
   const files = E.generate(s).files;
+  assert.ok(E.validate({...s, cpuBytes: ''}).errors.some(message => message.includes('explicit CPU byte budget')));
   assert.match(files['serving-reference.sh'], /--enable-return-routed-experts/);
   assert.match(files['serving-reference.sh'], /--enable-prefix-caching/);
   assert.match(files['serving-reference.sh'], /"kv_connector":"SimpleCPUOffloadConnector"/);
-  assert.match(files['serving-reference.sh'], /"cpu_to_gpu_ratio":2/);
+  assert.match(files['serving-reference.sh'], /"cpu_bytes_to_use":1073741824/);
   assert.match(files['serving-reference.sh'], /--kv-cache-dtype fp8_e4m3/);
   assert.match(files['experiment.sh'], /--update-weight-transport disk/);
   assert.match(files['experiment.sh'], /ROLLOUT_MODEL="\$HF_MODEL-fp8"/);
@@ -218,20 +320,21 @@ test('cache, routing replay, and precision settings survive export at the right 
     rollout: 16,
     pd: true,
     ib: 'mlx5_0',
-    hicache: true
+    hicache: true,
+    cpuBytes: '1073741824'
   });
   assert.match(pd.files['vllm.yaml'], /"kv_connector":"MultiConnector"/);
   assert.match(pd.files['vllm.yaml'], /enable_prefix_caching: true/);
   const decode = pd.files['vllm.yaml'].split('worker_type: decode')[1];
   assert.match(decode, /"kv_connector":"MooncakeConnector"/);
-  assert.doesNotMatch(decode, /SimpleCPUOffloadConnector|cpu_to_gpu_ratio/);
+  assert.doesNotMatch(decode, /SimpleCPUOffloadConnector|cpu_bytes_to_use/);
 });
 
 test('hybrid attention KV and recurrent state export independently to each engine owner', () => {
   const hybrid = E.change(E.change(E.defaults, 'model', 'glm5'), 'model', 'qwen38');
   assert.equal(hybrid.kv, 'auto');
   assert.equal(hybrid.mambaDtype, 'auto');
-  assert.doesNotMatch(shell(hybrid), /--vllm-(kv-cache-dtype|mamba-ssm-cache-dtype|mamba-full-memory-ratio)/);
+  assert.doesNotMatch(shell(hybrid), /--vllm-(kv-cache-dtype|mamba-ssm-cache-dtype)/);
   for (const layout of ['colocate', 'separate', 'external']) {
     for (const kv of E.enums.kv) {
       for (const mambaDtype of E.enums.mambaDtype) {
@@ -240,7 +343,6 @@ test('hybrid attention KV and recurrent state export independently to each engin
           layout,
           kv,
           mambaDtype,
-          mambaRatio: '',
           endpoints: 'node:30000',
           transport: layout === 'external' ? 'disk' : 'nccl'
         };
@@ -251,35 +353,23 @@ test('hybrid attention KV and recurrent state export independently to each engin
         assert.equal(file.includes(`${prefix}kv-cache-dtype fp8_e4m3`), kv === 'fp8');
         assert.equal(file.includes(`${prefix}mamba-ssm-cache-dtype`), mambaDtype !== 'auto');
         if (mambaDtype !== 'auto') assert.ok(file.includes(`${prefix}mamba-ssm-cache-dtype ${mambaDtype}`));
-        assert.doesNotMatch(file, /mamba-full-memory-ratio/);
+        if (layout === 'external') assert.ok(file.includes('VLLM_USE_V2_MODEL_RUNNER=1'));
         assert.equal(spawnSync('bash', ['-n'], {
           input: file
         }).status, 0);
       }
     }
   }
-  for (const ratio of ['0', '-1', 'NaN', 'Infinity', '0x10', '$(false)']) {
-    assert.ok(E.generate({
-      ...hybrid,
-      mambaRatio: ratio
-    }).validation.errors.some(e => e.includes('ratio')));
-  }
-  assert.ok(E.generate({
-    ...hybrid,
-    mambaRatio: '1.5'
-  }).validation.errors.some(e => e.includes('shared paged cache')));
   assert.equal(E.sanitize({
     ...hybrid,
     mambaDtype: 'fp8'
   }).mambaDtype, 'auto');
   const conventional = E.sanitize({
     ...hybrid,
-    model: 'dense',
-    mambaDtype: 'bfloat16',
-    mambaRatio: '1.5'
+    model: 'flash',
+    mambaDtype: 'bfloat16'
   });
   assert.equal(conventional.mambaDtype, 'auto');
-  assert.equal(conventional.mambaRatio, '');
   assert.doesNotMatch(shell(conventional), /--vllm-mamba/);
 });
 
@@ -309,9 +399,9 @@ test('EAGLE exports a separate draft head or a supported checkpoint MTP head', (
   assert.match(shell(glm), /"method":"mtp"/);
   assert.doesNotMatch(shell(glm), /"model":|speculative-draft-model-path/);
   assert.doesNotMatch(shell({...glm, draftSource: 'external', draft: 'org/compatible-eagle'}), /--vllm-speculative-draft-attention-backend nsa/);
-  const dense = E.change(separate, 'model', 'dense');
-  assert.equal(dense.draftSource, 'external');
-  assert.ok(E.generate({...dense, draftSource: 'builtin'}).validation.errors.some(e => e.includes('MTP')));
+  const dense = E.change(separate, 'model', 'qwen38');
+  assert.equal(dense.draftSource, 'builtin');
+  assert.deepEqual(E.generate(dense).validation.errors, []);
   assert.deepEqual(E.generate({...separate, pd: true, rollout: 16, layout: 'separate', ib: 'mlx5_0'}).validation.errors, []);
 });
 
@@ -335,6 +425,7 @@ test('all eight serving combinations have different PD, cache and decoding struc
   }
   assert.equal(scenes.size, 8);
 });
+
 test('all generated recipe variants are syntactically valid bash', () => {
   let count = 0;
   for (const model of Object.keys(E.models))
@@ -363,7 +454,7 @@ test('all generated recipe variants are syntactically valid bash', () => {
               count++;
             }
         }
-  assert.equal(count, 288);
+  assert.equal(count, Object.keys(E.models).length * 48);
 });
 
 test('shared choices are schema-limited and restore paths for the selected model', () => {
@@ -435,7 +526,7 @@ test('exported shell preserves literal user paths and submits the complete confi
     assert.ok(args.includes('--num-layers'));
     assert.ok(!fs.existsSync(path.join(dir, 'PWNED')));
     assert.ok(!fs.existsSync(path.join(dir, 'PWNED2')));
-    assert.ok(!fs.readdirSync(dir).some(n => n.startsWith('.slime-lab.')));
+    assert.ok(!fs.readdirSync(dir).some(n => n.startsWith('.vime-lab.')));
   } finally {
     fs.rmSync(dir, {
       recursive: true,
@@ -513,6 +604,9 @@ test('diagrams explain distinct signal paths, ownership, precision and correctio
   assert.doesNotMatch(draw({
     layout: 'separate'
   }), /external-map/);
+  assert.match(draw({
+    layout: 'separate'
+  }), /vime manages two dedicated GPU pools/);
   assert.match(draw({
     step: 2,
     precision: 'int4'

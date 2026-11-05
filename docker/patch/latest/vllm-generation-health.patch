@@ -1,20 +1,24 @@
+diff --git a/vllm/engine/protocol.py b/vllm/engine/protocol.py
+index 60a8a9f00b7..973875adfc2 100644
 --- a/vllm/engine/protocol.py
 +++ b/vllm/engine/protocol.py
-@@ -162,6 +162,11 @@
+@@ -165,6 +165,11 @@ class EngineClient(ABC):
+         """Raise if unhealthy."""
          ...
  
-     @abstractmethod
++    @abstractmethod
 +    async def check_health_generate(self, timeout: float = 20.0) -> None:
 +        """Require a scheduler or inference response, not just a live frontend."""
 +        ...
 +
-+    @abstractmethod
+     @abstractmethod
      async def start_profile(
          self,
-         profile_prefix: str | None = None,
+diff --git a/vllm/entrypoints/serve/instrumentator/health.py b/vllm/entrypoints/serve/instrumentator/health.py
+index 5c0b2d1855d..8c7defdeb12 100644
 --- a/vllm/entrypoints/serve/instrumentator/health.py
 +++ b/vllm/entrypoints/serve/instrumentator/health.py
-@@ -7,7 +7,7 @@
+@@ -7,7 +7,7 @@ from fastapi.responses import Response
  
  from vllm.engine.protocol import EngineClient
  from vllm.logger import init_logger
@@ -23,7 +27,7 @@
  
  logger = init_logger(__name__)
  
-@@ -31,3 +31,16 @@
+@@ -31,3 +31,17 @@ async def health(raw_request: Request) -> Response:
          return Response(status_code=200)
      except EngineDeadError:
          return Response(status_code=503)
@@ -39,18 +43,21 @@
 +        await client.check_health_generate()
 +        return Response(status_code=200)
 +    except (EngineDeadError, EngineGenerateError, TimeoutError):
++        logger.warning("Generation health check failed", exc_info=True)
 +        return Response(status_code=503)
+diff --git a/vllm/v1/engine/async_llm.py b/vllm/v1/engine/async_llm.py
+index 4a85ebfd31e..154ad5e3ed2 100644
 --- a/vllm/v1/engine/async_llm.py
 +++ b/vllm/v1/engine/async_llm.py
-@@ -47,6 +47,7 @@
- from vllm.tracing import init_tracer
+@@ -51,6 +51,7 @@ from vllm.tokenizers import TokenizerLike
+ from vllm.tracing import init_tracer, log_tracing_disabled_warning
  from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
  from vllm.usage.usage_lib import UsageContext
 +from vllm.utils import random_uuid
  from vllm.utils.async_utils import cancel_task_threadsafe
  from vllm.utils.collection_utils import as_list
  from vllm.v1.engine import EngineCoreRequest, PauseMode
-@@ -1089,6 +1090,32 @@
+@@ -1133,6 +1134,29 @@ class AsyncLLM(EngineClient):
          if self.errored:
              raise self.dead_error
  
@@ -58,11 +65,8 @@
 +        """Require a scheduler reply when busy, or an inference result when idle."""
 +        async with asyncio.timeout(timeout):
 +            await self.check_health()
-+            loads = await self.get_inflight_queue_diagnostics(0)
-+            if any(
-+                load.get("has_pending_work", False)
-+                or any(queue["num_requests"] for queue in load["queues"])
-+                for load in loads
++            if await self.is_sleeping() or any(
++                await self.engine_core.call_utility_all_async("has_work")
 +            ):
 +                return
 +            request_id = f"healthcheck-{random_uuid()}"

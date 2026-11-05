@@ -1,7 +1,8 @@
 diff --git a/vllm/config/model.py b/vllm/config/model.py
+index 2f306215ff9..f07a8e21d78 100644
 --- a/vllm/config/model.py
 +++ b/vllm/config/model.py
-@@ -367,6 +367,9 @@
+@@ -367,6 +367,9 @@ class ModelConfig:
      used with `--generation-config auto`, the override parameters will be
      merged with the default config from the model. If used with
      `--generation-config vllm`, only the override parameters are used."""
@@ -12,9 +13,10 @@ diff --git a/vllm/config/model.py b/vllm/config/model.py
      """Enable sleep mode for the engine (only cuda and
      hip platforms are supported)."""
 diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
+index b0c418c5312..9fbaf7ae8c6 100644
 --- a/vllm/engine/arg_utils.py
 +++ b/vllm/engine/arg_utils.py
-@@ -769,6 +769,9 @@
+@@ -790,6 +790,9 @@ class EngineArgs:
      reasoning_config: ReasoningConfig = get_field(VllmConfig, "reasoning_config")
  
      generation_config: str = ModelConfig.generation_config
@@ -22,29 +24,30 @@ diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
 +        ModelConfig.custom_pull_weights_pre_read_hook
 +    )
      enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
+     sleep_mode_backend: str = ModelConfig.sleep_mode_backend
      sleep_mode_offload_cudagraph: bool = ModelConfig.sleep_mode_offload_cudagraph
-     sleep_preserve_parameter_names: list[str] = get_field(
-@@ -1004,6 +1007,10 @@
-         )
+@@ -1037,6 +1040,10 @@ class EngineArgs:
          model_group.add_argument(
              "--override-generation-config", **model_kwargs["override_generation_config"]
-+        )
+         )
 +        model_group.add_argument(
 +            "--custom-pull-weights-pre-read-hook",
 +            **model_kwargs["custom_pull_weights_pre_read_hook"],
-         )
++        )
          model_group.add_argument(
              "--enable-sleep-mode", **model_kwargs["enable_sleep_mode"]
-@@ -1988,6 +1995,7 @@
+         )
+@@ -2040,6 +2047,7 @@ class EngineArgs:
              pooler_config=self.pooler_config,
              generation_config=self.generation_config,
              override_generation_config=self.override_generation_config,
 +            custom_pull_weights_pre_read_hook=self.custom_pull_weights_pre_read_hook,
              enable_sleep_mode=self.enable_sleep_mode,
+             sleep_mode_backend=self.sleep_mode_backend,
              sleep_mode_offload_cudagraph=self.sleep_mode_offload_cudagraph,
-             sleep_preserve_parameter_names=self.sleep_preserve_parameter_names,
 diff --git a/vllm/utils/local_checkpoint.py b/vllm/utils/local_checkpoint.py
 new file mode 100644
+index 00000000000..7e2ed2e8b8e
 --- /dev/null
 +++ b/vllm/utils/local_checkpoint.py
 @@ -0,0 +1,329 @@
@@ -378,9 +381,10 @@ new file mode 100644
 +        )
 +    _write_applied_version(local_checkpoint_dir, version)
 diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
+index 04e1e7730b1..acdbb97094c 100644
 --- a/vllm/v1/worker/gpu_worker.py
 +++ b/vllm/v1/worker/gpu_worker.py
-@@ -597,6 +597,24 @@
+@@ -637,6 +637,24 @@ class Worker(WorkerBase):
          with set_current_vllm_config(self.vllm_config):
              self.model_runner.reload_weights(*args, **kwargs)
  
