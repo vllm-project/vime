@@ -137,6 +137,11 @@ RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirn
        /tmp/vllm-watchdog-fatal-action.patch \
        /tmp/vllm-rocm-ipc-warmup.patch
 
+COPY docker/amd_patch/${PATCH_VERSION}/nixl/__init__.py /tmp/nixl_alias.py
+RUN SITE="$(python3 -c 'import os, nixl_rocm; print(os.path.dirname(os.path.dirname(nixl_rocm.__file__)))')" && \
+    mkdir "$SITE/nixl" && mv /tmp/nixl_alias.py "$SITE/nixl/__init__.py" && \
+    python3 -c "from nixl._api import nixl_agent, nixl_agent_config"
+
 # ====================================== Install main package ============================================
 
 COPY . /root/vime
