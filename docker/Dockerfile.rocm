@@ -20,8 +20,9 @@ ARG TE_TAG=v2.15_rocm
 # back to the base image's flash-attn. Set to 1 to build it in.
 ARG NVTE_FUSED_ATTN=0
 
-# ROCm/HIP fork of torch_memory_saver (--offload-train).
-ARG TMS_COMMIT=d64a639
+# ROCm/HIP fork of torch_memory_saver (--offload-train). Needs this commit or later: it rounds VMM sizes
+# to the granularity (else free fails in cuMemUnmap) and maps VMM memory for the host (else .item() faults).
+ARG TMS_COMMIT=118b09b3bc7b0cf386745db1eac2601d4aa7e681
 
 # Named TE_MAX_JOBS, not MAX_JOBS: the base image sets ENV MAX_JOBS=16, and an
 # inherited ENV shadows a same-named ARG inside RUN.
