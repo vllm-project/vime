@@ -760,14 +760,14 @@ def test_manager_cleanup_closes_remaining_resources_after_custom_source_error(ar
     manager.recovery = Mock()
     manager.serving = Mock()
     manager._owns_controller = False
-    monkeypatch.setattr(transport, "seal_rollout_store", Mock())
+    monkeypatch.setattr(transport, "close_rollout_store", Mock())
     monkeypatch.setattr(rollout.logging_utils, "finish_tracking", Mock())
     with pytest.raises(ValueError, match="custom close failed"):
         manager.dispose()
     manager.recovery.release_batches.assert_called_once()
     manager.recovery.journal.unlink.assert_called_once_with(missing_ok=True)
     manager.serving.dispose.remote.assert_not_called()
-    transport.seal_rollout_store.assert_called_once_with(args)
+    transport.close_rollout_store.assert_called_once_with(args)
     rollout.logging_utils.finish_tracking.assert_called_once_with(args)
 
 

@@ -474,3 +474,243 @@ index 57b8efe93..e7376a7f8 100644
      torch_memory_saver.hook_mode = "torch"
      HAVE_TORCH_MEMORY_SAVER = True
  except ImportError:
+diff --git a/megatron/core/dist_checkpointing/strategies/async_utils.py b/megatron/core/dist_checkpointing/strategies/async_utils.py
+--- a/megatron/core/dist_checkpointing/strategies/async_utils.py
++++ b/megatron/core/dist_checkpointing/strategies/async_utils.py
+@@ -24,6 +24,21 @@
+ from ..utils import debug_time
+ 
+ logger = logging.getLogger(__name__)
++
++
++def _init_async_worker_device(rank, device_index=None):
++    """Spawn workers must install their own device compatibility layer."""
++    if os.environ.get("VIME_PLATFORM", "").strip().lower() == "npu":
++        import torch_npu  # noqa: F401
++        from torch_npu.contrib import transfer_to_npu  # noqa: F401
++
++        device = torch.npu
++    else:
++        device = torch.cuda
++    count = device.device_count()
++    if count <= 0:
++        raise RuntimeError("Async checkpoint worker has no visible accelerator devices")
++    device.set_device(rank % count if device_index is None else device_index)
+ 
+ 
+ def _set_process_qos(cpu_priority: int, io_priority: Optional[int]) -> None:
+@@ -356,6 +371,7 @@
+     _persistent_queue: mp.JoinableQueue = None
+     _persistent_preload_q: mp.JoinableQueue = None
+     _persistent_comp_q: mp.Queue = None
++    _persistent_preload_done = None
+ 
+     def __init__(self):
+         self.process: Optional[mp.Process] = None
+@@ -377,6 +393,7 @@
+             cls._persistent_queue = ctx.JoinableQueue()
+             cls._persistent_preload_q = ctx.JoinableQueue()
+             cls._persistent_comp_q = ctx.Queue()
++            cls._persistent_preload_done = ctx.Event()
+             cls._persistent_process = ctx.Process(
+                 target=PersistentAsyncCaller.async_loop,
+                 args=(
+@@ -387,6 +404,10 @@
+                     logger.getEffectiveLevel(),
+                     cpu_priority,
+                     io_priority,
++                    cls._persistent_preload_done,
++                    torch.npu.current_device()
++                    if os.environ.get("VIME_PLATFORM", "").strip().lower() == "npu"
++                    else None,
+                 ),
+             )
+             cls._persistent_process.daemon = True
+@@ -394,6 +415,13 @@
+             logger.debug(f"PersistentAsyncCaller: {rank}, Started Async Caller")
+         return cls._persistent_process
+ 
++    def _check_worker_alive(self):
++        if self.process is not None and self.process.exitcode is not None:
++            raise RuntimeError(
++                f"Persistent async checkpoint worker exited unexpectedly "
++                f"(pid={self.process.pid}, exitcode={self.process.exitcode})"
++            )
++
+     def schedule_async_call(self, async_req: AsyncRequest) -> None:
+         """Put `AsyncRequest` to the Persistent Async Caller
+ 
+@@ -413,7 +441,9 @@
+         self.start_time = time()
+         if self.process is None:
+             self.process = PersistentAsyncCaller._get_process(torch.distributed.get_rank())
++        self._check_worker_alive()
+         if async_req.preload_fn is not None:
++            self._persistent_preload_done.clear()
+             self._persistent_preload_q.put(async_req.call_idx)
+         self._persistent_queue.put(async_req)
+         logger.debug(f"rank: {torch.distributed.get_rank()}, put {async_req.call_idx}")
+@@ -421,7 +451,9 @@
+         if async_req.preload_fn is not None:
+             start_sync = time()
+             # Synchronize for pre-staging tensors
+-            self._persistent_preload_q.join()
++            while not self._persistent_preload_done.wait(timeout=0.1):
++                self._check_worker_alive()
++            self._check_worker_alive()
+             end_sync = time()
+             logger.debug(
+                 f"rank: {torch.distributed.get_rank()}, "
+@@ -452,40 +484,32 @@
+                 if `blocking` is True), False if at least one rank is still active.
+         """
+ 
+-        is_alive: bool = False
+-
+-        if self.process:
+-            while self.cur_item is None:
++        # All ranks keep participating while waiting. A failed local writer
++        # must also release peers whose writers are still busy or already done.
++        while True:
++            if self.process is not None and self.cur_item is None:
+                 try:
+-                    # Retrieve comp call_idx without waiting
+                     self.cur_item = self._persistent_comp_q.get_nowait()
+                 except Empty:
+-                    # This method is called after any `AsyncRequest` is pushed to the main loop
+-                    # So, the background writing is still active
+-                    # before the worker put call_idx to `comp_q`
+-                    if not blocking:
+-                        is_alive = True
+-                        break
+-                    sleep(0.1)
+-
+-        if self.cur_item is not None:
+-            logger.debug(
+-                f"rank: {torch.distributed.get_rank()}, item: {self.cur_item}"
+-                f" is completed, {is_alive}"
+-            )
+-
+-        is_done = not is_alive if no_dist else self.sync_all_async_calls(is_alive)
+-        # This is set to False when blocking == False so this routine is called again
+-        # to simply call `sync_all_async_calls` to check if other ranks complete the writing
+-        if is_done:
+-            # The current request is completed globally. Reset the current item for polling.
+-            logger.debug(
+-                f"rank: {torch.distributed.get_rank()}, item: {self.cur_item}"
+-                f" is completed globally, {is_done}"
+-            )
+-            self.cur_item = None
+-
+-        return is_done
++                    pass
++            failed = self.process is not None and self.process.exitcode is not None
++            pending = self.process is not None and self.cur_item is None
++            status = 2 if failed else int(pending)
++            if not no_dist:
++                state = torch.tensor(
++                    [status], dtype=torch.int, device=torch.cuda.current_device()
++                )
++                torch.distributed.all_reduce(state, op=torch.distributed.ReduceOp.MAX)
++                status = state.item()
++            if status == 2:
++                self._check_worker_alive()
++                raise RuntimeError("Persistent async checkpoint worker failed on another rank")
++            if status == 0:
++                self.cur_item = None
++                return True
++            if not blocking:
++                return False
++            sleep(0.1)
+ 
+     def close(self, abort=False):
+         """Wait on the left async requests and terminate the PersistentAsyncCaller
+@@ -495,25 +519,49 @@
+             abort (bool, optional): Default to False. Needs to be manually set to true when
+                 the checkpoint async process needs to be aborted.
+         """
+-        logger.debug(f"PersistentAsyncCaller: {safe_get_rank()}, Destroying Async Caller")
+-        if self.process:
++        if self.process is None:
++            return
++        process = self.process
++        try:
+             if abort:
+-                log_single_rank(
+-                    logger, logging.WARNING, f"Persistent worker aborted in rank {safe_get_rank()}"
+-                )
+-                self.process.kill()
++                if process.is_alive():
++                    process.kill()
++                process.join(timeout=5)
++                if process.is_alive():
++                    raise RuntimeError("Could not terminate async checkpoint worker")
+             else:
++                self._check_worker_alive()
+                 self._persistent_queue.put('DONE')
+-                self._persistent_queue.join()
+-                self._persistent_process.join()
++                # Queue.join() cannot finish after a worker dies without
++                # task_done(). Wait for the ordered DONE instead, checking exit.
++                while process.is_alive():
++                    process.join(timeout=0.1)
++                if process.exitcode != 0:
++                    raise RuntimeError(
++                        f"Persistent async checkpoint worker exited during close "
++                        f"(pid={process.pid}, exitcode={process.exitcode})"
++                    )
++        finally:
++            if process.is_alive():
++                process.kill()
++                process.join(timeout=5)
++            for name in (
++                "_persistent_queue", "_persistent_preload_q", "_persistent_comp_q"
++            ):
++                channel = getattr(PersistentAsyncCaller, name)
++                if channel is not None:
++                    channel.cancel_join_thread()
++                    channel.close()
++                setattr(PersistentAsyncCaller, name, None)
+             self.process = None
+             PersistentAsyncCaller._persistent_process = None
+-            PersistentAsyncCaller._persistent_queue = None
+-            PersistentAsyncCaller._persistent_preload_q = None
+-            PersistentAsyncCaller._persistent_comp_q = None
++            PersistentAsyncCaller._persistent_preload_done = None
+ 
+     def __del__(self):
+-        self.close()
++        try:
++            self.close()
++        except Exception:
++            logger.exception("Failed to close persistent async checkpoint worker")
+ 
+     @staticmethod
+     @_disable_gc()
+@@ -525,6 +573,8 @@
+         log_level: int = logging.INFO,
+         cpu_priority: int = 10,
+         io_priority: Optional[int] = None,
++        preload_done=None,
++        device_index=None,
+     ):
+         """Main function for the persistent checkpoint worker
+ 
+@@ -562,7 +612,7 @@
+         # in this new process are on the right device, and device 0 on the node does not
+         # take on undue memory burden from other devices on node (default behavior without
+         # this line).
+-        torch.cuda.set_device(rank % torch.cuda.device_count())
++        _init_async_worker_device(rank, device_index)
+ 
+         # Set QoS to deprioritize checkpoint writing vs training
+         # This prevents checkpoint I/O from interfering with data loader
+@@ -582,6 +632,8 @@
+                     async_fn_args[1] = item.preload_fn()
+                     logger.debug(f"{rank} has completed D2H of {call_idx}")
+                     preload_q.task_done()
++                    if preload_done is not None:
++                        preload_done.set()
+                 if item.async_fn is not None:
+                     item.async_fn(*async_fn_args, **item.async_fn_kwargs)
+                 logger.debug(f"{rank} has completed saving {item.call_idx}")

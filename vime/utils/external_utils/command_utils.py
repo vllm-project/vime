@@ -3,11 +3,13 @@ This file is not for vime framework itself, but as an optional utility to easily
 """
 
 import datetime
+import errno
 import json
 import os
 import random
 import shlex
 import subprocess
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -57,6 +59,24 @@ def hf_download_public_model(full_name: str, *, dir_dst: str | Path, revision: s
     return exec_command(shlex.join(command))
 
 
+def _cleanup_test_directory(directory):
+    # Owners must drain their readers/producers before leaving the test. Close
+    # any driver-local cached writers too, without importing optional Straw.
+    if transport := sys.modules.get("vime.data.transport"):
+        transport.close_rollout_stores(root=directory.name)
+    for delay in (0.1, 0.3, 1.0, None):
+        try:
+            directory.cleanup()
+            return
+        except OSError as error:
+            # Shared mounts may briefly return stale directory entries. Retry
+            # only this test's root, and still fail if it cannot be removed.
+            if error.errno != errno.ENOTEMPTY or delay is None:
+                raise
+            print(f"Retrying test scratch cleanup after ENOTEMPTY: {directory.name}", flush=True)
+            time.sleep(delay)
+
+
 @contextmanager
 def test_work_directory(prefix: str, directory=None, keep: bool | None = None, parent=None):
     """Clean owned scratch even on failure; explicit directories remain caller-owned."""
@@ -81,13 +101,14 @@ def test_work_directory(prefix: str, directory=None, keep: bool | None = None, p
         finally:
             _dispose_failed_test_session.reset(token)
     else:
-        with tempfile.TemporaryDirectory(prefix=prefix, dir=parent) as directory:
-            print(f"Test artifacts: {directory} (removed on exit, including failure)", flush=True)
-            token = _dispose_failed_test_session.set(True)
-            try:
-                yield Path(directory)
-            finally:
-                _dispose_failed_test_session.reset(token)
+        directory = tempfile.TemporaryDirectory(prefix=prefix, dir=parent)
+        print(f"Test artifacts: {directory.name} (removed on exit, including failure)", flush=True)
+        token = _dispose_failed_test_session.set(True)
+        try:
+            yield Path(directory.name)
+        finally:
+            _dispose_failed_test_session.reset(token)
+            _cleanup_test_directory(directory)
 
 
 def get_test_platform_args() -> str:

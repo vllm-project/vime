@@ -278,12 +278,9 @@ def npu_step(
         step_env["VIME_TEST_RESOURCE_CLASS"] = resource_class
         commands.append("python tests/ci/npu_test_environment.py")
     if suite in ("migration-pd", "migration-pd-models"):
-        commands.extend(
-            [
-                'export VIME_TEST_DIAGNOSTICS_DIR="$PWD/.npu-test-diagnostics"',
-                'mkdir -p "$VIME_TEST_DIAGNOSTICS_DIR"',
-            ]
-        )
+        # The uploader must leave this expansion to the job shell. Log writers
+        # create their own parent directories before opening the output file.
+        commands.append('export VIME_TEST_DIAGNOSTICS_DIR="$$PWD/.npu-test-diagnostics"')
         if test_name == "test_glm4.7_30B_A3B_pd_mooncake.py":
             step_env["VIME_NPU_MEMORY_DIAGNOSTICS"] = "1"
         if test_name == "test_qwen2.5_vl_3B_ep_disaggregation.py":

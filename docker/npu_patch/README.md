@@ -67,7 +67,12 @@ git -C /vllm-workspace/vllm-ascend apply "${PATCH_DIR}/vllm-ascend.patch"
 
 ### 2. Megatron-LM
 
-Apply `megatron.patch`, copied from the shared `docker/patch/latest/megatron.patch`, to the pinned commit.
+Apply `megatron.patch` to the pinned commit. It includes the shared training
+fixes and an NPU-specific entry for persistent async checkpoint workers:
+spawned workers import `torch_npu.contrib.transfer_to_npu` and select their own
+NPU before receiving save requests. The patch also reports worker failures
+during preload, finalization and shutdown instead of waiting indefinitely.
+Async saving and optimizer/scheduler restoration remain enabled.
 
 ```bash
 git clone https://github.com/NVIDIA/Megatron-LM.git "${VIME_INSTALL_ROOT}/Megatron-LM"

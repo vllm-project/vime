@@ -26,6 +26,34 @@ _writers_lock = threading.Lock()
 _async_limits = {}
 
 
+def close_rollout_stores(*, root, run_id=None):
+    """Close this process's cached writers after their callers have drained IO.
+
+    A test root may contain several pools. Never close a writer in another
+    root or a writer inherited from a different process.
+    """
+    root = Path(root).resolve()
+    with _writers_lock:
+        for key in list(_writers):
+            pid, store_root, store_run, *_ = key
+            if pid != os.getpid() or not Path(store_root).is_relative_to(root):
+                continue
+            if run_id is not None and store_run != run_id:
+                continue
+            store, lock = _writers[key]
+            with lock:
+                store.close()
+            del _writers[key]
+
+
+def close_rollout_store(args):
+    """Dispose a drained rollout owner, without opening a new writer to close."""
+    if use_straw(args):
+        close_rollout_stores(
+            root=args.rollout_data_dir, run_id=getattr(args, "rollout_queue_run_id", None) or "rollout"
+        )
+
+
 def seal_rollout_store(args):
     """Seal local packs after generation/publication work has been drained."""
     if use_straw(args):
@@ -128,14 +156,16 @@ class DiskPayloadRef:
 
         from vime.data.codec import CODECS, SampleCodec
 
-        store = SharedFilesystemStore(
+        with SharedFilesystemStore(
             root or self.root,
             self.manifest.manifest.segment.run_id,
             codecs=CODECS,
             max_record_bytes=MAX_TENSOR_BYTES,
             max_buffer_bytes=MAX_PUBLICATION_BYTES,
-        )
-        value = SampleCodec(store).load(self.manifest, selection=selection)
+        ) as store:
+            # TensorRef/DiskPayloadRef contain metadata, not this reader's file
+            # handles. Their lazy reads remain valid after the session closes.
+            value = SampleCodec(store).load(self.manifest, selection=selection)
         for part in self.path:
             value = value[part] if isinstance(part, int) else getattr(value, part)
         if self.sample_metadata is not None:

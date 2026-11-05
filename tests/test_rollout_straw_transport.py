@@ -175,7 +175,7 @@ def test_custom_source_constructor_keeps_args_only_contract(args, monkeypatch, q
     monkeypatch.setattr(rollout, "Lock", SimpleNamespace(options=lambda **kw: SimpleNamespace(remote=lambda: None)))
     monkeypatch.setattr(rollout.ray, "get", lambda value, **kw: value)
     monkeypatch.setattr(rollout.ray, "kill", lambda *a, **kw: None)
-    monkeypatch.setattr(transport, "seal_rollout_store", lambda _: None)
+    monkeypatch.setattr(transport, "close_rollout_store", lambda _: None)
     serving, deployment = None, None
     if serving_owned:
         from vime.ray.serving import ServingDeployment

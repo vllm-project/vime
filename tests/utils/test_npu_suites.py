@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -428,6 +429,49 @@ def test_final_batch_has_five_real_disaggregation_jobs_and_separate_agent(suites
     assert all("npu_pd_environment.py" in step["command"] for step in steps[:5] if step is not epd)
     for step in steps[:5]:
         assert step["artifact_paths"] == ".npu-test-diagnostics/**/*"
-        assert 'export VIME_TEST_DIAGNOSTICS_DIR="$PWD/.npu-test-diagnostics"' in shlex.split(step["command"])[2]
+        assert 'export VIME_TEST_DIAGNOSTICS_DIR="$$PWD/.npu-test-diagnostics"' in shlex.split(step["command"])[2]
     glm = next(step for step in steps if "test_glm4.7" in step["command"])
     assert glm["env"]["VIME_NPU_MEMORY_DIAGNOSTICS"] == "1"
+
+
+def test_pd_commands_survive_upload_interpolation_and_reach_tests(suites, monkeypatch, tmp_path):
+    monkeypatch.setenv("NPU_SUITES", "migration-pd,migration-pd-models")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    python = bin_dir / "python"
+    python.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, pathlib, sys\n"
+        "root = os.environ.get('VIME_TEST_DIAGNOSTICS_DIR')\n"
+        "with open(os.environ['TEST_COMMAND_LOG'], 'a') as f:\n"
+        " f.write(json.dumps([sys.argv[1:], root]) + '\\n')\n"
+        "if sys.argv[1].startswith('tests/test_'):\n"
+        " path = pathlib.Path(root) / 'server.log'\n"
+        " path.parent.mkdir(parents=True, exist_ok=True)\n"
+        " path.write_text('test reached')\n"
+    )
+    python.chmod(0o755)
+    # Upload replaces $VAR from its own environment; $$ escapes one dollar.
+    # The uploader's PWD must never become the job's diagnostics directory.
+    uploader_env = {"PWD": "/not-the-job-directory", "BUILDKITE_COMMIT": ""}
+
+    def expand(match):
+        return "$" if match[0] == "$$" else uploader_env.get(match[0][1:], "")
+
+    for index, step in enumerate(suites.build_steps()):
+        cwd = tmp_path / str(index)
+        cwd.mkdir()
+        setup = cwd / "tests/ci/setup_npu_epd.sh"
+        setup.parent.mkdir(parents=True)
+        setup.write_text((REPO / "tests/ci/setup_npu_epd.sh").read_text())
+        log = cwd / "commands.jsonl"
+        command = re.sub(r"\$\$|\$[A-Za-z_][A-Za-z_0-9]*", expand, step["command"])
+        command = command.replace("${BUILDKITE_COMMIT}", "")
+        env = {**os.environ, **step["env"], "PATH": f"{bin_dir}:{os.environ['PATH']}", "TEST_COMMAND_LOG": str(log)}
+        env.pop("VIME_TEST_DIAGNOSTICS_DIR", None)
+        result = subprocess.run(shlex.split(command), cwd=cwd, env=env, capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stdout + result.stderr
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        assert records[-1][0][0].startswith("tests/test_")
+        assert records[-1][1] == str(cwd / ".npu-test-diagnostics")
+        assert (cwd / ".npu-test-diagnostics/server.log").read_text() == "test reached"
