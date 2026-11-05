@@ -1,7 +1,7 @@
 # vime on AMD ROCm (gfx950): base ships inference (ROCm/torch/triton/aiter/fa/vLLM), this adds training.
 # Build: DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm/vime-rocm:latest .
 
-# Pinned by digest. docker/amd_patch/ holds the vLLM patches for this base's vLLM commit.
+# Pinned by digest. Its vLLM commit must accept docker/patch/latest/ (today: VLLM_COMMIT in docker/Dockerfile).
 ARG BASE_IMAGE=vllm/vllm-openai-rocm:nightly-rocm100-83c078d955cd6e0c63d3b12abe669c8de936a370@sha256:d92e7eb1171463b6a653eb0573e64ffdab15b668a26b3bef24b469914c707174
 FROM ${BASE_IMAGE}
 
@@ -99,17 +99,18 @@ RUN pip install --no-cache-dir "numpy==1.26.4" "scipy==1.17.1" "pyarrow==25.0.1"
 
 # ====================================== Patches ============================================
 
-# ROCm's own copies of the vLLM patches, applied with strict `git apply` (vLLM is a pip install).
-COPY docker/amd_patch/${PATCH_VERSION}/vllm-pull_weights.patch /tmp/vllm-pull_weights.patch
-COPY docker/amd_patch/${PATCH_VERSION}/vllm-score-centering.patch /tmp/vllm-score-centering.patch
-COPY docker/amd_patch/${PATCH_VERSION}/vllm-fine-grained-tracing.patch /tmp/vllm-fine-grained-tracing.patch
-COPY docker/amd_patch/${PATCH_VERSION}/vllm-generation-health.patch /tmp/vllm-generation-health.patch
-COPY docker/amd_patch/${PATCH_VERSION}/vllm-tensor-dump.patch /tmp/vllm-tensor-dump.patch
-COPY docker/amd_patch/${PATCH_VERSION}/vllm-deepgemm-bf16.patch /tmp/vllm-deepgemm-bf16.patch
-COPY docker/amd_patch/${PATCH_VERSION}/vllm-deepep-optional-shrink.patch /tmp/vllm-deepep-optional-shrink.patch
-COPY docker/amd_patch/${PATCH_VERSION}/vllm-glm5next-unbounded-gate.patch /tmp/vllm-glm5next-unbounded-gate.patch
-COPY docker/amd_patch/${PATCH_VERSION}/vllm-tito-columnar-logprobs-render.patch /tmp/vllm-tito-columnar-logprobs-render.patch
-COPY docker/amd_patch/${PATCH_VERSION}/vllm-watchdog-fatal-action.patch /tmp/vllm-watchdog-fatal-action.patch
+# The shared vLLM patches (read-only here), in docker/Dockerfile's order, with strict `git apply`
+# (vLLM is a pip install). ROCm-only patches go in docker/amd_patch/.
+COPY docker/patch/${PATCH_VERSION}/vllm-pull_weights.patch /tmp/vllm-pull_weights.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-score-centering.patch /tmp/vllm-score-centering.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-fine-grained-tracing.patch /tmp/vllm-fine-grained-tracing.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-generation-health.patch /tmp/vllm-generation-health.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-tensor-dump.patch /tmp/vllm-tensor-dump.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-deepgemm-bf16.patch /tmp/vllm-deepgemm-bf16.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-deepep-optional-shrink.patch /tmp/vllm-deepep-optional-shrink.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-glm5next-unbounded-gate.patch /tmp/vllm-glm5next-unbounded-gate.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-tito-columnar-logprobs-render.patch /tmp/vllm-tito-columnar-logprobs-render.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-watchdog-fatal-action.patch /tmp/vllm-watchdog-fatal-action.patch
 RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirname(vllm.__file__)))')" && \
     cd "$VLLM_SITE" && \
     git apply -v /tmp/vllm-pull_weights.patch && \

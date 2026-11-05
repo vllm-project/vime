@@ -41,9 +41,9 @@ Targets gfx950 (MI350X/MI355X); pass `--build-arg GPU_ARCH=` for another CDNA ar
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm/vime-rocm:latest .
 ```
 
-The ROCm build applies its own copies of the vLLM patches from
-`docker/amd_patch/latest/`, with strict `git apply`, so changes to `docker/patch/`
-or `docker/Dockerfile` do not affect it. Today the base sits on the vLLM commit
-that `docker/Dockerfile` pins, and the copies match `docker/patch/latest/`. To move
-the ROCm image to another vLLM commit, change `BASE_IMAGE` and refresh the copies
-in the same ROCm PR.
+The ROCm build reads the shared vLLM patches in `docker/patch/latest/` and applies
+them with the same order and strict `git apply` as `docker/Dockerfile`, so its
+vLLM commit must be one that these patches accept (today, `VLLM_COMMIT`).
+ROCm-only patches go in `docker/amd_patch/`. Changes to `docker/patch/` or
+`VLLM_COMMIT` never block the CUDA image or its CI; if one breaks the ROCm build,
+a ROCm PR moves `BASE_IMAGE` to the matching ROCm nightly.
