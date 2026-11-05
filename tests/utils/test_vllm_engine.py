@@ -773,6 +773,27 @@ def test_launch_server_process_brackets_ipv6_health_url(vllm_args, monkeypatch):
     assert base_urls == ["http://[2001:db8::1]:8000"]
 
 
+def test_startup_failure_reports_native_output_and_process_identity(vllm_args, monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("VIME_TEST_DIAGNOSTICS_DIR", str(tmp_path))
+    monkeypatch.setattr(mod, "_build_subprocess_env", lambda _: {})
+    monkeypatch.setattr(mod.multiprocessing, "set_start_method", lambda *a, **kw: None)
+
+    def process(*, target, args):
+        Path(args[2]).write_text("native driver failed during engine startup")
+        return SimpleNamespace(start=lambda: None, is_alive=lambda: False, pid=123, exitcode=-6)
+
+    def unhealthy(**kwargs):
+        raise RuntimeError("Server process terminated unexpectedly")
+
+    monkeypatch.setattr(mod.multiprocessing, "Process", process)
+    monkeypatch.setattr(mod, "_wait_server_healthy", unhealthy)
+    with caplog.at_level("ERROR"), pytest.raises(RuntimeError, match="pid=123, exitcode=-6") as error:
+        mod.launch_server_process({"_args": vllm_args, "host": "host", "port": 8000, "_worker_type": "decode"})
+    assert "native driver failed" in caplog.text
+    assert "role=decode" in caplog.text and "port=8000" in caplog.text
+    assert "terminated unexpectedly" in str(error.value.__cause__)
+
+
 @pytest.mark.unit
 def test_get_base_gpu_id_with_critic_offset(vllm_args):
     vllm_args.colocate = False
@@ -903,7 +924,7 @@ def test_pipeline_rl_pause_and_disk_reload(vllm_engine, monkeypatch, flush_cache
     calls = []
 
     def post(url, *, json, params=None, timeout=None):
-        assert timeout is None
+        assert timeout == (300 if url.endswith("/pause") else None)
         calls.append((url, json, params))
         return _MockResponse(json_data={"success": True})
 
@@ -936,6 +957,67 @@ def test_pipeline_rl_worker_rank_does_not_send_control_requests(vllm_engine, mon
     vllm_engine.pause_generation()
     vllm_engine.update_weights_from_disk("/weights", weight_version="2")
     vllm_engine.continue_generation()
+
+
+def test_pause_timeout_is_visible_before_other_training_ranks_time_out(vllm_engine, monkeypatch, caplog):
+    def post(url, **kwargs):
+        assert kwargs["timeout"] == 300
+        raise requests.ReadTimeout("prefill pause did not complete")
+
+    vllm_engine.worker_type = "prefill"
+    monkeypatch.setattr(mod.requests, "post", post)
+    with caplog.at_level("INFO"), pytest.raises(requests.ReadTimeout):
+        vllm_engine.pause_generation()
+    assert "worker_type=prefill" in caplog.text
+    assert "Pause failed" in caplog.text
+
+
+@pytest.mark.parametrize("platform_name", ["cuda", "npu"])
+@pytest.mark.parametrize("worker_type", ["prefill", "decode"])
+def test_external_pd_preserves_discovered_ports_and_strict_config(vllm_args, monkeypatch, platform_name, worker_type):
+    from vime.backends.vllm_utils.external import ExternalEngineInfo, external_engine_init_kwargs
+    from vime.platforms import get_platform
+
+    platform = get_platform(platform_name)
+    monkeypatch.setattr(mod, "current_platform", lambda: platform)
+    base_port = 13160 if worker_type == "prefill" else 13180
+    config, advertised = platform.vllm.pd_config(worker_type, base_port, {"tensor_parallel_size": 1})
+    info = ExternalEngineInfo(
+        "http://host:8000", "host", 8000, worker_type, 1, advertised, {"kv_transfer_config": config}
+    )
+    engine = mod.VLLMEngine(vllm_args, rank=0, worker_type=worker_type, num_gpus_per_engine=1)
+    calls = []
+    actual = {
+        "nnodes": 1,
+        "node_rank": 0,
+        "kv_transfer_config": dict(config),
+        "weight_transfer_config": {"backend": platform.weight_transfer.backend("nccl")},
+    }
+    monkeypatch.setattr(mod, "get_server_info", lambda url: actual)
+    monkeypatch.setattr(engine, "_register_to_router", lambda args: calls.append(args))
+    engine.init(**external_engine_init_kwargs(info))
+    assert calls[0]["kv_transfer_config"] == config
+    assert calls[0]["_disaggregation_bootstrap_port"] == advertised
+    # Discovery and attachment are separate requests. Still reject a server
+    # whose transfer configuration changed between them.
+    monkeypatch.setattr(
+        mod, "get_server_info", lambda url: {**actual, "kv_transfer_config": {**config, "kv_role": "changed"}}
+    )
+    with pytest.raises(AssertionError, match="kv_transfer_config"):
+        engine.init(**external_engine_init_kwargs(info))
+
+
+def test_external_pd_rejects_wrong_role_in_discovery(vllm_args):
+    with pytest.raises(ValueError, match="incompatible KV role"):
+        mod._compute_server_args(
+            vllm_args,
+            0,
+            None,
+            "host",
+            8000,
+            worker_type="decode",
+            external_kv_transfer_config={"kv_connector": "MooncakePullConnector", "kv_role": "kv_producer"},
+        )
 
 
 def test_pull_weights_posts_collective_rpc(vllm_engine, monkeypatch):
@@ -1101,3 +1183,24 @@ def test_make_request_short_circuits_on_headless(vllm_engine, monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
+
+
+@pytest.mark.parametrize("worker_type,role", [("prefill", "kv_producer"), ("decode", "kv_consumer")])
+def test_npu_pd_reserves_handshake_and_scheduler_ports(vllm_args, monkeypatch, worker_type, role):
+    from vime.platforms import get_platform
+
+    platform = get_platform("npu")
+    monkeypatch.setattr(mod, "current_platform", lambda: platform)
+    server, _ = mod._compute_server_args(
+        vllm_args,
+        rank=0,
+        dist_init_addr=None,
+        host="127.0.0.1",
+        port=8000,
+        worker_type=worker_type,
+        disaggregation_bootstrap_port=12345,
+    )
+    assert server["kv_transfer_config"] == {"kv_connector": "MooncakePullConnector", "kv_role": role, "kv_port": 12345}
+    assert server["_disaggregation_bootstrap_port"] == 12349
+    assert platform.vllm.pd_port_count(4) == 9
+    assert server["_disaggregation_bootstrap_port"] < 12345 + platform.vllm.pd_port_count(4)

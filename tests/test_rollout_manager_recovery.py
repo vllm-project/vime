@@ -122,7 +122,9 @@ def _install_crash(manager, phase):
 def _consume_batch(refs, rank):
     data = process_rollout_data(refs, rank, len(refs))
     weight = torch.nn.Parameter(torch.zeros(1))
-    optimizer = torch.optim.SGD([weight], lr=0.01)
+    # This fixture trains CPU tensors. Avoid probing installed accelerator
+    # backends (torch-npu's foreach selector initializes a device even on CPU).
+    optimizer = torch.optim.SGD([weight], lr=0.01, foreach=False)
     inputs = torch.tensor([float(tokens.sum()) for tokens in data["tokens"]])
     targets = torch.tensor(data["local_raw_reward"]) + 1
     loss = ((inputs * weight - targets) ** 2).mean()
@@ -259,11 +261,62 @@ class _ResetPeer:
     def shutdown(self):
         pass
 
+    def start_server(self):
+        import subprocess
+
+        from vime.utils.process_lifecycle import snapshot_process_tree
+
+        self.server = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"], start_new_session=True)
+        return {"node_id": ray.get_runtime_context().get_node_id(), "process": snapshot_process_tree(self.server.pid)}
+
+
+def test_wedged_actor_retires_its_owned_server_on_the_owner_node(cluster, monkeypatch, tmp_path):
+    import time
+    from types import SimpleNamespace
+
+    import psutil
+
+    from vime.backends.vllm_utils import engine_group
+    from vime.utils.process_lifecycle import terminate_process_tree
+
+    actor = _ResetPeer.remote(True)
+    identity_ref = actor.start_server.remote()
+    identity = ray.get(identity_ref, timeout=30)
+    marker = tmp_path / "wedged-server-owner"
+
+    def block(owner):
+        marker.touch()
+        time.sleep(300)
+
+    actor.__ray_call__.remote(block)
+    try:
+        deadline = time.monotonic() + 10
+        while not marker.exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        group = engine_group.ServerGroup(
+            args=SimpleNamespace(num_gpus_per_node=1),
+            pg=None,
+            all_engines=[actor],
+            num_gpus_per_engine=1,
+            num_new_engines=0,
+            worker_type="encoder",
+            engine_process_refs={0: identity_ref},
+        )
+        group.retire_engine(0, timeout=0.2)
+        assert group.all_engines == [None] and not group.engine_process_refs
+        pid = identity["process"]["pid"]
+        assert not psutil.pid_exists(pid) or psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    finally:
+        ray.kill(actor, no_restart=True)
+        terminate_process_tree(identity["process"])
+
 
 @pytest.mark.parametrize("block_actor", [False, True])
 def test_serving_reset_retires_blocked_actor_and_keeps_healthy_peer(cluster, monkeypatch, tmp_path, block_actor):
     import time
     from types import SimpleNamespace
+
     from vime.backends.vllm_utils import engine_group
 
     blocked = _ResetPeer.remote(True)

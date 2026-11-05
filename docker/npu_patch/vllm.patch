@@ -1516,7 +1516,7 @@ index dd88d99c1f79db0d6468af41c3bbdd03ba731701..da89f7681f0031867cb18d5470515129
          """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
          return 0.0
 diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
-index 0758c6122565ca73cf18dd5e327177712ff0b17b..63f1bb8463e418bb45af9e82f632cbe9083240d3 100644
+index 0758c6122565ca73cf18dd5e327177712ff0b17b..3f16b68364818a288bd7c5de296e187f3c0d6fcd 100644
 --- a/vllm/v1/core/sched/scheduler.py
 +++ b/vllm/v1/core/sched/scheduler.py
 @@ -1242,6 +1242,18 @@ class Scheduler(SchedulerInterface):
@@ -1541,7 +1541,7 @@ index 0758c6122565ca73cf18dd5e327177712ff0b17b..63f1bb8463e418bb45af9e82f632cbe9
 @@ -1270,6 +1282,13 @@ class Scheduler(SchedulerInterface):
                          self.encoder_cache_manager.free(request)
                      break
-
+ 
 +                if request.kv_allocation_started_at is not None:
 +                    request.kv_transfer_metrics["kv_allocation_wait_time_ms"] = (
 +                        request.kv_transfer_metrics.get("kv_allocation_wait_time_ms", 0)
@@ -1575,14 +1575,14 @@ index 0758c6122565ca73cf18dd5e327177712ff0b17b..63f1bb8463e418bb45af9e82f632cbe9
 +            remote_kv_wait_time = None
              prefill_stats = None
              status_before_stop = request.status
-
+ 
 @@ -2238,6 +2260,8 @@ class Scheduler(SchedulerInterface):
                          kv_transfer_params["remote_prefill_cached_tokens"] = (
                              prefill_stats.num_cached_tokens
                          )
 +                    if request.remote_kv_wait_time:
 +                        remote_kv_wait_time = request.remote_kv_wait_time
-
+ 
                  if status_before_stop == RequestStatus.RUNNING:
                      stopped_running_reqs.add(request)
 @@ -2263,6 +2287,7 @@ class Scheduler(SchedulerInterface):
@@ -1610,10 +1610,22 @@ index 0758c6122565ca73cf18dd5e327177712ff0b17b..63f1bb8463e418bb45af9e82f632cbe9
                          finish_reason=request.get_finished_reason(),
                          events=request.take_events(),
                          trace_headers=request.trace_headers,
-@@ -2608,6 +2636,45 @@ class Scheduler(SchedulerInterface):
+@@ -2325,6 +2353,11 @@ class Scheduler(SchedulerInterface):
+                 )
+ 
+         # KV Connector: update state for finished KV Transfers.
++        if self.connector is not None and kv_connector_output is None:
++            # A no-forward worker step may discard its empty connector output.
++            # Scheduler-side connectors still need to consume remote ACKs (for
++            # example Mooncake producer delayed frees), including while paused.
++            kv_connector_output = KVConnectorOutput()
+         if kv_connector_output:
+             self._update_from_kv_xfer_finished(kv_connector_output)
+ 
+@@ -2608,6 +2641,45 @@ class Scheduler(SchedulerInterface):
          """Returns (num_running_reqs, num_waiting_reqs)."""
          return len(self.running), len(self.waiting) + len(self.kv_holding_waiting)
-
+ 
 +    def get_inflight_queue_diagnostics(self, limit: int) -> dict[str, Any]:
 +        """Return a bounded snapshot of in-flight request queues."""
 +        now = time.time()
@@ -1656,7 +1668,7 @@ index 0758c6122565ca73cf18dd5e327177712ff0b17b..63f1bb8463e418bb45af9e82f632cbe9
      def get_kv_cache_usage(self) -> float:
          """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
          return self.kv_cache_manager.usage
-@@ -2636,6 +2703,7 @@ class Scheduler(SchedulerInterface):
+@@ -2636,6 +2708,7 @@ class Scheduler(SchedulerInterface):
                      self.num_spec_tokens
                  )
              if self.connector is not None:
@@ -1664,16 +1676,16 @@ index 0758c6122565ca73cf18dd5e327177712ff0b17b..63f1bb8463e418bb45af9e82f632cbe9
                  self.connector.on_new_request(request)
                  kv_transfer_params = request.kv_transfer_params
                  if kv_transfer_params and kv_transfer_params.get("do_remote_prefill"):
-@@ -2715,6 +2783,8 @@ class Scheduler(SchedulerInterface):
+@@ -2715,6 +2788,8 @@ class Scheduler(SchedulerInterface):
      ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
          assert request.is_finished()
-
+ 
 +        request.stop_remote_kv_wait()
 +
          if self.aux_output_connector is not None:
              self.aux_output_connector.request_finished(request)
          self._inflight_prefills.discard(request)
-@@ -3193,6 +3263,8 @@ class Scheduler(SchedulerInterface):
+@@ -3193,6 +3268,8 @@ class Scheduler(SchedulerInterface):
                  return False
              # Promote request to waiting or preempted.
              self._update_waiting_for_remote_kv(request)
@@ -1682,10 +1694,10 @@ index 0758c6122565ca73cf18dd5e327177712ff0b17b..63f1bb8463e418bb45af9e82f632cbe9
              if request.num_preemptions:
                  request.status = RequestStatus.PREEMPTED
              else:
-@@ -3228,6 +3300,16 @@ class Scheduler(SchedulerInterface):
+@@ -3228,6 +3305,16 @@ class Scheduler(SchedulerInterface):
          if self.connector is not None:
              self.connector.update_connector_output(kv_connector_output)
-
+ 
 +        metadata = kv_connector_output.kv_connector_worker_meta
 +        if metadata is not None:
 +            for request_id, metrics in metadata.get_request_metrics().items():

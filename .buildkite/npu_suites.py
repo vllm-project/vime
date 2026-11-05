@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """Emit Buildkite steps for the NPU suites.
 
-Piped into `buildkite-agent pipeline upload` by the npu step in pipeline.yml.
+Piped into `buildkite-agent pipeline upload` by pipeline-npu.yaml.
 The suites and their configurations are defined here.
 
 NPU jobs run on the ascend-a3 queue with resource_class determining NPU count
 (e.g., "npu-8" means 8 NPUs).
 
 The selection is read from the NPU_SUITES environment variable. For local
-testing, set NPU_SUITES=smk,nightly instead of having a buildkite-agent on PATH.
+testing, set NPU_SUITES=migration-parallel instead of having an agent on PATH.
 
 stdlib only — runs with the agent host's python3.
 """
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 
@@ -36,6 +37,144 @@ SUITES = {
         # 35B convert plus the first rollout does not fit in the default 180 minutes.
         ("test_qwen3.5_35B_A3B_npu.py", "npu-16", "", {}, 360),
     ],
+    # Shared GPU tests: keep their assertions and select NPU launch policy.
+    # The score-centering test uses two logical devices within a proven 4-NPU pod.
+    "migration-basic": [
+        ("test_qwen2.5_0.5B_fully_async_short.py", "npu-4", "", {}),
+        ("test_qwen2.5_0.5B_pipeline_rl.py", "npu-4", "--transport nccl", {}),
+        ("test_qwen2.5_0.5B_pipeline_rl.py", "npu-4", "--transport disk", {}),
+        ("test_qwen2.5_0.5B_pipeline_rl.py", "npu-4", "--transport nccl --flush-cache-interval 2", {}),
+        ("test_full_disk_weight_update.py", "npu-4", "", {"VIME_TEST_NUM_ROLLOUT": "2"}),
+        ("test_qwen2.5_0.5B_fanout_short.py", "npu-4", "", {}),
+        ("test_qwen2.5_0.5B_score_centering.py", "npu-4", "", {}),
+    ],
+    # Second batch: preserve the GPU layouts and correctness checks. Disable
+    # optional evaluation, not training, and allow the 12-launch matrix 6 hours.
+    "migration-parallel": [
+        ("test_qwen2.5_0.5B_vllm_config.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}),
+        ("test_qwen2.5_0.5B_vllm_config_distributed.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}),
+        ("test_qwen2_5_0_5B_non_colocate_pp.py", "npu-4", "", {}),
+        ("test_qwen3_5_0_8B_top_p_cp2.py", "npu-4", "", {}),
+        ("test_qwen3_0.6B_parallel_check.py", "npu-8", "", {}, 360),
+        ("test_qwen2.5_0.5B_debug_train_dump_e2e.py", "npu-8", "", {}),
+        ("test_qwen3_4B_ppo.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}),
+        ("test_qwen3_4B_ppo_train_critic_only.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}),
+        # Basic disaggregated PPO coverage; this does not validate Ray NIXL.
+        ("test_qwen3_4B_ppo_disaggregate.py", "npu-8", "--transport object-store", {"VIME_TEST_ENABLE_EVAL": "0"}),
+    ],
+    # Batch 3: keep memory/lifecycle, recovery and optimizer roundtrips selectable
+    # independently. Recovery retains real allocator OOM and TP1 -> TP2 restart.
+    "migration-lifecycle": [
+        ("test_vllm_config_mixed_offload.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}),
+        ("test_vllm_config_mixed_offload_ft.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}),
+        ("test_release_train.py", "npu-4", "", {}),
+        ("test_qwen2.5_0.5B_debug_rollout_then_train.py", "npu-8", "", {}, 360),
+        ("test_straw_checkpoint_fork.py", "npu-4", "", {}, 360),
+    ],
+    "migration-recovery": [
+        ("test_qwen2.5_0.5B_rollout_health.py", "npu-4", "--crash-mode server", {}),
+        ("test_qwen2.5_0.5B_rollout_health.py", "npu-4", "--crash-mode actor", {}),
+        (
+            "test_qwen2.5_0.5B_training_recovery.py",
+            "npu-4",
+            "--mode straw --failure-rollout 1 --save-interval 3 --no-fault-tolerance",
+            {},
+            360,
+        ),
+        (
+            "test_qwen2.5_0.5B_training_recovery.py",
+            "npu-4",
+            "--mode straw --failure-rollout 1 --save-interval 3 --kill-manager --no-fault-tolerance",
+            {},
+            360,
+        ),
+        (
+            "test_qwen2.5_0.5B_training_recovery.py",
+            "npu-4",
+            "--mode straw --failure-rollout 1 --role-config --kill-manager --manager-crash-phase training",
+            {},
+            360,
+        ),
+        (
+            "test_qwen2.5_0.5B_training_recovery.py",
+            "npu-4",
+            "--mode debug --failure-rollout 1 --save-interval 3 --kill-manager --no-fault-tolerance",
+            {},
+            360,
+        ),
+        (
+            "test_qwen2.5_0.5B_training_recovery.py",
+            "npu-4",
+            "--mode straw --failure-rollout 1 --save-interval 1 --weight-sync disk-delta --kill-manager",
+            {},
+            360,
+        ),
+    ],
+    "migration-checkpoint": [
+        ("test_qwen3_4B_ckpt.py", "npu-8", "--save-optimizer gpu --load-optimizer gpu", {}, 360),
+        ("test_qwen3_4B_ckpt.py", "npu-8", "--save-optimizer gpu --load-optimizer cpu", {}, 360),
+        ("test_qwen3_4B_ckpt.py", "npu-8", "--save-optimizer cpu --load-optimizer cpu", {}, 360),
+        ("test_qwen3_4B_ckpt.py", "npu-8", "--save-optimizer cpu --load-optimizer gpu", {}, 360),
+        ("test_qwen3_4B_ckpt.py", "npu-8", "--async-save", {}, 360),
+    ],
+    # Batch 4: preserve BF16/alltoall MoE/R3 layouts and full-size model boundaries.
+    # The original DeepEP/FP8 and PD combinations are separate, unvalidated cases.
+    "migration-moe": [
+        (
+            "test_qwen3_30B_A3B_r3.py",
+            "npu-8",
+            "",
+            {"VIME_TEST_ENABLE_EVAL": "0", "VIME_TEST_USE_DEEPEP": "0", "VIME_TEST_USE_FP8_ROLLOUT": "0"},
+            360,
+        ),
+        ("test_moonlight_16B_A3B_non_colocate_nccl.py", "npu-8", "", {}, 360),
+        ("test_moonlight_16B_A3B.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}, 360),
+        ("test_moonlight_16B_A3B_r3.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}, 360),
+    ],
+    "migration-moe-recovery": [
+        ("test_qwen3_30B_A3B_training_recovery.py", "npu-16", "", {}, 360),
+    ],
+    "migration-models": [
+        ("test_quick_start_glm4_9B.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}, 360),
+        ("test_mimo_7B_mtp_only_grad.py", "npu-8", "", {}, 360),
+        ("test_qwen3_4B_streaming_partial_rollout.py", "npu-8", "", {}, 360),
+    ],
+    # Batch 5: two shared training cases, a mathematical-reference variant,
+    # and multi-turn VLM protocol validation. GPU kernel/NIXL parity is separate.
+    "migration-foundation": [
+        ("test_qwen3.5_0.8B_gsm8k_short.py", "npu-4", "--transport object-store", {"VIME_TEST_ENABLE_EVAL": "0"}),
+        ("test_ppo_logprob_entropy_npu.py", "npu-4", "", {}),
+        ("test_qwen2.5_0.5B_opd_vllm.py", "npu-8", "", {"VIME_TEST_ENABLE_EVAL": "0"}),
+        ("test_geo3k_vlm_multi_turn_e2e.py", "npu-4", "", {}),
+    ],
+    # Batch 6: real Ascend PD/EPD, including fault recovery. G11 uses a
+    # BF16/alltoall NPU variant; GPU DeepEP/FP8 combinations stay separate.
+    "migration-pd": [
+        ("test_qwen3_4B_external_pd.py", "npu-8", "", {"VIME_TEST_UPDATE_MODE": "delta"}, 360),
+        (
+            "test_qwen2.5_0.5B_training_recovery.py",
+            "npu-4",
+            "--mode straw --failure-rollout 1 --pd --wedge-engine --kill-manager",
+            {},
+            360,
+        ),
+        ("test_qwen2.5_vl_3B_ep_disaggregation.py", "npu-4", "", {}, 360),
+    ],
+    "migration-pd-models": [
+        ("test_glm4.7_30B_A3B_pd_mooncake.py", "npu-8", "", {}, 360),
+        (
+            "test_qwen3.6_35B_A3B_pd_mooncake.py",
+            "npu-8",
+            "",
+            {"VIME_TEST_ENABLE_EVAL": "0", "VIME_TEST_USE_DEEPEP": "0"},
+            360,
+        ),
+    ],
+    # Select independently: requires an existing x86 sandbox cluster. The
+    # current arm64 NPU host cannot run the pinned x86 MiMo task images natively.
+    "migration-agent": [
+        ("test_agent_sunabako_codex_e2e.py", "npu-8", "", {}, 360),
+    ],
     "nightly": [],
 }
 
@@ -50,16 +189,21 @@ def _read_suite_values() -> list[str]:
                 capture_output=True,
                 text=True,
             ).stdout
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, FileNotFoundError):
             raw = ""
     return [v.strip() for v in raw.replace(",", "\n").splitlines()]
 
 
 def _ci_image() -> str:
     values = _read_suite_values()
-    if ("image-build" in values) or (BUILDKITE_SOURCE == "schedule"):
+    existing_image = os.environ.get("NPU_CI_IMAGE", "").strip()
+    if BUILDKITE_SOURCE == "schedule":
         return f"{IMAGE_REGISTRY}/{IMAGE_NAME}:{VIME_IMAGE_TAG}"
-    return DEFAULT_CI_IMAGE
+    if "image-build" in values:
+        if existing_image:
+            raise SystemExit("Select image-build OR supply NPU_CI_IMAGE / Existing NPU image, not both")
+        return f"{IMAGE_REGISTRY}/{IMAGE_NAME}:{VIME_IMAGE_TAG}"
+    return existing_image or DEFAULT_CI_IMAGE
 
 
 def selected_suites() -> list:
@@ -70,7 +214,11 @@ def selected_suites() -> list:
     if "image-build" in values:
         # image-build auto-includes smk tests
         values.append("smk")
-    return [s for s in SUITES if s in values]
+    selected = [s for s in SUITES if s in values]
+    if not any(SUITES[s] for s in selected):
+        available = ", ".join(s for s, entries in SUITES.items() if entries)
+        raise SystemExit(f"No NPU tests selected; select a non-empty suite (currently: {available})")
+    return selected
 
 
 def npu_step(
@@ -81,7 +229,9 @@ def npu_step(
     env: dict,
     timeout_in_minutes: int = 180,
 ) -> dict:
+    ci_image = _ci_image()
     step_env = {
+        "VIME_PLATFORM": "npu",
         "VIME_TEST_ENABLE_INFINITE_RUN": "false",
         "BUILDKITE_PULL_REQUEST": os.environ.get("BUILDKITE_PULL_REQUEST", "false"),
         "BUILDKITE_COMMIT": os.environ.get("BUILDKITE_COMMIT", ""),
@@ -91,23 +241,65 @@ def npu_step(
         "IMAGE_REGISTRY": IMAGE_REGISTRY,
         "IMAGE_NAME": IMAGE_NAME,
         "VIME_IMAGE_TAG": VIME_IMAGE_TAG,
+        "VIME_TEST_IMAGE": ci_image,
         "HF_HOME": "/root/.cache/huggingface",
+        "VIME_TEST_DISPOSE_ON_FAILURE": "1",
         **env,
     }
-
-    commands = "\n".join(
-        [
-            'echo "INFO: update NPU environment"',
-            'if [ -n "${BUILDKITE_COMMIT}" ]; then',
-            "  source /workspace/build/buildkite/.buildkite/scripts/update-npu-environment.sh",
-            "fi",
-            "export HF_HUB_OFFLINE=0",
-            # Cover checkpoint conversion before the training launcher runs.
-            'export HCCL_CONNECT_TIMEOUT="$${HCCL_CONNECT_TIMEOUT:-600}"',
-            f"python tests/{test_name}{' ' + extra_args if extra_args else ''}",
-        ]
+    managed_scratch = suite in (
+        "migration-lifecycle",
+        "migration-recovery",
+        "migration-checkpoint",
+        "migration-moe",
+        "migration-moe-recovery",
+        "migration-models",
+        "migration-foundation",
+        "migration-pd",
+        "migration-pd-models",
+        "migration-agent",
     )
-    command = f"bash -c '{commands}'"
+    if managed_scratch:
+        keep = os.environ.get("NPU_KEEP_ARTIFACTS", "0")
+        if keep not in ("0", "1"):
+            raise SystemExit("NPU_KEEP_ARTIFACTS must be 0 (delete) or 1 (keep)")
+        step_env["VIME_TEST_KEEP_ARTIFACTS"] = keep
+
+    commands = [
+        "set -eo pipefail",
+        'echo "INFO: update NPU environment"',
+        'if [ -n "${BUILDKITE_COMMIT}" ]; then',
+        "  source /workspace/build/buildkite/.buildkite/scripts/update-npu-environment.sh",
+        "fi",
+        "export HF_HUB_OFFLINE=0",
+        # Cover checkpoint conversion before the training launcher runs.
+        'export HCCL_CONNECT_TIMEOUT="$${HCCL_CONNECT_TIMEOUT:-600}"',
+    ]
+    if suite.startswith("migration-"):
+        step_env["VIME_TEST_RESOURCE_CLASS"] = resource_class
+        commands.append("python tests/ci/npu_test_environment.py")
+    if suite in ("migration-pd", "migration-pd-models"):
+        # The uploader must leave this expansion to the job shell. Log writers
+        # create their own parent directories before opening the output file.
+        commands.append('export VIME_TEST_DIAGNOSTICS_DIR="$$PWD/.npu-test-diagnostics"')
+        if test_name == "test_glm4.7_30B_A3B_pd_mooncake.py":
+            step_env["VIME_NPU_MEMORY_DIAGNOSTICS"] = "1"
+        if test_name == "test_qwen2.5_vl_3B_ep_disaggregation.py":
+            commands.append("source tests/ci/setup_npu_epd.sh")
+        else:
+            commands.append("python tests/ci/npu_pd_environment.py")
+    if suite == "migration-agent":
+        for key in ("SUNABAKO_CLUSTER", "SUNABAKO_IMAGES", "SUNABAKO_RUNTIME"):
+            if key in os.environ:
+                step_env[key] = os.environ[key]
+        commands.extend(
+            [
+                "export VIME_AGENT_TEST_CACHE=$HF_HOME/agent-e2e/cache",
+                "source tests/ci/setup_agent_e2e.sh",
+            ]
+        )
+    commands.append(f"python tests/{test_name}{' ' + extra_args if extra_args else ''}")
+    script = "\n".join(commands)
+    command = f"bash -c {shlex.quote(script)}"
 
     label = f":fire: {suite}: {test_name}{' ' + extra_args if extra_args else ''}"
     step = {
@@ -119,7 +311,7 @@ def npu_step(
             "resource_class": resource_class,
         },
         "timeout_in_minutes": timeout_in_minutes,
-        "image": _ci_image(),
+        "image": ci_image,
         "plugins": [
             {
                 "kubernetes": {
@@ -131,12 +323,34 @@ def npu_step(
         ],
         "env": step_env,
     }
+    if suite.startswith("migration-"):
+        # Allow up to four migration jobs at once, including across builds. A failed case
+        # releases its slot. Share the existing group across all migration suites
+        # so selecting multiple batches does not multiply their concurrency.
+        step["concurrency"] = 4
+        step["concurrency_group"] = "vime-npu-migration-basic"
+    if suite in ("migration-pd", "migration-pd-models"):
+        step["artifact_paths"] = ".npu-test-diagnostics/**/*"
     return step
 
 
+def build_steps() -> list[dict]:
+    steps = []
+    seen = set()
+    for suite in selected_suites():
+        for index, entry in enumerate(SUITES[suite], start=1):
+            identity = json.dumps(entry, sort_keys=True)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            step = npu_step(suite, *entry)
+            step["key"] = f"npu-{suite}-{index}"
+            steps.append(step)
+    return steps
+
+
 def main() -> None:
-    steps = [npu_step(suite, *entry) for suite in selected_suites() for entry in SUITES[suite]]
-    json_str = json.dumps({"steps": steps}, indent=2)
+    json_str = json.dumps({"steps": build_steps()}, indent=2)
 
     print("--- Generated Pipeline JSON:", file=sys.stderr)
     print(json_str, file=sys.stderr)

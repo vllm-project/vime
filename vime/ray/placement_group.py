@@ -272,7 +272,7 @@ class RolloutStartup:
     def close(self, *, failed):
         timeout = getattr(self.args, "rollout_cleanup_timeout", 60)
         with Cleanup(timeout) as cleanup:
-            if failed and self.serving is not None:
+            if failed and self.serving is not None and not getattr(self.args, "dispose_rollout_on_failure", False):
                 # A live but wedged manager must not prevent the independent
                 # serving owner from releasing this driver's training actors.
                 if self.manager is not None:
@@ -290,7 +290,7 @@ class RolloutStartup:
                 )
                 return
 
-            # Successful completion disposes both owners independently. A
+            # Completion and disposable test failures dispose both owners. A
             # broken custom source/manager cannot skip engine or PG cleanup.
             for name, actor, fraction in (("manager", self.manager, 0.5), ("serving", self.serving, 1)):
                 if actor is not None:

@@ -347,3 +347,46 @@ def test_http_transport_preserves_streams_timeouts_and_connection_budget(concurr
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_retirement_fences_cached_processes_before_releasing_slot(monkeypatch, cleanup_fails):
+    from vime.backends.vllm_utils import engine_group
+
+    calls = []
+    actor = SimpleNamespace(shutdown=SimpleNamespace(remote=lambda: "shutdown"))
+    group = engine_group.ServerGroup(
+        args=SimpleNamespace(num_gpus_per_node=1),
+        pg=None,
+        num_gpus_per_engine=1,
+        num_new_engines=0,
+        all_engines=[actor],
+        worker_type="encoder",
+        engine_process_refs={0: "cached-identity"},
+    )
+    identity = {"node_id": "owner-node", "process": {"pid": 123}}
+
+    def get(ref, **kwargs):
+        if ref == "cached-identity":
+            return identity
+        assert ref == "fence"
+        calls.append("wait-for-release")
+        if cleanup_fails:
+            raise TimeoutError("server still owns device")
+
+    def options(**kwargs):
+        assert kwargs["scheduling_strategy"].node_id == "owner-node"
+        return SimpleNamespace(remote=lambda snapshot: "fence" if snapshot == identity["process"] else None)
+
+    monkeypatch.setattr(engine_group.ray, "get", get)
+    monkeypatch.setattr(engine_group.ray, "wait", lambda *a, **kw: ([], ["shutdown"]))
+    monkeypatch.setattr(engine_group.ray, "kill", lambda *a, **kw: calls.append("kill-actor"))
+    monkeypatch.setattr(engine_group, "_fence_server_processes", SimpleNamespace(options=options))
+    if cleanup_fails:
+        with pytest.raises(TimeoutError, match="still owns device"):
+            group.retire_engine(0, timeout=0.1)
+        assert group.all_engines == [actor] and group.engine_process_refs
+    else:
+        group.retire_engine(0, timeout=0.1)
+        assert group.all_engines == [None] and not group.engine_process_refs
+    assert calls == ["kill-actor", "wait-for-release"]

@@ -177,7 +177,7 @@ class RolloutManager:
             self.data_source.consumers["fully_async"].resume()
 
     def dispose(self, timeout=None):
-        from vime.data.transport import seal_rollout_store
+        from vime.data.transport import close_rollout_store
 
         # The driver disposes serving separately, even when a custom source
         # fails here. Managers close only resources they own, never borrowed ones.
@@ -193,7 +193,7 @@ class RolloutManager:
                     lambda: ray.get(self.controller.close.remote(), timeout=cleanup.remaining),
                 )
                 cleanup.run("terminate queue controller", ray.kill, self.controller, no_restart=True)
-            cleanup.run("seal rollout storage", seal_rollout_store, self.args)
+            cleanup.run("close rollout storage", close_rollout_store, self.args)
             cleanup.run("finish manager tracking", logging_utils.finish_tracking, self.args)
 
     def attach_training(self, args, deployment):

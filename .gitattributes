@@ -1,1 +1,2 @@
-*.patch text eol=lf
+# Patch payloads must retain upstream whitespace for exact application.
+*.patch text eol=lf whitespace=-trailing-space

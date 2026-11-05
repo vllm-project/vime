@@ -8,7 +8,8 @@ click it in the Buildkite UI like GPU CI test suites.
 
 ## Pipeline steps
 
-Three steps run in order:
+The pipeline validates the checkout, asks for suites, then uploads the image
+build and test steps. Tests depend on `image-build-npu`.
 
 **`pre-commit-npu`** runs the pre-commit gate on all files, always.
 
@@ -17,10 +18,52 @@ It appears only on PR triggers (`build.source != "schedule"`).  You select which
 NPU suites to run via a multi-select field:
 
 - **`image-build`** — triggers a fresh image build in the `image-build-npu` step;
-  when selected, `smk` is automatically included and all test steps use the newly
-  built image instead of the pre-built default.
-- **`smk`** — runs the smoke test suite.
-- **`nightly`** — runs the nightly test suite.
+  all test steps use the newly built image instead of the pre-built default.
+  It also selects all six `smk` tests.
+- **`smk`** — runs the six existing model/weight update tests with their original
+  resource classes and timeouts. The standalone TMS smoke test was removed
+  with the synced Ascend baseline.
+- **`migration-basic`** — runs seven shared GPU test scenarios with NPU launch
+  settings. Select it together with **`image-build`** to test a new PR image;
+  `image-build` does not automatically select `migration-basic`.
+- **`migration-parallel`** — second batch: nine shared layout, PP/CP, gradient
+  comparison, debug-dump and PPO scenarios.
+- **`migration-lifecycle`** — batch three: five mixed-offload, release/recreate,
+  debug replay and checkpoint-fork scenarios.
+- **`migration-recovery`** — batch three: seven server/actor crash and real
+  allocator OOM recovery scenarios.
+- **`migration-checkpoint`** — batch three: five optimizer placement and
+  asynchronous checkpoint roundtrips, each training after restore.
+- **`migration-moe`** — batch four: Qwen30B R3, Moonlight colocated training,
+  Moonlight R3 and non-colocated inference EP / collective weight updates.
+- **`migration-moe-recovery`** — batch four: Qwen30B R3 with real OOM,
+  manager loss and TP resharding under stateless Adam.
+- **`migration-models`** — batch four: GLM-Z1-9B, MiMo MTP-only gradients and
+  Qwen3-4B streaming partial rollout.
+- **`migration-foundation`** — batch five: Qwen3.5 basic GRPO (object-store
+  variant), NPU TP1/TP2 numerical reference, external vLLM teacher OPD and
+  Geo3K two-turn VLM protocol.
+- **`migration-pd`** — final batch: external small-model PD/delta weight sync,
+  PD OOM/wedged-engine recovery, and encoder/prefill/decode disaggregation.
+- **`migration-pd-models`** — final batch: GLM4.7 and Qwen3.6 PD/MTP scenarios;
+  Qwen uses an explicitly labeled BF16/alltoall NPU variant of GPU DeepEP.
+- **`migration-agent`** — separate agent test; currently blocked because the
+  NPU CI has no external x86 Sunabako sandbox cluster for the pinned task images.
+- **`nightly`** — reserved for future coverage; currently empty. Selecting only
+  this suite fails with an explicit error rather than uploading zero tests.
+
+Selecting only `image-build` or `smk` runs all six smoke tests.
+Select the migration groups separately to exercise model and rollout scenarios.
+
+The optional **Existing NPU image** field (`npu-ci-image` metadata, or
+`NPU_CI_IMAGE` environment variable) accepts a full image reference. Leave
+`image-build` unselected when supplying it. Tests reuse that image's dependencies;
+`update-npu-environment.sh` still checks out **this build's commit**, installs vime
+and reconciles its patches. The log's `VIME_TEST_IMAGE` records the actual image,
+separately from `BUILDKITE_COMMIT` / `VIME_IMAGE_TAG`. Without an explicit image or
+`image-build`, the default is `quay.io/ascend/vime:vime-latest`; it does **not**
+automatically select the previous build's image. Conflicting PR image choices
+fail before any upload. Scheduled builds continue to build a fresh image.
 
 **`image-build-npu`** the `image-build-npu` step will build and
 push a fresh NPU test image tagged with the current commit. When `image-build` 
@@ -33,6 +76,33 @@ This allows testing code changes that require an updated NPU environment
 **`upload-npu-suites`** reads the `NPU_SUITES` environment variable (or
 `buildkite-agent meta-data get npu-suites` for PR triggers) and generates
 individual test jobs via [`npu_suites.py`](./npu_suites.py).
+
+## Synced backend baseline
+
+This branch is rebased onto `ascend` after the squash merge of #476 at
+`c47a216d`. It contains the GPU-to-NPU migration changes on top of that baseline.
+
+The serving patches now target vLLM `a98247a` and vLLM-Ascend `007abb8`,
+with base image `v0.31.0-007abb8-a3`. Build a new image for the first run of
+this revision: Megatron `4b4acac9`, MegatronAdaptor `c7e52b2c` and TE-NPU
+`d405be23` replace the previous training sources, and MindSpeed must be absent.
+Runtime patch reconciliation cannot upgrade the dependency checkouts or remove
+installed packages. The patched TMS preload wheel also requires an image build.
+The migration suites retain their native HF initialization, PD recovery,
+CaMem mapping-state guards, temporary-directory cleanup and concurrency of four.
+
+TE-NPU now normalizes global packed CP sequence lengths before ring attention,
+so the old CP-length patch and its patch-specific CPU tests have been retired.
+The current `transformer-engine-npu.patch` is the RoPE backward optimization
+merged in #476; it remains applied in the image and runtime patch series.
+Keep the optional fused Ring Attention update disabled: its TND
+provider still requires a MindSpeed extension. The default non-fused path remains
+available. Revalidate CP2/CP4 with `migration-parallel`; previous hardware passes
+were recorded against the older dependency stack.
+
+Both smoke and migration launchers set `HCCL_CONNECT_TIMEOUT` before running the
+test so checkpoint conversion inherits it. An unset or empty value defaults to
+600 seconds; an explicit value is preserved.
 
 ## Triggers
 
@@ -47,33 +117,114 @@ entirely. A new image is **always** built, and the suites are determined by the
 `NPU_SUITES` environment variable (set in the scheduled build's pipeline
 configuration), which lists suite names from the `SUITES` dict.
 
+## GPU test migration: first batch
+
+For a PR containing the sync-s10 baseline and test changes, select
+**`image-build` + `migration-basic`** in the NPU gate. CI builds the image tagged
+with that PR's commit, then runs these seven migration scenarios plus all six
+smoke tests. No change to the default image is needed.
+
+| Shared test | Scenario | Resource class |
+| --- | --- | --- |
+| `test_qwen2.5_0.5B_fully_async_short.py` | Fully asynchronous rollout, straw and online GC | `npu-4` |
+| `test_qwen2.5_0.5B_pipeline_rl.py --transport nccl` | Live requests span collective weight updates (HCCL on NPU) | `npu-4` |
+| `test_qwen2.5_0.5B_pipeline_rl.py --transport disk` | Live requests span full disk reloads | `npu-4` |
+| `test_qwen2.5_0.5B_pipeline_rl.py --transport nccl --flush-cache-interval 2` | Periodic refresh aborts the probe at the expected version | `npu-4` |
+| `test_full_disk_weight_update.py` | Qwen3.5-0.8B full disk publication; two rollouts exercise inference after an update | `npu-4` |
+| `test_qwen2.5_0.5B_fanout_short.py` | Multiple training samples per prompt; exact helper invocation count | `npu-4` |
+| `test_qwen2.5_0.5B_score_centering.py` | Top-k 128 and top-p 1.0/0.95 metadata and finite gradients | `npu-4` |
+
+All migration suites use the existing `vime-npu-migration-basic` concurrency
+group with limit four, shared across builds. Batch one alone requests at most
+16 NPUs concurrently; batch two introduces eight-NPU jobs, so the shared limit
+can request up to 32 NPUs. Actual scheduling depends on queue availability.
+Failure of one scenario does not skip the remaining scenarios. Smoke tests
+retain their original resource classes and timeouts and use their existing
+scheduling outside the migration concurrency group.
+The score-centering test
+uses two logical devices inside a four-NPU pod. Each migration job has a
+180-minute timeout; image building retains its 240-minute timeout.
+
+These are shared test scripts, not copied NPU variants. Opt-in helpers in
+`command_utils` use `VIME_TEST_ROOT`, or `HF_HOME` on NPU, for model/data paths.
+NPU temporary checkpoints and straw directories go under that root's `tmp`
+directory, with a unique directory per run. GPU defaults remain `/root` and the
+system temporary directory. The full-disk case uses native HF reference loading
+on NPU because the common converter skips that platform; it does not claim
+torch_dist conversion coverage. NPU launch flags select flash attention, disable
+CUDA gradient-accumulation fusion and set `weight_nz_mode=0`, while retaining
+the tests' parallelism and assertions. The second batch uses NPU Adam CPU
+offload for the actor/critic pair, as detailed below.
+
+Before each migration test, the log section **NPU migration environment** records
+the commit/image tag, visible-device variables, Ray-independent device count,
+installed package versions, CPU affinity, cgroup limits, filesystem capacity
+and `npu-smi info` when available. Missing diagnostic fields are reported as
+unavailable. The test still runs and its failures remain failures. Ray's actual
+resource declaration and training memory snapshots appear in the test log.
+Do not interpret host-visible totals as container quotas or infer queue limits
+from an individual job.
+
+The fully-async case retains two rollouts and the original response length; it
+does not reach the framework's later fault-injection gate and is not a recovery
+test. Pipeline-RL keeps all three rollouts, three engines, the long live probes,
+weight/version checks and checkpoint assertion. Numerical tolerances are not
+relaxed for this migration. NPU hardware results must come from CI; command
+generation and CPU fixture tests only validate the harness.
+
+Following build [#382](https://buildkite.com/vllm/vime-npu-ci/builds/382/list),
+Pipeline-RL on NPU limits background generation to eight requests per engine
+(`--vllm-server-concurrency 8`), leaving room for the live probes in engines with
+`max_num_seqs=16`. `rollout-io-concurrency` only limits file I/O; it does not limit
+generation. Probe logs include request IDs, response-header and first-stream-line
+times, the first parsed event, and failure/closure details. The 180-second wait
+and continuity/abort assertions remain unchanged. Buildkite job concurrency
+remains four, independently of this serving request limit.
+
+The NPU full-disk case uses `max_model_len=8192`, `max_num_seqs=16`, memory
+utilization `0.5`, and graph capture size `8` to leave space for Ascend attention
+workspaces. Graph execution stays enabled. A check of all 7,473 GSM8K training
+prompts with the Qwen3.5-0.8B chat template found a maximum of 243 prompt tokens;
+adding the unchanged 1,024-token response budget requires only 1,267 tokens.
+No samples or responses are shortened. GPU serving settings retain their
+previous values. These resource adjustments still require an NPU CI rerun.
+
+To inspect generated steps locally without uploading or running jobs:
+
+```bash
+NPU_SUITES=image-build,migration-basic BUILDKITE_COMMIT="$(git rev-parse HEAD)" \
+  python .buildkite/npu_suites.py > /tmp/npu-steps.json
+```
+
 ## Adding a test
 
-Suites and test mappings are defined in [`npu_suites.py`](./npu_suites.py). Two
-suites are predefined — `smk` (runs with the `run-ci-npu-smk` label) and `nightly`
-(runs on schedule or with the `run-ci-npu-nightly` label).
+Suites and test mappings are defined in [`npu_suites.py`](./npu_suites.py).
+The twelve selectable migration groups contain 51 scenarios. `smk` contains
+seven tests including the TMS allocator smoke test. `nightly` is empty.
 
-Each entry is a 4-tuple:
+Each entry is a 4-tuple, with an optional fifth item for the timeout in minutes:
 
 ```python
-("test-qwen3-4B-npu.py", "npu-8", "", {})
+("test_qwen3_4B_npu.py", "npu-8", "", {})
 # (test_name, resource_class, extra_args, env_overrides)
 ```
 
-- **`test_name`** — the test script under `tests/`, e.g. `test-qwen3-4B-npu.py`.
+- **`test_name`** — the test script under `tests/`, e.g. `test_qwen3_4B_npu.py`.
 - **`resource_class`** — NPU count for the pod (`npu-2`, `npu-4`, `npu-8`,
   `npu-16`). 
 - **`extra_args`** — extra CLI arguments passed to the test script.
 - **`env_overrides`** — extra environment variables for the test step, e.g.
-  `{"USE_DEEPEP": "1"}`.
+  `{"VIME_TEST_NUM_ROLLOUT": "2"}`. Use the names read by the test; the NPU
+  generator does not translate GPU-suite environment aliases.
 
 A test script should:
 
 1. **Download models and datasets to `HF_HOME`** before training so subsequent
    steps reuse the cache. The CI sets `HF_HOME=/root/.cache/huggingface`.
 
-2. **Run training** via `train.py` or `train_async.py` with the appropriate
-   NPU-specific arguments.
+2. **Run training** via `command_utils.execute_train()` and the shared `train.py`
+   entry point with the appropriate NPU arguments. Fully asynchronous rollout
+   also uses this entry point.
 
 To register a new suite, add a key to the `SUITES` dict and update
 `selected_suites()` if it should run conditionally. Also add a corresponding
@@ -105,6 +256,13 @@ container starts. Changes that add, remove, or upgrade external repositories,
 modify installed dependencies, or otherwise change the Docker image must be
 validated with `image-build`.
 
+The CaMem C++ patch also needs a native rebuild. Both the Dockerfile and runtime
+updater run `docker/npu_patch/build_camem.py`, which compiles only the small
+CANN allocator module and preserves the image's other prebuilt Ascend ops.
+It requires g++, Python headers and CANN headers/libraries (installed by the
+current Dockerfile). Source/compiler/SDK fingerprints skip unchanged builds;
+reusing an image still builds a changed allocator before running tests.
+
 `torch-memory-saver.patch` is applied only while building the TMS wheel in
 `Dockerfile.npu`. It is not a runtime Git-source patch and must not be added to
 `series.conf`: the TMS source tree is removed after installation. Changes to
@@ -114,3 +272,391 @@ The initial rollout of this mechanism requires publishing a new default image
 that contains `/opt/npu_patch/series.conf`, then updating
 `DEFAULT_CI_IMAGE` in `npu_suites.py`. The legacy default image contains patch
 bytes under `/tmp/npu_patch` but not the OLD series required by this reconciler.
+
+## Second batch
+
+`migration-parallel` contains nine layout/parallel/PPO scenarios, all passed
+in build #385. The separate full-disk retry suite has been removed after its
+#384 success; full-disk remains part of `migration-basic`. The six existing
+model smoke cases are enabled together with the TMS allocator smoke test.
+
+To reuse the verified #385 training environment, leave `image-build` unselected
+and paste this into **Existing NPU image**. Runtime patch reconciliation still
+checks the current checkout:
+
+```text
+swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/vime-ci-npu:a4e997f184c9c561cf16bac6f8491081c3d3a621
+```
+
+Alternatively, leave that field empty and select `image-build` with the same
+suites to build a new image. Reuse requires the referenced image to remain
+available in the registry. Future base-dependency changes require a new image.
+
+| Inventory / shared test | Model | Training dataset | Preserved feature / layout | NPUs / timeout |
+| --- | --- | --- | --- | --- |
+| G03 `test_qwen2.5_0.5B_vllm_config.py` | Qwen2.5-0.5B-Instruct | GSM8K `train.parquet` | Colocated actor 8; TP2 and TP1 serving groups plus 2 placeholders | 8 / 180 min |
+| G04 `test_qwen2.5_0.5B_vllm_config_distributed.py` | Qwen2.5-0.5B-Instruct | GSM8K `train.parquet` | Actor 4 + rollout 4; mixed TP and placeholder; straw transport | 8 / 180 min |
+| G43 `test_qwen2_5_0_5B_non_colocate_pp.py` | Qwen2.5-0.5B-Instruct | GSM8K `train.parquet` | Actor PP2 on 2 devices + rollout 2; distributed weight sync | 4 / 180 min |
+| G47 `test_qwen3_5_0_8B_top_p_cp2.py` | Qwen3.5-0.8B | GSM8K `train.parquet` | CP2, top-p 0.95 / top-k 20, Qwen3.5 loss mask | 4 / 180 min |
+| G48 `test_qwen3_0.6B_parallel_check.py` | Qwen3-0.6B | DAPO `dapo-math-17k.jsonl` | Two loss modes, DP scaling / TP4 / PP4 / CP4 / TP2+PP2+CP2, 12 launches | 8 / 360 min |
+| G40 `test_qwen2.5_0.5B_debug_train_dump_e2e.py` | Qwen2.5-0.5B-Instruct | GSM8K `train.parquet` | TP2+PP2+CP2; compare train/rollout log-probs by sample position | 8 / 180 min |
+| G14 `test_qwen3_4B_ppo.py` | Qwen3-4B actor and critic | DAPO `dapo-math-17k.jsonl` | TP2+CP2, colocated, straw; critic-only then actor+critic | 8 / 180 min |
+| G16 `test_qwen3_4B_ppo_train_critic_only.py` | Qwen3-4B actor and critic | DAPO `dapo-math-17k.jsonl` | TP2+CP2, colocated; both steps critic-only | 8 / 180 min |
+| G15 `test_qwen3_4B_ppo_disaggregate.py --transport object-store` | Qwen3-4B actor and critic | DAPO `dapo-math-17k.jsonl` | Training 4 + rollout 4, TP2+CP2; basic PPO **without NIXL coverage** | 8 / 180 min |
+| G07 `test_full_disk_weight_update.py` (retry suite) | Qwen3.5-0.8B | GSM8K `train.parquet` | Two rollouts and initial + two full checkpoint publications | 4 / 180 min |
+
+Model repositories are under `Qwen/`; dataset repositories are `zhuzilin/gsm8k`
+and `zhuzilin/dapo-math-17k`. Optional GSM8K/AIME evaluation is disabled in this
+batch (`VIME_TEST_ENABLE_EVAL=0`). PPO no longer downloads AIME when disabled.
+
+These migration cases explicitly select native HF reference loading on NPU
+and skip their preparation-time conversion. The shared converter remains
+available to callers that request it; these cases do not validate conversion. All second-batch NPU cases
+chunk log-prob calculations at 128 tokens and bound vLLM to 16 simultaneous
+sequences, capture size 8 and memory utilization 0.5, retaining graph execution.
+The serving context is 8192 for GSM8K and 32768 for DAPO; original response
+limits and rollout counts remain. G03/G04 use a 2048-token training microbatch
+budget. PPO uses 8192 per device plus full recomputation and Adam CPU offload
+(`optimizer-cpu-offload`, `overlap-cpu-optimizer-d2h-h2d`,
+`use-precision-aware-optimizer`), preserving TP2/CP2 and both role learning rates.
+Host memory and the actor/critic offload combination still need CI evidence.
+
+G48 saves one rollout and uses it for all subsequent comparisons, with unique
+scratch paths per run. Loading that rollout already bypasses vLLM in the
+framework. NPU runs the individual dimensions before their combination; it does
+not request the CUDA batch-invariant inference option or `FULL_DECODE_ONLY`.
+The existing gradient-norm tolerance remains `rel_tol=abs_tol=0.01`; the dump
+alignment tolerance remains `rtol=atol=1e-3`. A failing dimension is not silently
+replaced with size 1. This is training parallelism coverage, not a deterministic
+Ascend serving test.
+
+G15 defaults to NIXL on GPU and object-store on NPU, with an explicit
+`--transport nixl` available for a separate capability probe. This suite
+registers the object-store variant only; **NIXL support remains unverified**.
+
+Full-disk's #383 OOM occurred in the second training step after Adam state was
+allocated. On NPU its dynamic microbatch budget is now 2048 (GPU remains 9216),
+with `--log-probs-chunk-size 128`. The two NPU rollouts, response limit 1024,
+entropy coefficient 0.01, serving settings and publication assertions remain.
+Passing CPU launch tests does not establish that the NPU OOM is resolved;
+completion of both training steps and the final publication checks is required.
+
+
+## Third batch: memory, recovery and checkpoint state
+
+Select **`migration-lifecycle`**, **`migration-recovery`** and/or
+**`migration-checkpoint`** independently. Together they run 17 new scenarios;
+including the existing basic/parallel suites gives 33 different migration
+scenarios. All share `vime-npu-migration-basic`, concurrency four. Four-NPU and
+eight-NPU jobs request at most 32 NPUs across simultaneous migration jobs.
+The six existing model smoke cases are enabled in `smk`.
+
+| Suite | GPU inventory | Model / dataset | NPUs / timeout |
+| --- | --- | --- | --- |
+| `migration-lifecycle` | G05/G06 mixed updatable/frozen offload, including fault injection | Qwen2.5-0.5B-Instruct / GSM8K | 8 / 180 min each |
+| `migration-lifecycle` | G18 release/recreate trainers from checkpoint | Qwen3.5-0.8B / GSM8K | 4 / 180 min |
+| `migration-lifecycle` | G23 rollout-only then straw/PT training replay | Qwen2.5-0.5B-Instruct / GSM8K | 8 / 360 min |
+| `migration-lifecycle` | G24 eight checkpoint-fork/replay phases | Qwen2.5-0.5B-Instruct / GSM8K | 4 / 360 min |
+| `migration-recovery` | G29/G30 server/actor crash, stale router cleanup and training | Qwen2.5-0.5B-Instruct / GSM8K | 4 / 180 min each |
+| `migration-recovery` | G31–G35 real OOM, TP1→TP2, manager crash, replay and disk delta | Qwen2.5-0.5B-Instruct / GSM8K | 4 / 360 min each |
+| `migration-checkpoint` | G49–G52 device↔device/CPU optimizer state, G53 async-save | Qwen3-4B / DAPO math-17k | 8 / 360 min each |
+
+Use `image-build` with the selected suites to build this PR's image. These
+changes add no vendor patches or dependencies, so the #385 image above may also
+be reused with **Existing NPU image**. Future dependency changes require a new
+image. Start with lifecycle, then recovery and checkpoint if separate runs
+make logs easier to inspect; no ordering dependency is imposed between jobs.
+
+The shared scripts use configurable asset/scratch roots and preserve the GPU
+parallel layouts. NPU memory policy keeps graph execution, log-prob chunks of
+128, training token budgets of 2048, serving memory utilization 0.5 and graph
+capture size 8 (the fork test retains its existing 0.4 serving utilization).
+Recovery advertises custom Ray `NPU` resources, forwards CANN/HCCL/adaptor
+paths to the raylet and submitted jobs, and allocates **twice the selected
+device capacity** at the deliberate failure boundary. It still requires the
+OOM, retained serving identity, new trainer identity, TP resharding, sample and
+route digests, replay cursor, scheduler progress, weight versions, post-failure
+inference and finite positive resumed gradients. No fake OOM replaces this
+hardware check. PD/NIXL and MoE/R3 recovery are outside this batch.
+
+Checkpoint roundtrips keep all four optimizer placement directions; CLI `gpu`
+means device-resident optimizer on NPU. Save two rollouts, load checkpoint 1,
+then train rollout 2 with `num-rollout=3`, retaining the saved scheduler horizon.
+The earlier horizon of two allowed loading without a subsequent training step.
+Both platforms now check scheduler progress, optimizer-load flags/placement,
+finite per-rollout gradients and the straw queue/builder snapshots. Custom
+nonempty checkpoint paths are rejected rather than cleared. The historical CLI
+value `gpu` only disables CPU offload; it does not select a CUDA device. Thus the
+four placement pairs mean NPU→NPU, NPU→CPU, CPU→CPU and CPU→NPU on Ascend.
+
+**Migration intermediate artifacts** in the gate defaults to **Delete on exit,
+including failed tests**. All eight shared scripts use `TemporaryDirectory` (or
+temporary files) for automatic scratch, including the disk-delta local staging
+directory. Select **Keep for debugging** to preserve it instead. Local runs use
+`VIME_TEST_KEEP_ARTIFACTS=1`; checkpoint/recovery/health scripts also accept
+`--keep-artifacts`. Explicit `--checkpoint-dir`/`--directory` remain caller-owned
+and are always preserved. A forced process/container kill can bypass Python's
+cleanup. Model/dataset caches are retained in either mode.
+
+The one-time legacy sweep completed in build #389 (16 entries removed). Its
+script and CI invocation are retired; migration jobs no longer sweep shared
+`tmp`. The old completion marker can remain outside `tmp`. Automatic scratch
+uses a unique per-test directory. CI sets `VIME_TEST_DISPOSE_ON_FAILURE=1`, and
+`test_work_directory()` requests `--dispose-rollout-on-failure` for disposable
+runs, releasing owned rollout actors/processes before removing scratch. Keep or
+explicit-directory runs retain the normal recoverable failure behavior. Recovery
+scenarios submit their deliberate failure phases directly and retain serving
+until their own final teardown. Forced kills can still leave scratch behind.
+The train/rollout debug dump (G40) also uses this policy.
+
+Build #389 fixes retain R3 and the original PipelineRL abort semantics: R3 cache
+reset additionally pauses in place (`keep`) before resetting AuxOutput state.
+The NPU image's vLLM scheduler requires a fully paused engine for that reset;
+this is an API/version contract difference from the GPU image pin. Moonlight
+colocate variants explicitly use their supported context length of 8192 instead
+of the generic 32768 default. Recovery verification failures print saved child
+log tails before scratch removal; the G37 initialization error in #389 still
+needs a hardware rerun to establish its underlying cause.
+
+G05/G06 exercise frozen-model sleep/wakeup, but the original tests do not
+compare frozen weights element by element. `VLLMEngine.check_weights()` is a
+`supported=False` stub, so completion must not be reported as frozen-weight
+numerical equivalence. Other hardware outcomes require the new CI logs.
+
+## Fourth batch: MoE, routing replay and model-specific boundaries
+
+This batch introduced eight shared GPU scenarios, taking the registry from
+33 to 41. Six of these eight have passed by build #390; G20 and G37 remain
+failed. All use a 360-minute timeout. After the #390 initialization OOM, G37
+requests `npu-16` (train 8/EP8 + serving 4); the other seven request `npu-8`.
+They share concurrency four, allowing at most 40 NPUs when G37 and three
+8-device jobs run together, subject to queue availability. No multi-node
+scenario is introduced.
+
+| Suite / GPU inventory | Shared test | Model / dataset | Preserved boundary |
+| --- | --- | --- | --- |
+| `migration-moe` / G13 | `test_qwen3_30B_A3B_r3.py` | Qwen/Qwen3-30B-A3B / DAPO math-17k | BF16/alltoall R3, TP4/CP2/EP8, colocated, two rollouts, response 8192 |
+| `migration-moe` / G46 | `test_moonlight_16B_A3B_non_colocate_nccl.py` | moonshotai/Moonlight-16B-A3B-Instruct / DAPO math-17k | Actor 4 TP1/EP4 + rollout 4 DP4/EP, naive all-to-all, collective weight updates, two rollouts |
+| `migration-moe` / G20 | `test_moonlight_16B_A3B.py` | moonshotai/Moonlight-16B-A3B-Instruct / DAPO math-17k | MLA/MoE, TP2/CP2/EP8, colocated, two rollouts |
+| `migration-moe` / G21 | `test_moonlight_16B_A3B_r3.py` | moonshotai/Moonlight-16B-A3B-Instruct / DAPO math-17k | G20 topology plus R3, straw and online GC |
+| `migration-moe-recovery` / G37 | `test_qwen3_30B_A3B_training_recovery.py` | Qwen/Qwen3-30B-A3B / GSM8K | NPU actor 8 + rollout 4, EP8 (npu-16); CUDA actor 4 + rollout 4, EP4; real OOM, manager loss during training, TP1→TP2, route identity, stateless Adam |
+| `migration-models` / G08 | `test_quick_start_glm4_9B.py` | zai-org/GLM-Z1-9B-0414 / DAPO math-17k | Actor 4 TP2/CP2 + rollout 4 TP2, two rollouts, response 8192 |
+| `migration-models` / G22 | `test_mimo_7B_mtp_only_grad.py` | XiaomiMiMo/MiMo-7B-RL / DAPO math-17k | TP2, one rollout, training MTP loss and vLLM MTP draft with three speculative tokens; main-model zero / MTP positive gradient checks |
+| `migration-models` / G19 | `test_qwen3_4B_streaming_partial_rollout.py` | Qwen/Qwen3-4B / DAPO math-17k | TP2/CP2, two rollouts, SSE generation, oversampling, partial reuse and off-policy masking |
+
+DAPO is `zhuzilin/dapo-math-17k/dapo-math-17k.jsonl`; G37 uses
+`zhuzilin/gsm8k/train.parquet`. Assets use the shared configurable test root.
+These NPU migration cases explicitly keep native HF reference loading and skip
+preparation-time conversion. Original CUDA conversion destinations and GPU
+feature choices remain.
+Optional AIME evaluation is disabled for G13/G20/G21/G08 and is not downloaded.
+
+The shared `get_test_npu_model_args()` helper applies the existing NPU flash
+attention / fusion policy, a 2048-token training microbatch budget, log-prob
+chunks of 128, serving memory utilization 0.5, capture size 8 and at most
+16 sequences. G46 retains its original eight-sequence limit and 4096 context;
+the other six direct launch cases use context 32768 without shortening their
+responses or changing rollout counts or parallel topology. Moonlight colocated,
+GLM, MiMo and streaming cases use the existing NPU Adam CPU-offload policy;
+Qwen R3 and non-colocated Moonlight already requested it on GPU. G37 inherits
+the recovery harness memory policy. MiMo and G46 retain their original eager
+mode; other cases retain graph execution. Hardware and host-memory capacity
+still require CI evidence.
+
+G13 explicitly sets `VIME_TEST_USE_DEEPEP=0` and
+`VIME_TEST_USE_FP8_ROLLOUT=0`, matching the GPU suite's effective BF16 variant.
+Selecting either option on NPU fails before downloading or launching; G12
+(DeepEP plus FP8) remains a separate, unadapted scenario. R3 flags, route capture
+and replay remain enabled. G37 retains the original failure and resume checks
+and deliberately does not save Adam moments. Its per-Ray-job deadline is
+10800 seconds on NPU (3600 on CUDA), overridable with `--job-timeout-seconds`;
+the Buildkite timeout covers the complete multi-phase job and remains 360
+minutes. On an internal deadline the harness prints the log tail, stops only
+its submitted job and fails.
+
+Automatic R3/MTP/recovery scratch uses `test_work_directory()` and the same
+**Migration intermediate artifacts** option described above. The completed legacy
+sweep is retired; only each run's owned temporary directories are removed.
+
+For the first hardware run, start with `migration-moe`, then
+`migration-moe-recovery` and `migration-models` to distinguish model/communication
+failures from recovery, MTP or streaming failures. Selecting all three runs all
+eight independently. Check actual routed-expert payloads for R3, the existing
+MTP gradient assertions, and SSE abort/reuse evidence for streaming. The
+original streaming smoke has no strict aborted/reused-sample count assertion;
+an exit code alone does not establish that all those branches executed.
+
+No vendor patch or image dependency changes are introduced. To reuse the
+verified #386 environment, leave `image-build` unselected and set **Existing NPU
+image** to:
+
+```text
+swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/vime-ci-npu:72026cf14032d63ff455d3505f2fee40bb35a8ad
+```
+
+Runtime setup still checks out the new build's commit. Alternatively leave the
+image field empty and select `image-build` with the desired migration groups.
+Local CPU checks validate launch/configuration contracts and shared logic;
+they do not establish support for MLA, routed-expert replay or MiMo MTP on NPU.
+
+
+## Batch five: foundation and external services
+
+Select `migration-foundation` for four independent jobs, sharing the existing
+concurrency group with a maximum of four. All four jobs passed build #390;
+the alternative-transport and numerical-reference boundaries below still apply.
+
+| GPU ID | Test | Model / data | Allocation / logical use | Limit |
+| --- | --- | --- | --- | --- |
+| G01 variant | `test_qwen3.5_0.8B_gsm8k_short.py --transport object-store` | Qwen3.5-0.8B / GSM8K | npu-4 / 4 colocated | 180 min |
+| G17 variant | `test_ppo_logprob_entropy_npu.py` | Shared synthetic 4x6 logits, no model/dataset | npu-4 / TP1 then TP2 | 180 min |
+| G25 | `test_qwen2.5_0.5B_opd_vllm.py` | Qwen2.5-0.5B-Instruct student + teacher / GSM8K | npu-8 / train 4 + external teacher 1 | 180 min |
+| G44 | `test_geo3k_vlm_multi_turn_e2e.py` | Qwen3-VL-2B-Instruct / VeraIsHere/geo3k_imgurl_processed | npu-4 / serving 1 | 180 min |
+
+G01 retains three rollouts, dynamic reward filtering, top-p 0.95, Qwen3.5 loss
+mask and health/fault-tolerance configuration. NPU reads native HF weights; the
+GPU default remains NIXL with the original conversion. Object-store is explicit
+in the NPU registration and does not validate Ray NIXL or guarantee a specific
+fault injection occurred. Optional evaluation is disabled in CI.
+
+G17 shares all 12 input scenarios with the CUDA test, but compares NPU FP32
+forward values and separate log-probability/entropy gradients with independent
+FP64 **CPU** log-softmax/autograd math (`atol=rtol=1e-6`). With a replay mask,
+log-probability includes the target while entropy still uses the full vocabulary.
+TP2 uses HCCL and checks each vocabulary shard; missing NPU/HCCL fails the job.
+The original CUDA legacy-kernel reference and tolerances remain unchanged. This
+variant cannot establish CUDA kernel parity. Local CPU/Gloo checks validate the
+oracle and sharding harness only, not NPU/HCCL execution.
+
+G25 selects `ASCEND_RT_VISIBLE_DEVICES` on NPU, masks the four training devices
+before starting its isolated Ray head, and launches the teacher on a separate
+physical device using the platform subprocess environment and V2 runner. It
+preserves the OPD reward endpoint, loss hooks and two training rollouts. Teacher
+health/startup failures print logs; teardown kills only its process tree and
+restores the driver's visibility. Run it in a fresh CI pod with no pre-existing
+Ray head. The real teacher reward/prompt-logprob path completed build #390; no fake
+teacher or reward bypass is introduced, and convergence is not established.
+
+G44 retains pinned model/data revisions, render-once/generate-twice, image
+features and token/context alignment assertions. It uses one NPU in eager mode;
+the CUDA-only batch-invariant setting is omitted on NPU. Backend determinism or
+convergence is not asserted. Both external-service tests use unique managed log
+directories, print tails on failure and stop owned processes before directory
+cleanup. The gate's **Migration intermediate artifacts** option preserves logs
+when requested; model/dataset caches remain reusable.
+
+This batch changes runtime code only and can reuse the build #389 image via
+**Existing NPU image**, without selecting `image-build`. An older image with
+different dependencies is not equivalent. To rerun #389 failures as well, also
+select `migration-moe` and `migration-moe-recovery` (nine jobs in total). No CI
+build is triggered by generating or reviewing these configurations.
+
+
+## Build #390 and the final batch
+
+Build #390 finished with seven passing and two failing tests. All four batch-five
+jobs passed; Qwen30B R3 and Moonlight R3 passed as well. G20 failed inside the
+Ascend V2 sampler on an invalid request index, before training; the index's
+origin still needs backend diagnostics. Do not treat it as the earlier context
+length problem or claim an unverified graph workaround fixes it.
+
+G37 failed during actor initialization: a 27-GiB FP32 DDP gradient-buffer
+allocation had only 22.30 GiB free on a 61.28-GiB NPU. The deliberate OOM hook had
+not executed. Its NPU variant now uses eight training devices with EP8 plus four serving
+devices, requesting npu-16. Both platforms retain TP1 -> TP2; CUDA keeps its
+original four-device EP4 trainer. ETP1 expert gradients shard over EP rather
+than dense TP, so increasing only TP would not halve this buffer. FP32 gradients,
+stateless Adam, R3, the actual OOM injection, manager loss and all recovery
+checks remain enabled. This revised topology still requires a CI run.
+
+| Suite / GPU ID | Model and data | Resources | Boundary |
+| --- | --- | --- | --- |
+| `migration-pd` / G41 | Qwen3-4B / GSM8K | npu-8, train 4 + prefill 1 + decode 1 | Real external PD, three rollouts, disk-delta; positive entropy coefficient retained |
+| `migration-pd` / G36 | Qwen2.5-0.5B-Instruct / GSM8K | npu-4, train 2 + prefill 1 + decode 1 | Real OOM, manager loss, wedged engine and TP1 -> TP2 recovery |
+| `migration-pd` / G45 | Qwen2.5-VL-3B-Instruct / synthetic image | npu-4, 3 logical serving devices | Original regular/EPD token comparison, image features and service-role assertions |
+| `migration-pd-models` / G09 | GLM-4.7-Flash / DAPO math-17k | npu-8, colocated | Actor TP2/PP2/CP2/EP4, PD4+4, speculative MTP4 |
+| `migration-pd-models` / G11 variant | Qwen3.6-35B-A3B / DAPO math-17k | npu-8, colocated | TP2/CP2/EP8, GDN, PD/MTP4; alltoall replaces GPU DeepEP explicitly |
+| `migration-agent` / G42 | Qwen3.8-27B / two pinned MiMo code tasks | npu-8 | Training entry adapted; blocked until external x86 sandbox is provided |
+
+All six entries have a 360-minute limit and share the existing concurrency
+limit of four. Run `migration-pd` first to validate the small-model connectors,
+then `migration-pd-models`. Rerun G37 with `migration-moe-recovery`. Do not select
+`migration-agent` in the current environment: the user confirmed no external
+sandbox exists. Its preflight fails before package installs or model downloads,
+with an explicit prerequisite error; this is recorded as blocked, not passed.
+
+The shared platform selects Ascend `MooncakePullConnector` for P/D KV transfer;
+CUDA still selects `NixlConnector`. Ascend worker handshake ports occupy the
+first TP*DP*PP*PCP slots, followed by scheduler control ports. The allocator
+reserves that full range and advertises the scheduler port to the router.
+Producer/consumer roles remain distinct. The external-server path uses the same
+platform contract, device visibility and HCCL weight-backend naming. This is
+KV transport, independent of Ray rollout-data NIXL and of weight synchronization.
+
+G45 keeps `ECCPUConnector` and its **host-memory** NIXL feature transfer. Its
+setup pins `nixl==1.4.1` and `nixl-cu12==1.4.1`, aligned with the pinned vLLM
+connector requirements, using `--no-deps` to preserve torch/torch-npu/numpy.
+The CUDA-12 backend wheel provides the native library for CPU/UCX use; no NPU
+memory registration is claimed. `UCX_TLS=tcp,sm,self` restricts this job to host
+transports. Before loading the model, a 4-KiB DRAM registration probe checks the
+library/API; binary loading and actual feature transfers still require CI.
+The other PD jobs import the existing Ascend Mooncake backend before downloads.
+
+PD configs, debug rollout dumps, external-server logs, weight checkpoints and
+local disk-delta staging use per-test `test_work_directory()` contexts. Local
+staging stays on `/tmp`, while shared scratch uses the configured test root.
+Keep/explicit caller paths are preserved; owned processes are stopped before
+removing automatic scratch. Global `pkill vllm` is removed from the external PD
+test. Model/dataset caches remain persistent. No global legacy tmp sweep returns.
+
+For agent testing, the two official pinned OCI images are amd64 and the Ascend
+CI host is arm64. An arm64 sunabako wheel cannot execute their x86 binaries in
+local native mode. A reachable x86 `SUNABAKO_CLUSTER` plus `SUNABAKO_IMAGES`, or
+an independently validated arm64 task-image plan, is required. No fabricated
+agent/reward or ordinary model-only substitute is used. The current setup keeps
+the image's arm64 SDK and Ray 2.48 authentication mode instead of applying the
+GPU setup's new-Ray CLI and reinstalling its dependencies.
+
+G10/G12 DeepEP+FP8 remain unported GPU combinations. G01/G15 object-store, G17
+NPU mathematical reference, and G11 alltoall are explicitly scoped variants.
+Registration counts are not equivalent to full GPU-configuration parity.
+The final batch changes shared Python/runtime setup and can reuse the #390
+image with `image-build` unselected; its EPD setup installs only its pinned
+optional wheels. Hardware acceptance and sandbox provisioning are pending.
+
+### Build #391 PD fixes
+
+The external PD adapter now keeps the discovered KV configuration and advertised
+control ports rather than treating them as new local port allocations. Public
+model downloads for G45/G11 retain their repositories, revisions and cache paths;
+the #391 implementation retried via the official endpoint, which #392 showed
+was unreachable from those CI jobs. The current implementation disables Xet
+from the first attempt and keeps the configured endpoint, proxy, model revision
+and cache for at most three attempts, rejecting incomplete safetensors shards.
+HTTP file redirects can still require access to another host; CI reachability
+must be verified before treating G11/G45 as backend test results.
+
+For the remaining #392 failures, select `migration-pd` and
+`migration-pd-models`. These suites upload `.npu-test-diagnostics/**/*` as
+Buildkite artifacts. Per-server native/Python output keeps a tail of at most
+8 MiB; recovery failures also retain at most 2 MiB from each child job log.
+Checkpoints and queue scratch keep their existing temporary-directory cleanup.
+GLM PD additionally logs CaMem pointer/tag/mapping state and Mooncake memory
+registration returns. Process retirement waits for owned server descendants
+on their original node before allowing a replacement; this is shared GPU/NPU
+lifecycle handling. CaMem mapping-state tracking is Ascend-specific. These
+changes have CPU validation and still require NPU CI acceptance.
+
+The NPU vLLM patch polls scheduler-side KV completion even when an empty worker
+output was discarded, so producer ACKs can free retained blocks and finish a
+pause. Pause HTTP calls log their engine role and have a 300-second timeout.
+The Ascend patch drains pulls and deregisters Mooncake buffers before sleep,
+then registers them again only after the KV pool wakes. Weight-only wakes keep
+KV buffers unregistered. These changes preserve PD, colocation, memory offload,
+fault injection and recovery assertions; hardware acceptance still requires CI.
+
+Select `migration-pd`, then `migration-pd-models`; keep `migration-agent`
+unselected until a sandbox is provisioned. The changes are Python and patch
+updates without new binary dependencies. The #391 image can be supplied through
+**Existing NPU image** with `image-build` unselected: the existing runtime patch
+reconciler replaces the image's old patch series before the tests run.

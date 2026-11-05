@@ -3,11 +3,17 @@ This file is not for vime framework itself, but as an optional utility to easily
 """
 
 import datetime
+import errno
 import json
 import os
 import random
+import shlex
 import subprocess
+import sys
+import tempfile
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +24,118 @@ from vime.utils.misc import exec_command
 _ = exec_command, dataclass_cli
 
 repo_base_dir = Path(os.path.abspath(__file__)).resolve().parents[3]
+_dispose_failed_test_session = ContextVar("dispose_failed_test_session", default=None)
+
+
+def get_test_root() -> Path:
+    """Keep GPU paths unchanged; let shared NPU tests use the CI asset cache."""
+    root = os.environ.get("VIME_TEST_ROOT")
+    if not root and current_platform().name == "npu":
+        root = os.environ.get("HF_HOME")
+    return Path(root or "/root")
+
+
+def get_test_tmp_dir() -> str | None:
+    """Keep NPU checkpoint/queue scratch under the test root in per-case directories."""
+    if current_platform().name != "npu":
+        return None
+    directory = get_test_root() / "tmp"
+    directory.mkdir(parents=True, exist_ok=True)
+    return str(directory)
+
+
+def keep_test_artifacts() -> bool:
+    return get_bool_env_var("VIME_TEST_KEEP_ARTIFACTS", "0")
+
+
+def hf_download_public_model(full_name: str, *, dir_dst: str | Path, revision: str | None = None):
+    if current_platform().name == "npu":
+        from vime.utils.external_utils.hf_assets import download_public_model
+
+        return download_public_model(full_name, dir_dst, revision=revision)
+    command = ["hf", "download", full_name, "--local-dir", str(dir_dst)]
+    if revision is not None:
+        command += ["--revision", revision]
+    return exec_command(shlex.join(command))
+
+
+def _cleanup_test_directory(directory):
+    # Owners must drain their readers/producers before leaving the test. Close
+    # any driver-local cached writers too, without importing optional Straw.
+    if transport := sys.modules.get("vime.data.transport"):
+        transport.close_rollout_stores(root=directory.name)
+    for delay in (0.1, 0.3, 1.0, None):
+        try:
+            directory.cleanup()
+            return
+        except OSError as error:
+            # Shared mounts may briefly return stale directory entries. Retry
+            # only this test's root, and still fail if it cannot be removed.
+            if error.errno != errno.ENOTEMPTY or delay is None:
+                raise
+            print(f"Retrying test scratch cleanup after ENOTEMPTY: {directory.name}", flush=True)
+            time.sleep(delay)
+
+
+@contextmanager
+def test_work_directory(prefix: str, directory=None, keep: bool | None = None, parent=None):
+    """Clean owned scratch even on failure; explicit directories remain caller-owned."""
+    if directory is not None:
+        path = Path(directory)
+        path.mkdir(parents=True, exist_ok=True)
+        print(f"Test artifacts: {path} (explicit directory, preserved)", flush=True)
+        token = _dispose_failed_test_session.set(False)
+        try:
+            yield path
+        finally:
+            _dispose_failed_test_session.reset(token)
+        return
+    parent = parent or get_test_tmp_dir()
+    preserve = keep if keep is not None else keep_test_artifacts()
+    if preserve:
+        path = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+        print(f"Test artifacts: {path} (preserved)", flush=True)
+        token = _dispose_failed_test_session.set(False)
+        try:
+            yield path
+        finally:
+            _dispose_failed_test_session.reset(token)
+    else:
+        directory = tempfile.TemporaryDirectory(prefix=prefix, dir=parent)
+        print(f"Test artifacts: {directory.name} (removed on exit, including failure)", flush=True)
+        token = _dispose_failed_test_session.set(True)
+        try:
+            yield Path(directory.name)
+        finally:
+            _dispose_failed_test_session.reset(token)
+            _cleanup_test_directory(directory)
+
+
+def get_test_platform_args() -> str:
+    """Opt-in launch flags for shared smoke tests; preserve their parallel/optimizer choices."""
+    if current_platform().name != "npu":
+        return ""
+    return (
+        "--use-flash-attn --no-gradient-accumulation-fusion "
+        f"--vllm-additional-config {shlex.quote(json.dumps({'weight_nz_mode': 0}))} "
+    )
+
+
+def get_test_npu_model_args(
+    *, max_model_len: int = 32768, max_num_seqs: int = 16, offload_optimizer: bool = False
+) -> str:
+    """Bound NPU test memory without changing parallelism, rollout lengths or assertions."""
+    if current_platform().name != "npu":
+        return ""
+    args = (
+        f"{get_test_platform_args()} "
+        "--max-tokens-per-gpu 2048 --log-probs-chunk-size 128 "
+        f"--vllm-gpu-memory-utilization 0.5 --vllm-max-num-seqs {max_num_seqs} "
+        f"--vllm-max-cudagraph-capture-size 8 --vllm-max-model-len {max_model_len} "
+    )
+    if offload_optimizer:
+        args += "--optimizer-cpu-offload --overlap-cpu-optimizer-d2h-h2d --use-precision-aware-optimizer "
+    return args
 
 
 def convert_checkpoint(
@@ -53,15 +171,15 @@ def convert_checkpoint(
         )
 
     exec_command(
-        f"source {repo_base_dir}/scripts/models/{megatron_model_type}.sh && "
+        f"source {shlex.quote(str(repo_base_dir / 'scripts/models' / (megatron_model_type + '.sh')))} && "
         f"PYTHONPATH={repo_base_dir}:/root/Megatron-LM:${{PYTHONPATH:-}} "
         f"torchrun "
         f"--nproc-per-node {num_gpus_per_node} "
         f"{multinode_args}"
         f"tools/convert_hf_to_torch_dist.py "
         "${MODEL_ARGS[@]} "
-        f"--hf-checkpoint {hf_checkpoint} "
-        f"--save {path_dst}"
+        f"--hf-checkpoint {shlex.quote(str(hf_checkpoint))} "
+        f"--save {shlex.quote(path_dst)}"
         f"{normalized_extra_args}"
     )
 
@@ -70,9 +188,12 @@ def rsync_simple(path_src: str, path_dst: str):
     exec_command(f"mkdir -p {path_dst} && rsync -a --info=progress2 {path_src}/ {path_dst}")
 
 
-def hf_download_dataset(full_name: str):
+def hf_download_dataset(full_name: str, *, dir_dst: str | Path = "/root/datasets"):
     _, partial_name = full_name.split("/")
-    exec_command(f"hf download --repo-type dataset {full_name} --local-dir /root/datasets/{partial_name}")
+    exec_command(
+        f"hf download --repo-type dataset {shlex.quote(full_name)} "
+        f"--local-dir {shlex.quote(str(Path(dir_dst) / partial_name))}"
+    )
 
 
 def fp8_cast_bf16(path_src, path_dst):
@@ -105,6 +226,12 @@ def execute_train(
         extra_env_vars = {}
     if config is None:
         config = ExecuteTrainConfig()
+
+    dispose_failed = _dispose_failed_test_session.get()
+    if dispose_failed is None:
+        dispose_failed = get_bool_env_var("VIME_TEST_DISPOSE_ON_FAILURE", "0") and not keep_test_artifacts()
+    if dispose_failed:
+        train_args += " --dispose-rollout-on-failure "
 
     platform = current_platform()
     external_ray = get_bool_env_var("VIME_SCRIPT_EXTERNAL_RAY")

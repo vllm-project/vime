@@ -131,6 +131,10 @@ RUN git -C /vllm-workspace/vllm-ascend apply --check --whitespace=nowarn \
     git -C /vllm-workspace/vllm-ascend apply --whitespace=nowarn \
       /opt/npu_patch/vllm-ascend.patch
 
+# The base image's native extension is prebuilt. Python patches alone cannot
+# repair its allocator; rebuild the small CANN-only module, keeping other ops.
+RUN python3 /opt/npu_patch/build_camem.py
+
 # Protect the serving stack while installing Vime dependencies.
 RUN python3 -c 'import importlib.metadata as m; names = ["numpy", "ray", "torch", "torch-npu", "torchvision", "transformers", "triton-ascend", "vllm", "vllm-ascend", "fastapi", "starlette"]; open("/tmp/vime-npu-constraints.txt", "w").write("\n".join(f"{name}=={m.version(name)}" for name in names) + "\n")' && \
     printf '%s\n' 'datasets==5.0.1' 'pyarrow==25.0.1' >> /tmp/vime-npu-constraints.txt

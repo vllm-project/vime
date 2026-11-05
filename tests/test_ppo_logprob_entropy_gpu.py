@@ -8,6 +8,8 @@ import socket
 import pytest
 import torch
 
+from ppo_logprob_entropy_test_helpers import PARITY_SCENARIOS, _full_logits, _keep_mask
+
 from vime.utils.ppo_utils import calculate_log_probs_and_entropy
 
 
@@ -25,21 +27,6 @@ BACKWARD_RTOL = 0.0
 # Entropy backward uses a separate memory-saving CUDA reduction.
 ENTROPY_BACKWARD_ATOL = 1e-6
 
-PARITY_SCENARIOS = [
-    (-1, False, False, False),
-    (-1, False, True, False),
-    (-1, False, True, True),
-    (-1, True, False, False),
-    (-1, True, True, False),
-    (-1, True, True, True),
-    (2, False, False, False),
-    (2, False, True, False),
-    (2, False, True, True),
-    (2, True, False, False),
-    (2, True, True, False),
-    (2, True, True, True),
-]
-
 
 def _free_port() -> int:
     sock = socket.socket()
@@ -47,30 +34,6 @@ def _free_port() -> int:
     port = sock.getsockname()[1]
     sock.close()
     return port
-
-
-def _full_logits() -> torch.Tensor:
-    return torch.tensor(
-        [
-            [1.0, 2.0, 3.0, 4.0, 0.5, -1.0],
-            [4.0, 1.0, 0.5, 2.0, 3.0, 0.0],
-            [-1.0, 3.0, 2.0, 0.0, 1.0, 5.0],
-            [0.2, -0.4, 1.7, -2.0, 3.3, 0.0],
-        ],
-        dtype=torch.float32,
-    )
-
-
-def _keep_mask() -> torch.Tensor:
-    return torch.tensor(
-        [
-            [False, True, False, True, False, False],  # target 5 is absent.
-            [False, True, False, False, True, False],  # target 0 is absent.
-            [True, False, True, False, False, True],  # target 3 is absent.
-            [False, True, False, True, False, False],  # target 2 is absent.
-        ],
-        dtype=torch.bool,
-    )
 
 
 def _weighted_loss(

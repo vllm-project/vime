@@ -446,9 +446,9 @@ class _GenerationActor:
         # closing their files or killing this process.
         await asyncio.get_running_loop().shutdown_default_executor()
         self.data_source.close()
-        from vime.data.transport import seal_rollout_store
+        from vime.data.transport import close_rollout_store
 
-        seal_rollout_store(self.args)
+        close_rollout_store(self.args)
 
 
 class DistributedRollout(RolloutScheduler):

@@ -2,98 +2,121 @@ import os
 import subprocess
 import time
 import urllib.request
+from shlex import quote
+
+from vllm.utils.system_utils import kill_process_tree
 
 import vime.utils.external_utils.command_utils as U
+from vime.platforms import current_platform
+from vime.utils.http_utils import is_port_available
 
 MODEL_NAME = "Qwen2.5-0.5B-Instruct"
 MODEL_TYPE = "qwen2.5-0.5B"
 NUM_GPUS = 8
 NUM_TRAIN_GPUS = 4
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 
 TEACHER_HOST = "127.0.0.1"
 TEACHER_PORT = 13141
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/gsm8k")
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/gsm8k", dir_dst=DATASET_DIR)
 
 
 def _get_gpu_split():
-    """Split available GPUs: first half for training, one from the rest for teacher."""
-    all_gpus = os.environ.get("CUDA_VISIBLE_DEVICES", ",".join(str(i) for i in range(NUM_GPUS))).split(",")
-    assert len(all_gpus) >= NUM_GPUS, f"Expected at least {NUM_GPUS} GPUs, got {len(all_gpus)}"
-    train_gpus = all_gpus[:NUM_TRAIN_GPUS]
-    teacher_gpu = all_gpus[NUM_TRAIN_GPUS]  # 1 GPU is enough for the 0.5B teacher
-    return train_gpus, teacher_gpu
+    """Keep the teacher outside the four-device training/Ray allocation."""
+    visible_env = current_platform().ray.visible_devices_env
+    visible = os.environ.get(visible_env, ",".join(str(i) for i in range(NUM_GPUS)))
+    devices = [value.strip() for value in visible.split(",") if value.strip()]
+    assert len(devices) >= NUM_GPUS and len(set(devices)) == len(
+        devices
+    ), f"Expected at least {NUM_GPUS} distinct devices; {visible_env}={visible!r}"
+    return devices[:NUM_TRAIN_GPUS], devices[NUM_TRAIN_GPUS]
 
 
-def _launch_teacher_server(teacher_gpu: str):
-    """Launch a vLLM teacher server on the specified GPU."""
+def _stop_teacher(process):
+    if process is not None:
+        kill_process_tree(process.pid)
+        process.wait(timeout=30)
+
+
+def _launch_teacher_server(teacher_gpu: str, log_path):
+    if not is_port_available(TEACHER_PORT):
+        raise RuntimeError(f"Teacher port {TEACHER_PORT} is already in use")
+    platform = current_platform()
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = teacher_gpu
-
-    log_path = "/tmp/vllm_teacher.log"
-    log_file = open(log_path, "w")
-    process = subprocess.Popen(
-        [
-            "python3",
-            "-m",
-            "vllm.entrypoints.openai.api_server",
-            "--model",
-            f"/root/models/{MODEL_NAME}",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            str(TEACHER_PORT),
-            "--tensor-parallel-size",
-            "1",
-            "--gpu-memory-utilization",
-            "0.6",
-            "--trust-remote-code",
-            "--enable-scale-out",
-        ],
-        env=env,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-    )
-
-    print(f"Starting teacher vLLM server on GPU {teacher_gpu} (pid={process.pid}), log: {log_path}")
-
-    # Wait for server to be ready (up to 10 minutes)
-    for _ in range(120):
-        if process.poll() is not None:
-            raise RuntimeError(f"Teacher server process exited with code {process.returncode}. Check {log_path}")
-        try:
-            req = urllib.request.urlopen(f"http://{TEACHER_HOST}:{TEACHER_PORT}/health", timeout=2)
-            if req.status == 200:
-                print(f"Teacher vLLM server is ready on GPU {teacher_gpu}")
-                return process
-        except Exception:
-            pass
-        time.sleep(5)
-
-    process.kill()
-    raise RuntimeError(f"Teacher server failed to start within timeout. Check {log_path}")
+    env[platform.ray.visible_devices_env] = teacher_gpu
+    env = platform.vllm.subprocess_env(env, visible_devices=teacher_gpu, colocate=False)
+    env.update(VLLM_SERVER_DEV_MODE="1", VLLM_USE_V2_MODEL_RUNNER="1")
+    command = [
+        "python3",
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
+        str(MODEL_DIR),
+        "--host",
+        TEACHER_HOST,
+        "--port",
+        str(TEACHER_PORT),
+        "--tensor-parallel-size",
+        "1",
+        "--gpu-memory-utilization",
+        "0.6",
+        "--trust-remote-code",
+        "--enable-scale-out",
+    ]
+    if platform.is_npu:
+        command += ["--max-model-len", "8192", "--max-num-seqs", "16", "--additional-config", '{"weight_nz_mode": 0}']
+    with log_path.open("w") as log_file:
+        process = subprocess.Popen(command, env=env, stdout=log_file, stderr=subprocess.STDOUT)
+    print(f"Starting teacher on {platform.name}:{teacher_gpu} (pid={process.pid}), log: {log_path}")
+    try:
+        for _ in range(120):
+            if process.poll() is not None:
+                raise RuntimeError(f"Teacher server exited with code {process.returncode}")
+            try:
+                with urllib.request.urlopen(f"http://{TEACHER_HOST}:{TEACHER_PORT}/health", timeout=2) as response:
+                    if response.status == 200:
+                        return process
+            except (OSError, TimeoutError):
+                pass
+            time.sleep(5)
+        raise TimeoutError("Teacher server did not become healthy within 10 minutes")
+    except BaseException:
+        print(f"Teacher startup failed:\n{log_path.read_text(errors='replace')[-16000:]}", flush=True)
+        _stop_teacher(process)
+        raise
 
 
 def execute():
+    with U.test_work_directory("vime_opd_") as directory:
+        _execute(directory)
+
+
+def _execute(directory):
     train_gpus, teacher_gpu = _get_gpu_split()
     teacher_process = None
 
-    # Restrict CUDA_VISIBLE_DEVICES to training GPUs before Ray starts
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(train_gpus)
+    visible_env = current_platform().ray.visible_devices_env
+    previous_visible = os.environ.get(visible_env)
+    # Restrict the platform's visibility before Ray starts; the teacher uses
+    # an independent physical device and never enters the training pool.
+    os.environ[visible_env] = ",".join(train_gpus)
+    log_path = directory / "teacher.log"
 
     def launch_teacher():
         nonlocal teacher_process
-        teacher_process = _launch_teacher_server(teacher_gpu)
+        teacher_process = _launch_teacher_server(teacher_gpu, log_path)
 
     try:
-        ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load /root/models/{MODEL_NAME}/ "
+        ckpt_args = f"--hf-checkpoint {quote(str(MODEL_DIR))} --ref-load {quote(str(MODEL_DIR))} "
 
         rollout_args = (
-            "--prompt-data /root/datasets/gsm8k/train.parquet "
+            f"--prompt-data {quote(str(DATASET_DIR / 'gsm8k/train.parquet'))} "
             "--input-key messages "
             "--label-key label "
             "--apply-chat-template "
@@ -108,11 +131,14 @@ def execute():
         )
 
         eval_args = (
-            "--eval-prompt-data gsm8k /root/datasets/gsm8k/test.parquet "
+            f"--eval-prompt-data gsm8k {quote(str(DATASET_DIR / 'gsm8k/test.parquet'))} "
             "--n-samples-per-eval-prompt 1 "
             "--eval-max-response-len 1024 "
             "--eval-top-k 1 "
         )
+
+        if not U.get_bool_env_var("VIME_TEST_ENABLE_EVAL", "1"):
+            eval_args = ""
 
         perf_args = (
             "--tensor-model-parallel-size 1 "
@@ -186,6 +212,7 @@ def execute():
             f"{ci_args} "
             f"{misc_args} "
             f"{rm_args} "
+            f"{U.get_test_npu_model_args(max_model_len=8192)} "
         )
 
         U.execute_train(
@@ -194,10 +221,18 @@ def execute():
             megatron_model_type=MODEL_TYPE,
             before_ray_job_submit=launch_teacher,
         )
+    except BaseException:
+        if log_path.exists():
+            print(f"OPD failed; teacher log tail:\n{log_path.read_text(errors='replace')[-16000:]}", flush=True)
+        raise
     finally:
-        if teacher_process:
-            teacher_process.kill()
-            teacher_process.wait()
+        try:
+            _stop_teacher(teacher_process)
+        finally:
+            if previous_visible is None:
+                os.environ.pop(visible_env, None)
+            else:
+                os.environ[visible_env] = previous_visible
 
 
 if __name__ == "__main__":

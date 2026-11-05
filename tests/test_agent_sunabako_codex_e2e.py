@@ -3,7 +3,9 @@
 Requires 8 GPUs (validated on H20 96GB), sunabako, skopeo/umoci and a usable sandbox node.
 Without SUNABAKO_CLUSTER, creates an isolated local native-runtime node. RSS
 test mode requires explicit SUNABAKO_ALLOW_TEST_MEMORY=1; it is not a hard cap.
-All artifacts survive failure in VIME_AGENT_TEST_RUN_DIR (a fresh directory).
+Automatic artifacts are removed on exit unless VIME_TEST_KEEP_ARTIFACTS=1.
+An explicit VIME_AGENT_TEST_RUN_DIR remains caller-owned and must be fresh.
+NPU CI requires an external x86 sandbox for the pinned amd64 task images.
 """
 
 import argparse
@@ -20,7 +22,6 @@ import shlex
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -28,6 +29,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+import vime.utils.external_utils.command_utils as U
 
 NUM_GPUS = 8
 SAMPLES_PER_PROMPT = 4
@@ -72,8 +75,25 @@ def checkpoint_ready(checkpoint):
     return all((checkpoint / name).is_file() for name in set(json.loads(index.read_text())["weight_map"].values()))
 
 
+def check_runtime_prerequisites():
+    if U.current_platform().name == "npu" and not (
+        os.environ.get("SUNABAKO_CLUSTER") and os.environ.get("SUNABAKO_IMAGES")
+    ):
+        raise RuntimeError(
+            "NPU agent E2E requires SUNABAKO_CLUSTER and SUNABAKO_IMAGES for an x86_64 sandbox cluster. "
+            "The pinned MiMo task root filesystems and coding CLIs are x86_64; the Ascend CI host is arm64. "
+            "Local native sandbox execution cannot run these binaries. No model download or training was started."
+        )
+
+
 def prepare_assets():
-    cache = Path(os.environ.get("VIME_AGENT_TEST_CACHE", "/root/.cache/vime-agent-e2e"))
+    check_runtime_prerequisites()
+    default_cache = (
+        U.get_test_root() / "agent-e2e/cache"
+        if U.current_platform().name == "npu"
+        else Path("/root/.cache/vime-agent-e2e")
+    )
+    cache = Path(os.environ.get("VIME_AGENT_TEST_CACHE", str(default_cache)))
     cache.mkdir(parents=True, exist_ok=True)
     # Preparation now runs before GPU locking, so simultaneous CI jobs must
     # serialize writers to the model, dataset and CLI caches too.
@@ -93,7 +113,7 @@ def _prepare_assets(cache):
     from examples.coding_agent_rl.prepare_mimo import convert
     from huggingface_hub import snapshot_download
 
-    checkpoint = Path(os.environ.get("HF_CHECKPOINT", "/root/models/Qwen3.8-27B"))
+    checkpoint = Path(os.environ.get("HF_CHECKPOINT", str(U.get_test_root() / "models/Qwen3.8-27B")))
     if not checkpoint_ready(checkpoint):
         print(f"[agent-assets] Preparing model checkpoint: {checkpoint}", flush=True)
         snapshot_download(
@@ -342,6 +362,8 @@ def execute(run_dir, checkpoint):
         --attention-softmax-in-fp32 --attention-backend flash
     """
     )
+    if U.current_platform().name == "npu":
+        flags += shlex.split(U.get_test_npu_model_args(max_model_len=65536))
     flags += [
         "--hf-checkpoint",
         str(checkpoint),
@@ -571,29 +593,39 @@ def verify(run_dir, version, timings):
     print(json.dumps(result, indent=2))
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--prepare-only", action="store_true", help="Cache downloads without taking GPU locks")
+    parser.add_argument("--prepare-only", action="store_true", help="Cache downloads without taking device locks")
+    parser.add_argument("--preflight-only", action="store_true", help="Check sandbox prerequisites without downloads")
     args = parser.parse_args()
+    check_runtime_prerequisites()
+    if args.preflight_only:
+        return
     if args.prepare_only:
         prepare_assets()
-        sys.exit(0)
+        return
     output = os.environ.get("VIME_AGENT_TEST_RUN_DIR")
-    if output:
-        run_dir = Path(output).resolve()
-        run_dir.mkdir(parents=True, exist_ok=False)
-    else:
-        run_dir = Path(tempfile.mkdtemp(prefix="vime-agent-e2e-"))
-    os.chdir(REPO_ROOT)
-    print(f"Agent E2E artifacts: {run_dir}", flush=True)
-    start = time.monotonic()
-    try:
-        checkpoint, version = prepare(run_dir)
-        prepared = time.monotonic()
-        execute(run_dir, checkpoint)
-        trained = time.monotonic()
-        timings = {"prepare": prepared - start, "train": trained - prepared, "total": trained - start}
-        (run_dir / "timings.json").write_text(json.dumps(timings, indent=2) + "\n")
-        verify(run_dir, version, timings)
-    finally:
-        cleanup_sandboxes(run_dir)
+    if output and Path(output).exists():
+        raise FileExistsError(f"Agent E2E requires a fresh explicit run directory: {output}")
+    with U.test_work_directory("vime_agent_e2e_", directory=output) as run_dir:
+        os.chdir(REPO_ROOT)
+        print(f"Agent E2E artifacts: {run_dir}", flush=True)
+        start = time.monotonic()
+        try:
+            checkpoint, version = prepare(run_dir)
+            prepared = time.monotonic()
+            execute(run_dir, checkpoint)
+            trained = time.monotonic()
+            timings = {"prepare": prepared - start, "train": trained - prepared, "total": trained - start}
+            (run_dir / "timings.json").write_text(json.dumps(timings, indent=2) + "\n")
+            verify(run_dir, version, timings)
+        except BaseException:
+            for path in run_dir.glob("*.log"):
+                print(f"Agent E2E failed; {path.name}:\n{path.read_text(errors='replace')[-16000:]}", flush=True)
+            raise
+        finally:
+            cleanup_sandboxes(run_dir)
+
+
+if __name__ == "__main__":
+    main()

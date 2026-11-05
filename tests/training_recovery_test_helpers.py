@@ -1,4 +1,4 @@
-"""Actual CUDA OOM injection and serving/data identity checks for restart e2e."""
+"""Actual device OOM injection and serving/data identity checks for restart e2e."""
 
 import hashlib
 import json
@@ -10,6 +10,23 @@ import torch
 import torch.distributed as dist
 
 from vime.ray.training_recovery import RECOVERY_NAMESPACE, training_session_name
+from vime.utils import accelerator
+
+
+def is_device_oom(log):
+    """Recognize allocator OOMs while rejecting unrelated backend failures."""
+    return any(text in log.lower() for text in ("cuda out of memory", "npu out of memory", "outofmemoryerror"))
+
+
+def inject_device_oom():
+    device = accelerator.device()
+    total_memory = accelerator.get_device_properties().total_memory
+    print(
+        f"OOM injection: device={device}, requested_bytes={total_memory * 2}, capacity_bytes={total_memory}",
+        flush=True,
+    )
+    torch.empty(total_memory * 2, dtype=torch.uint8, device=device)
+    raise AssertionError(f"Allocation exceeding twice the {device} capacity unexpectedly succeeded")
 
 
 async def reward(args, sample, **kwargs):
@@ -89,8 +106,6 @@ def before_train_step(args, rollout_id, step_id, model, optimizer, opt_param_sch
                 ray.kill(manager, no_restart=True)
     dist.barrier()
     if bad_configuration and rollout_id == failure_rollout:
-        # Exercise the real CUDA allocator's failure and Ray exception handling.
+        # Exercise the selected device allocator and Ray exception handling.
         # The corrected TP=2 configuration proceeds through actual GRPO updates.
-        total_memory = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
-        torch.empty(total_memory * 2, dtype=torch.uint8, device="cuda")
-        raise AssertionError("CUDA allocation exceeding twice the device capacity unexpectedly succeeded")
+        inject_device_oom()

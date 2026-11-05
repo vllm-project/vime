@@ -22,6 +22,7 @@ if not _has_megatron:
 
 from vime.backends.megatron_utils import megatron_to_hf as megatron_to_hf_module
 from vime.backends.megatron_utils.hf_to_megatron import _LOADERS
+from vime.backends.megatron_utils.hf_to_megatron import common as hf_common
 from vime.backends.megatron_utils.hf_to_megatron.common import SafetensorReader, shard_mcore_tensor
 from vime.backends.megatron_utils.hf_to_megatron.deepseek import deepseek_hf_tensor
 from vime.backends.megatron_utils.hf_to_megatron.glm import glm4_hf_tensor, glm4_moe_hf_tensor
@@ -608,6 +609,78 @@ def test_reader_dequantizes_block_scaled_fp8(tmp_path):
 
     assert loaded.dtype == torch.bfloat16
     assert torch.equal(loaded, weight.to(torch.bfloat16) * 2)
+
+
+@pytest.fixture
+def hf_model_loader(monkeypatch, tmp_path):
+    # Isolate distributed parameter enumeration; exercise the real safetensors
+    # reader, model-specific mapping and parameter copy on CPU.
+    common = types.ModuleType("vime.backends.megatron_utils.update_weight.common")
+    common.named_params_and_buffers = lambda args, models: (
+        item for model in models for item in model.parameters_to_load
+    )
+    monkeypatch.setitem(sys.modules, common.__name__, common)
+    monkeypatch.setattr(hf_common, "shard_mcore_tensor", lambda name, tensor, parameter: tensor)
+    tensors = {
+        "model.norm.weight": torch.arange(4, dtype=torch.float32),
+        "lm_head.weight": torch.arange(32, dtype=torch.float32).reshape(8, 4),
+    }
+    save_file(tensors, tmp_path / "model.safetensors")
+
+    def load(role, parameters):
+        # The role is set on chunk 0 even when PP/VPP puts the head on another chunk.
+        models = [
+            types.SimpleNamespace(role=role, parameters_to_load=[]),
+            types.SimpleNamespace(parameters_to_load=parameters),
+        ]
+        hf_common.load_model_hf_weights(types.SimpleNamespace(), models, tmp_path, _config(), qwen_hf_tensor)
+
+    return load, tensors
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("prefix", ["", "module.module.", "module.module.language_model."])
+def test_hf_critic_initializes_backbone_and_preserves_value_head(hf_model_loader, prefix):
+    load, tensors = hf_model_loader
+    backbone = torch.nn.Parameter(torch.full((4,), -1.0))
+    head_weight = torch.nn.Parameter(torch.full((1, 4), 0.02))
+    head_bias = torch.nn.Parameter(torch.zeros(1))
+    load(
+        "critic",
+        [
+            (prefix + "decoder.final_layernorm.weight", backbone),
+            (prefix + "output_layer.weight", head_weight),
+            (prefix + "output_layer.bias", head_bias),
+        ],
+    )
+    assert torch.equal(backbone, tensors["model.norm.weight"])
+    assert torch.equal(head_weight, torch.full((1, 4), 0.02))
+    assert torch.equal(head_bias, torch.zeros(1))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("role", ["actor", "ref", None])
+def test_hf_lm_output_head_still_loads(hf_model_loader, role):
+    load, tensors = hf_model_loader
+    head = torch.nn.Parameter(torch.zeros(8, 4))
+    load(role, [("module.module.output_layer.weight", head)])
+    assert torch.equal(head, tensors["lm_head.weight"])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("role", "name", "shape", "error"),
+    [
+        ("actor", "output_layer.bias", (1,), KeyError),
+        ("critic", "decoder.layers.0.unsupported.bias", (1,), KeyError),
+        ("critic", "decoder.final_layernorm.weight", (3,), ValueError),
+        ("actor", "output_layer.weight", (1, 4), ValueError),
+    ],
+)
+def test_hf_critic_exception_does_not_hide_other_loading_errors(hf_model_loader, role, name, shape, error):
+    load, _ = hf_model_loader
+    with pytest.raises(error):
+        load(role, [(name, torch.nn.Parameter(torch.zeros(shape)))])
 
 
 if __name__ == "__main__":

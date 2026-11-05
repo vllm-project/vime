@@ -66,6 +66,15 @@ class WeightTransferPlatformOps:
 class VLLMLaunchPlatformOps:
     """Platform additions to the common vLLM launch command and environment."""
 
+    def pd_port_count(self, num_devices: int) -> int:
+        return 1
+
+    def pd_config(self, worker_type: str, bootstrap_port: int | None, parallel_config: Mapping):
+        if worker_type == "prefill":
+            assert bootstrap_port is not None, "Prefill requires disaggregation_bootstrap_port"
+        role = {"prefill": "kv_producer", "decode": "kv_consumer"}[worker_type]
+        return {"kv_connector": "NixlConnector", "kv_role": role}, bootstrap_port
+
     def subprocess_env(
         self,
         base_env: Mapping[str, str],

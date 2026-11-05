@@ -5,6 +5,8 @@ import logging
 import multiprocessing
 import os
 import time
+import uuid
+from pathlib import Path
 from threading import Thread
 from typing import Any
 
@@ -18,6 +20,7 @@ from vime.backends.vllm_utils.server_control import unregister_worker
 from vime.platforms import current_platform
 from vime.ray.ray_actor import RayActor
 from vime.utils.http_utils import _wrap_ipv6, get_host_info
+from vime.utils.process_lifecycle import capture_process_output, snapshot_process_tree, terminate_process_tree
 
 logger = logging.getLogger(__name__)
 
@@ -49,16 +52,42 @@ def launch_server_process(server_args_dict: dict) -> multiprocessing.Process:
     logger.info("Launching vLLM server: %s", kwargs)
 
     multiprocessing.set_start_method("spawn", force=True)
-    p = multiprocessing.Process(target=_run_vllm_server, args=(kwargs, env))
+    diagnostics = os.environ.get("VIME_TEST_DIAGNOSTICS_DIR")
+    log_path = (
+        str(Path(diagnostics) / f"vllm-{server_args_dict.get('_worker_type', 'regular')}-{uuid.uuid4().hex}.log")
+        if diagnostics
+        else None
+    )
+    p = multiprocessing.Process(target=_run_vllm_server, args=(kwargs, env, log_path))
     p.start()
 
     if server_args_dict.get("node_rank", 0) != 0:
         return p
 
-    _wait_server_healthy(
-        base_url=f"http://{host}:{server_args_dict['port']}",
-        is_process_alive=lambda: p.is_alive(),
-    )
+    try:
+        _wait_server_healthy(
+            base_url=f"http://{host}:{server_args_dict['port']}",
+            is_process_alive=lambda: p.is_alive(),
+        )
+    except BaseException as error:
+        logger.error(
+            "vLLM startup failed: pid=%s exitcode=%s role=%s devices=%s port=%s log=%s",
+            p.pid,
+            p.exitcode,
+            server_args_dict.get("_worker_type", "regular"),
+            server_args_dict.get("_visible_devices"),
+            server_args_dict.get("port"),
+            log_path,
+        )
+        if log_path and Path(log_path).is_file():
+            with Path(log_path).open("rb") as output:
+                output.seek(max(0, Path(log_path).stat().st_size - 16000))
+                logger.error("vLLM startup output:\n%s", output.read().decode(errors="replace"))
+        if p.is_alive():
+            terminate_process_tree(snapshot_process_tree(p.pid))
+        raise RuntimeError(
+            f"vLLM server startup failed: pid={p.pid}, exitcode={p.exitcode}, log={log_path}"
+        ) from error
 
     return p
 
@@ -101,7 +130,22 @@ def _build_subprocess_env(server_args_dict: dict[str, Any]) -> dict[str, str]:
     return env
 
 
-def _run_vllm_server(kwargs: dict, env: dict) -> None:
+def _run_vllm_server(kwargs: dict, env: dict, log_path: str | None = None) -> None:
+    # A retired Ray actor may be wedged and unable to run shutdown(). Its owner
+    # must be able to fence all serving descendants before reusing the devices.
+    if hasattr(os, "setsid"):
+        os.setsid()
+    with capture_process_output(log_path):
+        try:
+            _serve_vllm(kwargs, env)
+        except BaseException:
+            import traceback
+
+            traceback.print_exc()
+            raise
+
+
+def _serve_vllm(kwargs: dict, env: dict) -> None:
     os.environ.update(env)
 
     parent = multiprocessing.parent_process()
@@ -168,6 +212,7 @@ class VLLMEngine(RayActor):
         disaggregation_bootstrap_port=None,
         router_ip=None,
         router_port=None,
+        external_kv_transfer_config=None,
     ):
         del nccl_port
 
@@ -191,6 +236,7 @@ class VLLMEngine(RayActor):
             base_gpu_id=self.base_gpu_id,
             vllm_overrides=self.vllm_overrides,
             num_gpus_per_engine=self.num_gpus_per_engine,
+            external_kv_transfer_config=external_kv_transfer_config,
         )
 
         self.node_rank = server_args_dict["node_rank"]
@@ -201,6 +247,9 @@ class VLLMEngine(RayActor):
             self._init_external(server_args_dict, external_engine_need_check_fields=external_engine_need_check_fields)
         else:
             self._init_normal(server_args_dict)
+            # Cache the process identity as the init result, before any later
+            # RPC can wedge this actor. External servers remain caller-owned.
+            return self.get_process_identity()
 
     def _init_external(self, expect_server_args, external_engine_need_check_fields):
         logger.info(f"Use external vLLM engine (rank={self.rank}, expect_server_args={expect_server_args})")
@@ -308,6 +357,11 @@ class VLLMEngine(RayActor):
     def flush_cache(self):
         if self.node_rank != 0:
             return
+        if getattr(self.args, "use_rollout_routing_replay", False):
+            # AuxOutput must be fully paused before requests and route buffers
+            # are reset. An updater's preceding abort still aborts its requests;
+            # this additional fence moves the scheduler to PAUSED_ALL.
+            self.pause_generation(mode="in_place")
         params = {"reset_running_requests": "true", "reset_external": "true"}
         for _ in range(60):
             try:
@@ -331,6 +385,11 @@ class VLLMEngine(RayActor):
         if self.node_rank != 0:
             return None
         return f"http://{self.server_host}:{self.server_port}"
+
+    def get_process_identity(self):
+        import ray
+
+        return {"node_id": ray.get_runtime_context().get_node_id(), "process": snapshot_process_tree(self.process.pid)}
 
     def shutdown(self):
         if self.args.rollout_external:
@@ -503,12 +562,21 @@ class VLLMEngine(RayActor):
     def pause_generation(self, mode: str = "abort"):
         if self.node_rank != 0:
             return
-        response = requests.post(
-            f"http://{self.server_host}:{self.server_port}/pause",
-            params={"mode": "keep" if mode == "in_place" else mode, "clear_cache": "false"},
-            json={},
-        )
-        response.raise_for_status()
+        url = f"http://{self.server_host}:{self.server_port}/pause"
+        started = time.monotonic()
+        logger.info(f"Pause start: url={url}, worker_type={self.worker_type}, mode={mode}, timeout=300s")
+        try:
+            response = requests.post(
+                url,
+                params={"mode": "keep" if mode == "in_place" else mode, "clear_cache": "false"},
+                json={},
+                timeout=300,
+            )
+            response.raise_for_status()
+        except requests.RequestException:
+            logger.exception(f"Pause failed after {time.monotonic() - started:.2f}s: {url}")
+            raise
+        logger.info(f"Pause completed after {time.monotonic() - started:.2f}s: {url}")
         return response
 
     def continue_generation(self):
@@ -658,6 +726,7 @@ def _compute_server_args(
     base_gpu_id: int | None = None,
     vllm_overrides: dict | None = None,
     num_gpus_per_engine: int | None = None,
+    external_kv_transfer_config: dict | None = None,
 ):
     normalized_overrides = {}
     for key, value in (vllm_overrides or {}).items():
@@ -721,19 +790,20 @@ def _compute_server_args(
         if node_rank != 0:
             kwargs["headless"] = True
 
-    if worker_type == "prefill":
-        assert (
-            disaggregation_bootstrap_port is not None
-        ), "disaggregation_bootstrap_port must be set for prefill worker"
-        kwargs["kv_transfer_config"] = {
-            "kv_connector": "NixlConnector",
-            "kv_role": "kv_producer",
-        }
-    elif worker_type == "decode":
-        kwargs["kv_transfer_config"] = {
-            "kv_connector": "NixlConnector",
-            "kv_role": "kv_consumer",
-        }
+    if worker_type in ("prefill", "decode"):
+        if external_kv_transfer_config is not None:
+            if not args.rollout_external:
+                raise ValueError("External KV transfer metadata requires --rollout-external")
+            expected_role = "kv_producer" if worker_type == "prefill" else "kv_consumer"
+            if external_kv_transfer_config.get("kv_role") not in (expected_role, "kv_both"):
+                raise ValueError(f"External {worker_type} has incompatible KV role: {external_kv_transfer_config}")
+            if worker_type == "prefill" and disaggregation_bootstrap_port is None:
+                raise ValueError("External prefill requires an advertised disaggregation_bootstrap_port")
+            kwargs["kv_transfer_config"] = dict(external_kv_transfer_config)
+        else:
+            kwargs["kv_transfer_config"], disaggregation_bootstrap_port = current_platform().vllm.pd_config(
+                worker_type, disaggregation_bootstrap_port, kwargs
+            )
 
     if ec_transfer_override is not None and worker_type in ("encoder", "regular", "prefill"):
         kwargs["ec_transfer_config"] = {

@@ -4,9 +4,11 @@ Runs a tiny Qwen3.5-0.8B job where each weight sync writes a complete HF
 checkpoint and rollout engines reload it through ``update_weights_from_disk``.
 """
 
+import json
 import os
 import tempfile
 from pathlib import Path
+from shlex import quote
 
 import vime.utils.external_utils.command_utils as U
 
@@ -14,33 +16,57 @@ import vime.utils.external_utils.command_utils as U
 MODEL_NAME = "Qwen3.5-0.8B"
 MODEL_TYPE = "qwen3.5-0.8B"
 NUM_GPUS = 4
+TEST_ROOT = U.get_test_root()
+MODEL_DIR = TEST_ROOT / "models" / MODEL_NAME
+DATASET_DIR = TEST_ROOT / "datasets"
 TORCH_DIST_CKPT = f"/dev/shm/{MODEL_NAME}_torch_dist"
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset("zhuzilin/gsm8k")
-    U.convert_checkpoint(
-        model_name=MODEL_NAME,
-        megatron_model_type=MODEL_TYPE,
-        num_gpus_per_node=NUM_GPUS,
-        dir_dst="/dev/shm",
-    )
+    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {quote(str(MODEL_DIR))}")
+    U.hf_download_dataset("zhuzilin/gsm8k", dir_dst=DATASET_DIR)
+    # This migration case intentionally initializes NPU training from HF weights.
+    if U.current_platform().name != "npu":
+        U.convert_checkpoint(
+            model_name=MODEL_NAME,
+            megatron_model_type=MODEL_TYPE,
+            num_gpus_per_node=NUM_GPUS,
+            dir_dst="/dev/shm",
+            hf_checkpoint=str(MODEL_DIR),
+        )
+
+
+def verify_checkpoints(disk_dir, num_rollout):
+    checkpoint_dirs = sorted(Path(disk_dir).glob("weight_v[0-9]*"))
+    assert len(checkpoint_dirs) >= num_rollout + 1, "Expected initial weights and an update after every rollout"
+    versions = [int(path.name.removeprefix("weight_v")) for path in checkpoint_dirs]
+    assert versions == list(range(1, len(versions) + 1)), versions
+    for path in checkpoint_dirs:
+        index = json.loads((path / "model.safetensors.index.json").read_text())
+        assert "delta_encoding" not in index.get("metadata", {}), "Expected full checkpoints"
+        assert index["weight_map"], f"No weights in {path}"
+        for filename in set(index["weight_map"].values()):
+            assert (path / filename).stat().st_size > 0, f"Missing or empty shard: {path / filename}"
+    print(f"Full disk validation passed: {num_rollout} rollouts, published versions {versions}", flush=True)
 
 
 def execute():
-    with tempfile.TemporaryDirectory(prefix="vime_full_disk_weight_update_") as disk_dir:
-        ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load {TORCH_DIST_CKPT} "
+    num_rollout = int(os.environ.get("VIME_TEST_NUM_ROLLOUT", "1"))
+    assert num_rollout >= 1
+    with tempfile.TemporaryDirectory(prefix="vime_full_disk_weight_update_", dir=U.get_test_tmp_dir()) as disk_dir:
+        # This NPU migration case uses native HF initialization, so its
+        # reference must point to the original weights.
+        ref_load = TORCH_DIST_CKPT if (U.current_platform().name != "npu") else str(MODEL_DIR)
+        ckpt_args = f"--hf-checkpoint {quote(str(MODEL_DIR))} --ref-load {quote(ref_load)} "
 
         rollout_args = (
-            "--prompt-data /root/datasets/gsm8k/train.parquet "
+            f"--prompt-data {quote(str(DATASET_DIR / 'gsm8k/train.parquet'))} "
             "--input-key messages "
             "--label-key label "
             "--apply-chat-template "
             "--rollout-shuffle "
             "--rm-type math "
-            "--num-rollout 1 "
+            f"--num-rollout {num_rollout} "
             "--rollout-batch-size 4 "
             "--n-samples-per-prompt 4 "
             "--rollout-max-response-len 1024 "
@@ -58,8 +84,14 @@ def execute():
             "--expert-model-parallel-size 1 "
             "--expert-tensor-parallel-size 1 "
             "--use-dynamic-batch-size "
-            "--max-tokens-per-gpu 9216 "
+            f"--max-tokens-per-gpu {2048 if U.current_platform().name == 'npu' else 9216} "
         )
+
+        if U.current_platform().name == "npu":
+            # After the first optimizer step, Adam state remains resident.
+            # Chunk full-vocabulary FP32 log-prob/entropy temporaries as well as
+            # reducing the training microbatch; retain both rollouts and entropy.
+            perf_args += "--log-probs-chunk-size 128 "
 
         grpo_args = (
             "--advantage-estimator grpo "
@@ -80,17 +112,22 @@ def execute():
             "--adam-beta2 0.98 "
         )
 
-        vllm_args = (
-            "--rollout-num-gpus-per-engine 1 "
-            "--rollout-num-gpus 3 "
-            "--vllm-gpu-memory-utilization 0.7 "
-            "--vllm-max-cudagraph-capture-size 32 "
-        )
+        vllm_args = "--rollout-num-gpus-per-engine 1 --rollout-num-gpus 3 "
+        if U.current_platform().name == "npu":
+            # This tests full weight reload, not the model's 262144-token context.
+            # GSM8K prompts plus 1024 response tokens fit within 8192. Reserve
+            # memory for Ascend attention graph capture while keeping graph mode.
+            vllm_args += (
+                "--vllm-max-model-len 8192 --vllm-max-num-seqs 16 "
+                "--vllm-gpu-memory-utilization 0.5 --vllm-max-cudagraph-capture-size 8 "
+            )
+        else:
+            vllm_args += "--vllm-gpu-memory-utilization 0.7 --vllm-max-cudagraph-capture-size 32 "
 
         disk_update_args = (
             "--update-weight-mode full "
             "--update-weight-transport disk "
-            f"--update-weight-disk-dir {disk_dir} "
+            f"--update-weight-disk-dir {quote(disk_dir)} "
             "--update-weight-disk-keep-files "
         )
 
@@ -118,6 +155,7 @@ def execute():
             f"{disk_update_args} "
             f"{ci_args} "
             f"{misc_args} "
+            f"{U.get_test_platform_args()} "
         )
 
         U.execute_train(
@@ -126,10 +164,7 @@ def execute():
             megatron_model_type=MODEL_TYPE,
         )
 
-        checkpoint_dirs = sorted(Path(disk_dir).glob("weight_v*"))
-        assert checkpoint_dirs, f"No disk checkpoint directories were written under {disk_dir}"
-        assert any((path / "model.safetensors.index.json").exists() for path in checkpoint_dirs)
-        assert any(list(path.glob("*.safetensors")) for path in checkpoint_dirs)
+        verify_checkpoints(disk_dir, num_rollout)
 
 
 if __name__ == "__main__":

@@ -70,8 +70,12 @@ def external_engine_init_kwargs(info: ExternalEngineInfo) -> dict:
         "host": info.host,
         "port": info.port,
     }
-    if info.worker_type == "prefill":
+    if info.is_pd_worker and info.disaggregation_bootstrap_port is not None:
         init_kwargs["disaggregation_bootstrap_port"] = info.disaggregation_bootstrap_port
+    if info.is_pd_worker and (config := info.server_info.get("kv_transfer_config")) is not None:
+        # These ports/configs describe an already running server. In particular,
+        # Ascend's advertised control port is not its KV worker-port base.
+        init_kwargs["external_kv_transfer_config"] = dict(config)
     return init_kwargs
 
 

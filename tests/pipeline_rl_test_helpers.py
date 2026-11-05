@@ -1,4 +1,4 @@
-"""Live-request probes used by the PipelineRL GPU e2e test."""
+"""Live-request probes used by the shared PipelineRL e2e test."""
 
 import json
 import os
@@ -96,7 +96,8 @@ class GenerationProbe:
             ready = self.condition.wait_for(lambda: self.error or self.done or predicate(self.events), timeout=180)
             if self.error:
                 raise self.error
-            assert ready and predicate(self.events), f"Probe failed on {self.url}: {self.events[-3:]}"
+            if not (ready and predicate(self.events)):
+                raise AssertionError(f"Probe failed on {self.url}, request_id={self.rid}: {self.events[-3:]}")
 
     def verify(self):
         first = self.events[0]
