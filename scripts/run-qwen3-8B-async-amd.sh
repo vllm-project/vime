@@ -1,5 +1,5 @@
 #!/bin/bash
-# Async (non-colocated) GRPO for Qwen3-8B on ROCm (gfx950 / MI350): train_async.py,
+# Fully-async non-colocated GRPO for Qwen3-8B on ROCm (gfx950 / MI350),
 # actor and rollout on disjoint GPUs, RCCL-broadcast weight sync (no colocate IPC).
 
 # for rerun the task
@@ -48,6 +48,7 @@ CKPT_ARGS=(
 )
 
 ROLLOUT_ARGS=(
+   --rollout-function-path vime.rollout.fully_async_rollout.generate_rollout_fully_async
    --prompt-data /root/dapo-math-17k/dapo-math-17k.jsonl
    --input-key prompt
    --label-key label
@@ -131,7 +132,7 @@ RUNTIME_ENV_JSON="{
 
 ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
-   -- python3 train_async.py \
+   -- python3 train.py \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node ${ACTOR_GPUS} \
    --rollout-num-gpus ${ROLLOUT_GPUS} \

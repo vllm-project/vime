@@ -1,5 +1,8 @@
+import ast
 import json
 from argparse import Namespace
+from contextlib import nullcontext
+from pathlib import Path
 
 import pytest
 import torch
@@ -201,3 +204,58 @@ def test_flat_head_then_padding_head_keeps_the_real_sequence(fixture):
     collector.finish()
     features = load_file(str(collector.root / "batch-0000.safetensors"))["features"]
     torch.testing.assert_close(features, hidden[[2, 3], 0])
+
+
+def _actor_methods():
+    source = Path(__file__).resolve().parents[1] / "vime/backends/megatron_utils/actor.py"
+    actor = next(
+        node
+        for node in ast.parse(source.read_text()).body
+        if isinstance(node, ast.ClassDef) and node.name == "MegatronTrainRayActor"
+    )
+    return {node.name: node for node in actor.body if isinstance(node, ast.FunctionDef)}
+
+
+def test_compute_log_prob_passes_the_collector_to_forward_only():
+    seen = []
+
+    def fake_forward_only(*_args, draft_feature_collector=None, **_kwargs):
+        seen.append(draft_feature_collector)
+        return {}
+
+    # Importing the whole actor needs Ray and GPU Megatron; run the real method alone.
+    isolated = ast.Module(body=[_actor_methods()["compute_log_prob"]], type_ignores=[])
+    namespace = {
+        "DataIterator": object,
+        "torch": torch,
+        "timer": lambda _name: nullcontext(),
+        "forward_only": fake_forward_only,
+        "get_log_probs_and_entropy": None,
+    }
+    exec(compile(ast.fix_missing_locations(isolated), "actor.py", "exec"), namespace)
+    actor = Namespace(args=None, model=None)
+    collector = object()
+    namespace["compute_log_prob"](actor, [], [1], draft_feature_collector=collector)
+    namespace["compute_log_prob"](actor, [], [1], store_prefix="ref_")
+    assert seen == [collector, None]
+
+
+def test_train_actor_creates_the_collector_it_passes():
+    train_actor = _actor_methods()["train_actor"]
+    passed = [
+        (node.lineno, keyword.value.id)
+        for node in ast.walk(train_actor)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "compute_log_prob"
+        for keyword in node.keywords
+        if keyword.arg == "draft_feature_collector" and isinstance(keyword.value, ast.Name)
+    ]
+    assigned = {
+        target.id: node.lineno
+        for node in ast.walk(train_actor)
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    assert passed, "the actor log-prob forward no longer receives the draft feature collector"
+    for lineno, name in passed:
+        assert name in assigned and assigned[name] < lineno, f"{name} is passed before it is assigned"

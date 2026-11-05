@@ -151,7 +151,7 @@ vllm:
           data_parallel_size: 64
           enable_expert_parallel: true
           max_num_seqs: 768
-          max_cudagraph_capture_size: 72
+          max_cudagraph_capture_size: 60
           all2all_backend: deepep_low_latency
           kv_transfer_config:
             kv_connector: MooncakeConnector
@@ -166,11 +166,11 @@ VLLM_ARGS=(
    --rollout-num-gpus-per-engine 64
    --vllm-gpu-memory-utilization 0.70
    --vllm-kv-cache-dtype fp8_e4m3
-   --vllm-max-cudagraph-capture-size 48
+   --vllm-max-cudagraph-capture-size 40
    --vllm-config "${VLLM_CONFIG_FILE}"
 
    # MTP / EAGLE speculative decoding uses the model's own next-token-prediction layer.
-   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":5}'
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":4}'
 )
 
 MISC_ARGS=(
