@@ -67,6 +67,44 @@ def test_image_build_runs_selected_migration_with_all_smoke_cases(suites, monkey
     ]
 
 
+@pytest.mark.parametrize("selection", ["smk", "migration-basic"])
+@pytest.mark.parametrize(("configured", "expected"), [(None, "600"), ("", "600"), ("1200", "1200")])
+def test_conversion_timeout_is_inherited_by_test_processes(
+    suites, monkeypatch, tmp_path, selection, configured, expected
+):
+    monkeypatch.setenv("NPU_SUITES", selection)
+    monkeypatch.setenv("BUILDKITE_COMMIT", "")  # The environment updater is outside this shell contract.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    python = bin_dir / "python"
+    python.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "print(json.dumps({'argv': sys.argv[1:], 'timeout': os.environ.get('HCCL_CONNECT_TIMEOUT')}))\n"
+    )
+    python.chmod(0o755)
+    step = suites.build_steps()[0]
+    env = {**os.environ, **step["env"], "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    if configured is None:
+        env.pop("HCCL_CONNECT_TIMEOUT", None)
+    else:
+        env["HCCL_CONNECT_TIMEOUT"] = configured
+    # Buildkite turns $$ into a literal $ before the command reaches bash.
+    result = subprocess.run(
+        shlex.split(step["command"].replace("$$", "$")),
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=15,
+    )
+    calls = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+    assert len(calls) == (2 if selection == "migration-basic" else 1)
+    assert all(call["timeout"] == expected for call in calls)
+    assert calls[-1]["argv"][0] == f"tests/{suites.SUITES[selection][0][0]}"
+
+
 @pytest.mark.parametrize("selection", ["", "nightly", "unknown", "image-build,unknown"])
 def test_invalid_or_empty_selection_fails_before_emitting_json(monkeypatch, selection):
     env = {**os.environ, "NPU_SUITES": selection}

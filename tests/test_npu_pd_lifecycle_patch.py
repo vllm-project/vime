@@ -209,12 +209,21 @@ def camem_allocator():
     # Execute the shipped Python state transitions with a fake device API.
     # Imports/torch allocation are excluded; native transitions are compiled
     # and exercised independently in test_npu_camem_native_patch.py.
-    methods = {"sleep", "wake_up", "python_free_callback"}
+    methods = {"sleep", "discard", "wake_up", "_python_free_callback"}
     classes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
-    allocation = next(node for node in classes if node.name == "AllocationData")
     allocator = next(node for node in classes if node.name == "CaMemAllocator")
     allocator.body = [node for node in allocator.body if isinstance(node, ast.FunctionDef) and node.name in methods]
     calls = []
+
+    @dataclasses.dataclass
+    class AllocationData:
+        handle: tuple
+        tag: str
+        cpu_backup_tensor: object = None
+        is_asleep: bool = False
+
+    class BaseAllocator:
+        pass
 
     class Tensor:
         def data_ptr(self):
@@ -228,6 +237,8 @@ def camem_allocator():
 
     namespace = {
         "dataclasses": dataclasses,
+        "AllocationData": AllocationData,
+        "CuMemAllocator": BaseAllocator,
         "HandleType": tuple,
         "os": os,
         "logger": logging.getLogger(__name__),
@@ -235,14 +246,15 @@ def camem_allocator():
             Tensor=Tensor,
             uint8=object(),
             empty=lambda *a, **kw: Tensor(),
-            npu=SimpleNamespace(synchronize=lambda: None, empty_cache=lambda: None),
+            npu=SimpleNamespace(synchronize=lambda *args: None, empty_cache=lambda: None),
+            accelerator=SimpleNamespace(synchronize=lambda *args: None, empty_cache=lambda: None),
         ),
         "gc": SimpleNamespace(collect=lambda: None),
         "memcpy": lambda *args: calls.append(("copy", args[-1])),
         "create_and_map": lambda handle: calls.append(("map", handle[2])),
         "unmap_and_release": lambda handle: calls.append(("unmap", handle[2])),
     }
-    exec(compile(ast.Module(body=[allocation, allocator], type_ignores=[]), "<shipped-camem>", "exec"), namespace)
+    exec(compile(ast.Module(body=[allocator], type_ignores=[]), "<shipped-camem>", "exec"), namespace)
     cls = namespace["CaMemAllocator"]
     cls.default_tag = "default"
     cls.sleep_persistent_tag = "sleep_persistent"
@@ -265,7 +277,7 @@ def test_python_camem_selective_wake_then_sleep_does_not_double_unmap(camem_allo
     assert calls[-1] == ("unmap", 100)
     allocator.wake_up(["kv_cache"])
     assert calls[-1] == ("map", 200)
-    assert allocator.pointer_to_data[300].mapped  # persistent allocations stay mapped
+    assert not allocator.pointer_to_data[300].is_asleep  # persistent allocations stay mapped
 
 
 def test_python_camem_failed_transition_keeps_retry_state(camem_allocator):
@@ -277,13 +289,45 @@ def test_python_camem_failed_transition_keeps_retry_state(camem_allocator):
     namespace["unmap_and_release"] = fail
     with pytest.raises(RuntimeError, match="driver failure"):
         allocator.sleep(offload_tags=())
-    assert allocator.pointer_to_data[100].mapped
+    assert not allocator.pointer_to_data[100].is_asleep
     namespace["unmap_and_release"] = lambda handle: None
     allocator.sleep(offload_tags=())
     namespace["create_and_map"] = fail
     with pytest.raises(RuntimeError, match="driver failure"):
         allocator.wake_up(["weights"])
-    assert not allocator.pointer_to_data[100].mapped
+    assert allocator.pointer_to_data[100].is_asleep
+
+
+def test_python_camem_discard_uses_shared_sleep_state_and_preserves_policy(camem_allocator):
+    allocator, calls, _ = camem_allocator
+    allocator.sleep(offload_tags=("weights",))
+    before = list(calls)
+    allocator.discard("weights")
+    assert calls == before  # an asleep backed allocation keeps its original policy
+    allocator.wake_up(["weights"])
+    allocator.discard("weights")
+    assert calls[-1] == ("unmap", 100)
+    assert allocator.pointer_to_data[100].is_asleep
+    assert allocator.pointer_to_data[100].cpu_backup_tensor is None
+    before = list(calls)
+    allocator.discard("weights")
+    assert calls == before
+
+
+def test_python_camem_failed_discard_remains_mapped_for_retry(camem_allocator):
+    allocator, calls, namespace = camem_allocator
+
+    def fail(handle):
+        raise RuntimeError("driver failure")
+
+    namespace["unmap_and_release"] = fail
+    with pytest.raises(RuntimeError, match="driver failure"):
+        allocator.discard("weights")
+    assert not allocator.pointer_to_data[100].is_asleep
+    namespace["unmap_and_release"] = lambda handle: calls.append(("unmap", handle[2]))
+    allocator.discard("weights")
+    assert allocator.pointer_to_data[100].is_asleep
+    assert calls == [("unmap", 100)]
 
 
 if __name__ == "__main__":

@@ -79,6 +79,9 @@ individual test jobs via [`npu_suites.py`](./npu_suites.py).
 
 ## Synced backend baseline
 
+This branch is rebased onto `ascend` after the squash merge of #476 at
+`c47a216d`. It contains the GPU-to-NPU migration changes on top of that baseline.
+
 The serving patches now target vLLM `a98247a` and vLLM-Ascend `007abb8`,
 with base image `v0.31.0-007abb8-a3`. Build a new image for the first run of
 this revision: Megatron `4b4acac9`, MegatronAdaptor `c7e52b2c` and TE-NPU
@@ -89,11 +92,17 @@ The migration suites retain their native HF initialization, PD recovery,
 CaMem mapping-state guards, temporary-directory cleanup and concurrency of four.
 
 TE-NPU now normalizes global packed CP sequence lengths before ring attention,
-so the old `transformer-engine-npu.patch` and its patch-specific CPU tests have
-been retired. Keep the optional fused Ring Attention update disabled: its TND
+so the old CP-length patch and its patch-specific CPU tests have been retired.
+The current `transformer-engine-npu.patch` is the RoPE backward optimization
+merged in #476; it remains applied in the image and runtime patch series.
+Keep the optional fused Ring Attention update disabled: its TND
 provider still requires a MindSpeed extension. The default non-fused path remains
 available. Revalidate CP2/CP4 with `migration-parallel`; previous hardware passes
 were recorded against the older dependency stack.
+
+Both smoke and migration launchers set `HCCL_CONNECT_TIMEOUT` before running the
+test so checkpoint conversion inherits it. An unset or empty value defaults to
+600 seconds; an explicit value is preserved.
 
 ## Triggers
 

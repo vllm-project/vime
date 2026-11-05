@@ -28,15 +28,14 @@ BUILDKITE_SOURCE = os.environ.get("BUILDKITE_SOURCE", "")
 
 # (test_name, resource_class, extra_args, env_overrides[, timeout_in_minutes])
 SUITES = {
-    # Temporarily paused for this migration PR: these six cases were already validated.
     "smk": [
-        # ("test_delta_disk_weight_update.py", "npu-4", "", {}),
-        # ("test_qwen3_4B_npu.py", "npu-8", "", {}),
-        # ("test_qwen3_30B_A3B_npu.py", "npu-16", "", {}),
-        # ("test_qwen3_vl_8B_npu.py", "npu-8", "", {}),
-        # ("test_glm4.7_30B_A3B_npu.py", "npu-16", "", {}),
-        # # 35B convert plus the first rollout does not fit in the default 180 minutes.
-        # ("test_qwen3.5_35B_A3B_npu.py", "npu-16", "", {}, 360),
+        ("test_delta_disk_weight_update.py", "npu-4", "", {}),
+        ("test_qwen3_4B_npu.py", "npu-8", "", {}),
+        ("test_qwen3_30B_A3B_npu.py", "npu-16", "", {}),
+        ("test_qwen3_vl_8B_npu.py", "npu-8", "", {}),
+        ("test_glm4.7_30B_A3B_npu.py", "npu-16", "", {}),
+        # 35B convert plus the first rollout does not fit in the default 180 minutes.
+        ("test_qwen3.5_35B_A3B_npu.py", "npu-16", "", {}, 360),
     ],
     # Shared GPU tests: keep their assertions and select NPU launch policy.
     # The score-centering test uses two logical devices within a proven 4-NPU pod.
