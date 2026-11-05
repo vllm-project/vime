@@ -74,7 +74,7 @@ index 95471f8c3510fa4d591812c4640a933e4070f69a..0ec356ffc575d503a8717be1dc0bf5a0
 +            slot_mapping=slot_mapping.to(dtype=torch.int32).contiguous(),
              cache_mode="Norm",
          )
- 
+
 diff --git a/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/base_worker.py b/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/base_worker.py
 index 0371db247091e5f886876e1988f044bbfa7babdb..ca4d82afda822a10ff127b1fa6e0405c904f3375 100644
 --- a/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/base_worker.py
@@ -232,16 +232,16 @@ index 827dca0b1dd60ebbe0851367a62f62aa7ece1270..8462db56d68cfd1bc0bf9d7d7e2fedbe
 +++ b/vllm_ascend/distributed/weight_transfer/hccl_engine.py
 @@ -3,8 +3,9 @@
  """HCCL-based weight transfer engine."""
- 
+
  from collections.abc import Callable, Iterator
 -from dataclasses import dataclass
 -from typing import TYPE_CHECKING, Any
 +from concurrent.futures import ThreadPoolExecutor
 +from dataclasses import asdict, dataclass
 +from typing import TYPE_CHECKING, Any, ClassVar
- 
+
  import torch
- 
+
 @@ -14,6 +15,11 @@ if TYPE_CHECKING:
  from vllm.config import VllmConfig
  from vllm.config.weight_transfer import WeightTransferConfig
@@ -256,8 +256,8 @@ index 827dca0b1dd60ebbe0851367a62f62aa7ece1270..8462db56d68cfd1bc0bf9d7d7e2fedbe
      WeightTransferUpdateInfo,
 @@ -26,6 +32,19 @@ from vllm_ascend.distributed.weight_transfer.packed_tensor import (
  )
- 
- 
+
+
 +@dataclass
 +class HCCLTrainerInitInfo(TrainerInitInfo):
 +    """Stateful trainer configuration; rank 0 owns the HCCL endpoint."""
@@ -412,7 +412,7 @@ index bba50ab9a463e2db072dcd5077a60d84eac5d056..8f6a4543995006065c6e2f8fa2663483
 @@ -258,6 +262,12 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
              return merged
          return [{} for _ in handles]
- 
+
 +    def send_weights(self) -> None:
 +        super().send_weights()
 +        # The inherited lifecycle has released its sender-side tensor refs.
@@ -428,12 +428,12 @@ index b9e0cfb7dab536b2a4f1b554186b0cc32473292b..158a402f921c5bcf867fab16dad8480f
 +++ b/vllm_ascend/distributed/weight_transfer/packed_tensor.py
 @@ -92,6 +92,7 @@ def packed_broadcast_producer(
      target_packed_tensor_size = buffer_size_bytes
- 
+
      streams = [torch.npu.Stream() for _ in range(num_buffers)]
 +    source_stream = torch.npu.current_stream()
      buffer_idx = 0
      previous_broadcast_stream = None
- 
+
 @@ -106,6 +107,7 @@ def packed_broadcast_producer(
              # Synchronize the current stream (waits for previous
              # iteration's work on this buffer to finish)
@@ -445,7 +445,7 @@ index b9e0cfb7dab536b2a4f1b554186b0cc32473292b..158a402f921c5bcf867fab16dad8480f
 @@ -290,10 +292,9 @@ def packed_npu_ipc_producer(
  ) -> Iterator[dict[str, Any]]:
      """Pack tensors into a reusable NPU IPC buffer and yield chunks.
- 
+
 -    Allocates a single NPU buffer of ``buffer_size_bytes`` and registers
 -    it for IPC once via ``reduce_tensor``.  Each chunk's packed data is
 -    copied into this buffer before yielding, so only one IPC-shared
@@ -455,7 +455,7 @@ index b9e0cfb7dab536b2a4f1b554186b0cc32473292b..158a402f921c5bcf867fab16dad8480f
 +    consumer's rebuild/release, while reusing the same device allocation.
      A nonempty iterator containing only zero-element tensors still yields a
      chunk so its names, shapes and dtypes are delivered; an empty iterator does not.
- 
+
 @@ -310,9 +311,6 @@ def packed_npu_ipc_producer(
      if buffer_size_bytes <= 0:
          raise ValueError(f"buffer_size_bytes must be positive, got {buffer_size_bytes}")
@@ -463,11 +463,11 @@ index b9e0cfb7dab536b2a4f1b554186b0cc32473292b..158a402f921c5bcf867fab16dad8480f
 -    # Store only the rebuild args (drop the func); the consumer rebuilds with
 -    # the well-known ``rebuild_npu_tensor``, mirroring upstream's CUDA IPC engine.
 -    _, ipc_args = reduce_tensor(ipc_buffer)
- 
+
      names: list[str] = []
      shapes: list[list[int]] = []
 @@ -341,6 +339,7 @@ def packed_npu_ipc_producer(
- 
+
          if total_bytes and total_bytes + flat.numel() > buffer_size_bytes:
              torch.npu.current_stream().synchronize()
 +            _, ipc_args = reduce_tensor(ipc_buffer)
@@ -475,7 +475,7 @@ index b9e0cfb7dab536b2a4f1b554186b0cc32473292b..158a402f921c5bcf867fab16dad8480f
                  "names": names,
                  "shapes": shapes,
 @@ -360,6 +359,7 @@ def packed_npu_ipc_producer(
- 
+
      if names:
          torch.npu.current_stream().synchronize()
 +        _, ipc_args = reduce_tensor(ipc_buffer)
@@ -489,7 +489,7 @@ index bcfd117ec920fd1c8f523680444ee36e02fa11de..ef8b151de1116cc6b6518b6b66a0beef
 @@ -35,11 +35,14 @@ def causal_conv1d_ref(
      seqlen = x.shape[-1]
      dim, width = weight.shape
- 
+
 +    # F.conv1d performs cross-correlation; flip the kernel to get true
 +    # causal convolution matching fla.ShortConvolution semantics.
 +    flipped_weight = weight.flip(-1).unsqueeze(1)
@@ -501,7 +501,7 @@ index bcfd117ec920fd1c8f523680444ee36e02fa11de..ef8b151de1116cc6b6518b6b66a0beef
 -        out = F.conv1d(x, weight.unsqueeze(1), bias, padding=0, groups=dim)
 +        out = F.conv1d(x, flipped_weight, bias, padding=0, groups=dim)
      out = out[..., :seqlen]
- 
+
      if return_final_states:
 diff --git a/vllm_ascend/ops/gdn.py b/vllm_ascend/ops/gdn.py
 index 6a9423f221dc355ccc220a84adba672acacc6269..cda383265cd33f029f3db78c979ca4381b580370 100644
@@ -510,7 +510,7 @@ index 6a9423f221dc355ccc220a84adba672acacc6269..cda383265cd33f029f3db78c979ca438
 @@ -114,6 +114,9 @@ def initialize_packed_conv_weight(layer: nn.Module) -> None:
              ),
          )
- 
+
 +    # Derived during post-load processing, not received from the checkpoint.
 +    conv1d.get_parameter(_PACKED_CONV_WEIGHT_NAME).weight_loader_numel = 0
 +
@@ -542,7 +542,7 @@ index 75924c74f8cecf6dd2aca1b2f573b1ec05f38f07..661dd3b3abe4f48f7e46becf4a2737b2
 +    is_active = slot_idx < tl.load(num_sampled_tokens_ptr + req_idx)
 +    source_row = tl.load(cu_num_logits_ptr + req_idx) + slot_idx
      count = tl.zeros((), dtype=tl.int32)
- 
+
      for start_idx in range(0, vocab_size, BLOCK_SIZE):
          offsets = start_idx + tl.arange(0, BLOCK_SIZE)
          valid = offsets < vocab_size
@@ -563,11 +563,11 @@ index 75924c74f8cecf6dd2aca1b2f573b1ec05f38f07..661dd3b3abe4f48f7e46becf4a2737b2
              packed,
              mask=byte_offsets < tl.cdiv(vocab_size, 8),
          )
- 
+
 -    tl.store(counts_ptr + req_idx, count)
 +    tl.store(counts_ptr + output_row, count)
- 
- 
+
+
  def sampling_mask_from_logits_npu(
      cls: type[SamplingMaskTensors],
      logits: torch.Tensor,
@@ -581,7 +581,7 @@ index 75924c74f8cecf6dd2aca1b2f573b1ec05f38f07..661dd3b3abe4f48f7e46becf4a2737b2
      """Pack sampling masks after making strided vocab loads NPU-friendly."""
      if logits.stride(1) != 1:
          logits = logits.contiguous()
- 
+
 -    num_reqs, vocab_size = logits.shape
 +    num_reqs = num_sampled_tokens.shape[0]
 +    vocab_size = logits.shape[1]
@@ -638,7 +638,7 @@ index 75924c74f8cecf6dd2aca1b2f573b1ec05f38f07..661dd3b3abe4f48f7e46becf4a2737b2
 +            BLOCK_SIZE=_BLOCK_SIZE,
          )
 -        return cls(token_ids, packed_mask, counts, vocab_size)
- 
+
 -    return cls(packed_mask, counts, vocab_size)
 +    # Keep the exact packed fallback; NPU dynamic compaction is not required.
 +    logger.warning_once(
@@ -665,7 +665,7 @@ index 13d19fa2b28b57c12c9a800cc1d758b7ec57ce19..8707443ae938e1cc65ed1e230da3b124
 +++ b/vllm_ascend/patch/platform/patch_pp_mtp.py
 @@ -238,7 +238,7 @@ def _patch_scheduler_update_from_output() -> None:
      original_update_from_output = Scheduler.update_from_output
- 
+
      @wraps(original_update_from_output)
 -    def _patched_update_from_output(self, scheduler_output, model_runner_output):
 +    def _patched_update_from_output(self, scheduler_output, model_runner_output, weight_version=None):
@@ -678,7 +678,7 @@ index 13d19fa2b28b57c12c9a800cc1d758b7ec57ce19..8707443ae938e1cc65ed1e230da3b124
              model_runner_output,
 +            weight_version,
          )
- 
+
          if use_pp_ipc_runtime_patch:
 diff --git a/vllm_ascend/patch/platform/patch_profiling_chunk.py b/vllm_ascend/patch/platform/patch_profiling_chunk.py
 index 659dd70c8a1872d104b96adbcb8dfb245a5eb597..af1c9df7d8fc2b109cf1c490acd45fb4ba518b7b 100644
@@ -687,15 +687,15 @@ index 659dd70c8a1872d104b96adbcb8dfb245a5eb597..af1c9df7d8fc2b109cf1c490acd45fb4
 @@ -143,9 +143,9 @@ def _ensure_update_from_output_wrapped(scheduler):
      cls = type(scheduler)
      _original_update_from_output = cls.update_from_output
- 
+
 -    def _wrapped_update_from_output(self, scheduler_output, model_output):
 +    def _wrapped_update_from_output(self, scheduler_output, model_output, weight_version=None):
          _record_execution_timing(self, scheduler_output, model_output)
 -        return _original_update_from_output(self, scheduler_output, model_output)
 +        return _original_update_from_output(self, scheduler_output, model_output, weight_version)
- 
+
      cls.update_from_output = _wrapped_update_from_output
- 
+
 diff --git a/vllm_ascend/worker/worker.py b/vllm_ascend/worker/worker.py
 index 767c1948823c6a2556ba883311f918b96a45983d..7182fb8b51d43b5d7faed704d16dfe04c0b9721a 100644
 --- a/vllm_ascend/worker/worker.py

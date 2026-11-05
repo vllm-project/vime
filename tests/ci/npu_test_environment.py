@@ -35,12 +35,21 @@ def collect_environment():
         "cgroup": {},
         "filesystems": {},
     }
-    for package in ("torch", "torch-npu", "vllm", "vllm-ascend", "ray", "fla-core", "flash-linear-attention"):
+    for package in (
+        "torch",
+        "torch-npu",
+        "vllm",
+        "vllm-ascend",
+        "ray",
+        "straw-queue",
+        "fla-core",
+        "flash-linear-attention",
+    ):
         try:
             report["versions"][package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
             report["versions"][package] = "not installed"
-    report["cpu_affinity"] = sorted(os.sched_getaffinity(0))
+    report["cpu_affinity_count"] = len(os.sched_getaffinity(0))
     for filename in (
         "/sys/fs/cgroup/memory.max",
         "/sys/fs/cgroup/memory.current",
