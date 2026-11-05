@@ -130,6 +130,14 @@ steps:
           python tests/test_reloadable_process_group_memory_check.py
           python tests/test_ppo_logprob_entropy.py
           python tests/utils/test_hf_checkpoint_saver.py
+          python tests/speculative_training/test_config.py
+          python tests/speculative_training/test_feature_schema.py
+          python tests/speculative_training/test_feature_collector.py
+          python tests/speculative_training/test_eagle3_backend.py
+          python tests/speculative_training/test_dspark_backend.py
+          python tests/speculative_training/test_dspark_factory.py
+          python tests/speculative_training/test_draft_trainer_helpers.py
+          python tests/speculative_training/test_draft_group.py
         '
 
   - label: ":robot_face: agent adapter tests"

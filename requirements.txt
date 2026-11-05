@@ -13,6 +13,7 @@ omegaconf
 openai
 openai-agents
 pillow
+pyarrow==20.0.0  # NPU stack pins numpy 1.x; newer pyarrow wheels require numpy>=2
 pylatexenc
 pyyaml
 qwen_vl_utils # for VLM

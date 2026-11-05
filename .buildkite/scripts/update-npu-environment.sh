@@ -175,6 +175,11 @@ update_vime_code() {
 }
 
 install_vime_code() {
+    # The image bakes numpy 1.x for the NPU stack (torch_npu/megatron), while
+    # pyarrow arrives transitively and unpinned; newer pyarrow wheels require
+    # numpy>=2 and break ray job submit ("pyarrow requires NumPy 2.0 or newer").
+    # Align pyarrow to the last numpy-1-compatible version validated on NPU.
+    pip install "pyarrow==20.0.0" --break-system-packages || pip install "pyarrow==20.0.0"
     pip install -e "$VIME_DIR" --no-deps --break-system-packages || pip install -e "$VIME_DIR" --no-deps
 }
 
