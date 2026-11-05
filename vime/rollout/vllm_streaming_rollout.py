@@ -17,6 +17,12 @@ The outer rollout loop (semaphore, dp_rank balancing, abort orchestration,
 partial-rollout buffer hand-off) is still owned by ``vllm_rollout``; this file
 only replaces the inner HTTP call.
 
+This generator selects request-level abort, so Vime cancels each active HTTP
+stream instead of aborting every request on its vLLM server.
+
+Request cancellation preserves only metadata received before disconnect;
+terminal-only data such as routed-expert replay is unavailable after abort.
+
 vLLM's ``/inference/v1/generate`` SSE chunks carry **delta** ``token_ids`` +
 ``logprobs`` per ``GenerateResponseStreamChoice`` — so we *accumulate* the
 per-chunk deltas (``+=``) rather than overwriting from each chunk. Each delta
@@ -40,35 +46,20 @@ from vime.rollout.vllm_rollout import (
     _align_mm_feature_placeholders_to_tokens,
     _build_inference_sampling_params,
     _coerce_flat_int_token_ids,
+    _inference_generate_meta_info,
+    _inference_generate_metrics,
+    _inference_generate_tokens_and_logprobs,
     _mm_render_response_to_generate_body,
     _prepare_prompt_ids,
     prime_encoder,
 )
 from vime.utils import http_utils
-from vime.utils.processing_utils import build_multimodal_messages, build_processor_kwargs
+from vime.utils.processing_utils import build_multimodal_messages
 from vime.utils.types import Sample
 
 __all__ = ["generate_streaming"]
 
 logger = logging.getLogger(__name__)
-
-
-def _base_dataset_prompt_ids(sample: Sample, tokenizer, processor: Any) -> list[int]:
-    """Token ids for the dataset prompt only (never reuse ``sample.tokens``).
-
-    Used for partial-continuation budgeting: ``max_new_tokens -= len(sample.tokens)
-    - len(base_prompt_ids)`` when ``sample.response`` is non-empty. vLLM's
-    ``/inference/v1/generate`` is token-only, so on a partial resume we re-send the
-    full prefix and must subtract the already-generated tokens from the budget.
-    This lives here (not in ``vllm_rollout``) because it is specific to the
-    streaming path's partial-continuation handling.
-    """
-    raw_multimodal_inputs = sample.multimodal_inputs or {}
-    has_multimodal_inputs = any(value is not None for value in raw_multimodal_inputs.values())
-    if processor and has_multimodal_inputs:
-        processor_output = processor(text=sample.prompt, **build_processor_kwargs(raw_multimodal_inputs))
-        return _coerce_flat_int_token_ids(processor_output["input_ids"][0])
-    return _coerce_flat_int_token_ids(tokenizer.encode(sample.prompt, add_special_tokens=False))
 
 
 async def generate_streaming(args: Namespace, sample: Sample, sampling_params: dict[str, Any]) -> Sample:
@@ -77,6 +68,9 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
     Writes the cumulative state from each SSE chunk onto ``sample`` so an
     abort that cuts the stream still leaves a coherent partial sample behind.
     """
+    if getattr(args, "use_score_centering", False):
+        raise ValueError("Score centering does not support streaming rollout.")
+
     if args.ci_test:
         assert isinstance(sample.prompt, str)
 
@@ -90,17 +84,13 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
     ), f"Sample status is {sample.status}"
 
     prompt_ids = _prepare_prompt_ids(sample, state.tokenizer, state.processor)
-    base_prompt_ids = _base_dataset_prompt_ids(sample, state.tokenizer, state.processor)
 
     messages = build_multimodal_messages(sample.prompt, sample.multimodal_inputs)
 
     params = dict(sampling_params)
-    if len(sample.response) > 0:
-        params["max_new_tokens"] -= len(sample.tokens) - len(base_prompt_ids)
+    params["max_new_tokens"] -= sample.response_length
 
-    assert (
-        params["max_new_tokens"] >= 0
-    ), f"max_new_tokens: {params['max_new_tokens']} should not be less than 0 (after partial continuation adjustment; tokens={len(sample.tokens)}, base_prompt={len(base_prompt_ids)})"
+    assert params["max_new_tokens"] >= 0, f"max_new_tokens: {params['max_new_tokens']} should not be less than 0"
     if params["max_new_tokens"] == 0:
         sample.status = Sample.Status.TRUNCATED
         return sample
@@ -121,10 +111,12 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
     payload: dict[str, Any]
     if messages:
         render_payload = {"model": args.hf_checkpoint, "messages": messages}
-        await prime_encoder(args, render_payload["messages"])
+        ec_transfer_params = await prime_encoder(args, render_payload["messages"])
         with trace_span(sample, "vllm_mm_render", attrs={"model": args.hf_checkpoint}):
             render_data = await http_utils.post(f"{base}/v1/chat/completions/render", render_payload, headers=headers)
         payload = _mm_render_response_to_generate_body(render_data, args.hf_checkpoint)
+        if ec_transfer_params:
+            payload["ec_transfer_params"] = ec_transfer_params
         if token_ids:
             _align_mm_feature_placeholders_to_tokens(payload, token_ids)
             payload["token_ids"] = token_ids
@@ -158,8 +150,8 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
     last_choice: dict[str, Any] | None = None
     last_usage: dict[str, Any] | None = None
     weight_version: str | None = None
-    request_spec_decode_stats: dict[str, int] | None = None
-    sampling_mask: list[list[int]] | None = None
+    response_metrics: dict[str, Any] = {}
+    trace_metadata: dict[str, Any] = {}
     finish_reason: Any = None
 
     client = http_utils._http_client
@@ -184,8 +176,13 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
 
                 if chunk.get("weight_version") is not None:
                     weight_version = str(chunk["weight_version"])
-                if chunk.get("request_spec_decode_stats") is not None:
-                    request_spec_decode_stats = chunk["request_spec_decode_stats"]
+                chunk_metrics = _inference_generate_metrics(chunk)
+                if chunk_metrics:
+                    response_metrics.update(chunk_metrics)
+                    trace_metadata["metrics"] = response_metrics
+                for key in ("request_id",):
+                    if chunk.get(key) is not None:
+                        trace_metadata[key] = chunk[key]
 
                 choices = chunk.get("choices") or []
                 if not choices:
@@ -195,10 +192,6 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
                     continue
                 choice = choices[0]
                 last_choice = choice
-                if choice.get("sampling_mask") is not None:
-                    if sampling_mask is None:
-                        sampling_mask = []
-                    sampling_mask.extend(choice["sampling_mask"])
                 if chunk.get("usage"):
                     last_usage = chunk["usage"]
                 if choice.get("finish_reason"):
@@ -206,15 +199,10 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
 
                 # Each chunk carries only its delta tokens + logprobs; accumulate.
                 delta_tokens = choice.get("token_ids") or []
-                delta_log_probs = []
-                lp = choice.get("logprobs")
-                if isinstance(lp, dict):
-                    content_items = lp.get("content") or []
-                    delta_log_probs = [
-                        float(it.get("logprob", 0.0)) if isinstance(it, dict) else 0.0 for it in content_items
-                    ]
-                if len(delta_log_probs) != len(delta_tokens):
-                    delta_log_probs = (delta_log_probs + [0.0] * len(delta_tokens))[: len(delta_tokens)]
+                content = (choice.get("logprobs") or {}).get("content") or []
+                if len(content) != len(delta_tokens):
+                    raise ValueError("Streaming token IDs and logprob pairs must have matching lengths.")
+                delta_tokens, delta_log_probs = _inference_generate_tokens_and_logprobs(choice)
                 if delta_tokens:
                     call_tokens += delta_tokens
                     call_log_probs += delta_log_probs
@@ -231,21 +219,22 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
                 if base_loss_mask is not None:
                     assert args.partial_rollout and args.mask_offpolicy_in_partial_rollout
                     sample.loss_mask = base_loss_mask + [1] * len(call_tokens)
+                sample._apply_meta_info(
+                    args,
+                    _inference_generate_meta_info(chunk),
+                    new_token_count=len(delta_tokens),
+                    update_terminal_info=False,
+                )
 
                 if state.aborted:
                     break
 
         if finish_reason and last_choice is not None:
-            span.update(build_vllm_meta_trace_attrs({"choices": [last_choice], "usage": last_usage}))
+            span.update(build_vllm_meta_trace_attrs({**trace_metadata, "choices": [last_choice], "usage": last_usage}))
 
     if finish_reason and last_choice is not None:
         new_response_tokens = call_tokens
-        if len(call_log_probs) == len(call_tokens):
-            new_response_log_probs = [float(x) for x in call_log_probs]
-        else:
-            new_response_log_probs = ([float(x) for x in call_log_probs] + [0.0] * len(call_tokens))[
-                : len(call_tokens)
-            ]
+        new_response_log_probs = [float(x) for x in call_log_probs]
 
         # Build meta_info from the terminal choice + usage, mirroring generate().
         fr = last_choice.get("finish_reason") or "stop"
@@ -264,14 +253,13 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
             meta["prompt_tokens"] = last_usage.get("prompt_tokens", 0)
             meta["completion_tokens"] = last_usage.get("completion_tokens", 0)
             meta["cached_tokens"] = (last_usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
-        if request_spec_decode_stats:
-            meta["spec_accept_token_num"] = request_spec_decode_stats.get(
-                "num_accepted_draft_tokens", request_spec_decode_stats.get("num_accepted_tokens", 0)
+        spec_stats = response_metrics.get("speculative_decoding")
+        if spec_stats:
+            meta["spec_accept_token_num"] = spec_stats.get(
+                "num_accepted_draft_tokens", spec_stats.get("num_accepted_tokens", 0)
             )
-            meta["spec_draft_token_num"] = request_spec_decode_stats.get("num_draft_tokens", 0)
-            meta["spec_verify_ct"] = request_spec_decode_stats.get(
-                "num_spec_steps", request_spec_decode_stats.get("num_verify_steps", 0)
-            )
+            meta["spec_draft_token_num"] = spec_stats.get("num_draft_tokens", 0)
+            meta["spec_verify_ct"] = spec_stats.get("num_spec_steps", spec_stats.get("num_verify_steps", 0))
         if new_response_tokens:
             meta["output_token_logprobs"] = [
                 [float(lp), int(tid)] for lp, tid in zip(new_response_log_probs, new_response_tokens, strict=True)
@@ -282,23 +270,18 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
         if last_choice.get("routed_experts") is not None:
             raw = base64.b64decode(last_choice["routed_experts"].encode("ascii"), validate=True)
             meta["routed_experts"] = np.load(io.BytesIO(raw), allow_pickle=False)
-        if sampling_mask is not None:
-            top_p_meta = {"top_p_token_ids": [token_id for token_ids in sampling_mask for token_id in token_ids]}
-            offsets = [0]
-            for token_ids in sampling_mask:
-                offsets.append(offsets[-1] + len(token_ids))
-            top_p_meta["top_p_token_offsets"] = offsets
-            sample._apply_meta_info(
-                args,
-                top_p_meta,
-                new_token_count=len(new_response_tokens),
-                update_terminal_info=False,
-            )
         # tokens already accumulated above; finalize metadata only (no token re-append).
+        if weight_version is not None and call_tokens:
+            sample.weight_versions.append(weight_version)
         sample.append_response_tokens(args, meta_info=meta)
     elif state.aborted:
         if weight_version is not None:
             sample.weight_versions.append(weight_version)
         sample.status = Sample.Status.ABORTED
+    else:
+        raise RuntimeError("vLLM streaming response ended without a terminal finish_reason.")
 
     return sample
+
+
+generate_streaming.abort_mode = "request"

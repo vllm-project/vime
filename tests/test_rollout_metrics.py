@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 
-from vime.observability.rollout_metrics import _compute_top_p_kept_vocab_metrics
+from vime.observability.rollout_metrics import _compute_spec_metrics, _compute_top_p_kept_vocab_metrics
 from vime.utils.misc import decode_int32_meta_array
 from vime.utils.types import Sample
 
@@ -13,7 +13,20 @@ NUM_GPUS = 0
 
 
 def _make_args():
-    return Namespace(vllm_speculative_algorithm=False, num_layers=2, moe_router_topk=2)
+    return Namespace(vllm_speculative_config=None, num_layers=2, moe_router_topk=2)
+
+
+@pytest.mark.unit
+def test_spec_metrics_use_vllm_speculative_config():
+    sample = Sample()
+    sample.spec_info.spec_accept_token_num = 6
+    sample.spec_info.spec_draft_token_num = 8
+    sample.spec_info.spec_verify_ct = 2
+    args = Namespace(vllm_speculative_config={"method": "mtp", "num_speculative_tokens": 4})
+    metrics = _compute_spec_metrics(args, [sample])
+    assert metrics["spec_accept_rate"] == sample.spec_info.spec_accept_rate
+    assert metrics["spec_accept_length"] == sample.spec_info.spec_accept_length
+    assert _compute_spec_metrics(_make_args(), [sample]) == {}
 
 
 @pytest.mark.unit

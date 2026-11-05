@@ -4,6 +4,7 @@ import sys
 import tempfile
 from argparse import Namespace
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 import yaml
@@ -23,6 +24,97 @@ def _write_yaml(data: dict) -> str:
 
 
 class TestVllmConfigUpdateWeights:
+    @pytest.mark.parametrize("first_model", ["regular", "pd", "epd"])
+    @pytest.mark.parametrize("second_model", ["regular", "pd", "epd"])
+    def test_models_starting_concurrently_use_disjoint_ports(self, monkeypatch, first_model, second_model):
+        from vime.backends.vllm_utils import deployment, disaggregation
+        from vime.backends.vllm_utils.engine_group import ServerGroup
+        from vime.backends.vllm_utils.vllm_config import ModelConfig, ServerGroupConfig, VllmConfig
+
+        layouts = {
+            "regular": [("regular", 4)],
+            "pd": [("prefill", 2), ("decode", 2)],
+            "epd": [("encoder", 1), ("prefill", 1), ("decode", 2)],
+        }
+        config = VllmConfig(
+            models=[
+                ModelConfig(
+                    name=name,
+                    update_weights=(name == "actor"),
+                    server_groups=[
+                        ServerGroupConfig(worker_type=worker_type, num_gpus=num_gpus)
+                        for worker_type, num_gpus in layouts[layout]
+                    ],
+                )
+                for name, layout in (("actor", first_model), ("ref", second_model))
+            ]
+        )
+        allocated = []
+
+        def start_engines(self, port_cursors=None):
+            port = (port_cursors or {}).get(0, 15000)
+            allocated.append(port)
+            engine = Mock()
+            engine.get_url.remote.return_value = f"http://127.0.0.1:{port}"
+            self.all_engines = [engine for _ in self.all_engines]
+            return [f"init-{port}"], {0: port + 100}
+
+        monkeypatch.setattr(ServerGroup, "start_engines", start_engines)
+        monkeypatch.setattr(deployment, "resolve_vllm_config", lambda _args: config)
+        monkeypatch.setattr(deployment, "_start_router", lambda *_args, **_kwargs: ("127.0.0.1", 3456, None))
+        monkeypatch.setattr(deployment, "get_host_info", lambda: (None, "127.0.0.1"))
+        monkeypatch.setattr(deployment, "find_available_port", lambda _port: 3456)
+        monkeypatch.setattr(deployment, "collect_pd_urls", lambda _groups: ([], []))
+        monkeypatch.setattr(disaggregation.ray, "get", lambda refs: refs)
+        args = Namespace(
+            rollout_external=False,
+            rollout_num_gpus_per_engine=1,
+            num_gpus_per_node=8,
+            debug_train_only=False,
+            debug_rollout_only=False,
+            colocate=False,
+            actor_num_nodes=1,
+            actor_num_gpus_per_node=8,
+            offload_rollout=False,
+            hf_checkpoint="/tmp/hf",
+        )
+
+        servers, _ = deployment.start_rollout_servers(args, pg=(None, list(range(8)), list(range(8))))
+
+        assert list(servers) == ["actor", "ref"]
+        assert len(allocated) == len(layouts[first_model]) + len(layouts[second_model])
+        assert len(allocated) == len(set(allocated))
+
+    @pytest.mark.parametrize("update_weights,level", [(True, 2), (False, 1)])
+    @pytest.mark.parametrize("recover", [False, True])
+    def test_offload_preserves_frozen_weights(self, monkeypatch, update_weights, level, recover):
+        from vime.backends.vllm_utils import engine_group
+
+        engine = Mock()
+        group = engine_group.ServerGroup(
+            args=Namespace(num_gpus_per_node=1),
+            pg=None,
+            all_engines=[None if recover else engine],
+            num_gpus_per_engine=1,
+            num_new_engines=0,
+            needs_offload=True,
+            model_path="frozen-model",
+        )
+
+        def start_engines(port_cursors):
+            group.all_engines = [engine]
+            group.num_new_engines = 1
+            return [], port_cursors
+
+        monkeypatch.setattr(group, "start_engines", start_engines)
+        monkeypatch.setattr(engine_group.ray, "get", lambda handles: handles)
+        server = engine_group.RolloutServer(server_groups=[group], update_weights=update_weights)
+        if recover:
+            server.recover()
+        else:
+            server.offload()
+        engine.release_memory_occupation.remote.assert_called_once_with(level=level)
+
     def test_update_weights_defaults_to_none(self):
         """Models without explicit update_weights parse as None (resolved to True/False at runtime by VllmConfig.resolve based on hf_checkpoint match)."""
         from vime.backends.vllm_utils.vllm_config import VllmConfig
@@ -42,6 +134,8 @@ class TestVllmConfigUpdateWeights:
         # Parsed default is None; VllmConfig.resolve() later infers True/False from
         # whether model_path matches args.hf_checkpoint.
         assert config.models[0].update_weights is None
+        config.models[0].resolve(Namespace(hf_checkpoint="/tmp/hf", rollout_num_gpus_per_engine=1))
+        assert config.models[0].update_weights is True
 
     def test_update_weights_explicit_false(self):
         """Models with update_weights: false should be parsed correctly."""
@@ -230,7 +324,10 @@ class TestZeroGpuRolloutConfig:
 
     def test_vllm_server_args_derive_tp_from_overridden_pp(self, monkeypatch):
         from vime.backends.vllm_utils import vllm_engine
+        from vime.utils import accelerator
 
+        # Device mapping is tested separately; building server args needs no GPU.
+        monkeypatch.setattr(accelerator, "resolve_visible_device_id", lambda device_id: device_id)
         monkeypatch.setattr(vllm_engine, "_VLLM_SERVER_FIELDS", frozenset())
 
         args = Namespace(
@@ -267,7 +364,9 @@ class TestZeroGpuRolloutConfig:
 
     def test_offload_rollout_enables_vllm_sleep_mode(self, monkeypatch):
         from vime.backends.vllm_utils import vllm_engine
+        from vime.utils import accelerator
 
+        monkeypatch.setattr(accelerator, "resolve_visible_device_id", lambda device_id: device_id)
         monkeypatch.setattr(vllm_engine, "_VLLM_SERVER_FIELDS", frozenset())
 
         args = Namespace(
@@ -478,8 +577,16 @@ class TestZeroGpuRolloutConfig:
 
         groups = servers["default"].server_groups
         assert [group.worker_type for group in groups] == ["encoder", "regular"]
-        assert groups[1].vllm_overrides["language_only"] is True
-        assert groups[1].vllm_overrides["encoder_urls"] == ["http://encoder"]
+        assert "language_only" not in groups[1].vllm_overrides
+        assert groups[1].vllm_overrides["mm_decoder_only"] is True
+        assert "mm_decoder_only" not in groups[0].vllm_overrides
+        assert "encoder_urls" not in groups[1].vllm_overrides
+        assert args.vllm_model_encoder_endpoints["default"][1] == ["http://encoder"]
+        assert groups[1].vllm_overrides["ec_transfer_config"]["ec_connector"] == "ECCPUConnector"
+        assert groups[1].vllm_overrides["ec_transfer_config"]["ec_connector_extra_config"] == {
+            "ec_cpu_bytes": 1_000_000_000,
+            "ec_enable_nixl": True,
+        }
         assert init_handles == ["regular-init-1"]
         assert ray_get_calls == [["encoder-init-0"], ["encoder-url-ref"]]
 

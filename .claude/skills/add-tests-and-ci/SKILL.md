@@ -37,23 +37,16 @@ if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
 ```
 
-- `run-ci-changed` extracts a top-level `NUM_GPUS = <N>` constant from added/modified `tests/test_*.py` and `tests/plugin_contracts/test_*.py`; if missing, it defaults to 8 GPUs. Set `NUM_GPUS = 0` for CPU-only tests.
+- Set `NUM_GPUS = 0` for CPU-only tests, following the existing test metadata convention.
 - For GPU/e2e tests, follow the nearby file pattern (`prepare()`, `execute()`, `NUM_GPUS`, and any model/dataset constants).
 
-### Step 3: Register Tests in GitHub CI
+### Step 3: Register Tests in Buildkite CI
 
-Whenever adding, moving, or renaming a test file, update the GitHub workflow template before finishing:
+Whenever adding, moving, or renaming a test file, update its Buildkite registration before finishing:
 
-1. Add the test to the appropriate matrix in `.github/workflows/pr-test.yml.j2`.
-   - CPU-only pytest/unit tests usually belong in `cpu-unittest` with `num_gpus: 0`.
-   - GPU/e2e tests should be placed beside the nearest similar model/path test with the matching `num_gpus` and environment fields.
-2. Regenerate workflows:
-
-```bash
-python .github/workflows/generate_github_workflows.py
-```
-
-3. Include both `.github/workflows/pr-test.yml.j2` and the generated `.github/workflows/pr-test.yml` in the change set.
+1. Register CPU test files in the appropriate command list in `.buildkite/pipeline.yml`, beside similar tests. Agent CPU tests belong in `agent-adapter`.
+2. Register GPU/e2e tests in `.buildkite/gpu_suites.py`, with the matching GPU count and environment settings. Update `.buildkite/pipeline.yml` when changing suite selection or wiring.
+3. Include the registration changes with the tests. These files are the source of truth; there is no GitHub workflow regeneration step.
 
 Only skip fixed matrix registration when the test is intentionally helper-only or manually invoked; state that reason in the final response.
 
@@ -64,34 +57,29 @@ Only skip fixed matrix registration when the test is intentionally helper-only o
 - Run repository-wide checks only when they are already part of the task or workflow.
 - Avoid documenting placeholder test commands that may not exist in the current tree.
 
-### Step 5: Keep Workflow Template as Source of Truth
+### Step 5: Keep Buildkite Sources in Sync
 
 For CI workflow changes unrelated to a new, moved, or renamed test:
 
-1. Edit `.github/workflows/pr-test.yml.j2`
-2. Regenerate workflows:
-
-```bash
-python .github/workflows/generate_github_workflows.py
-```
-
-3. Include both the template and generated workflow file in the change set (`.j2` and `.yml`). If the user asked for a commit, commit both.
+1. Edit `.buildkite/pipeline.yml` for always-on CPU commands and pipeline wiring.
+2. Edit `.buildkite/gpu_suites.py` for generated GPU jobs rather than editing its generated output.
+3. Keep suite definitions, selection, and `.buildkite/README.md` consistent when changing suites.
 
 ### Step 6: Provide Verifiable PR Notes
 
 Include:
 
 - Which tests were added/changed
-- Where each new/renamed test was registered in `.github/workflows/pr-test.yml.j2`
+- Where each new/renamed test was registered in `.buildkite/pipeline.yml` or `.buildkite/gpu_suites.py`
 - Exact commands executed
 - GPU assumptions for each test path
 - Why this coverage protects against regression
 
 ## Common Mistakes
 
-- Editing generated workflow file only
-- Relying on `run-ci-changed` discovery for a new test that should run in the regular PR matrix
-- Forgetting `NUM_GPUS = 0` on a CPU-only changed test, causing `run-ci-changed` to default to 8 GPUs
+- Editing generated GPU jobs instead of their source
+- Relying on pytest discovery for a new test in a suite with an explicit file list
+- Treating a green CPU build as GPU validation; GPU suites require the manual Buildkite gate
 - Adding a CPU pytest file that passes under `pytest tests/foo.py` but fails under CI's `python tests/foo.py`
 - Adding tests without following existing constants/conventions
 - Making tests too large or non-deterministic
@@ -101,5 +89,6 @@ Include:
 
 - Pytest config: `pyproject.toml`
 - Tests: `tests/`
-- CI template: `.github/workflows/pr-test.yml.j2`
+- CI sources: `.buildkite/pipeline.yml`, `.buildkite/gpu_suites.py`
+- Buildkite guide: `.buildkite/README.md`
 - CI guide: `docs/en/developer_guide/ci.md`

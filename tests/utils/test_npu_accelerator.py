@@ -124,6 +124,34 @@ def test_bootstrap_rejects_preselected_cuda_without_replacing_it(monkeypatch):
     assert not bootstrap._bootstrapped
 
 
+@pytest.mark.parametrize("failed_module", ["megatron_adaptor", "vime.backends.megatron_utils.npu_attention_patch"])
+def test_bootstrap_can_retry_failed_import(monkeypatch, failed_module):
+    bootstrap = current_platform().megatron
+    monkeypatch.setattr(npu, "_ensure_torch_npu", lambda: None)
+    monkeypatch.setattr(npu, "_install_safe_empty_cache", lambda: None)
+    original_import = npu.importlib.import_module
+    error = ImportError(failed_module)
+
+    def import_module(name, *args, **kwargs):
+        if name == failed_module:
+            raise error
+        if name == "megatron_adaptor":
+            return SimpleNamespace()
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(npu.importlib, "import_module", import_module)
+    with pytest.raises(ImportError) as exc_info:
+        bootstrap.bootstrap()
+    assert exc_info.value is error
+    assert not bootstrap._bootstrapped
+    assert not bootstrap._bootstrapping
+
+    monkeypatch.setattr(npu.importlib, "import_module", lambda name: SimpleNamespace())
+    bootstrap.bootstrap()
+    assert bootstrap._bootstrapped
+    assert not bootstrap._bootstrapping
+
+
 def test_repatch_passes_typed_args_and_restores_attention(monkeypatch):
     events = []
     full_args = SimpleNamespace(adaptor_default=True)

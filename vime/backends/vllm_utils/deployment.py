@@ -44,7 +44,6 @@ def _start_router(
     router_args.host = router_ip
     router_args.port = router_port
     router_args.prometheus_port = find_available_port(random.randint(4000, 5000))
-    router_args.log_level = "warning"
     router_args.request_timeout_secs = args.vllm_router_request_timeout_secs
 
     if has_pd_disaggregation:
@@ -54,10 +53,12 @@ def _start_router(
         router_args.prefill_urls = prefill_urls
         router_args.decode_urls = decode_urls
 
-    # Disable circuit breaker to prevent RDMA transfer timeouts from
-    # marking workers as dead. Timeouts are transient (PCIe contention under
-    # high load) and do not indicate a dead server.
+    # RDMA transfer timeouts are transient and should not mark decode workers dead.
     router_args.disable_circuit_breaker = True
+
+    # RolloutHealthMonitor owns engine health checks.
+    if hasattr(router_args, "disable_health_check"):
+        router_args.disable_health_check = True
 
     logger.info(f"Launch router with args: {router_args}")
 
@@ -71,19 +72,17 @@ def _start_router(
 
 
 def _compute_rollout_offset(args) -> int:
-    """Offset (in PG bundle slots) where rollout GPUs start."""
+    """Offset (in placement-group bundle slots) where rollout GPUs start."""
     if args.debug_train_only or args.debug_rollout_only or args.colocate:
         return 0
-    offset = args.actor_num_nodes * args.actor_num_gpus_per_node
-    return offset
+    return args.actor_num_nodes * args.actor_num_gpus_per_node
 
 
 def _compute_megatron_num_gpus(args) -> int:
-    """Total number of megatron (actor + critic) GPU slots in the placement group."""
+    """Total number of Megatron GPU slots in the placement group."""
     if args.debug_rollout_only:
         return 0
-    num = args.actor_num_nodes * args.actor_num_gpus_per_node
-    return num
+    return args.actor_num_nodes * args.actor_num_gpus_per_node
 
 
 def start_rollout_servers(args, pg) -> tuple[dict[str, Any], list[Any]]:

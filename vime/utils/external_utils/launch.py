@@ -2,9 +2,8 @@
 
 Used only by the test and example launch utilities (`command_utils.execute_train`), not by
 vime core: a `Platform` describes one accelerator for the purpose of *launching a job* — how
-Ray advertises its devices, the device runtime env, whether torch_dist checkpoint conversion
-works, and how to construct the launch command. It adapts the core ``vime.platforms``
-selection to shell commands.
+Ray advertises its devices, the device runtime env, and how to construct the launch command.
+It adapts the core ``vime.platforms`` selection to shell commands.
 
 Imports stay stdlib-only (torch imports are lazy) so the module is unit-testable in isolation;
 the actual `exec_command` calls live in `command_utils`.
@@ -23,7 +22,6 @@ class Platform:
     name: str
     ray_args: str  # ray-start resource flags, "{n}"-templated with the device count
     env: dict = field(default_factory=dict)  # device runtime env (into runtime_env + raylet)
-    torch_dist_convert: bool = True  # False -> use native HF loading without automatic conversion
 
     def ray_start_args(self, num_devices: int) -> str:
         return self.ray_args.format(n=num_devices)
@@ -49,7 +47,6 @@ register(
         # vime requests NPU bundles, not GPU (see ray/placement_group.py), so advertise
         # the custom NPU resource rather than Ray GPU capacity.
         ray_args="--num-gpus 0 --resources '{{\"NPU\": {n}}}'",
-        torch_dist_convert=False,  # Keep HF tests unchanged; torch_dist has a separate opt-in test.
         env={
             "PYTHONPATH": (
                 "/root/Megatron-LM:/root/vime:"
@@ -73,7 +70,6 @@ register(
             "HCCL_CONNECT_TIMEOUT": "7200",
             "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:False",
             "VLLM_DISABLE_COMPILE_CACHE": "1",
-            "VLLM_ASCEND_ENABLE_NZ": "0",
             "HYDRA_FULL_ERROR": "1",
             "TRANSFORMERS_VERBOSITY": "error",  # silence transformers image-processing log spam
         },
@@ -101,27 +97,22 @@ def launch_commands(
     num_devices: int,
     megatron_model_type: str | None,
     repo_base_dir: str,
-    train_script: str = "train.py",
     extra_env: dict | None = None,
     external_ray: bool = False,
     master_addr: str = "127.0.0.1",
+    ray_running: bool = False,
 ) -> list:
     """Ordered shell commands to launch a training job on `platform` (pure; caller execs).
 
     Driven entirely by platform data (ray resources + device env), so any non-CUDA platform
-    works with no change here. Lives outside `execute_train` so its CUDA body stays
-    byte-identical to upstream and only adds a one-line seam.
+    works with no change here. The caller checks Ray liveness; existing clusters
+    and independently owned serving processes must survive trainer restarts.
     """
     extra_env = extra_env or {}
     all_env = {**platform.env, **extra_env}
     all_env["VIME_PLATFORM"] = platform.name
     cmds: list = []
-    cmds.append(
-        "pkill -9 -f '[v]llm serve|VLL[M]::'; sleep 3; "
-        + ("" if external_ray else "ray stop --force; pkill -9 ray; ")
-        + "pkill -9 vime; sleep 3; true; "
-    )
-    if not external_ray:
+    if not external_ray and not ray_running:
         # Export the device env BEFORE `ray start` so the raylet and the actors it spawns
         # (e.g. vLLM engines) inherit it; a job's runtime_env does not reach those actors.
         exports = "".join(f"export {k}={shlex.quote(str(v))} && " for k, v in all_env.items())
@@ -137,6 +128,6 @@ def launch_commands(
         f"export no_proxy=127.0.0.1 && export PYTHONUNBUFFERED=1 && {src}"
         f'ray job submit --address="http://127.0.0.1:8265" '
         f"--runtime-env-json={shlex.quote(json.dumps(runtime_env))} "
-        f"-- python3 {train_script} {model_args} {train_args}"
+        f"-- python3 train.py {model_args} {train_args}"
     )
     return cmds

@@ -1,4 +1,3 @@
-import argparse
 import gc
 import os
 import shutil
@@ -26,6 +25,9 @@ from vime.utils.memory_utils import print_memory
 
 def add_convertion_args(parser):
     """Add conversion arguments to the parser"""
+    for flag in ("--use-gated-attention", "--post-self-attn-layernorm", "--post-mlp-layernorm"):
+        if flag not in parser._option_string_actions:
+            parser.add_argument(flag, action="store_true")
     parser.add_argument("--hf-checkpoint", type=str, required=True, help="HuggingFace model path")
     parser.add_argument(
         "--custom-model-provider-path",
@@ -34,10 +36,6 @@ def add_convertion_args(parser):
         help="Path to a custom model provider function.",
     )
     parser.add_argument("--allgather-cp", action="store_true", default=False)
-    try:
-        parser.add_argument("--use-gated-attention", action="store_true", default=False)
-    except argparse.ArgumentError:
-        pass
     try:
         parser.add_argument("--padded-vocab-size", type=int, default=None)
     except Exception:

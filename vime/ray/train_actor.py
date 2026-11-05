@@ -22,7 +22,10 @@ logger = logging.getLogger(__name__)
 def get_local_gpu_id():
     platform = current_platform()
     if platform.is_npu:
-        return platform.ray.local_device_id()
+        device_ids = platform.ray.accelerator_ids()
+        if not device_ids:
+            raise RuntimeError(f"No {platform.ray.resource_name} accelerator IDs are assigned to this Ray actor")
+        return accelerator.resolve_visible_device_id(device_ids[0])
 
     return accelerator.resolve_visible_device_id(ray.get_gpu_ids()[0])
 
@@ -79,6 +82,7 @@ class TrainRayActor(RayActor):
         try:
             if torch.version.hip is not None:
                 logger.info("Detected ROCm/HIP environment, skipping NUMA affinity setup")
+                # will find the coresponding API to implement ROCm version as below
             else:
                 import pynvml
 

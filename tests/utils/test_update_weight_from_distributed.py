@@ -69,6 +69,7 @@ class RecordingRemoteMethod:
 @dataclass
 class RecordingEngine:
     init_weight_transfer_engine: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
+    destroy_weights_update_group: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     start_weight_update: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     start_draft_weight_update: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     update_weights: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
@@ -80,8 +81,9 @@ class RecordingEngine:
 
 
 class RecordingTrainer:
-    def __init__(self, client, *, source=None, fail=False):
+    def __init__(self, client, *, source=None, fail=False, is_sender=True):
         self.client = client
+        self.is_sender = is_sender
         self.source = source
         self.fail = fail
         self.draft_states = []
@@ -189,7 +191,7 @@ def test_weight_source_switches_to_draft_weights(update_module, monkeypatch):
 def test_nccl_trainer_uses_single_packed_buffer(update_module, monkeypatch):
     from vime.platforms import get_platform
 
-    adapter = sys.modules[update_module.create_nccl_trainer.__module__]
+    adapter = sys.modules[update_module.connect_rollout_engines_from_distributed.__module__]
     monkeypatch.setattr(adapter, "current_platform", lambda: get_platform("cuda"))
     created = []
 
@@ -219,7 +221,7 @@ def test_nccl_trainer_uses_single_packed_buffer(update_module, monkeypatch):
         raising=False,
     )
 
-    assert adapter.create_nccl_trainer("client", "source", [2, 2]) == "trainer"
+    assert adapter.connect_rollout_engines_from_distributed("client", "source", [2, 2]) == "trainer"
     init_info, client, source = created[0]
     assert init_info.packed_num_buffers == 1
     assert init_info.world_size == 5
@@ -242,12 +244,30 @@ def test_connect_replaces_existing_trainer(update_module, monkeypatch):
         created.append((client, source, gpu_counts))
         return RecordingTrainer(client)
 
-    monkeypatch.setattr(update_module, "create_nccl_trainer", create_trainer)
+    monkeypatch.setattr(update_module, "connect_rollout_engines_from_distributed", create_trainer)
     updater.connect_rollout_engines([engine], object(), engine_gpu_counts=[4])
 
     assert old_trainer.shutdown_calls == 1
+    assert len(engine.destroy_weights_update_group.calls) == 1
     assert created[0][1:] == (updater._source, [4])
     assert updater._trainer is not old_trainer
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("is_sender", [True, False])
+def test_disconnect_releases_both_ends_once(update_module, is_sender):
+    updater = object.__new__(update_module.UpdateWeightFromDistributed)
+    engine = RecordingEngine()
+    trainer = RecordingTrainer(object(), is_sender=is_sender)
+    updater.rollout_engines = [engine]
+    updater._trainer = trainer
+
+    updater.disconnect_rollout_engines()
+    updater.disconnect_rollout_engines()
+
+    assert trainer.shutdown_calls == 1
+    assert len(engine.destroy_weights_update_group.calls) == int(is_sender)
+    assert updater._trainer is None
 
 
 def _updater_for_transfer(update_module, *, mtp=False, dspark=False, fail=False):
@@ -255,6 +275,7 @@ def _updater_for_transfer(update_module, *, mtp=False, dspark=False, fail=False)
     updater.args = types.SimpleNamespace(
         enable_mtp_training=mtp,
         dspark_enabled=dspark,
+        flush_cache_interval=1,
         vllm_speculative_config={"method": "mtp"} if mtp else {"method": "dspark"} if dspark else None,
     )
     updater.quantization_config = None
@@ -310,6 +331,83 @@ def test_failed_transfer_does_not_resume_generation(update_module, monkeypatch):
         updater.update_weights()
 
     assert updater.rollout_engines[0].continue_generation.calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("layer_prefix", "hf_layer"),
+    [
+        ("mtp.layers.0.transformer_layer", 47),
+        ("mtp.layers.0.mtp_model_layer", 47),
+        ("decoder.layers.46", 46),
+    ],
+)
+@pytest.mark.parametrize(("ep_size", "ep_rank"), [(1, 0), (8, 0), (8, 1), (8, 7)])
+def test_expert_parallel_hf_load_and_export(
+    update_module, monkeypatch, tmp_path, layer_prefix, hf_layer, ep_size, ep_rank
+):
+    from safetensors.torch import save_file
+
+    from vime.backends.megatron_utils.hf_to_megatron.common import load_model_hf_weights
+    from vime.backends.megatron_utils.hf_to_megatron.deepseek import deepseek_hf_tensor
+    from vime.backends.megatron_utils.megatron_to_hf import convert_to_hf
+
+    common = importlib.import_module(COMMON_MODULE)
+    monkeypatch.setattr(
+        common,
+        "mpu",
+        types.SimpleNamespace(
+            get_expert_model_parallel_world_size=lambda: ep_size,
+            get_expert_model_parallel_rank=lambda: ep_rank,
+        ),
+    )
+    monkeypatch.setattr(common, "get_transformer_layer_offset", lambda config: 0)
+    args = types.SimpleNamespace(
+        num_experts=64, num_layers=47, kv_channels=2, num_attention_heads=1, num_query_groups=1, vocab_size=2
+    )
+    config = types.SimpleNamespace(model_type="glm4_moe_lite", num_hidden_layers=47, tie_word_embeddings=False)
+    hf_weights = {
+        f"model.layers.{hf_layer}.mlp.experts.{expert}.{projection}_proj.weight": torch.full(
+            (2, 2), float(3 * expert + offset)
+        )
+        for expert in range(args.num_experts)
+        for offset, projection in enumerate(("gate", "up", "down"), start=1)
+    }
+    save_file(hf_weights, str(tmp_path / "model.safetensors"))
+    local_count = args.num_experts // ep_size
+    parameters = {
+        f"module.module.{layer_prefix}.mlp.experts.{linear}.weight{expert}": torch.nn.Parameter(torch.zeros(shape))
+        for expert in range(local_count)
+        for linear, shape in (("linear_fc1", (4, 2)), ("linear_fc2", (2, 2)))
+    }
+    model = types.SimpleNamespace(
+        config=config, named_parameters=lambda: iter(parameters.items()), named_buffers=lambda: iter(())
+    )
+
+    load_model_hf_weights(args, [model], tmp_path, config, deepseek_hf_tensor)
+
+    exported = {}
+    for local_expert in range(local_count):
+        hf_prefix = f"model.layers.{hf_layer}.mlp.experts.{ep_rank * local_count + local_expert}"
+        local_prefix = f"module.module.{layer_prefix}.mlp.experts"
+        expected_fc1 = torch.cat(
+            [hf_weights[f"{hf_prefix}.{projection}_proj.weight"] for projection in ("gate", "up")]
+        )
+        assert torch.equal(parameters[f"{local_prefix}.linear_fc1.weight{local_expert}"], expected_fc1)
+        assert torch.equal(
+            parameters[f"{local_prefix}.linear_fc2.weight{local_expert}"], hf_weights[f"{hf_prefix}.down_proj.weight"]
+        )
+    for name, parameter in common.named_params_and_buffers(args, [model]):
+        assert name.startswith(f"module.module.{layer_prefix}.")
+        exported.update(convert_to_hf(args, "glm4_moe_lite", name, parameter))
+    expected = {
+        f"model.layers.{hf_layer}.mlp.experts.{expert}.{projection}_proj.weight"
+        for expert in range(ep_rank * local_count, (ep_rank + 1) * local_count)
+        for projection in ("gate", "up", "down")
+    }
+    assert exported.keys() == expected
+    for name, parameter in exported.items():
+        assert torch.equal(parameter, hf_weights[name])
 
 
 @pytest.fixture
@@ -376,7 +474,9 @@ def test_single_tp_returns_parameter_without_collective(monkeypatch, weight_modu
 
 
 @pytest.mark.unit
-def test_all_gather_params_async_restores_layouts(monkeypatch, weight_modules):
+@pytest.mark.parametrize("async_op", [False, True])
+@pytest.mark.parametrize("expert", [False, True])
+def test_all_gather_params_restores_layouts(monkeypatch, weight_modules, async_op, expert):
     common, _ = weight_modules
     direct = torch.nn.Parameter(torch.tensor([99.0]))
     direct.tensor_model_parallel = False
@@ -387,7 +487,7 @@ def test_all_gather_params_async_restores_layouts(monkeypatch, weight_modules):
     entries = [
         (_param_info("dense", direct), direct),
         (_param_info("linear.weight", column), column),
-        (_param_info("linear_fc1.weight", glu), glu),
+        (_param_info("mlp.experts.linear_fc1.weight0" if expert else "linear_fc1.weight", glu), glu),
         (_param_info("linear_fc2.weight", row), row),
     ]
     remote_parts = iter(
@@ -399,7 +499,7 @@ def test_all_gather_params_async_restores_layouts(monkeypatch, weight_modules):
     )
     calls = []
 
-    def all_gather(partitions, local, group, async_op):
+    def all_gather(partitions, local, group, async_op=False):
         calls.append((group, async_op))
         partitions[0].copy_(local)
         partitions[1].copy_(next(remote_parts))
@@ -407,11 +507,17 @@ def test_all_gather_params_async_restores_layouts(monkeypatch, weight_modules):
 
     monkeypatch.setattr(common.mpu, "get_tensor_model_parallel_world_size", lambda: 2)
     monkeypatch.setattr(common.mpu, "get_tensor_model_parallel_group", lambda: "tp")
+    monkeypatch.setattr(common.mpu, "get_expert_tensor_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(common.mpu, "get_expert_tensor_parallel_group", lambda: "etp")
     monkeypatch.setattr(common.dist, "all_gather", all_gather)
 
-    gathered = common.all_gather_params_async(entries)
+    gathered = (
+        common.all_gather_params_async(entries)
+        if async_op
+        else [common.all_gather_param(info.name, param) for info, param in entries]
+    )
 
-    assert calls == [("tp", True)] * 3
+    assert calls == [("tp", async_op), ("etp" if expert else "tp", async_op), ("tp", async_op)]
     assert gathered[0].data_ptr() == direct.data_ptr()
     assert torch.equal(gathered[1], torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]))
     assert torch.equal(gathered[2], torch.tensor([[1.0], [2.0], [3.0], [4.0], [10.0], [20.0], [30.0], [40.0]]))

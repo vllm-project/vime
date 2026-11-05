@@ -99,26 +99,31 @@ def test_ray_resource_contract(monkeypatch, name, bundle, actor_options):
     assert ray_spec.actor_options(0.4) == actor_options
 
 
-def test_npu_runtime_env_is_scoped_to_npu_provider(monkeypatch, tmp_path):
+@pytest.mark.parametrize("colocate", [False, True])
+@pytest.mark.parametrize("train_backend", ["megatron", "fsdp"])
+def test_npu_runtime_env_is_scoped_to_npu_provider(monkeypatch, tmp_path, colocate, train_backend):
     toolkit = tmp_path / "toolkit"
     (toolkit / "python" / "site-packages" / "acl").mkdir(parents=True)
     monkeypatch.setenv("ASCEND_TOOLKIT_HOME", str(toolkit))
     monkeypatch.setenv("VIME_PLATFORM", "npu")
-    args = Namespace(offload_train=True, train_backend="megatron", colocate=True)
+    args = Namespace(offload_train=True, train_backend=train_backend, colocate=colocate)
+    inherited = {"BASE": "1", "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True"}
 
-    train_env = current_platform().ray.train_runtime_env(args, {"BASE": "1"})
-    rollout_env = current_platform().ray.rollout_runtime_env(args, {"BASE": "1"})
+    train_env = current_platform().ray.train_runtime_env(args, inherited)
+    rollout_env = current_platform().ray.rollout_runtime_env(args, inherited)
 
-    assert train_env["TMS_HOOK_MODE"] == "torch"
-    assert train_env["TMS_REGION_TAG"] == "training"
-    assert train_env["TMS_ENABLE_CPU_BACKUP"] == "1"
+    assert train_env["TMS_HOOK_MODE"] == "preload"
+    assert "TMS_REGION_TAG" not in train_env
+    assert "TMS_ENABLE_CPU_BACKUP" not in train_env
     assert train_env["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:False"
     assert str(toolkit / "python" / "site-packages") in train_env["PYTHONPATH"]
     assert rollout_env["VLLM_USE_AOT_COMPILE"] == "0"
     assert rollout_env["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:False"
+    assert inherited["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:True"
 
 
-def test_npu_vllm_env_replaces_cuda_and_rocm_visibility(monkeypatch):
+@pytest.mark.parametrize("colocate", [False, True])
+def test_npu_vllm_env_replaces_cuda_and_rocm_visibility(monkeypatch, colocate):
     monkeypatch.setenv("VIME_PLATFORM", "npu")
     platform = current_platform()
 
@@ -126,11 +131,12 @@ def test_npu_vllm_env_replaces_cuda_and_rocm_visibility(monkeypatch):
         {
             "KEEP": "1",
             "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+            "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
             "CUDA_VISIBLE_DEVICES": "0,1",
             "HIP_VISIBLE_DEVICES": "0,1",
         },
         visible_devices="4,5",
-        colocate=True,
+        colocate=colocate,
     )
 
     assert env["KEEP"] == "1"
@@ -172,49 +178,6 @@ def test_weight_transfer_provider_selects_matching_backend_and_init_info(monkeyp
     assert plugin_calls == (["load", "load"] if name == "npu" else [])
     for backend in ("npu_ipc", "hccl", "custom"):
         assert ops.backend(backend) == backend
-
-
-@pytest.mark.parametrize("platform", ["cuda", "npu"])
-@pytest.mark.parametrize("chained", [False, True])
-def test_optimizer_state_initialization_reuses_megatron_callback(monkeypatch, platform, chained):
-    monkeypatch.setenv("VIME_PLATFORM", platform)
-    calls = []
-
-    def init_state(optimizer, config):
-        calls.append((optimizer, config))
-
-    optimizers = [
-        SimpleNamespace(optimizer=object(), config=object(), init_state_fn=init_state)
-        for _ in range(2 if chained else 1)
-    ]
-    optimizer = SimpleNamespace(chained_optimizers=optimizers) if chained else optimizers[0]
-
-    current_platform().megatron.initialize_optimizer_state(optimizer)
-
-    expected = [(opt.optimizer, opt.config) for opt in optimizers] if platform == "npu" else []
-    assert calls == expected
-
-
-@pytest.mark.parametrize("empty_optimizer", [False, True])
-def test_npu_optimizer_state_initialization_skips_missing_state_or_optimizer(monkeypatch, empty_optimizer):
-    monkeypatch.setenv("VIME_PLATFORM", "npu")
-
-    def unexpected_init(*args):
-        raise AssertionError("an empty optimizer must not initialize state")
-
-    optimizer = SimpleNamespace(
-        optimizer=None if empty_optimizer else object(),
-        config=object(),
-        init_state_fn=unexpected_init if empty_optimizer else None,
-    )
-
-    current_platform().megatron.initialize_optimizer_state(optimizer)
-
-
-@pytest.mark.parametrize("platform", ["cuda", "npu"])
-def test_eval_only_has_no_optimizer_state_to_initialize(monkeypatch, platform):
-    monkeypatch.setenv("VIME_PLATFORM", platform)
-    current_platform().megatron.initialize_optimizer_state(None)
 
 
 def test_memory_utils_keep_main_accelerator_surface(monkeypatch):

@@ -1,52 +1,23 @@
-diff --git a/megatron_adaptor/features_manager/megatron/megatron_basic.py b/megatron_adaptor/features_manager/megatron/megatron_basic.py
---- a/megatron_adaptor/features_manager/megatron/megatron_basic.py
-+++ b/megatron_adaptor/features_manager/megatron/megatron_basic.py
-@@ -78,27 +78,27 @@ class MegatronBasicFeature(MindSpeedFeature):
-         # class via force_patch.  The MindSpeed subclass imports its own
-         # Triton operators directly from mindspeed.ops.triton and never
-         # reads these FLA paths, so no conflict arises.
--        from megatron_adaptor.patches.megatron.gdn_packed_seq import (
--            _npu_causal_conv1d,
--            _npu_chunk_gated_delta_rule,
--            _npu_l2norm,
--        )
--
--        pm.register_patch(
--            'fla.modules.convolution.causal_conv1d',
--            _npu_causal_conv1d,
--            create_dummy=True,
--        )
--        pm.register_patch(
--            'fla.ops.gated_delta_rule.chunk_gated_delta_rule',
--            _npu_chunk_gated_delta_rule,
--            create_dummy=True,
--        )
--        pm.register_patch(
--            'fla.modules.l2norm.l2norm',
--            _npu_l2norm,
--            create_dummy=True,
--        )
-+        # from megatron_adaptor.patches.megatron.gdn_packed_seq import (
-+        #    _npu_causal_conv1d,
-+        #    _npu_chunk_gated_delta_rule,
-+        #    _npu_l2norm,
-+        #)
-+
-+        #pm.register_patch(
-+        #    'fla.modules.convolution.causal_conv1d',
-+        #    _npu_causal_conv1d,
-+        #    create_dummy=True,
-+        #)
-+        #pm.register_patch(
-+        #    'fla.ops.gated_delta_rule.chunk_gated_delta_rule',
-+        #    _npu_chunk_gated_delta_rule,
-+        #    create_dummy=True,
-+        #)
-+        #pm.register_patch(
-+        #    'fla.modules.l2norm.l2norm',
-+        #    _npu_l2norm,
-+        #    create_dummy=True,
-+        #)
- 
-     def register_non_mcore_basic_patches(self, pm, args):
-         from megatron_adaptor.patches.megatron.megatron_basic import (
+diff --git a/megatron_adaptor/patches/megatron/transformer_config.py b/megatron_adaptor/patches/megatron/transformer_config.py
+index e0187d9..4b9bb6a 100644
+--- a/megatron_adaptor/patches/megatron/transformer_config.py
++++ b/megatron_adaptor/patches/megatron/transformer_config.py
+@@ -67,7 +67,8 @@ def transformer_config_init_wrapper(fn):
+     def wrapper(self, *args, **kwargs):
+         known_config = {}
+         unknown_config = {}
+-        full_args = vars(get_full_args()).copy()
++        # Serving arguments share the Namespace but are not training config fields.
++        full_args = {key: value for key, value in vars(get_full_args()).items() if not key.startswith('vllm_')}
+         full_args.update(dict(kwargs))
+
+         config_key = inspect.signature(self.__class__).parameters
+@@ -100,7 +101,7 @@ def transformer_config_init_wrapper(fn):
+ def transformer_config_init_subclass(cls, **kwargs):
+     mutable_types = (list, dict, set, bytearray)
+     unknown_config = {}
+-    full_args = vars(get_full_args()).copy()
++    full_args = {key: value for key, value in vars(get_full_args()).items() if not key.startswith('vllm_')}
+     full_args.update(kwargs)
+
+     config_key = inspect.signature(cls).parameters

@@ -176,7 +176,7 @@ If a PR spans multiple areas, include all relevant prefixes (e.g., `[Bugfix][Rol
 
 ### Review Process
 
-1. **Automated CI** — Pre-commit and PR tests run on GitHub Actions
+1. **Automated CI** — Pre-commit checks run on pre-commit.ci; PR tests run on Buildkite (see [.buildkite/README.md](.buildkite/README.md))
 2. **Code review** — Maintainers review for correctness, scope, and maintainability
 3. **Feedback** — Address review comments and re-request review when ready
 4. **Merge** — Maintainer merges after approval
@@ -388,7 +388,7 @@ AI辅助代码须满足全部质量标准：充分测试、完善文档、遵守
 
 ### 审查流程
 
-1. CI自动运行pre-commit与PR测试
+1. pre-commit.ci运行静态检查，Buildkite运行PR测试（见[.buildkite/README.md](.buildkite/README.md)）
 2. 维护者审查正确性、范围与可维护性
 3. 根据反馈修改并在就绪后请求再次审查
 4. 通过后由维护者合并

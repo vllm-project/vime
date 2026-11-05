@@ -1,661 +1,476 @@
-diff --git a/megatron/core/activations.py b/megatron/core/activations.py
-index 8b422d73a..58fba4667 100644
---- a/megatron/core/activations.py
-+++ b/megatron/core/activations.py
-@@ -5,19 +5,19 @@ import torch.nn.functional as F
- from megatron.core.jit import jit_fuser
- 
- 
--@jit_fuser
-+
- def squared_relu(x: torch.Tensor) -> torch.Tensor:
-     """Squared ReLU activation"""
-     return torch.pow(F.relu(x), 2)
- 
- 
--@jit_fuser
-+
- def quick_gelu(x: torch.Tensor) -> torch.Tensor:
-     """Quick GELU activation"""
-     return x * torch.sigmoid(1.702 * x)
- 
- 
--@jit_fuser
-+
- def fast_gelu(x: torch.Tensor) -> torch.Tensor:
-     """Fast GELU activation"""
-     return 0.5 * x * (1.0 + torch.tanh(x * 0.7978845608 * (1.0 + 0.044715 * x * x)))
+diff --git a/megatron/core/dist_checkpointing/strategies/common.py b/megatron/core/dist_checkpointing/strategies/common.py
+index 3e9685e2b..cffd9af2a 100644
+--- a/megatron/core/dist_checkpointing/strategies/common.py
++++ b/megatron/core/dist_checkpointing/strategies/common.py
+@@ -45,7 +45,7 @@ def load_common(checkpoint_dir: str):
+
+     load_path = os.path.join(checkpoint_dir, COMMON_STATE_FNAME)
+     try:
+-        return maybe_msc.torch.load(load_path, map_location='cpu')
++        return maybe_msc.torch.load(load_path, map_location='cpu', weights_only=False)
+     except FileNotFoundError as e:
+         err_msg = f'Common file {load_path} does not exist'
+         ckpt_files = [f.name for f in maybe_msc.Path(checkpoint_dir).iterdir()]
+diff --git a/megatron/core/dist_checkpointing/strategies/torch.py b/megatron/core/dist_checkpointing/strategies/torch.py
+index d8487c4bb..c9fc61838 100644
+--- a/megatron/core/dist_checkpointing/strategies/torch.py
++++ b/megatron/core/dist_checkpointing/strategies/torch.py
+@@ -519,10 +519,8 @@ class MCoreLoadPlanner(DefaultLoadPlanner):
+     def _validate_global_shapes(self, metadata, sharded_tensors):
+         for sh_ten in sharded_tensors:
+             if sh_ten.key not in metadata.state_dict_metadata:
+-                raise KeyError(
+-                    f"{sh_ten.key} from model not in state dict:"
+-                    f" {sorted(metadata.state_dict_metadata.keys())}"
+-                )
++                logger.warning('%s from model not in state dict, will skip', sh_ten.key)
++                continue
+             loaded_shape = metadata.state_dict_metadata[sh_ten.key].size
+             expected_shape = sh_ten.global_shape
+             if loaded_shape != expected_shape:
+@@ -547,6 +545,7 @@ class MCoreLoadPlanner(DefaultLoadPlanner):
+         metadata_with_sizes = [
+             (tensor_metadata[key], tensor_metadata[key].size, sharded_tensor)
+             for key, sharded_tensor in self.allow_shape_mismatch_sharded_tensors.items()
++            if key in tensor_metadata
+         ]
+         try:
+             # Temporarily set sizes to expected shapes
+@@ -983,6 +982,7 @@ class TorchDistLoadShardedStrategy:
+                 shapes_validation_sharded_tensors=flexible_shape_sharded_tensors,
+                 allow_shape_mismatch_sharded_tensors=allow_shape_mismatch_sharded_tensors,
+                 stream_ckpt_dequant=self.stream_ckpt_dequant,
++                allow_partial_load=True,
+                 flatten_state_dict=False,
+                 flatten_sharded_tensors=False,
+             ),
 diff --git a/megatron/core/distributed/param_and_grad_buffer.py b/megatron/core/distributed/param_and_grad_buffer.py
-index a9982e176..807c4a88d 100644
+index 50fa566d1..92e1b3267 100644
 --- a/megatron/core/distributed/param_and_grad_buffer.py
 +++ b/megatron/core/distributed/param_and_grad_buffer.py
-@@ -787,45 +787,19 @@ class _ParamAndGradBuffer:
-             # Individual param/grad contexts below handle TMS regions separately.
-             mem_alloc_context = nullcontext
- 
--        def _make_no_backup_context(tag, disable, flag_name="disable_grad_buffers_cpu_backup"):
--            if disable:
--                try:
--                    from torch_memory_saver import torch_memory_saver
--                except ImportError as e:
--                    raise ImportError(
--                        f"{flag_name}=True requires torch_memory_saver. "
--                        "Install with: pip install torch-memory-saver"
--                    ) from e
--                return partial(
--                    torch_memory_saver.region,
--                    tag=tag,
--                    enable_cpu_backup=False,
+@@ -1156,12 +1156,7 @@ class _ParamAndGradBuffer:
+             if self.ddp_config.use_distributed_optimizer and any(
+                 is_mxfp8tensor(p) or is_grouped_mxfp8tensor(p) for p in self.params
+             ):
+-                self.shared_buffer = torch.zeros(
+-                    self.numel,
+-                    dtype=self.grad_dtype,
+-                    device=torch.cuda.current_device(),
+-                    requires_grad=False,
 -                )
--            return nullcontext
--        grad_mem_alloc_context = _make_no_backup_context(
--            "grad_buffer", disable_grad_buffers_cpu_backup
--        )
--        param_mem_alloc_context = _make_no_backup_context(
--            "param_buffer", disable_param_buffers_cpu_backup, "disable_param_buffers_cpu_backup"
--        )
--
-+        # NPU already wraps model construction in the outer VIME training
-+        # torch_memory_saver region. Do not open nested mem-pool regions here.
-         with mem_alloc_context():
-             # For MXFP8 param: Create a shared buffer for param AG and grad RS for memory efficiency
-             # The buffer is mapped to weight gradients whose dtype is either bf16 or FP32.
-             # It can be temporarily reused by param AG.
-             if self.ddp_config.use_distributed_optimizer and any(is_mxfp8tensor(p) for p in params):
--                shared_mem_alloc_context = (
--                    param_mem_alloc_context
--                    if disable_param_buffers_cpu_backup
--                    else grad_mem_alloc_context
-+                self.shared_buffer = torch.zeros(
-+                    self.numel,
-+                    dtype=self.grad_dtype,
-+                    device=torch.cuda.current_device(),
-+                    requires_grad=False,
-                 )
--                with shared_mem_alloc_context():
--                    self.shared_buffer = torch.zeros(
--                        self.numel,
--                        dtype=self.grad_dtype,
--                        device=torch.cuda.current_device(),
--                        requires_grad=False,
--                    )
++                self.shared_buffer = self._allocate_buffer("shared", self.numel, self.grad_dtype)
                  # For FP32 weight grads, only half of the buffer is used to store params in bf16.
                  if self.grad_dtype == torch.float32:
                      self.param_data = self.shared_buffer[: math.ceil(self.numel / 2)].view(
-@@ -837,20 +811,18 @@ class _ParamAndGradBuffer:
-             else:
+@@ -1174,18 +1169,8 @@ class _ParamAndGradBuffer:
                  # Only re-map param tensors if using distributed optimizer.
                  if self.ddp_config.use_distributed_optimizer:
--                    with param_mem_alloc_context():
--                        self.param_data = torch.zeros(
--                            self.numel,
--                            dtype=self.param_dtype,
--                            device=torch.cuda.current_device(),
--                            requires_grad=False,
--                        )
--                with grad_mem_alloc_context():
--                    self.grad_data = torch.zeros(
-+                    self.param_data = torch.zeros(
-                         self.numel,
--                        dtype=self.grad_dtype,
-+                        dtype=self.param_dtype,
-                         device=torch.cuda.current_device(),
-                         requires_grad=False,
-                     )
-+                self.grad_data = torch.zeros(
-+                    self.numel,
-+                    dtype=self.grad_dtype,
-+                    device=torch.cuda.current_device(),
-+                    requires_grad=False,
-+                )
- 
+                     numel = self.nvfp4_packed_numel if self.has_nvfp4_params else self.numel
+-                    self.param_data = torch.zeros(
+-                        numel,
+-                        dtype=self.param_dtype,
+-                        device=torch.cuda.current_device(),
+-                        requires_grad=False,
+-                    )
+-                self.grad_data = torch.zeros(
+-                    self.numel,
+-                    dtype=self.grad_dtype,
+-                    device=torch.cuda.current_device(),
+-                    requires_grad=False,
+-                )
++                    self.param_data = self._allocate_buffer("param", numel, self.param_dtype)
++                self.grad_data = self._allocate_buffer("grad", self.numel, self.grad_dtype)
+
          self.grad_data_size = 0
          self.param_data_size = 0
-diff --git a/megatron/core/fusions/fused_bias_dropout.py b/megatron/core/fusions/fused_bias_dropout.py
-index 336452562..614ee1a48 100644
---- a/megatron/core/fusions/fused_bias_dropout.py
-+++ b/megatron/core/fusions/fused_bias_dropout.py
-@@ -64,14 +64,14 @@ def bias_dropout_add_unfused(training):
-     return _bias_dropout_add
- 
- 
--@jit_fuser
+@@ -1428,6 +1413,11 @@ class _ParamAndGradBuffer:
+             dp_cp_group=self.dp_cp_group,
+         )
+
++    def _allocate_buffer(self, buffer_type, numel, dtype):
++        return torch.zeros(
++            numel, dtype=dtype, device=torch.cuda.current_device(), requires_grad=False
++        )
 +
- def bias_dropout_add_fused_train(
-     x_with_bias: Tuple[torch.Tensor, Optional[torch.Tensor]], residual: torch.Tensor, prob: float
- ) -> torch.Tensor:
-     return _bias_dropout_add_func(x_with_bias, residual, prob, True)
- 
- 
--@jit_fuser
-+
- def bias_dropout_add_fused_inference(
-     x_with_bias: Tuple[torch.Tensor, Optional[torch.Tensor]], residual: torch.Tensor, prob: float
- ) -> torch.Tensor:
-diff --git a/megatron/core/fusions/fused_bias_geglu.py b/megatron/core/fusions/fused_bias_geglu.py
-index 7a7fbe7f9..f9a438953 100644
---- a/megatron/core/fusions/fused_bias_geglu.py
-+++ b/megatron/core/fusions/fused_bias_geglu.py
-@@ -13,7 +13,7 @@ from megatron.core.jit import jit_fuser
- # x * 0.5 * (1.0 + torch.erf(x * 0.70710678))
- 
- 
--@jit_fuser
-+
- def geglu(y):
-     """Performs GEGLU (GELU-Gated Linear Unit) activation.
- 
-@@ -27,7 +27,7 @@ def geglu(y):
-     return (y_1 * 0.5 * (1.0 + torch.tanh(0.79788456 * y_1 * (1 + 0.044715 * y_1 * y_1)))) * y_2
- 
- 
--@jit_fuser
-+
- def bias_geglu(bias, y):
-     """Performs GEGLU activation with bias addition.
- 
-@@ -45,7 +45,7 @@ def bias_geglu(bias, y):
- # gradient of tanh approximation of gelu
- # gradient of actual gelu is:
- # 0.5 * (1. + torch.erf(x * 0.70710678)) + 0.3989423 * x * torch.exp(-0.5 * x * x)
--@jit_fuser
-+
- def geglu_back(g, y):
-     """Computes the gradient for the GEGLU activation.
- 
-@@ -65,7 +65,7 @@ def geglu_back(g, y):
-     return torch.cat(((g * y_2) * ff, g * (y_1 * 0.5 * (1.0 + tanh_out))), -1)
- 
- 
--@jit_fuser
-+
- def bias_geglu_back(g, y, bias):
-     """Computes the gradient for the biased GEGLU activation.
- 
-@@ -181,13 +181,13 @@ def bias_geglu_impl(input, bias):
- # ------------------------- QUICK GEGLU FUSION --------------------------
- 
- 
--@jit_fuser
-+
- def quick_gelu(y: torch.Tensor) -> torch.Tensor:
-     """Sigmoid approximation of gelu"""
-     return y * torch.sigmoid(1.702 * y)
- 
- 
--@jit_fuser
-+
- def quick_geglu(y: torch.Tensor, linear_offset: float = 0.0) -> torch.Tensor:
-     """Performs Quick-GELU-based GEGLU activation : quick_gelu(y1) * (y2 + offset).
- 
-@@ -202,7 +202,7 @@ def quick_geglu(y: torch.Tensor, linear_offset: float = 0.0) -> torch.Tensor:
-     return quick_gelu(y_1) * (y_2 + linear_offset)
- 
- 
--@jit_fuser
-+
- def weighted_quick_geglu(
-     y: torch.Tensor, weights: torch.Tensor, linear_offset: float = 0.0
- ) -> torch.Tensor:
-@@ -217,7 +217,7 @@ def weighted_quick_geglu(
- 
- 
- # gradient of sigmoid approximation of gelu
--@jit_fuser
-+
- def quick_geglu_back(g, y, linear_offset: float = 0.0) -> torch.Tensor:
-     """Backward helper for Quick-GEGLU.
- 
-@@ -236,7 +236,7 @@ def quick_geglu_back(g, y, linear_offset: float = 0.0) -> torch.Tensor:
-     return torch.cat((dy_1, dy_2), -1)
- 
- 
--@jit_fuser
-+
- def weighted_quick_geglu_back(g, y, weights, linear_offset: float = 0.0):
-     """Backward helper for weighted Quick-GEGLU.
-     Returns gradient w.r.t input `y` and `weights`.
-@@ -255,7 +255,7 @@ def weighted_quick_geglu_back(g, y, weights, linear_offset: float = 0.0):
- # ---------------- Weighted Bias Quick-GEGLU helpers -----------------
- 
- 
--@jit_fuser
-+
- def weighted_bias_quick_geglu(
-     y: torch.Tensor, bias: torch.Tensor, weights: torch.Tensor, linear_offset: float = 0.0
- ) -> torch.Tensor:
-@@ -275,7 +275,7 @@ def weighted_bias_quick_geglu(
-     return res.to(dtype)
- 
- 
--@jit_fuser
-+
- def weighted_bias_quick_geglu_back(g, y, bias, weights, linear_offset: float = 0.0):
-     """Backward helper for weighted Quick-GEGLU with bias.
- 
-diff --git a/megatron/core/fusions/fused_bias_gelu.py b/megatron/core/fusions/fused_bias_gelu.py
-index 8cc90f617..fda8f2f5f 100644
---- a/megatron/core/fusions/fused_bias_gelu.py
-+++ b/megatron/core/fusions/fused_bias_gelu.py
-@@ -13,7 +13,7 @@ from megatron.core.jit import jit_fuser
- # x * 0.5 * (1.0 + torch.erf(x * 0.70710678))
- 
- 
--@jit_fuser
-+
- def bias_gelu(bias, y):
-     x = bias + y
-     return x * 0.5 * (1.0 + torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x)))
-@@ -22,7 +22,7 @@ def bias_gelu(bias, y):
- # gradient of tanh approximation of gelu
- # gradient of actual gelu is:
- # 0.5 * (1. + torch.erf(x * 0.70710678)) + 0.3989423 * x * torch.exp(-0.5 * x * x)
--@jit_fuser
-+
- def bias_gelu_back(g, bias, y):
-     x = bias + y
-     tanh_out = torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x))
-diff --git a/megatron/core/fusions/fused_bias_swiglu.py b/megatron/core/fusions/fused_bias_swiglu.py
-index 632470876..105936786 100644
---- a/megatron/core/fusions/fused_bias_swiglu.py
-+++ b/megatron/core/fusions/fused_bias_swiglu.py
-@@ -12,7 +12,7 @@ from megatron.core.utils import nvtx_decorator
- ###### BIAS SWIGLU FUSION/ NO AUTOGRAD ################
- 
- 
--@jit_fuser
-+
- def swiglu(y):
-     """Performs SwiGLU (Swish-Gated Linear Unit) activation function.
- 
-@@ -26,7 +26,7 @@ def swiglu(y):
-     return F.silu(y_1) * y_2
- 
- 
--@jit_fuser
-+
- def bias_swiglu(y, bias):
-     """Performs SwiGLU activation with bias addition.
- 
-@@ -41,7 +41,7 @@ def bias_swiglu(y, bias):
-     return swiglu(y)
- 
- 
--@jit_fuser
-+
- def weighted_swiglu(y, weights):
-     dtype = y.dtype
-     res = swiglu(y) * weights
-@@ -51,7 +51,7 @@ def weighted_swiglu(y, weights):
- # gradient of tanh approximation of gelu
- # gradient of actual gelu is:
- # 0.5 * (1. + torch.erf(x * 0.70710678)) + 0.3989423 * x * torch.exp(-0.5 * x * x)
--@jit_fuser
-+
- def swiglu_back(g, y):
-     """Computes the gradient for the SwiGLU activation function.
- 
-@@ -69,7 +69,7 @@ def swiglu_back(g, y):
+     def _compute_nvfp4_packed_layout(self, params_with_names):
+         """Derive packed NVFP4 index map and bucket indices from the primary layout.
+
+diff --git a/megatron/core/fusions/fused_mla_yarn_rope_apply.py b/megatron/core/fusions/fused_mla_yarn_rope_apply.py
+index 1fd5dcfae..5938fc04e 100644
+--- a/megatron/core/fusions/fused_mla_yarn_rope_apply.py
++++ b/megatron/core/fusions/fused_mla_yarn_rope_apply.py
+@@ -385,6 +385,7 @@ def rotary_fwd_kv_kernel(
+     SIN,
+     emb_dim: tl.constexpr,
+     k_dim: tl.constexpr,
++    k_dim_ceil: tl.constexpr,
+     v_dim: tl.constexpr,
+     head_num: tl.constexpr,
+     batch_size,
+@@ -434,21 +435,27 @@ def rotary_fwd_kv_kernel(
+     cos_right = tl.load(COS + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2))
+     sin_right = tl.load(SIN + token_idx * emb_dim + emb_dim // 2 + tl.arange(0, emb_dim // 2))
+
+-    KV_ptr = KV + pid_m * stride_kv_seq + pid_head * BLOCK_H * stride_kv_nheads
+-    kv_off = tl.arange(0, BLOCK_H)[:, None] * stride_kv_nheads
+-    mask = kv_off < head_num * stride_kv_nheads
+-    k_in_off = kv_off + tl.arange(0, k_dim)[None, :]
+-    v_in_off = kv_off + k_dim + tl.arange(0, v_dim)[None, :]
+-    k = tl.load(KV_ptr + k_in_off, mask=mask)
+-    v = tl.load(KV_ptr + v_in_off, mask=mask)
++    KV_ptr = KV + pid_m * stride_kv_seq # + pid_head * BLOCK_H * stride_kv_nheads
++    ki_range = tl.arange(0, BLOCK_H)[:, None] + pid_head * BLOCK_H
++    kj_range = tl.arange(0, k_dim_ceil)[None, :]
++    mask_k = (ki_range < head_num) & (kj_range < k_dim)
++    mask_v = ki_range < head_num
++    k_off = ki_range * stride_kv_nheads + kj_range
++    if v_dim > 0:
++        v_off = ki_range * stride_kv_nheads + k_dim + tl.arange(0, v_dim)[None, :]
++        v = tl.load(KV_ptr + v_off, mask=mask_v)
++    else:
++        v = tl.zeros((BLOCK_H, 1), dtype=KV.dtype.element_ty)
++    k = tl.load(KV_ptr + k_off, mask=mask_k)
+
+-    K_ptr = O_KEY + pid_m * stride_k_seq + pid_head * BLOCK_H * stride_k_nheads
+-    V_ptr = O_VALUE + pid_m * stride_v_seq + pid_head * BLOCK_H * stride_v_nheads
++    K_ptr = O_KEY + pid_m * stride_k_seq # + pid_head * BLOCK_H * stride_k_nheads
++    V_ptr = O_VALUE + pid_m * stride_v_seq # + pid_head * BLOCK_H * stride_v_nheads
+
+-    k_out_off = tl.arange(0, BLOCK_H)[:, None] * stride_k_nheads + tl.arange(0, k_dim)[None, :]
+-    v_out_off = tl.arange(0, BLOCK_H)[:, None] * stride_v_nheads + tl.arange(0, v_dim)[None, :]
+-    tl.store(K_ptr + k_out_off, k, mask=mask)
+-    tl.store(V_ptr + v_out_off, v, mask=mask)
++    k_out_off = ki_range * stride_k_nheads + kj_range
++    tl.store(K_ptr + k_out_off, k, mask=mask_k)
++    if v_dim > 0:
++        v_out_off = ki_range * stride_v_nheads + tl.arange(0, v_dim)[None, :]
++        tl.store(V_ptr + v_out_off, v, mask=mask_v)
+
+     EMB = K_POS_EMB + pid_m * stride_emb_seq
+     # x1 = t[..., 0::2], x2 = t[..., 1::2]
+@@ -460,14 +467,16 @@ def rotary_fwd_kv_kernel(
+     x_left = x_left.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
+     x_right = x_right.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
+
++    x_range = tl.arange(0, BLOCK_H)[:, None] + pid_head * BLOCK_H
++    mask_x = x_range < head_num
+     x_left_off = (
+-        tl.arange(0, BLOCK_H)[:, None] * stride_k_nheads
++        x_range * stride_k_nheads
+         + k_dim
+         + tl.arange(0, emb_dim // 2)[None, :]
      )
- 
- 
--@jit_fuser
+     x_right_off = x_left_off + emb_dim // 2
+-    tl.store(K_ptr + x_left_off, x_left, mask=mask)
+-    tl.store(K_ptr + x_right_off, x_right, mask=mask)
++    tl.store(K_ptr + x_left_off, x_left, mask=mask_x)
++    tl.store(K_ptr + x_right_off, x_right, mask=mask_x)
+
+
+ @triton.autotune(
+@@ -493,6 +502,7 @@ def rotary_bwd_kv_kernel(
+     SIN,
+     emb_dim: tl.constexpr,
+     k_dim: tl.constexpr,
++    k_dim_ceil: tl.constexpr,
+     v_dim: tl.constexpr,
+     head_num: tl.constexpr,
+     batch_size,
+@@ -533,27 +543,32 @@ def rotary_bwd_kv_kernel(
+     else:
+         token_idx = _get_thd_token_idx(cu_seqlens_kv, pid_m, seq_num, cp_rank, cp_size)
+
+-    dKV_ptr = dKV + pid_m * stride_dkv_seq + pid_head * BLOCK_H * stride_dkv_nheads
+-    dkv_off = tl.arange(0, BLOCK_H)[:, None] * stride_dkv_nheads
+-    mask = dkv_off < head_num * stride_dkv_nheads
+-    dk_out_off = dkv_off + tl.arange(0, k_dim)[None, :]
+-    dv_out_off = dkv_off + k_dim + tl.arange(0, v_dim)[None, :]
+-
+-    dK_ptr = dK + pid_m * stride_dk_seq + pid_head * BLOCK_H * stride_dk_nheads
+-    dV_ptr = dV + pid_m * stride_dv_seq + pid_head * BLOCK_H * stride_dv_nheads
+-    dk_in_off = tl.arange(0, BLOCK_H)[:, None] * stride_dk_nheads + tl.arange(0, k_dim)[None, :]
+-    dv_in_off = tl.arange(0, BLOCK_H)[:, None] * stride_dv_nheads + tl.arange(0, v_dim)[None, :]
+-    dk = tl.load(dK_ptr + dk_in_off, mask=mask)
+-    dv = tl.load(dV_ptr + dv_in_off, mask=mask)
+-    tl.store(dKV_ptr + dk_out_off, dk, mask=mask)
+-    tl.store(dKV_ptr + dv_out_off, dv, mask=mask)
++    dKV_ptr = dKV + pid_m * stride_dkv_seq # + pid_head * BLOCK_H * stride_dkv_nheads
++    ki_range = tl.arange(0, BLOCK_H)[:, None] + pid_head * BLOCK_H
++    kj_range = tl.arange(0, k_dim_ceil)[None, :]
++    mask_k = (ki_range < head_num) & (kj_range < k_dim)
++    mask_v = ki_range < head_num
++    dk_out_off = ki_range * stride_dkv_nheads + kj_range
 +
- def bias_swiglu_back(g, y, bias):
-     """Computes the gradient for the biased SwiGLU activation function.
- 
-@@ -86,7 +86,7 @@ def bias_swiglu_back(g, y, bias):
-     return swiglu_back(g, y)
- 
- 
--@jit_fuser
++    dK_ptr = dK + pid_m * stride_dk_seq # + pid_head * BLOCK_H * stride_dk_nheads
++    dV_ptr = dV + pid_m * stride_dv_seq # + pid_head * BLOCK_H * stride_dv_nheads
++    dk_in_off = ki_range * stride_dk_nheads + kj_range
 +
- def weighted_swiglu_back(g, y, weights):
-     input_dtype = y.dtype
-     w_dtype = weights.dtype
-diff --git a/megatron/core/fusions/fused_cross_entropy.py b/megatron/core/fusions/fused_cross_entropy.py
-index 23e4b6031..4d447e0e0 100644
---- a/megatron/core/fusions/fused_cross_entropy.py
-+++ b/megatron/core/fusions/fused_cross_entropy.py
-@@ -9,7 +9,7 @@ from megatron.core.tensor_parallel.cross_entropy import VocabParallelCrossEntrop
- from megatron.core.tensor_parallel.utils import VocabUtility
- 
- 
--@jit_fuser
++    dk = tl.load(dK_ptr + dk_in_off, mask=mask_k)
++    tl.store(dKV_ptr + dk_out_off, dk, mask=mask_k)
 +
- def calculate_logits_max(vocab_parallel_logits: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-     """
-     Calculates the maximum logits of the predicted tokens.
-@@ -22,7 +22,7 @@ def calculate_logits_max(vocab_parallel_logits: torch.Tensor) -> Tuple[torch.Ten
-     return vocab_parallel_logits, logits_max
- 
- 
--@jit_fuser
-+
- def calculate_predicted_logits(
-     vocab_parallel_logits: torch.Tensor,
-     target: torch.Tensor,
-@@ -44,7 +44,7 @@ def calculate_predicted_logits(
-     return target_mask, masked_target_1d, predicted_logits_sum_exp_logits, exp_logits
- 
- 
--@jit_fuser
-+
- def calculate_cross_entropy_loss(
-     exp_logits: torch.Tensor, predicted_logits_sum_exp_logits: torch.Tensor
- ) -> Tuple[torch.Tensor, torch.Tensor]:
-@@ -61,7 +61,7 @@ def calculate_cross_entropy_loss(
-     return exp_logits, loss
- 
- 
--@jit_fuser
-+
- def calculate_gradients(
-     softmax: torch.Tensor,
-     grad_output: torch.Tensor,
-diff --git a/megatron/core/fusions/fused_pad_routing_map.py b/megatron/core/fusions/fused_pad_routing_map.py
-index c382178b6..563279edd 100644
---- a/megatron/core/fusions/fused_pad_routing_map.py
-+++ b/megatron/core/fusions/fused_pad_routing_map.py
-@@ -70,7 +70,7 @@ def _pad_routing_map_kernel(
-     tl.store(output_row_ptr + token_indices, output_row, mask=token_mask)
- 
- 
--@jit_fuser
-+
- def fused_pad_routing_map(routing_map: torch.Tensor, pad_multiple: int) -> torch.Tensor:
-     """Fused version of pad_routing_map.
-     Args:
-diff --git a/megatron/core/fusions/fused_weighted_squared_relu.py b/megatron/core/fusions/fused_weighted_squared_relu.py
-index 02dabc14c..137022386 100644
---- a/megatron/core/fusions/fused_weighted_squared_relu.py
-+++ b/megatron/core/fusions/fused_weighted_squared_relu.py
-@@ -10,7 +10,7 @@ from megatron.core.utils import nvtx_decorator
- ######################  WEIGHTED SQUARED ReLU FUSION  ######################
- 
- 
--@jit_fuser
-+
- def weighted_squared_relu(x: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-     """Element-wise weight applied after Squared-ReLU.
- 
-@@ -28,7 +28,7 @@ def weighted_squared_relu(x: torch.Tensor, weights: torch.Tensor) -> torch.Tenso
-     return res.to(out_dtype)
- 
- 
--@jit_fuser
-+
- def _squared_relu_back(g: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-     """Gradient of Squared-ReLU.
- 
-@@ -37,7 +37,7 @@ def _squared_relu_back(g: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-     return g * 2 * F.relu(x)
- 
- 
--@jit_fuser
-+
- def weighted_squared_relu_back(g: torch.Tensor, x: torch.Tensor, weights: torch.Tensor):
-     """Backward for weighted Squared-ReLU.
- 
++    if v_dim > 0:
++        dv_out_off = ki_range * stride_dkv_nheads + k_dim + tl.arange(0, v_dim)[None, :]
++        dv_in_off = ki_range * stride_dv_nheads + tl.arange(0, v_dim)[None, :]
++        dv = tl.load(dV_ptr + dv_in_off, mask=mask_v)
++        tl.store(dKV_ptr + dv_out_off, dv, mask=mask_v)
+
+     if pid_head == 0:
+         x_left_accum = tl.zeros((BLOCK_H, emb_dim // 2), dtype=tl.float32)
+         x_right_accum = tl.zeros((BLOCK_H, emb_dim // 2), dtype=tl.float32)
+         for i in tl.static_range(triton.cdiv(head_num, BLOCK_H)):
+-            dK_ptr = dK + pid_m * stride_dk_seq + i * BLOCK_H * stride_dk_nheads
+-            x_off = tl.arange(0, BLOCK_H)[:, None] * stride_dk_nheads + k_dim
++            dK_ptr = dK + pid_m * stride_dk_seq # + i * BLOCK_H * stride_dk_nheads
++            x_off = tl.arange(0, BLOCK_H)[:, None] * stride_dk_nheads + k_dim + i * BLOCK_H * stride_dk_nheads
+             mask = x_off < head_num * stride_dk_nheads
+             x_left_off = x_off + tl.arange(0, emb_dim // 2)[None, :]
+             x_right_off = x_left_off + emb_dim // 2
+@@ -632,6 +647,7 @@ class ApplyMLARotaryEmbKV(torch.autograd.Function):
+
+         o_key = kv.new_empty(total_seqlen, nheads, emb_dim + k_dim)
+         o_value = kv.new_empty(total_seqlen, nheads, v_dim)
++        k_dim_ceil = triton.next_power_of_2(k_dim)
+
+         grid = lambda META: (total_seqlen, triton.cdiv(nheads, META["BLOCK_H"]))
+         rotary_fwd_kv_kernel[grid](
+@@ -643,6 +659,7 @@ class ApplyMLARotaryEmbKV(torch.autograd.Function):
+             sin,
+             emb_dim,
+             k_dim,
++            k_dim_ceil,
+             v_dim,
+             nheads,
+             batch_size,
+@@ -668,7 +685,7 @@ class ApplyMLARotaryEmbKV(torch.autograd.Function):
+         ctx.cp_size = cp_size
+         if cu_seqlens_kv is None:
+             o_key = o_key.view(max_seqlen, -1, nheads, emb_dim + k_dim)
+-            o_value = o_value.view(max_seqlen, -1, nheads, v_dim)
++            o_value = o_value.view(max_seqlen, batch_size, nheads, v_dim)
+         return o_key, o_value
+
+     @staticmethod
+@@ -689,7 +706,7 @@ class ApplyMLARotaryEmbKV(torch.autograd.Function):
+             # sbhd
+             max_seqlen, batch_size, nheads, _ = dk.shape
+             dk = dk.contiguous().view(-1, nheads, ctx.emb_dim + ctx.k_dim)
+-            dv = dv.contiguous().view(-1, nheads, ctx.v_dim)
++            dv = dv.contiguous().view(max_seqlen * batch_size, nheads, ctx.v_dim)
+             total_seqlen = dk.shape[0]
+         else:
+             # thd
+@@ -700,6 +717,7 @@ class ApplyMLARotaryEmbKV(torch.autograd.Function):
+
+         d_kv = dk.new_empty(total_seqlen, nheads, ctx.k_dim + ctx.v_dim)
+         d_emb = dk.new_empty(total_seqlen, 1, ctx.emb_dim)
++        k_dim_ceil = triton.next_power_of_2(ctx.k_dim)
+
+         grid = lambda META: (total_seqlen, triton.cdiv(nheads, META["BLOCK_H"]))
+         rotary_bwd_kv_kernel[grid](
+@@ -711,6 +729,7 @@ class ApplyMLARotaryEmbKV(torch.autograd.Function):
+             sin,
+             ctx.emb_dim,
+             ctx.k_dim,
++            k_dim_ceil,
+             ctx.v_dim,
+             nheads,
+             batch_size,
 diff --git a/megatron/core/inference/contexts/dynamic_context.py b/megatron/core/inference/contexts/dynamic_context.py
-index 2b241c86d..cca4503d5 100644
+index 102a5e5e5..d6978a437 100644
 --- a/megatron/core/inference/contexts/dynamic_context.py
 +++ b/megatron/core/inference/contexts/dynamic_context.py
-@@ -51,12 +51,8 @@ try:
- except:
-     HAVE_PACKAGING = False
- 
--try:
--    import flashinfer  # pylint: disable=unused-import
- 
--    HAVE_FLASHINFER = True
--except ImportError:
--    HAVE_FLASHINFER = False
-+HAVE_FLASHINFER = False
- 
+@@ -67,8 +67,9 @@ except ImportError:
+     HAVE_FLASHINFER = False
+
  try:
-     from torch_memory_saver import torch_memory_saver
-diff --git a/megatron/core/models/gpt/gpt_layer_specs.py b/megatron/core/models/gpt/gpt_layer_specs.py
-index a9d3583e5..f2adaceb2 100755
---- a/megatron/core/models/gpt/gpt_layer_specs.py
-+++ b/megatron/core/models/gpt/gpt_layer_specs.py
-@@ -209,7 +209,7 @@ def get_gpt_layer_with_transformer_engine_spec(
-             'The fp8 argument in "get_gpt_layer_with_transformer_engine_spec" has been deprecated'
-             " and will be removed soon. Please update your code accordingly."
+-    from torch_memory_saver import torch_memory_saver
++    from torch_memory_saver import TorchMemorySaver
+
++    torch_memory_saver = TorchMemorySaver()
+     torch_memory_saver.hook_mode = "torch"
+     HAVE_TORCH_MEMORY_SAVER = True
+ except ImportError:
+diff --git a/megatron/core/models/gpt/gpt_model.py b/megatron/core/models/gpt/gpt_model.py
+index ff3514b74..c6bd29fd2 100644
+--- a/megatron/core/models/gpt/gpt_model.py
++++ b/megatron/core/models/gpt/gpt_model.py
+@@ -533,6 +533,7 @@ class GPTModel(LanguageModule):
+         padding_mask: Optional[Tensor] = None,
+         output_processor: Optional[Callable[..., Tensor]] = None,
+         output_processor_context: Optional[Any] = None,
++        mtp_kwargs: Optional[dict] = None,
+     ) -> Tensor:
+         """Forward function of the GPT Model This function passes the input tensors
+         through the embedding layer, and then the decoder and finally into the post
+@@ -615,6 +616,7 @@ class GPTModel(LanguageModule):
+             inference_context=inference_context,
+             output_processor=output_processor,
+             output_processor_context=output_processor_context,
++            mtp_kwargs=mtp_kwargs,
          )
--
-+    from megatron.core.extensions.transformer_engine_spec_provider import TESpecProvider
-     if use_kitchen:
-         assert HAVE_KITCHEN
-         backend: BackendSpecProvider = KitchenSpecProvider(
+
+     def _postprocess(
+@@ -639,6 +641,7 @@ class GPTModel(LanguageModule):
+         inference_context=None,
+         output_processor=None,
+         output_processor_context=None,
++        mtp_kwargs=None,
+     ):
+         """Postprocesses decoder hidden states to generate logits or compute loss.
+
+@@ -660,10 +663,12 @@ class GPTModel(LanguageModule):
+         )
+
+         # logits and loss
++        mtp_labels = (mtp_kwargs or {}).get("mtp_labels")
++        compute_mtp_loss = labels is not None or mtp_labels is not None
+         output_weight = None
+         if self.share_embeddings_and_output_weights:
+             output_weight = self.shared_embedding_or_output_weight()
+-        if mtp_in_postprocess and not (in_inference_mode or is_spec_decode):
++        if mtp_in_postprocess and compute_mtp_loss and not (in_inference_mode or is_spec_decode):
+             hidden_states = self.mtp(
+                 input_ids=input_ids,
+                 position_ids=position_ids,
+@@ -696,7 +701,7 @@ class GPTModel(LanguageModule):
+                     )
+                 else:
+                     inference_context.mtp_decoder_hidden_states = hidden_states
+-            elif not in_inference_mode:
++            elif not in_inference_mode and compute_mtp_loss:
+                 # In training/eval, use the utility function for processing MTP loss/scaling.
+                 hidden_states = process_mtp_loss(
+                     hidden_states=hidden_states,
+@@ -712,7 +717,7 @@ class GPTModel(LanguageModule):
+                     tp_group=self.tp_group,
+                     packed_seq_params=packed_seq_params,
+                     scale_logits_fn=self._scale_logits if self.config.use_mup else None,
+-                    input_ids=input_ids,
++                    input_ids=mtp_labels,
+                 )
+         sequence_parallel_override = False
+
 diff --git a/megatron/core/optimizer/distrib_optimizer.py b/megatron/core/optimizer/distrib_optimizer.py
-index dd8590a79..3736b0e31 100644
+index 782d32635..4de315ed0 100644
 --- a/megatron/core/optimizer/distrib_optimizer.py
 +++ b/megatron/core/optimizer/distrib_optimizer.py
-@@ -659,10 +659,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
-                     break
-         elif USING_TE_OPTIMIZER or USING_APEX_OPTIMIZER:
-             # Extract 'step', for TE FusedAdam support.
-+            # Use int() to convert tensors to Python scalars so set() deduplicates
-+            # by value (PyTorch tensor hashing is identity-based).
-             steps = list(
-                 set(
-                     [
--                        g["step"]
-+                        int(g["step"])
-                         for g in inner_state_dict["param_groups"]
-                         if len(g["params"]) > 0 and "step" in g
-                     ]
-@@ -824,7 +826,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
- 
-         # Extract 'step', for non-Apex/TE support.
-         if not HAVE_APEX_OR_TE:
--            steps = list(set([g["step"] for g in state_dict["optimizer"]["param_groups"]]))
-+            steps = list(set([int(g["step"]) for g in state_dict["optimizer"]["param_groups"]]))
-             assert len(steps) == 1
-             step = torch.tensor(steps[0], dtype=torch.float)
- 
-diff --git a/megatron/core/ssm/gated_delta_net.py b/megatron/core/ssm/gated_delta_net.py
-index 601a72a43..ec114cf38 100644
---- a/megatron/core/ssm/gated_delta_net.py
-+++ b/megatron/core/ssm/gated_delta_net.py
-@@ -465,7 +465,7 @@ class GatedDeltaNet(MegatronModule):
- 
-         return out, out_bias
- 
--    @jit_fuser
-+    
-     def _apply_gated_norm(self, x, gate):
-         # Output Norm
-         x_dtype = x.dtype
+@@ -877,6 +877,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+                 # TE FusedAdam will not accumulate step for empty param groups, so we need to
+                 # align the step across param groups.
+                 param_group["step"] = int(step)
++            if "step" in param_group and param_group["step"] is None:
++                del param_group["step"]
+
+         # Grad scaler state.
+         if self.grad_scaler:
+@@ -1247,6 +1249,11 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+                     bucket_state = []
+                     for model_param, param_range_map in gbuf_range_map["param_map"].items():
+                         tensors = self._get_main_param_and_optimizer_states(model_param)
++                        if "step" in tensors:
++                            # Step is restored from optimizer param_groups. Keeping it in
++                            # bucket state makes it common checkpoint state whose list
++                            # skeleton depends on save-time optimizer placement.
++                            del tensors["step"]
+                         tensors.update(
+                             {
+                                 "gbuf_local_start": param_range_map["gbuf_local"].start,
+@@ -2089,6 +2096,11 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+                     for src_tensors, (model_param, param_range_map) in zip(
+                         bucket_state, gbuf_range_map["param_map"].items()
+                     ):
++                        # Local metadata used for checkpoint merging/filtering, not optimizer state.
++                        src_tensors.pop('padding', None)
++                        # Step is restored from optimizer param_groups.
++                        src_tensors.pop('step', None)
++
+                         # Main param & optimizer states.
+                         self._set_main_param_and_optimizer_states(model_param, src_tensors)
+
+diff --git a/megatron/training/argument_utils.py b/megatron/training/argument_utils.py
+index 70f26c64d..6b35b88c8 100644
+--- a/megatron/training/argument_utils.py
++++ b/megatron/training/argument_utils.py
+@@ -166,7 +166,7 @@ class ArgumentGroupFactory:
+         argparse_kwargs = {}
+         argparse_kwargs["arg_names"] = [self._format_arg_name(attribute.name)]
+         argparse_kwargs["dest"] = attribute.name
+-        argparse_kwargs["help"] = self.field_docstrings[attribute.name] if attribute.name in self.field_docstrings else ""
++        argparse_kwargs["help"] = self.field_docstrings.get(attribute.name, "").replace("%", "%%")
+
+         # dataclasses specifies that both should not be set
+         if isinstance(attribute.default, type(dataclasses.MISSING)):
+diff --git a/megatron/training/checkpointing.py b/megatron/training/checkpointing.py
+index eee57040d..3503d96bf 100644
+--- a/megatron/training/checkpointing.py
++++ b/megatron/training/checkpointing.py
+@@ -252,8 +252,8 @@ def get_load_checkpoint_path_by_args(args, load_arg='load'):
+             iteration, release = read_metadata(tracker_filename)
+
+     # Allow user to specify the loaded iteration.
+-    if getattr(args, 'ckpt_step', None):
+-        iteration = args.ckpt_step
++    if getattr(args, "ckpt_step", None) is not None:
++        iteration, release = args.ckpt_step, False
+
+     return get_checkpoint_name(load_dir, iteration, release, return_base_dir=True)
+
+@@ -1650,8 +1650,10 @@ def _load_base_checkpoint(
+         if args.non_persistent_global_ckpt_dir or load_dir is None
+         else os.path.join(load_dir, _NON_PERSISTENT_CKPT_SUBDIR)
+     )
+-    non_persistent_iteration = _get_non_persistent_iteration(
+-        non_persistent_global_dir, args, checkpointing_context
++    non_persistent_iteration = (
++        _get_non_persistent_iteration(non_persistent_global_dir, args, checkpointing_context)
++        if getattr(args, "ckpt_step", None) is None
++        else -1
+     )
+     iteration, release = -1, False
+     tracker_filename = 'because load directory is not defined'
+@@ -1661,8 +1663,8 @@ def _load_base_checkpoint(
+             iteration, release = read_metadata(tracker_filename)
+
+     # Allow user to specify the loaded iteration.
+-    if getattr(args, 'ckpt_step', None):
+-        iteration = args.ckpt_step
++    if getattr(args, "ckpt_step", None) is not None:
++        iteration, release = args.ckpt_step, False
+
+     # Record the iteration loaded (stored separately from args to avoid
+     # polluting checkpoints, since args is saved in checkpoints).
 diff --git a/megatron/core/transformer/attention.py b/megatron/core/transformer/attention.py
-index bc5e4e2ee..d223e774e 100644
 --- a/megatron/core/transformer/attention.py
 +++ b/megatron/core/transformer/attention.py
-@@ -1219,7 +1219,7 @@ class Attention(MegatronModule, ABC):
- 
-         return output, bias
- 
--    @jit_fuser
-+    
-     def _apply_output_gate(self, x, gate):
-         x_dtype = x.dtype
-         gate = gate.contiguous()
-diff --git a/megatron/core/transformer/module.py b/megatron/core/transformer/module.py
-index c30c107e7..f4340f4d1 100644
---- a/megatron/core/transformer/module.py
-+++ b/megatron/core/transformer/module.py
-@@ -17,9 +17,9 @@ from megatron.core.transformer.utils import (
-     sharded_state_dict_default,
- )
- 
--_FLOAT_TYPES = (torch.FloatTensor, torch.cuda.FloatTensor)
--_HALF_TYPES = (torch.HalfTensor, torch.cuda.HalfTensor)
--_BF16_TYPES = (torch.BFloat16Tensor, torch.cuda.BFloat16Tensor)
-+_FLOAT_TYPES = (torch.FloatTensor, torch.cuda.FloatTensor, torch.npu.FloatTensor)
-+_HALF_TYPES = (torch.HalfTensor, torch.cuda.HalfTensor, torch.npu.HalfTensor)
-+_BF16_TYPES = (torch.BFloat16Tensor, torch.cuda.BFloat16Tensor, torch.npu.BFloat16Tensor)
- 
- 
- def param_is_not_shared(param):  # pylint: disable=missing-function-docstring
-diff --git a/megatron/core/transformer/moe/experts.py b/megatron/core/transformer/moe/experts.py
-index d8e753422..aff929985 100644
---- a/megatron/core/transformer/moe/experts.py
-+++ b/megatron/core/transformer/moe/experts.py
-@@ -92,7 +92,7 @@ class GroupedMLP(MegatronModule):
-             if self.config.activation_func not in (F.silu, F.gelu):
-                 raise ValueError("Activation function must be silu or gelu when using GroupedMLP.")
- 
--            @jit_fuser
-+            
-             def glu(x):
-                 x = torch.chunk(x, 2, dim=-1)
-                 return self.config.activation_func(x[0]) * x[1]
-@@ -109,7 +109,7 @@ class GroupedMLP(MegatronModule):
-                 "moe_act recompute for fp8 or fp4 cannot work with the legacy GroupedMLP."
-             )
- 
--        @jit_fuser
-+        
-         def activation_func_with_probs(x, probs):
-             dtype = x.dtype
-             res = self.activation_func(x) * probs
-diff --git a/megatron/core/transformer/moe/token_dispatcher.py b/megatron/core/transformer/moe/token_dispatcher.py
-index 327dbc8a3..b007d6662 100644
---- a/megatron/core/transformer/moe/token_dispatcher.py
-+++ b/megatron/core/transformer/moe/token_dispatcher.py
-@@ -1402,7 +1402,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
-         ).contiguous()
-         return routing_map, probs
- 
--    @jit_fuser
-+    
-     def dispatch_preprocess(
-         self, hidden_states: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor
-     ):
-diff --git a/megatron/core/transformer/multi_token_prediction.py b/megatron/core/transformer/multi_token_prediction.py
-index 63f81465d..c47baeaea 100755
---- a/megatron/core/transformer/multi_token_prediction.py
-+++ b/megatron/core/transformer/multi_token_prediction.py
-@@ -7,6 +7,7 @@ from typing import Callable, List, Optional, Union
- 
- import torch
- from torch import Tensor
-+import warnings
- 
- from megatron.core import InferenceParams, parallel_state, tensor_parallel
- from megatron.core.dist_checkpointing.mapping import ShardedStateDict
-diff --git a/megatron/core/transformer/torch_norm.py b/megatron/core/transformer/torch_norm.py
-index d0ceca7af..f16796680 100644
---- a/megatron/core/transformer/torch_norm.py
-+++ b/megatron/core/transformer/torch_norm.py
-@@ -69,7 +69,7 @@ class L2Norm(torch.nn.Module):
-         self.hidden_size = hidden_size
-         self.eps = eps
- 
--    @jit_fuser
-+    
-     def _norm(self, x):
-         """
-         Performs the actual L2 normalization.
-diff --git a/megatron/core/transformer/utils.py b/megatron/core/transformer/utils.py
-index 880c53099..dbc95736e 100644
---- a/megatron/core/transformer/utils.py
-+++ b/megatron/core/transformer/utils.py
-@@ -51,7 +51,7 @@ def attention_mask_func(attention_scores, attention_mask):
-     return attention_scores
- 
- 
--@jit_fuser
-+
- def gelu_impl(x):
-     """OpenAI's gelu implementation."""
-     return 0.5 * x * (1.0 + torch.tanh(0.7978845608028654 * x * (1.0 + 0.044715 * x * x)))
-@@ -65,7 +65,7 @@ def openai_gelu(x):
- # This is actually Python equivalent of torch.nn.functional.gelu(), also with
- # type hints for ONNX exporter
- # pylint: disable=missing-function-docstring
--@jit_fuser
-+
- def erf_gelu(x):
-     return (
-         x * 0.5 * (torch.erf(x / 1.41421).to(dtype=x.dtype) + torch.ones_like(x).to(dtype=x.dtype))
-diff --git a/megatron/legacy/model/fused_bias_gelu.py b/megatron/legacy/model/fused_bias_gelu.py
-index e00e63148..ffe4b7ec6 100644
---- a/megatron/legacy/model/fused_bias_gelu.py
-+++ b/megatron/legacy/model/fused_bias_gelu.py
-@@ -12,7 +12,7 @@ from megatron.core.jit import jit_fuser
- # actual gelu is:
- # x * 0.5 * (1.0 + torch.erf(x * 0.70710678))
- 
--@jit_fuser
-+
- def bias_gelu(bias, y):
-     x = bias + y
-     return  x * 0.5 * (1.0 + torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x)))
-@@ -20,7 +20,7 @@ def bias_gelu(bias, y):
- # gradient of tanh approximation of gelu
- # gradient of actual gelu is:
- # 0.5 * (1. + torch.erf(x * 0.70710678)) + 0.3989423 * x * torch.exp(-0.5 * x * x)
--@jit_fuser
-+
- def bias_gelu_back(g, bias, y):
-     x = bias + y
-     tanh_out = torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x))
-diff --git a/megatron/legacy/model/transformer.py b/megatron/legacy/model/transformer.py
-index ca3414eec..5dd9e4798 100644
---- a/megatron/legacy/model/transformer.py
-+++ b/megatron/legacy/model/transformer.py
-@@ -856,7 +856,7 @@ def get_bias_dropout_add(training):
-     return _bias_dropout_add
- 
- 
--@jit_fuser
-+
- def bias_dropout_add_fused_train(x: torch.Tensor,
-                                  bias: Optional[torch.Tensor],
-                                  residual: torch.Tensor,
-@@ -864,7 +864,7 @@ def bias_dropout_add_fused_train(x: torch.Tensor,
-     return bias_dropout_add(x, bias, residual, prob, True)
- 
- 
--@jit_fuser
-+
- def bias_dropout_add_fused_inference(x: torch.Tensor,
-                                      bias: Optional[torch.Tensor],
-                                      residual: torch.Tensor,
-diff --git a/megatron/legacy/model/utils.py b/megatron/legacy/model/utils.py
-index 5762000d5..534858df7 100644
---- a/megatron/legacy/model/utils.py
-+++ b/megatron/legacy/model/utils.py
-@@ -43,7 +43,7 @@ def get_linear_layer(rows, columns, init_method):
-     return layer
- 
- 
--@jit_fuser
-+
- def gelu_impl(x):
-     """OpenAI's gelu implementation."""
-     return 0.5 * x * (1.0 + torch.tanh(0.7978845608028654 * x *
-@@ -54,7 +54,7 @@ def openai_gelu(x):
- 
- 
- #This is actually Python equivalent of torch.nn.functional.gelu(), also with type hints for ONNX exporter
--@jit_fuser
-+
- def erf_gelu(x):
-     return x * 0.5 * (torch.erf(x / 1.41421).to(dtype=x.dtype)+torch.ones_like(x).to(dtype=x.dtype))
- 
-diff --git a/megatron/training/utils.py b/megatron/training/utils.py
-index 7709f6513..65b8f7fca 100644
---- a/megatron/training/utils.py
-+++ b/megatron/training/utils.py
-@@ -446,6 +446,8 @@ def is_first_or_last_pipeline_stage(vp_stage):
- 
- def get_device_arch_version():
-     """Returns GPU arch version (8: Ampere, 9: Hopper, 10: Blackwell, ...)"""
-+    if hasattr(torch, 'npu') and torch.npu.is_available():
-+        return 10  # NPU: treat as Blackwell to avoid CUDA restrictions
-     return torch.cuda.get_device_properties(torch.device("cuda:0")).major
- 
- 
+@@ -91,7 +91,6 @@ try:
+     from importlib.metadata import PackageNotFoundError
+     from importlib.metadata import version as _get_dist_version
+
+-    from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_func
+     from packaging.version import Version as _Version
+
+     try:
+@@ -99,6 +98,8 @@ try:
+         HAVE_FA4 = _Version(_get_dist_version("flash-attn-4")) >= _Version(_MIN_FA4_VERSION)
+     except PackageNotFoundError:
+         HAVE_FA4 = False
++    if HAVE_FA4:
++        from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_func
+ except ImportError:
+     HAVE_FA4 = False
+
+diff --git a/megatron/training/training.py b/megatron/training/training.py
+index 57b8efe93..e7376a7f8 100644
+--- a/megatron/training/training.py
++++ b/megatron/training/training.py
+@@ -222,8 +222,9 @@ except ImportError:
+     HAVE_FSDP2 = False
+
+ try:
+-    from torch_memory_saver import torch_memory_saver
++    from torch_memory_saver import TorchMemorySaver
+
++    torch_memory_saver = TorchMemorySaver()
+     torch_memory_saver.hook_mode = "torch"
+     HAVE_TORCH_MEMORY_SAVER = True
+ except ImportError:

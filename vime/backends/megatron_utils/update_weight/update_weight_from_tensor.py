@@ -17,13 +17,18 @@ from vime.platforms import current_platform
 from vime.utils import accelerator
 from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.types import ParamInfo
+from vime.utils.weight_sync import should_flush_cache
 
 from ..dspark.export import export_dspark_model_weights
 from ..megatron_to_hf import convert_to_hf
-from .common import HfWeightSource, VimeRayWeightSyncClient, create_nccl_trainer
+from .common import HfWeightSource, VimeRayWeightSyncClient
 from .expert_routing import configure_expert_routing
 from .hf_weight_iterator_direct import HfWeightIteratorDirect
-from .update_weight_from_distributed import post_process_weights
+from .update_weight_from_distributed import (
+    connect_rollout_engines_from_distributed,
+    disconnect_rollout_engines_from_distributed,
+    post_process_weights,
+)
 
 
 def _current_gpu_uuid() -> str:
@@ -152,12 +157,9 @@ class UpdateWeightFromTensor:
         engine_parallel_configs: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         del rollout_engine_lock
-        for trainer in self._native_trainers:
-            trainer.shutdown()
         self._all_rollout_engines = list(rollout_engines)
         self.rollout_engines = []
         self._ipc_engine = None
-        self._native_trainers = []
 
         if engine_gpu_counts is None:
             engine_gpu_counts = [self.args.rollout_num_gpus_per_engine] * len(rollout_engines)
@@ -179,6 +181,12 @@ class UpdateWeightFromTensor:
 
         self.rollout_engines = list(rollout_engines[:colocate_engine_nums])
         distributed_rollout_engines = list(rollout_engines[colocate_engine_nums:])
+        for trainer in self._native_trainers:
+            if trainer.init_info_cls.backend == current_platform().weight_transfer.backend("nccl"):
+                disconnect_rollout_engines_from_distributed(trainer, distributed_rollout_engines)
+            else:
+                trainer.shutdown()
+        self._native_trainers = []
         use_distribute = bool(distributed_rollout_engines)
         colocate_gpu_offsets = engine_gpu_offsets[:colocate_engine_nums]
         colocate_gpu_counts = engine_gpu_counts[:colocate_engine_nums]
@@ -196,7 +204,7 @@ class UpdateWeightFromTensor:
             use_distribute=use_distribute,
         )
 
-        if not self._expert_transfer_plan:
+        if not self._expert_transfer_plan or self.args.dspark_enabled:
             if self.rollout_engines:
                 from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 
@@ -222,17 +230,18 @@ class UpdateWeightFromTensor:
                     lambda: self.weight_version,
                     distributed_gpu_counts,
                 )
-                trainer = create_nccl_trainer(
+                trainer = connect_rollout_engines_from_distributed(
                     client,
                     self._source,
                     distributed_gpu_counts,
                 )
                 self._native_trainers.append(trainer)
 
-            return
+            if not self._expert_transfer_plan:
+                return
 
-        # Rank-local expert routing is the one case the generic IPC API cannot
-        # express: each rollout EP rank receives a different expert subset.
+        # Expert routing supplies per-worker payloads instead of using the
+        # generic trainer's shared weight source.
         if self._ipc_gather_group is None:
             for index in range(colocate_engine_nums):
                 group_ranks = list(
@@ -251,7 +260,7 @@ class UpdateWeightFromTensor:
             if start <= dist.get_rank() < start + colocate_gpu_counts[index]:
                 self._ipc_engine = engine
 
-        if dist.get_rank() == 0:
+        if dist.get_rank() == 0 and not self._native_trainers:
             ray.get(
                 [
                     engine.init_weight_transfer_engine.remote({"init_info": {"packed": True}})
@@ -303,6 +312,14 @@ class UpdateWeightFromTensor:
         for request in dist.batch_isend_irecv(p2p_ops) if p2p_ops else ():
             request.wait()
 
+        # NCCL Work.wait() only orders the current CUDA stream. A fast rank
+        # must not enter quantization's CUDA allocations/copies while peers
+        # are still issuing grouped P2P calls: those host calls can synchronize
+        # with the unfinished transfer and prevent its peers from launching.
+        # Include ranks without local transfers so every batch has one fence.
+        dist.barrier(group=get_gloo_group())
+        torch.cuda.synchronize()
+
         hf_named_tensors = []
         for expert_param, tensor in local_params:
             hf_named_tensors.extend(
@@ -349,12 +366,21 @@ class UpdateWeightFromTensor:
     @torch.no_grad()
     def update_weights(self) -> None:
         """
-        version++, flush caches, process buckets. Progress on rank 0.
+        version++, pause generation, optionally flush caches, process buckets.
         """
         self.weight_version += 1
+        flush_cache = should_flush_cache(
+            self.args.flush_cache_interval, self.weight_version, getattr(self.args, "update_weight_start_version", 0)
+        )
         if self.rank == 0:
-            ray.get([engine.pause_generation.remote() for engine in self._all_rollout_engines])
-            ray.get([engine.flush_cache.remote() for engine in self._all_rollout_engines])
+            ray.get(
+                [
+                    engine.pause_generation.remote(mode="abort" if flush_cache else "in_place")
+                    for engine in self._all_rollout_engines
+                ]
+            )
+            if flush_cache:
+                ray.get([engine.flush_cache.remote() for engine in self._all_rollout_engines])
             if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
                 post_process_weights(
                     restore_weights_before_load=True,
@@ -363,25 +389,26 @@ class UpdateWeightFromTensor:
                 )
         dist.barrier(group=get_gloo_group())
 
-        if self._native_trainers:
+        if self._expert_transfer_plan:
+            megatron_local_weights = self.weights_getter()
+            self._update_rollout_weights(megatron_local_weights, draft=False)
+        else:
             for trainer in self._native_trainers:
                 trainer.client.draft = False
                 trainer.send_weights()
-            update_draft = self.args.dspark_enabled or (
-                self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp"
-            )
-            if update_draft:
+
+        update_draft = self.args.dspark_enabled or (
+            self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp"
+        )
+        if update_draft:
+            if self._native_trainers:
                 self._source.draft = self.args.dspark_enabled
                 for trainer in self._native_trainers:
                     trainer.client.draft = True
                     trainer.send_weights()
                     trainer.client.draft = False
                 self._source.draft = False
-        else:
-            megatron_local_weights = self.weights_getter()
-            self._update_rollout_weights(megatron_local_weights, draft=False)
-
-            if self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp":
+            else:
                 self._update_rollout_weights(megatron_local_weights, draft=True)
 
         # int4/fp4 post_process

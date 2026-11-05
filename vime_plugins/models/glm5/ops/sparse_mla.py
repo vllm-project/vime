@@ -58,7 +58,7 @@ class VLLMSparseMLA(torch.autograd.Function):
         # flash_mla_sparse requires num_heads to be a multiple of 64 on Hopper
         # (sm90) and 128 on Blackwell (sm100/sm103). The kernel is NOT
         # padding-invariant on sm103: padding q from 64 -> 128 heads changes the
-        # bf16 rounding of the real heads (~1 bf16 ULP). The VLLM rollout
+        # bf16 rounding of the real heads (~1 bf16 ULP). The SGLang rollout
         # (dsa_backend._forward_flashmla_sparse) always applies this padding on
         # Blackwell, so the train side MUST pad identically or train/rollout
         # logprobs diverge (0.027 on B300 vs 1.9e-7 on H100). Hopper needs no

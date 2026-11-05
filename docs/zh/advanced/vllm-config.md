@@ -57,7 +57,7 @@ vllm:
 |------|------|--------|------|
 | `worker_type` | `str` | **必填** | 引擎类型：`regular`（标准）、`prefill`（PD prefill worker）、`decode`（PD decode worker）或 `placeholder`（占位，不启动引擎）。 |
 | `num_gpus` | `int` | **必填** | 该组的 GPU 总数。必须 > 0。 |
-| `num_gpus_per_engine` | `int` | 模型的 `num_gpus_per_engine` | 单个引擎实例的 worker GPU 总数。只有 DP 和 PP 都为 1 时才等于 TP。 |
+| `num_gpus_per_engine` | `int` | 模型的 `num_gpus_per_engine` | 单个引擎实例的 worker GPU 总数：TP × DP × PP × PCP（prefill 上下文并行）。只有 DP、PP 和 PCP 都为 1 时才等于 TP。 |
 | `overrides` | `dict` | `{}` | vLLM `EngineArgs` 字段覆盖。优先级最高，覆盖 `--vllm-*` CLI 参数和模型级默认值。 |
 
 ### Worker 类型

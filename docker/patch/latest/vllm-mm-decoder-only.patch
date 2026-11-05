@@ -1,0 +1,97 @@
+diff --git a/vllm/config/model.py b/vllm/config/model.py
+index cfbb870e788..0ab5f5e2d13 100644
+--- a/vllm/config/model.py
++++ b/vllm/config/model.py
+@@ -438,2 +438,3 @@ class ModelConfig:
+     mm_encoder_only: InitVar[bool | None] = None
++    mm_decoder_only: InitVar[bool | None] = None
+     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
+@@ -570,2 +571,3 @@ class ModelConfig:
+         mm_encoder_only: bool | None,
++        mm_decoder_only: bool | None,
+         mm_encoder_tp_mode: MMEncoderTPMode | None,
+@@ -843,2 +845,3 @@ class ModelConfig:
+                 mm_encoder_only=mm_encoder_only,
++                mm_decoder_only=mm_decoder_only,
+                 mm_encoder_tp_mode=mm_encoder_tp_mode,
+diff --git a/vllm/config/multimodal.py b/vllm/config/multimodal.py
+index 3bba0434c3e..393d697da0e 100644
+--- a/vllm/config/multimodal.py
++++ b/vllm/config/multimodal.py
+@@ -384,2 +384,5 @@ class MultiModalConfig:
+     """
++    mm_decoder_only: bool = False
++    """Skip local encoder towers while retaining multimodal input processing
++    and cache capacity for external encoder outputs."""
+     mm_encoder_tp_mode: MMEncoderTPMode = "weights"
+@@ -515,2 +518,6 @@ class MultiModalConfig:
+     def _validate_multimodal_config(self):
++        if self.mm_encoder_only and self.mm_decoder_only:
++            raise ValueError(
++                "mm_encoder_only and mm_decoder_only are mutually exclusive"
++            )
+         if self.mm_processor_cache_type != "shm" and (
+diff --git a/vllm/config/vllm.py b/vllm/config/vllm.py
+index 8fc89f1591c..a4eb1c3c08c 100644
+--- a/vllm/config/vllm.py
++++ b/vllm/config/vllm.py
+@@ -2997,2 +2997,4 @@ class VllmConfig:
+             )
++        if mm_config.mm_decoder_only:
++            raise ValueError("An EC producer-only instance cannot use mm_decoder_only.")
+         mm_config.mm_encoder_only = True
+diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
+index 527b8956d03..5af30836742 100644
+--- a/vllm/engine/arg_utils.py
++++ b/vllm/engine/arg_utils.py
+@@ -645,2 +645,3 @@ class EngineArgs:
+     mm_encoder_only: bool = MultiModalConfig.mm_encoder_only
++    mm_decoder_only: bool = MultiModalConfig.mm_decoder_only
+     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
+@@ -1471,2 +1472,5 @@ class EngineArgs:
+         )
++        multimodal_group.add_argument(
++            "--mm-decoder-only", **multimodal_kwargs["mm_decoder_only"]
++        )
+         multimodal_group.add_argument(
+@@ -1981,2 +1985,3 @@ class EngineArgs:
+             mm_encoder_only=self.mm_encoder_only,
++            mm_decoder_only=self.mm_decoder_only,
+             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
+diff --git a/vllm/model_executor/models/interfaces.py b/vllm/model_executor/models/interfaces.py
+index 433c373c8e3..882b29baef1 100644
+--- a/vllm/model_executor/models/interfaces.py
++++ b/vllm/model_executor/models/interfaces.py
+@@ -347,4 +347,4 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
+ 
+-        Tower model components are automatically skipped when `--limit-mm-per-prompt`
+-        is set to zero for all of their modalities.
++        Tower model components are automatically skipped in decoder-only mode or
++        when `--limit-mm-per-prompt` is zero for all of their modalities.
+ 
+@@ -378,3 +378,4 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
+                 )
+-                if all(mm_config.get_limit_per_prompt(m) == 0 for m in modalities)
++                if mm_config.mm_decoder_only
++                or all(mm_config.get_limit_per_prompt(m) == 0 for m in modalities)
+                 else nullcontext()
+diff --git a/vllm/multimodal/encoder_budget.py b/vllm/multimodal/encoder_budget.py
+index 32db904bfa1..86555e6a3ea 100644
+--- a/vllm/multimodal/encoder_budget.py
++++ b/vllm/multimodal/encoder_budget.py
+@@ -78,3 +78,3 @@ class MultiModalBudget:
+                 for modality in supported_mm_limits
+-                if mm_limits.get(modality, 0) > 0
++                if not mm_config.mm_decoder_only and mm_limits.get(modality, 0) > 0
+             }
+@@ -84,3 +84,4 @@ class MultiModalBudget:
+                 for modality in supported_mm_limits
+-                if enable_mm_embeds and mm_limits.get(modality, 0) == 0
++                if mm_config.mm_decoder_only
++                or (enable_mm_embeds and mm_limits.get(modality, 0) == 0)
+             }
+@@ -97,3 +98,3 @@ class MultiModalBudget:
+             logger.info_once(
+-                "enable_mm_embeds is True; modalities handled as embedding-only: %s",
++                "Modalities handled without local encoder towers: %s",
+                 tuple(embed_only_modalities),

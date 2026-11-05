@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
-from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,28 +31,6 @@ class RayResourceSpec:
         else:
             ids = ray.get_runtime_context().get_accelerator_ids().get(self.resource_name, [])
         return [str(device_id) for device_id in ids]
-
-    def local_device_id(self) -> int | str:
-        device_ids = self.accelerator_ids()
-        if not device_ids:
-            raise RuntimeError(f"No {self.resource_name} accelerator IDs are assigned to this Ray actor")
-
-        assigned_id = device_ids[0]
-        visible_devices = os.environ.get(self.visible_devices_env)
-        if visible_devices is None:
-            try:
-                return int(assigned_id)
-            except ValueError:
-                return assigned_id
-
-        visible_ids = [value.strip() for value in visible_devices.split(",") if value.strip()]
-        try:
-            return visible_ids.index(assigned_id)
-        except ValueError as exc:
-            raise RuntimeError(
-                f"Ray assigned {self.resource_name} id {assigned_id}, but it is absent from "
-                f"{self.visible_devices_env}={visible_devices!r}"
-            ) from exc
 
     def train_runtime_env(
         self,
@@ -107,15 +83,6 @@ class TrainingBootstrap:
         return None
 
     def repatch(self, args: Any) -> None:
-        return None
-
-    def adjust_tp_partition_dim(self, name: str, partition_dim: int) -> int:
-        return partition_dim
-
-    def training_context(self, offload_train: bool):
-        return nullcontext()
-
-    def initialize_optimizer_state(self, optimizer: Any) -> None:
         return None
 
 

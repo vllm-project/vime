@@ -111,6 +111,12 @@ def install_vllm_router_stub() -> None:
             prefix = "router-" if use_router_prefix else ""
             dprefix = "router_" if use_router_prefix else ""
             parser.add_argument(
+                f"--{prefix}log-level",
+                dest=f"{dprefix}log_level",
+                default=None,
+                choices=["debug", "info", "warning", "error", "critical"],
+            )
+            parser.add_argument(
                 f"--{prefix}policy",
                 dest=f"{dprefix}policy",
                 type=str,

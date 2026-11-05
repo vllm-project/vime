@@ -176,7 +176,7 @@ def _norm_forward(
     if normalization == "RMSNorm" and os.environ.get("MEGATRON_USE_VLLM_FUSED_RESIDUAL_RMS", "0") == "1":
         if norm_bias is not None:
             raise RuntimeError("VLLM RMSNorm alignment does not support a norm bias")
-        from vllm.model_executor.layers.batch_invariant import rms_norm_batch_invariant
+        from vllm.model_executor.determinism.batch_invariant import rms_norm_batch_invariant
 
         weight = norm_weight
         if zero_centered_gamma:
@@ -725,7 +725,7 @@ def enable_vllm_global_batch_invariant_ops() -> None:
     }:
         return
 
-    from vllm.model_executor.layers import batch_invariant
+    from vllm.model_executor.determinism import batch_invariant
 
     batch_invariant.enable_batch_invariant_mode()
 
@@ -735,7 +735,7 @@ def _vllm_batch_invariant_rmsnorm(
     weight: torch.Tensor,
     eps: float,
 ) -> torch.Tensor:
-    from vllm.model_executor.layers.batch_invariant import rms_norm_batch_invariant
+    from vllm.model_executor.determinism.batch_invariant import rms_norm_batch_invariant
 
     return rms_norm_batch_invariant(value, weight, eps)
 

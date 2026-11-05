@@ -743,7 +743,7 @@ class DSAMLASelfAttention(DSAMultiLatentAttention):
         if self.config.layernorm_zero_centered_gamma:
             norm_weight = norm_weight + 1.0
         if os.getenv("MEGATRON_USE_VLLM_FUSED_RESIDUAL_RMS", "0") == "1":
-            from vllm.model_executor.layers.batch_invariant import rms_norm_batch_invariant
+            from vllm.model_executor.determinism.batch_invariant import rms_norm_batch_invariant
 
             return rms_norm_batch_invariant(
                 q_compressed,

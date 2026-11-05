@@ -10,9 +10,11 @@
 1. **High-performance training**: Efficient training in various modes by connecting Megatron with vLLM;
 2. **Flexible data generation**: Arbitrary training data generation workflows through custom data generation interfaces and server-based engines.
 
+Training, rollout, the data buffer, and environment feedback share one dataflow. This supports math, code, search, tool use, and long-horizon agent workflows within the same training loop.
+
 Vime inherits broad model support from slime, including:
 
-- Qwen series (Qwen3.6, Qwen3.5, Qwen3Next, Qwen3MoE, Qwen3, Qwen2.5);
+- Qwen series (Qwen3.8, Qwen3.6, Qwen3.5, Qwen3Next, Qwen3MoE, Qwen3, Qwen2.5);
 - DeepSeek V3 series (DeepSeek V3, V3.1, DeepSeek R1);
 - Llama 3.
 
@@ -34,6 +36,8 @@ The vLLM community horizontally supports many LLM post-training frameworks, incl
   - [Quick Start](#quick-start)
     - [Agentic RL examples](#agentic-rl-examples)
   - [Arguments Walkthrough](#arguments-walkthrough)
+  - [Engine Deployment](#engine-deployment)
+  - [Correctness, Stability, and CI](#correctness-stability-and-ci)
   - [Code Reading Path](#code-reading-path)
   - [Developer Guide](#developer-guide)
   - [slime doc](#slime-doc)
@@ -51,6 +55,8 @@ The vLLM community horizontally supports many LLM post-training frameworks, incl
 - **rollout (vLLM + router)**: Launches vLLM inference engines and routes generation requests; custom generate functions can wrap generation with multi-turn loops, tool calls, environment/sandbox interaction, and verifier-based rewards.
 - **data buffer**: A bridge module that manages prompt initialization, custom data, and rollout generation methods, including agentic workflows that produce samples through the same interface.
 
+The default payload transport is Ray `object-store`. `--rollout-data-transport straw` persists prompt tasks, rollout continuations, and training batches on shared storage. See the [straw architecture and recovery guide](docs/en/advanced/straw.md).
+
 ## Quick Start
 
 For a comprehensive quick start guide covering environment setup, data preparation, training startup, and key code analysis, please refer to:
@@ -65,7 +71,7 @@ Agentic workloads use the standard rollout / Data Buffer loop through Vime's cus
 
 - [`examples/multi_agent`](examples/multi_agent/README.md): Multi-agent generation through `--custom-generate-function-path`.
 - [`examples/fully_async`](examples/fully_async/README.md): Fully asynchronous rollout for long-tail agent generation.
-- [`examples/coding_agent_rl`](examples/coding_agent_rl/README.md): End-to-end coding-agent RL with Claude Code or Codex, sandboxed tool use, test-based rewards, and token-correct trajectory segments.
+- [`examples/coding_agent_rl`](examples/coding_agent_rl/README.md): Qwen3.8-27B coding-agent RL on Xiaomi MiMo SWE data, using sunabako sandboxes, official test rewards, and token-correct trajectories.
 
 See the [Agentic RL Training Roadmap](docs/en/get_started/agent.md) and [Customization Guide](docs/en/get_started/customization.md). The coding-agent example ships an E2B-compatible backend, while the shared `vime.agent.sandbox.Sandbox` contract can be implemented for Docker, Modal, or local VMs.
 
@@ -74,12 +80,35 @@ See the [Agentic RL Training Roadmap](docs/en/get_started/agent.md) and [Customi
 Arguments in Vime are divided into three categories:
 
 1. **Megatron arguments**: Vime reads all arguments in Megatron. You can configure Megatron by passing arguments like `--tensor-model-parallel-size 2`.
-2. **vLLM arguments**: vLLM server and engine options are exposed with a `--vllm-` prefix (for example, `--vllm-gpu-memory-utilization`). Router options live under two prefixes: vllm-router's native options are passed with `--router-` (for example, `--router-policy round_robin`, `--router-request-timeout-secs`), while Vime-side orchestration knobs that tell Vime *where* the router lives use `--vllm-router-` (`--vllm-router-ip`, `--vllm-router-port`). See [vime/backends/vllm_utils/arguments.py](vime/backends/vllm_utils/arguments.py) for the full surface.
+2. **vLLM arguments**: vLLM server and engine options are exposed with a `--vllm-` prefix (for example, `--vllm-gpu-memory-utilization`). vllm-router's native options use `--router-` (for example, `--router-policy round_robin`). Vime-side router options use `--vllm-router-`, including `--vllm-router-ip`, `--vllm-router-port`, and `--vllm-router-request-timeout-secs`. See [vime/backends/vllm_utils/arguments.py](vime/backends/vllm_utils/arguments.py) for the full surface.
 3. **Framework-specific arguments**: Shared Vime orchestration flags (rollout GPUs, data paths, RL algorithms, etc.). Please refer to [vime/utils/arguments.py](vime/utils/arguments.py).
 
-`--rollout-num-gpus-per-engine` sets the tensor parallel size of each vLLM engine. The default rollout entry is `vime.rollout.vllm_rollout.generate_rollout`.
+`--rollout-num-gpus-per-engine` sets the GPU count of each vLLM engine; it equals TP only when DP, PP and PCP are all 1. The default rollout entry is `vime.rollout.vllm_rollout.generate_rollout`.
 
 For complete usage instructions, please refer to the [Usage Documentation](docs/en/get_started/usage.md).
+
+## Engine Deployment
+
+Vime keeps the Megatron and vLLM control surfaces close to the upstream engines while adding the RL dataflow around them. Beyond the argument pass-through described above, see:
+
+- [vLLM Config](docs/en/advanced/vllm-config.md) for optional YAML topology configuration, heterogeneous server groups, multi-model serving, and per-group overrides;
+- [PD Disaggregation](docs/en/advanced/pd-disaggregation.md) for multi-turn and agentic workloads with different prefill/decode resource needs;
+- router policies such as session affinity for multi-turn agents (see [vLLM Config](docs/en/advanced/vllm-config.md));
+- [Delta Weight Sync](docs/en/advanced/delta-weight-sync.md) for disk-based updates of disaggregated rollout engines;
+- [External Rollout Engines](docs/en/advanced/external-rollout-engines.md) for serving managed outside the training job. Serving can use an independent environment; disk transport avoids an NCCL group between training and serving. Different GPU models or vendors still require compatible model formats, precision, and vLLM hardware support.
+
+## Correctness, Stability, and CI
+
+RL bugs can be silent. Vime keeps the dataflow explicit and supports separate rollout-only and train-only debugging paths. CPU unit tests, customization-hook contract tests, and GPU end-to-end suites protect different parts of this workflow. Buildkite runs always-on CPU checks; GPU suites require the manual gate, so a green CPU build is not GPU validation.
+
+Useful engineering docs:
+
+- [CI](docs/en/developer_guide/ci.md)
+- [Debugging](docs/en/developer_guide/debug.md)
+- [Reproducibility](docs/en/advanced/reproducibility.md)
+- [Fault Tolerance](docs/en/advanced/fault-tolerance.md)
+- [Trace Viewer](docs/en/developer_guide/trace.md)
+- [Profiling](docs/en/developer_guide/profiling.md)
 
 ## Code Reading Path
 
