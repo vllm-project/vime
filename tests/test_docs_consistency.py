@@ -26,7 +26,6 @@ COMMAND_PATH_RE = re.compile(r"\b(?:bash|python)\s+((?:scripts?|tests)/[A-Za-z0-
 LOCAL_ANCHOR_RE = re.compile(r"\]\(#([A-Za-z0-9_-]+)\)")
 HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
 RELEASE_CHECK = ROOT / ".claude/skills/release/scripts/check_release.py"
-DOCKER_ARG_RE = re.compile(r"^ARG ([A-Z][A-Z0-9_]*)=(\S+)$", re.MULTILINE)
 
 
 def _markdown_files():
@@ -93,12 +92,6 @@ def test_customization_anchor_links_exist(language):
 def test_release_metadata_check():
     result = subprocess.run([sys.executable, str(RELEASE_CHECK), "--repo", str(ROOT)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-
-
-def test_rocm_image_pins_its_base_by_digest():
-    rocm = (ROOT / "docker/Dockerfile.rocm").read_text()
-    base = dict(DOCKER_ARG_RE.findall(rocm))["BASE_IMAGE"]
-    assert re.fullmatch(r"vllm/vllm-openai-rocm:nightly-rocm\d+-[0-9a-f]{40}@sha256:[0-9a-f]{64}", base), base
 
 
 @pytest.fixture

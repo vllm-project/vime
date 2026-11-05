@@ -27,23 +27,18 @@ Before each update, we will test the following models with 64xH100:
 
 ## ROCm
 
-`docker/Dockerfile.rocm` builds the AMD image, published as `vllm/vime-rocm:latest`
-and consumed by `.buildkite/pipeline-rocm.yaml`. It layers on AMD's vLLM ROCm
-nightly image for one vLLM commit (`vllm/vllm-openai-rocm:nightly-rocm100-<commit>`,
-pinned by digest), which already carries ROCm 10 (`rocm_sdk` wheels), a ROCm
-PyTorch build, triton, aiter and flash-attn, and adds only the training half:
-TransformerEngine (built from `ROCm/TransformerEngine`), apex, Megatron-LM plus
-the `docker/amd_patch/` patches, torch_memory_saver, and vime.
+`docker/Dockerfile.rocm` builds `vllm/vime-rocm:latest` for gfx950
+(MI350X/MI355X), using a digest-pinned vLLM ROCm base image.
+It is used by `.buildkite/pipeline-rocm.yaml`.
 
-Targets gfx950 (MI350X/MI355X); pass `--build-arg GPU_ARCH=` for another CDNA arch.
+Build from the repository root:
 
 ```bash
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm/vime-rocm:latest .
 ```
 
-The ROCm build reads the shared vLLM patches in `docker/patch/latest/` and applies
-them with the same order and strict `git apply` as `docker/Dockerfile`, so its
-vLLM commit must be one that these patches accept (today, `VLLM_COMMIT`).
-ROCm-only patches go in `docker/amd_patch/`. Changes to `docker/patch/` or
-`VLLM_COMMIT` never block the CUDA image or its CI; if one breaks the ROCm build,
-a ROCm PR moves `BASE_IMAGE` to the matching ROCm nightly.
+Override `GPU_ARCH` with `--build-arg` for another supported architecture.
+
+The build applies shared vLLM patches from `docker/patch/latest/` with strict
+`git apply`, in CUDA's order; ROCm-only patches live in `docker/amd_patch/`.
+Keep `BASE_IMAGE` compatible with the shared patches.
