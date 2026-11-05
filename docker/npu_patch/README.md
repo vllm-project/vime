@@ -6,12 +6,12 @@ This guide provides instructions for installing Vime with NPU support, including
 
 | Component | Version/Commit | Source |
 | --- | --- | --- |
-| Base image | `v0.31.0-007abb8-a3` | `quay.io/atlas-ci/vllm-ascend` |
-| vLLM | `a98247ab4db686ee03c66d5feb3c761e52a2f8ab` | [GitHub](https://github.com/vllm-project/vllm) |
-| vLLM-Ascend | `007abb8c89971f589932584a5a6d0a986bfbcdd0` | [GitHub](https://github.com/vllm-project/vllm-ascend) |
-| vLLM Router | `1fbcde7443d75b36befb61bc081f64c2a1f13a4b` + `docker/patch/latest/router-health-check.patch` | [GitHub](https://github.com/vllm-project/router) |
-| Sunabako | `0.1.1` + `docker/patch/latest/sunabako-arm64.patch` | [PyPI](https://pypi.org/project/sunabako/0.1.1/) |
-| FLA (serving, included in base image) | `flash-linear-attention-npu-a3==26.9.1+dev5cc6990` | [v26.9.1-20261020-020004](https://github.com/flashserve/flash-linear-attention-npu/releases/tag/v26.9.1-20261020-020004) |
+| Base image | `v0.32.0-bf07462-a3` | `quay.io/atlas-ci/vllm-ascend` |
+| vLLM | `544f182d9f0c9bfe8bd7645525951d5e3692a542` | [GitHub](https://github.com/vllm-project/vllm) |
+| vLLM-Ascend | `bf074627d11b65dfb41720355ba2c08725c0e0d1` | [GitHub](https://github.com/vllm-project/vllm-ascend) |
+| vLLM Router | `1fbcde7443d75b36befb61bc081f64c2a1f13a4b` + the three shared router patches below | [GitHub](https://github.com/vllm-project/router) |
+| Sunabako | `0.1.2` + `docker/patch/latest/sunabako-arm64.patch` | [PyPI](https://pypi.org/project/sunabako/0.1.2/) |
+| FLA (serving, included in base image) | `flash-linear-attention-npu-a3==26.9.1` | [Ascend image recipe](https://github.com/vllm-project/vllm-ascend/blob/bf074627d11b65dfb41720355ba2c08725c0e0d1/Dockerfile.a3) |
 | Megatron-LM | `4b4acac9a1d28ea6829c8d4f566d75698a21249d` | [GitHub](https://github.com/NVIDIA/Megatron-LM) |
 | MegatronAdaptor | `c7e52b2c8482105e6ec7fcd8cdef364e7c7b22c5` | [GitCode](https://gitcode.com/Ascend/MegatronAdaptor) |
 | TransformerEngineNPU | `d405be23773968bf7fdc567854005054550830fc` + `transformer-engine-npu.patch` | [GitCode](https://gitcode.com/Ascend/TransformerEngineNPU) |
@@ -34,7 +34,7 @@ export PATCH_DIR="${VIME_INSTALL_ROOT}/vime/docker/npu_patch"
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 ```
 
-Preserve the base image's serving package versions and pin the data dependencies compatible with NumPy 1.26.4:
+Preserve the base image's serving package versions and pin the Vime dependencies:
 
 ```bash
 export PIP_CONSTRAINT="$(mktemp /tmp/vime-npu-constraints.XXXXXX)"
@@ -50,6 +50,8 @@ names = [
 with open(os.environ["PIP_CONSTRAINT"], "w") as constraints:
     constraints.write("\n".join(f"{name}=={metadata.version(name)}" for name in names) + "\n")
     constraints.write("datasets==5.0.1\npyarrow==25.0.1\n")
+    constraints.write("straw-queue==0.1.6\nsunabako==0.1.2\n")
+    constraints.write("wandb==0.31.0\nopentelemetry-exporter-otlp==1.45.1\n")
 PY
 ```
 
@@ -115,7 +117,7 @@ provides a separate wheel-build stage; for installation inside the base image:
 export SUNABAKO_BUILD_ROOT="$(mktemp -d /tmp/vime-sunabako.XXXXXX)"
 python3 -m venv "${SUNABAKO_BUILD_ROOT}/venv"
 "${SUNABAKO_BUILD_ROOT}/venv/bin/python" -m pip install 'maturin>=1.8,<2'
-curl -fsSL https://files.pythonhosted.org/packages/cd/16/d9fd84bbf784c19425d9d83d8d98deef6d5f107012e8d50bddeb5c11cf5c/sunabako-0.1.1.tar.gz \
+curl -fsSL https://files.pythonhosted.org/packages/32/04/17067354c37b23f7fe00e70c131c863f85acaac86874baa36e32426fb8b1/sunabako-0.1.2.tar.gz \
   -o "${SUNABAKO_BUILD_ROOT}/sunabako.tar.gz"
 mkdir "${SUNABAKO_BUILD_ROOT}/src"
 tar -xf "${SUNABAKO_BUILD_ROOT}/sunabako.tar.gz" -C "${SUNABAKO_BUILD_ROOT}/src" --strip-components=1
@@ -129,7 +131,7 @@ python3 -m pip install --no-deps "${SUNABAKO_BUILD_ROOT}"/wheels/*.whl
 Then install Vime and the training FLA packages:
 
 ```bash
-pip install -r "${VIME_INSTALL_ROOT}/vime/requirements.txt"
+pip install -r "${VIME_INSTALL_ROOT}/vime/requirements.txt" 'opentelemetry-exporter-otlp==1.45.1'
 pip install --no-deps --no-build-isolation -e "${VIME_INSTALL_ROOT}/vime"
 pip install --no-deps einops 'fla-core==0.5.2' 'flash-linear-attention==0.5.2'
 ```
@@ -154,9 +156,10 @@ cd "${VIME_INSTALL_ROOT}/vime"
 
 ### 6. vLLM Router
 
-Build the pinned router with the shared health-check patch so Vime can own worker
-health checks. This patch changes Rust as well as Python; applying only the Python
-changes is insufficient. Install Rust 1.95, `cmake`, `pkg-config`, and `libssl-dev`
+Build the pinned router with the shared health-check, PD registration and worker
+registration patches, in that order. These patches change Rust as well as Python;
+applying only the Python changes is insufficient. Install Rust 1.95, `cmake`,
+`pkg-config`, and `libssl-dev`
 before building. The Dockerfile supplies these in a separate wheel-build stage.
 
 ```bash
@@ -166,6 +169,10 @@ git -C "${VIME_INSTALL_ROOT}/vllm-router" fetch --depth 1 origin 1fbcde7443d75b3
 git -C "${VIME_INSTALL_ROOT}/vllm-router" checkout --detach FETCH_HEAD
 git -C "${VIME_INSTALL_ROOT}/vllm-router" apply --check "${VIME_INSTALL_ROOT}/vime/docker/patch/latest/router-health-check.patch"
 git -C "${VIME_INSTALL_ROOT}/vllm-router" apply "${VIME_INSTALL_ROOT}/vime/docker/patch/latest/router-health-check.patch"
+git -C "${VIME_INSTALL_ROOT}/vllm-router" apply --check "${VIME_INSTALL_ROOT}/vime/docker/patch/latest/router-pd-registration.patch"
+git -C "${VIME_INSTALL_ROOT}/vllm-router" apply "${VIME_INSTALL_ROOT}/vime/docker/patch/latest/router-pd-registration.patch"
+git -C "${VIME_INSTALL_ROOT}/vllm-router" apply --check "${VIME_INSTALL_ROOT}/vime/docker/patch/latest/router-worker-registration.patch"
+git -C "${VIME_INSTALL_ROOT}/vllm-router" apply "${VIME_INSTALL_ROOT}/vime/docker/patch/latest/router-worker-registration.patch"
 pip install setuptools-rust wheel
 cd "${VIME_INSTALL_ROOT}/vllm-router"
 CARGO_BUILD_JOBS=4 python3 -m pip wheel --no-deps --no-build-isolation --wheel-dir dist .

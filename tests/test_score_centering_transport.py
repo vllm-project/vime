@@ -98,26 +98,35 @@ def test_tito_stream_preserves_empty_finish_reason(finish_reason, return_token_i
 def npu_sampling_mask_tensors():
     from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
 
-    if hasattr(SamplingMaskTensors, "rows_per_request"):
-        pytest.skip("Packed-score layout targets the frozen single-position Ascend vendor bundle")
     return SamplingMaskTensors
 
 
 @pytest.mark.parametrize("vocab_size", [13, 4101])
 @pytest.mark.parametrize("packed", [False, True])
 @pytest.mark.parametrize("return_logprobs", [False, True])
+@pytest.mark.parametrize("rows_per_request", [1, 3])
 def test_npu_sampling_support_scores_follow_ids_through_cpu_decode(
-    npu_sampling_mask_tensors, vocab_size, packed, return_logprobs
+    npu_sampling_mask_tensors, vocab_size, packed, return_logprobs, rows_per_request
 ):
+    if packed and return_logprobs:
+        pytest.importorskip("vllm_ascend", reason="Packed-mask logprobs require the NPU vendor patch")
     # Exercise both compact-ID and Ascend packed-mask layouts on CPU; no kernel
-    # is launched. The middle row represents chunked prefill with no output.
-    logits = torch.arange(3 * vocab_size, dtype=torch.float32).reshape(3, vocab_size) / vocab_size
+    # is launched. The middle request represents chunked prefill with no output.
+    num_rows = 3 * rows_per_request
+    num_sampled = np.array([rows_per_request, 0, max(1, rows_per_request - 1)])
+    logits = torch.arange(num_rows * vocab_size, dtype=torch.float32).reshape(num_rows, vocab_size) / vocab_size
     logits[:, ::3] = -torch.inf
-    supports = [torch.where(torch.isfinite(row))[0].numpy() for row in logits]
-    supports[1] = np.empty(0, dtype=np.int64)
-    keep = np.zeros((3, vocab_size), dtype=np.uint8)
+    supports = [
+        (
+            torch.where(torch.isfinite(row))[0].numpy()
+            if index % rows_per_request < num_sampled[index // rows_per_request]
+            else np.empty(0, dtype=np.int64)
+        )
+        for index, row in enumerate(logits)
+    ]
+    keep = np.zeros((num_rows, vocab_size), dtype=np.uint8)
     width = 0 if packed else vocab_size
-    ids = torch.zeros((3, width), dtype=torch.int32)
+    ids = torch.zeros((num_rows, width), dtype=torch.int32)
     dense_scores = logits.log_softmax(dim=-1)
     scores = dense_scores.clone() if packed else torch.zeros_like(dense_scores)
     for row, support in enumerate(supports):
@@ -130,14 +139,18 @@ def test_npu_sampling_support_scores_follow_ids_through_cpu_decode(
         torch.from_numpy(np.packbits(keep, axis=1, bitorder="little")),
         torch.tensor([len(support) for support in supports], dtype=torch.int32),
         vocab_size,
+        rows_per_request=rows_per_request,
         logprobs=scores if return_logprobs else None,
     )
-    decoded = tensors.to_cpu_nonblocking().tolists()
-    for row, support in enumerate(supports):
-        selected = decoded.slice_request(row, 1)
-        assert selected.to_nested_list() == [support.tolist()]
+    decoded = tensors.to_cpu_nonblocking().tolists(num_sampled)
+    for request in range(len(num_sampled)):
+        count = 1 if rows_per_request == 1 else num_sampled[request]
+        rows = range(request * rows_per_request, request * rows_per_request + count)
+        selected = decoded.slice_request(request, count)
+        assert selected.to_nested_list() == [supports[row].tolist() for row in rows]
         if return_logprobs:
-            np.testing.assert_allclose(selected.to_nested_logprobs(), [dense_scores[row, support].tolist()])
+            for actual, row in zip(selected.to_nested_logprobs(), rows, strict=True):
+                np.testing.assert_allclose(actual, dense_scores[row, supports[row]].tolist())
         else:
             assert selected.logprobs is None
 
