@@ -37,7 +37,7 @@ FROM ${BASE_IMAGE}
 
 ARG PATCH_VERSION=latest
 ARG VLLM_COMMIT=83c078d955cd6e0c63d3b12abe669c8de936a370
-ARG MEGATRON_COMMIT=4b4acac9a1d28ea6829c8d4f566d75698a21249d
+ARG MEGATRON_COMMIT=ae76c60e6c35d913867d6dd7bad0f30b128b54e7
 ARG DEEPGEMM_COMMIT=8965e4a5cded4041c8dbbe8d35b0be31fd8da90b
 ARG DEEPEP_COMMIT=6845ffd9d59126ec0030c13e0e155935a61e5b5a
 ARG DEEPEP_CUDA_ARCH_LIST=9.0;10.0;10.3
@@ -144,6 +144,11 @@ RUN NVCC_APPEND_FLAGS="--threads 1" \
 
 RUN git clone https://github.com/NVIDIA/Megatron-LM.git --recursive && \
     cd Megatron-LM && git checkout ${MEGATRON_COMMIT}
+
+# Megatron dev reads cached checkpoint metadata (vime sets ckpt_assume_constant_structure)
+# and runs async checkpointing through nvidia-resiliency-ext, which sits in its `dev` extra
+# and is therefore not pulled in by `pip install -e .`. Keep the pin equal to Megatron's.
+RUN pip install --no-deps nvidia-resiliency-ext==0.7.0
 
 # zhuzilin fork builds, grouped together right after Megatron-LM:
 # torch_memory_saver, plus the GLM-5 train/rollout alignment kernels.
