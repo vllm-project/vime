@@ -1,6 +1,5 @@
 import inspect
 import re
-import socket
 from argparse import Namespace
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
@@ -10,8 +9,6 @@ import torch.distributed as dist
 from megatron.core import mpu
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
-from vime.platforms import current_platform
-from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.types import ParamInfo
 
 
@@ -52,7 +49,6 @@ def all_gather_param(name: str, param: torch.nn.Parameter) -> torch.Tensor:
     if "linear_fc1.weight" in name or "linear_fc1.bias" in name:
         param_partitions = [p.chunk(2, dim=0) for p in param_partitions]
         param_partitions = [p[0] for p in param_partitions] + [p[1] for p in param_partitions]
-        partition_dim = current_platform().megatron.adjust_tp_partition_dim(name, partition_dim)
     # this is bug in megatron's grouped moe.
     if "linear_fc2.weight" in name:
         if partition_dim == 0:
@@ -120,7 +116,6 @@ def all_gather_params_async(
             if "linear_fc1.weight" in info.name or "linear_fc1.bias" in info.name:
                 param_partitions = [p.chunk(2, dim=0) for p in param_partitions]
                 param_partitions = [p[0] for p in param_partitions] + [p[1] for p in param_partitions]
-                partition_dim = current_platform().megatron.adjust_tp_partition_dim(info.name, partition_dim)
             # this is bug in megatron's grouped moe.
             if "linear_fc2.weight" in info.name:
                 if partition_dim == 0:
@@ -168,15 +163,15 @@ def named_params_and_buffers(args: Namespace, model: Sequence[torch.nn.Module]) 
 
                 # MTP layer indices start from 0
                 layer_idx, rest = match.groups()
-                expert_pattern = r"transformer_layer\.mlp\.experts\.(.+)\.(weight|bias)(\d+)"
+                expert_pattern = r"(transformer_layer|mtp_model_layer)\.mlp\.experts\.(.+)\.(weight|bias)(\d+)"
                 match = re.match(expert_pattern, rest)
                 if not match:
                     yield name, param
                     continue
 
-                rest, param_type, expert_idx = match.groups()
+                mtp_module, rest, param_type, expert_idx = match.groups()
                 expert_idx = int(expert_idx) + expert_offset
-                yield f"{prefix}mtp.layers.{layer_idx}.transformer_layer.mlp.experts.{rest}.{param_type}{expert_idx}", param
+                yield f"{prefix}mtp.layers.{layer_idx}.{mtp_module}.mlp.experts.{rest}.{param_type}{expert_idx}", param
                 continue
 
             layer_idx, rest = match.groups()
@@ -283,32 +278,3 @@ class VimeRayWeightSyncClient:
 
         version = str(self.version_getter()) if weight_version is None else str(weight_version)
         ray.get([engine.finish_weight_update.remote(weight_version=version) for engine in self.engines])
-
-
-def create_nccl_trainer(
-    client: VimeRayWeightSyncClient,
-    source: HfWeightSource,
-    engine_gpu_counts: Sequence[int],
-):
-    import ray
-    from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
-
-    rendezvous = [None]
-    if dist.get_rank() == 0:
-        with socket.socket() as sock:
-            sock.bind(("", 0))
-            rendezvous[0] = (ray._private.services.get_node_ip_address(), sock.getsockname()[1])
-    dist.broadcast_object_list(rendezvous, src=0, group=get_gloo_group())
-    master_address, master_port = rendezvous[0]
-    return WeightTransferTrainerFactory.trainer_init(
-        current_platform().weight_transfer.trainer_init_info(
-            colocate=False,
-            master_address=master_address,
-            master_port=master_port,
-            world_size=sum(engine_gpu_counts) + 1,
-            rank=dist.get_rank(),
-            packed_num_buffers=1,
-        ),
-        client=client,
-        source=source,
-    )

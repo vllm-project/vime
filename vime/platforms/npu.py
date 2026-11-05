@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib
 import logging
 import os
-from contextlib import nullcontext
 from glob import glob
 from typing import Any
 
@@ -135,14 +134,11 @@ class NpuRayResourceSpec(RayResourceSpec):
 
     def train_runtime_env(self, args: Any, env_vars=None) -> dict[str, str]:
         env = dict(env_vars or {})
-        if not (getattr(args, "offload_train", False) and getattr(args, "train_backend", None) == "megatron"):
+        if not getattr(args, "offload_train", False):
             return env
 
-        env["TMS_HOOK_MODE"] = "torch"
-        env["TMS_REGION_TAG"] = "training"
-        env["TMS_ENABLE_CPU_BACKUP"] = "1"
-        if getattr(args, "colocate", False):
-            env["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:False"
+        env["TMS_HOOK_MODE"] = "preload"
+        env["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:False"
         cann_python_path = _cann_python_site_packages()
         if cann_python_path is not None:
             _prepend_pythonpath(env, cann_python_path)
@@ -153,8 +149,8 @@ class NpuRayResourceSpec(RayResourceSpec):
         cann_python_path = _cann_python_site_packages()
         if cann_python_path is not None:
             _prepend_pythonpath(env, cann_python_path)
-        if getattr(args, "colocate", False):
-            env["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:False"
+        # Sleep-mode pools also require this outside colocate.
+        env["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:False"
         env["VLLM_USE_AOT_COMPILE"] = "0"
         return env
 
@@ -196,8 +192,7 @@ class NpuVLLMLaunchPlatformOps(VLLMLaunchPlatformOps):
         cann_python_path = _cann_python_site_packages()
         if cann_python_path is not None:
             _prepend_pythonpath(env, cann_python_path)
-        if colocate:
-            env["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:False"
+        env["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:False"
         return env
 
 
@@ -222,11 +217,6 @@ class NpuTrainingBootstrap(TrainingBootstrap):
             # is imported. Apply the NPU attention override afterwards.
             importlib.import_module("megatron_adaptor")
             importlib.import_module("vime.backends.megatron_utils.npu_attention_patch")
-        except Exception:
-            # A failed bootstrap may be retried after the runtime environment is
-            # corrected; never leave a partially initialized success marker.
-            raise
-        else:
             self._bootstrapped = True
         finally:
             self._bootstrapping = False
@@ -245,26 +235,6 @@ class NpuTrainingBootstrap(TrainingBootstrap):
         # does not reinstall Vime's existing override.
         attention = importlib.import_module("vime.backends.megatron_utils.npu_attention_patch")
         attention.DotProductAttention.forward = attention.npu_dot_product_attention_forward
-
-    def adjust_tp_partition_dim(self, name: str, partition_dim: int) -> int:
-        if "linear_fc1.weight" in name or "linear_fc1.bias" in name:
-            return 0
-        return partition_dim
-
-    def training_context(self, offload_train: bool):
-        if not offload_train:
-            return nullcontext()
-        from torch_memory_saver import torch_memory_saver
-
-        return torch_memory_saver.region(tag="training", enable_cpu_backup=True)
-
-    def initialize_optimizer_state(self, optimizer: Any) -> None:
-        """Create lazy optimizer state before leaving the training memory pool."""
-        if optimizer is None:
-            return
-        for opt in getattr(optimizer, "chained_optimizers", [optimizer]):
-            if opt.optimizer is not None and opt.init_state_fn is not None:
-                opt.init_state_fn(opt.optimizer, opt.config)
 
 
 class NpuCheckpointCapabilities(CheckpointCapabilities):

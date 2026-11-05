@@ -4,11 +4,11 @@ Deploys two models via --vllm-config in colocate mode:
   - "actor": update_weights=true, 4 GPUs → overlaps with megatron, gets offloaded
     and weights updated from training.
   - "ref":   update_weights=false, 4 GPUs → overlaps with megatron, gets offloaded
-    and weights restored from disk (update_weights_from_disk).
+    and weights restored from the level-1 sleep CPU backup.
 
 Key coverage:
   - Per-group needs_offload (both overlap with megatron in colocate mode)
-  - update_weights_from_disk for frozen model
+  - Level-1 sleep preserves frozen model weights
   - Selective flush_cache (only for offloaded / updatable engines)
   - Offload/onload cycle completes without crash
 """

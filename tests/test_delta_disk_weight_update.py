@@ -11,11 +11,12 @@ import shlex
 import tempfile
 from pathlib import Path
 
+import torch
 from safetensors import safe_open
 
 import vime.utils.external_utils.command_utils as U
-from vime.utils.disk_delta import checksum, make_tensor_reader
-
+from vime.backends.megatron_utils.hf_to_megatron.common import SafetensorReader
+from vime.utils.disk_delta import checksum
 
 MODEL_NAME = "Qwen3-0.6B"
 MODEL_TYPE = "qwen3-0.6B"
@@ -23,10 +24,9 @@ NUM_GPUS = 4
 TEST_ROOT = os.environ.get("HF_HOME") or "/root"
 MODEL_DIR = f"{TEST_ROOT}/models/{MODEL_NAME}"
 DATASET_DIR = f"{TEST_ROOT}/datasets/gsm8k"
-TORCH_DIST_CKPT = f"/dev/shm/{MODEL_NAME}_torch_dist"
 
 
-def prepare():
+def prepare(checkpoint_root):
     U.exec_command(f"mkdir -p {shlex.quote(MODEL_DIR)} {shlex.quote(DATASET_DIR)}")
     U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {shlex.quote(MODEL_DIR)}")
     U.exec_command("hf download --repo-type dataset zhuzilin/gsm8k " f"--local-dir {shlex.quote(DATASET_DIR)}")
@@ -34,58 +34,73 @@ def prepare():
         model_name=MODEL_NAME,
         megatron_model_type=MODEL_TYPE,
         num_gpus_per_node=NUM_GPUS,
-        dir_dst="/dev/shm",
+        dir_dst=checkpoint_root,
         hf_checkpoint=MODEL_DIR,
     )
+    return f"{checkpoint_root}/{MODEL_NAME}_torch_dist"
 
 
 def verify_checkpoints(case_dir: Path, encoding: str):
     published = case_dir / "published"
     local = case_dir / "local"
-    indexes = []
-    for version in (1, 2):
-        path = published / f"weight_v{version:06d}"
+    versions = sorted(path for path in published.glob("weight_v*") if path.is_dir() and path.name[8:].isdigit())
+    assert len(versions) >= 3, "Expected an initial full checkpoint and at least two delta updates"
+    full_path = versions[0]
+    full_index = json.loads((full_path / "model.safetensors.index.json").read_text())
+    assert "delta_encoding" not in full_index["metadata"], full_index["metadata"]
+    assert full_index["weight_map"], "The initial full checkpoint must contain model weights"
+    initial = SafetensorReader(full_path)
+    expected_checksums = {
+        name: checksum("adler32", initial.get_tensor(name).view(torch.uint8).numpy().reshape(-1))
+        for name in full_index["weight_map"]
+    }
+    previous_version = int(full_path.name[8:])
+    for path in versions[1:]:
+        version = int(path.name[8:])
         index = json.loads((path / "model.safetensors.index.json").read_text())
         metadata = index["metadata"]
+        assert version == previous_version + 1, (previous_version, version)
         assert metadata["version"] == f"{version:06d}", metadata
-        assert metadata["base_version"] == f"{version - 1:06d}", metadata
+        assert metadata["base_version"] == f"{previous_version:06d}", metadata
         assert metadata["delta_encoding"] == encoding, metadata
         assert metadata["compression_format"] == "zstd", metadata
         assert metadata["checksum_format"] == "adler32", metadata
         assert index["weight_map"], f"No changed tensors in delta version {version}"
         for filename in set(index["weight_map"].values()):
             assert (path / filename).stat().st_size > 0
-        indexes.append(index)
+            with safe_open(str(path / filename), framework="np") as delta:
+                digests = delta.metadata()
+                names = {name for name, shard in index["weight_map"].items() if shard == filename}
+                assert set(delta.keys()) == names
+                for name in names:
+                    assert name in expected_checksums, f"Delta tensor absent from full checkpoint: {name}"
+                    expected_checksums[name] = digests[name]
+        previous_version = version
 
     state = json.loads((local / ".weight_sync/state.json").read_text())
-    assert state == {"version": "000002"}, state
-    read_tensor = make_tensor_reader(str(local))
-    final_index = indexes[-1]
-    checked = 0
-    for filename in set(final_index["weight_map"].values()):
-        with safe_open(str(published / "weight_v000002" / filename), framework="np") as delta:
-            digests = delta.metadata()
-            for name in delta.keys():
-                assert final_index["weight_map"][name] == filename
-                actual = checksum("adler32", read_tensor(name))
-                assert actual == digests[name], f"Recovered weight checksum mismatch: {name}"
-                checked += 1
-    assert checked == len(final_index["weight_map"])
+    assert state == {"version": f"{previous_version:06d}"}, state
+    recovered = SafetensorReader(local)
+    assert set(recovered.weight_map) == set(expected_checksums)
+    for name, expected in expected_checksums.items():
+        actual = checksum("adler32", recovered.get_tensor(name).view(torch.uint8).numpy().reshape(-1))
+        assert actual == expected, f"Recovered weight checksum mismatch: {name}"
     summary = {
         "encoding": encoding,
         "rollout_rounds": 2,
+        "published_versions": [path.name for path in versions],
         "local_version": state["version"],
-        "checked_tensors": checked,
+        "checked_tensors": len(expected_checksums),
     }
     (case_dir / "validation.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"Disk delta validation passed: {summary}", flush=True)
 
 
-def execute():
+def execute(torch_dist_checkpoint):
     for encoding in ("xor", "overwrite"):
         with tempfile.TemporaryDirectory(prefix=f"vime_delta_disk_{encoding}_") as disk_dir:
-            ref_load = TORCH_DIST_CKPT if U.current_platform().torch_dist_convert else MODEL_DIR
-            ckpt_args = f"--hf-checkpoint {shlex.quote(MODEL_DIR)} " f"--ref-load {shlex.quote(ref_load)} "
+            ckpt_args = (
+                f"--hf-checkpoint {shlex.quote(MODEL_DIR)} " f"--ref-load {shlex.quote(torch_dist_checkpoint)} "
+            )
 
             rollout_args = (
                 f"--prompt-data {shlex.quote(f'{DATASET_DIR}/train.parquet')} "
@@ -185,8 +200,15 @@ def execute():
             verify_checkpoints(Path(disk_dir), encoding)
 
 
+def main():
+    checkpoint_tmp_root = Path(TEST_ROOT) / "tmp"
+    checkpoint_tmp_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="vime_delta_torch_dist_", dir=checkpoint_tmp_root) as checkpoint_root:
+        torch_dist_checkpoint = prepare(checkpoint_root)
+        for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+            os.environ.pop(proxy_var, None)
+        execute(torch_dist_checkpoint)
+
+
 if __name__ == "__main__":
-    prepare()
-    for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
-        os.environ.pop(proxy_var, None)
-    execute()
+    main()

@@ -40,6 +40,7 @@ PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
 
 You need to configure your litellm API in generate_with_tau.py for user simulation:
 
+```python
 TAU_CONFIGS = {
     "env": "retail",  # Select between ["retail", "airline"]
     "agent_strategy": "tool-calling",  # Select between ["tool-calling", "act", "react", "few-shot"], only tool-calling implemented for now
@@ -52,6 +53,7 @@ TAU_CONFIGS = {
 }
 # Replace with your actual API key for user sim    
 GEMINI_API_KEY = "YOUR KEY" 
+```
 
 Multi-turn limit: set env `TAU_MAX_TURNS` (default 10) or pass `--max-turns` to train.py.
 

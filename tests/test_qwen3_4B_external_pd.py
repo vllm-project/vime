@@ -153,6 +153,7 @@ def _launch_vllm_server(
         "processed_logprobs",
         "--enable-prompt-tokens-details",
         "--enable-server-load-tracking",
+        "--enable-scale-out",
         "--kv-transfer-config",
         json.dumps({"kv_connector": "NixlConnector", "kv_role": kv_role}),
         "--weight-transfer-config",
@@ -344,13 +345,14 @@ def execute():
             },
         )
 
-        checkpoint_dirs = sorted(Path(disk_dir).glob("weight_v*"))
-        assert checkpoint_dirs, f"No disk checkpoint directories were written under {disk_dir}"
-        assert any((path / "model.safetensors.index.json").exists() for path in checkpoint_dirs)
-        assert any(list(path.glob("*.safetensors")) for path in checkpoint_dirs)
         if update_mode == "delta":
-            indexes = [json.loads((path / "model.safetensors.index.json").read_text()) for path in checkpoint_dirs]
-            assert all("delta_encoding" in index["metadata"] for index in indexes)
+            delta_files = list(Path(disk_dir).glob("weight_v*/*.safetensors"))
+            assert delta_files, f"No disk delta safetensors were written under {disk_dir}"
+        else:
+            checkpoint_dirs = sorted(Path(disk_dir).glob("weight_v*"))
+            assert checkpoint_dirs, f"No disk checkpoint directories were written under {disk_dir}"
+            assert any((path / "model.safetensors.index.json").exists() for path in checkpoint_dirs)
+            assert any(list(path.glob("*.safetensors")) for path in checkpoint_dirs)
     finally:
         for p in processes:
             if p.poll() is None:

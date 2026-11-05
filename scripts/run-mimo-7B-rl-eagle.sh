@@ -111,7 +111,8 @@ VLLM_ARGS=(
    # for speculative decoding
 
    # sometimes flashinfer has IMA bugs. Use fa3 as instead
-   --vllm-attention-backend fa3
+   --vllm-attention-backend FLASH_ATTN
+   --vllm-attention-config '{"flash_attn_version":3}'
    --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":4}'
 )
 

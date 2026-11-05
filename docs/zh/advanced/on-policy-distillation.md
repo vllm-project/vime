@@ -11,7 +11,7 @@
 | `--opd-kl-coef` | OPD KL 惩罚系数（默认值：1.0）。控制蒸馏信号相对于 RL advantage 的权重。 |
 | `--opd-teacher-load` | 教师模型的 Megatron checkpoint 路径。`--opd-type=megatron` 时**必须**设置，`--opd-type=vllm` 时**不可**设置。 |
 | `--opd-teacher-ckpt-step` | 可选的教师模型 checkpoint 步数。 |
-| `--opd-teacher-model` | `--opd-type=vllm` 时发送给外部 VLLM 教师服务的可选模型名。 |
+| `--opd-teacher-model` | `--opd-type=vllm` 时发送给外部 vLLM 教师服务的可选模型名。 |
 
 ## 原理
 
@@ -43,14 +43,14 @@ $$
 
 ## 两种教师模式
 
-### VLLM 模式 (`--opd-type vllm`)
+### vLLM 模式 (`--opd-type vllm`)
 
-教师模型运行在外部 VLLM 服务器上，教师的 log-probs 在 rollout 阶段获取。
+教师模型运行在外部 vLLM 服务器上，教师的 log-probs 在 rollout 阶段获取。
 
 **适用场景**：教师与学生架构不同，或教师模型太大无法与训练模型同时加载。由于教师需要为学生的原始 token ID 评分，两者仍须使用兼容的 tokenizer 和词表。
 
 **工作流程**：
-1. 外部 VLLM 服务器运行教师模型。
+1. 外部 vLLM 服务器运行教师模型。
 2. 在 rollout 阶段，自定义 reward 函数（`vime.rollout.on_policy_distillation.reward_func`）将学生采样的 token ID 发送给教师服务器，并获取教师对这些相同 token 的 log-probability。
 3. 自定义后处理函数（`vime.rollout.on_policy_distillation.post_process_rewards`）将教师 log-probs 裁剪到 response 范围并存储到 `sample.teacher_log_probs` 中。
 4. 在训练阶段，vime 从基础 advantage 中减去按 `--opd-kl-coef` 缩放后的采样 log-probability 差值。
@@ -90,7 +90,7 @@ $$
 
 完整的示例脚本在 `examples/on_policy_distillation/` 中：
 
-### VLLM 教师
+### vLLM 教师
 
 ```bash
 # 1. 下载模型和数据

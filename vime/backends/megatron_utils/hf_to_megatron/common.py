@@ -9,8 +9,6 @@ import torch
 import torch.nn.functional as F
 from safetensors import safe_open
 
-from vime.platforms import current_platform
-
 
 class SafetensorReader:
     def __init__(self, path: str | Path):
@@ -62,7 +60,7 @@ class SafetensorReader:
 def strip_mcore_wrappers(name: str) -> str:
     while name.startswith("module."):
         name = name.removeprefix("module.")
-    return name.removeprefix("language_model.")
+    return name.removeprefix("language_model.").replace(".mtp_model_layer.", ".transformer_layer.")
 
 
 def text_config(config):
@@ -131,7 +129,7 @@ def shard_mcore_tensor(name: str, tensor: torch.Tensor, parameter: torch.Tensor)
         tensor,
         parallel_size=parallel_size,
         parallel_rank=parallel_rank,
-        partition_dim=current_platform().megatron.adjust_tp_partition_dim(name, parameter.partition_dim),
+        partition_dim=parameter.partition_dim,
         partition_stride=parameter.partition_stride,
     )
 

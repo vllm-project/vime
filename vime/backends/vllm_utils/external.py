@@ -90,7 +90,7 @@ def get_server_info(url: str, timeout: float = 30.0) -> dict:
 def _normalize_server_info(server_info: dict) -> dict:
     vllm_config = server_info.get("vllm_config")
     if not isinstance(vllm_config, dict):
-        return server_info
+        vllm_config = server_info
 
     normalized = dict(server_info)
     for section in vllm_config.values():
@@ -116,6 +116,15 @@ def _normalize_server_info(server_info: dict) -> dict:
     weight_transfer_config = find_config_value(vllm_config, "weight_transfer_config")
     if weight_transfer_config is not None:
         normalized["weight_transfer_config"] = weight_transfer_config
+    ec_transfer_config = find_config_value(vllm_config, "ec_transfer_config")
+    if ec_transfer_config is not None:
+        normalized["ec_transfer_config"] = ec_transfer_config
+    if (
+        isinstance(ec_transfer_config, dict)
+        and ec_transfer_config.get("ec_connector") is not None
+        and ec_transfer_config.get("ec_role") == "ec_producer"
+    ):
+        normalized["encoder_only"] = True
     if isinstance(kv_transfer_config, dict):
         role = kv_transfer_config.get("kv_role")
         if role == "kv_producer":
@@ -135,13 +144,6 @@ def _normalize_server_info(server_info: dict) -> dict:
 def _infer_worker_type(server_info: dict) -> str:
     if server_info.get("encoder_only"):
         return "encoder"
-    kv_transfer_config = server_info.get("kv_transfer_config")
-    if isinstance(kv_transfer_config, dict):
-        role = kv_transfer_config.get("kv_role")
-        if role == "kv_producer":
-            return "prefill"
-        if role == "kv_consumer":
-            return "decode"
     mode = server_info.get("disaggregation_mode")
     if mode in ("prefill", "decode"):
         return mode

@@ -6,12 +6,13 @@ on the updatable (actor) server, testing:
   - Health monitor detects crash and marks engine as None
   - RolloutServer.recover() restarts the dead engine
   - Updatable engines: offload → resume_memory_occupation → update_weights
-  - Non-updatable engines: offload → update_weights_from_disk
+  - Non-updatable engines: level-1 offload → resume_memory_occupation
   - Training continues after recovery
 """
 
 import os
 import tempfile
+from shlex import quote
 
 import vime.utils.external_utils.command_utils as U
 
@@ -52,6 +53,7 @@ def execute():
     ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load /root/models/{MODEL_NAME}/ "
 
     rollout_args = (
+        "--rollout-data-transport straw "
         "--prompt-data /root/datasets/gsm8k/train.parquet "
         "--input-key messages "
         "--label-key label "
@@ -145,11 +147,13 @@ def execute():
         f"{misc_args} "
     )
 
-    U.execute_train(
-        train_args=train_args,
-        num_gpus_per_node=NUM_GPUS,
-        megatron_model_type=MODEL_TYPE,
-    )
+    with tempfile.TemporaryDirectory(prefix="vime_straw_") as rollout_dir:
+        train_args += f"--rollout-data-dir {quote(rollout_dir)} "
+        U.execute_train(
+            train_args=train_args,
+            num_gpus_per_node=NUM_GPUS,
+            megatron_model_type=MODEL_TYPE,
+        )
 
 
 if __name__ == "__main__":

@@ -125,7 +125,7 @@ While `sleep_rollout` is waiting:
 
 1. `profile_rollout.py --action start`
 2. Send a few completion requests to the router or **directly to a worker** (2-4 is usually enough; traces get large)
-3. If relying on auto-flush, remember that `max_iterations` stops after `> N` steps. For example, `max_iterations=3` needs 4 requests; otherwise call `profile_rollout.py --action stop` manually.
+3. If relying on auto-flush, `max_iterations=3` stops after 4 recorded worker steps, not 4 requests. One request may span many steps, and one step may batch several requests. Call `profile_rollout.py --action stop` to finish collection manually.
 4. Inspect traces under `torch_profiler_dir`
 
 Example request (`model` is the HF checkpoint path):
@@ -162,7 +162,7 @@ python tools/analyze_profile.py --profile-dir /root/logs/vllm_profile --all-rank
 | Symptom | Fix |
 |------|------|
 | `POST /start_profile` 404 | Pass `--vllm-profiler-config` as JSON; restart the job |
-| Start OK but empty output dir | Confirm curl hits a worker and returns 200; if `max_iterations=3`, send 4 requests or call `stop_profile` manually |
+| Start OK but empty output dir | Confirm requests reach the profiled worker; wait for enough recorded worker steps or call `stop_profile` manually |
 | Router 503 | Confirm the current job's router port; connect directly to a worker |
 | Slow stop | Wait for trace flushing to finish; reduce request count |
 
@@ -287,7 +287,7 @@ run_profiling_session() {
   echo "=== 1/3 start_profile (all workers via router) ==="
   python tools/profile_rollout.py --router-url "${router_url}" --action start
 
-  echo "=== 2/3 send completions (direct to worker; 4 requests so max_iterations=3 can auto-flush) ==="
+  echo "=== 2/3 send completions (direct to worker; auto-flush counts worker steps, not requests) ==="
   for i in 1 2 3 4; do
     response="$(curl -sS -X POST "${worker_url}/v1/completions" \
       -H "Content-Type: application/json" \

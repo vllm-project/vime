@@ -8,8 +8,8 @@ from typing import Any
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+from vime.backends.vllm_utils.server_control import unregister_worker
 from vime.backends.vllm_utils.vllm_config import ServerGroupConfig
-from vime.backends.vllm_utils.vllm_engine import VLLMEngine, _resolve_parallel_sizes
 from vime.platforms import current_platform
 from vime.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, add_default_ray_env_vars
 
@@ -18,6 +18,52 @@ GPU_MEMORY_TYPE_WEIGHTS = "weights"
 GPU_MEMORY_TYPE_CUDA_GRAPH = "cuda_graph"
 
 logger = logging.getLogger(__name__)
+
+
+def reset_weights_update_groups(groups, *, timeout):
+    """Reset every serving peer together, then retire only failed engines.
+
+    Prefill and decode may share one NCCL weight-update group. Destroying that
+    group can wait for its peers, so sending resets to one server group and
+    waiting before contacting the next group can deadlock healthy engines.
+    """
+    # Retire unresponsive actors before asking healthy peers to destroy their
+    # shared NCCL group; otherwise the healthy reset can wait on the stuck peer.
+    probes = {
+        engine.get_url.remote(): (group_index, index // group.nodes_per_engine)
+        for group_index, group in enumerate(groups)
+        for index, engine in enumerate(group.all_engines)
+        if engine is not None
+    }
+    if probes:
+        ray.wait(list(probes), num_returns=len(probes), timeout=timeout)
+    unresponsive = set()
+    for ref, (group_index, engine_id) in probes.items():
+        try:
+            ray.get(ref, timeout=0)
+        except Exception as error:
+            logger.warning("Retiring unresponsive engine before trainer reset: %s", error)
+            unresponsive.add((group_index, engine_id))
+    for group_index, engine_id in sorted(unresponsive):
+        groups[group_index].retire_engine(engine_id, timeout=timeout)
+
+    resets = {
+        engine.reset_weights_update_groups.remote(): (group_index, index // group.nodes_per_engine)
+        for group_index, group in enumerate(groups)
+        for index, engine in enumerate(group.all_engines)
+        if engine is not None
+    }
+    if resets:
+        ray.wait(list(resets), num_returns=len(resets), timeout=timeout)
+    failed = set()
+    for ref, engine in resets.items():
+        try:
+            ray.get(ref, timeout=0)
+        except Exception as error:
+            logger.warning("Retiring engine %s after trainer reset failed: %s", engine, error)
+            failed.add(engine)
+    for group_index, engine_id in sorted(failed):
+        groups[group_index].retire_engine(engine_id, timeout=timeout)
 
 
 @dataclasses.dataclass
@@ -33,6 +79,7 @@ class ServerGroup:
     pg: Any  # (placement_group, reordered_bundle_indices, reordered_gpu_ids)
     all_engines: list
     num_gpus_per_engine: int
+    # Also marks surviving engines that a replacement trainer must reconnect.
     num_new_engines: int
     worker_type: str = "regular"  # "regular", "prefill", "decode", or "placeholder"
     rank_offset: int = 0  # cumulative engine count before this group
@@ -42,6 +89,9 @@ class ServerGroup:
     model_path: str | None = None  # checkpoint path for update_weights_from_disk
     router_ip: str | None = None
     router_port: int | None = None
+    # Retain addresses outside the actors: deregistration must still work when
+    # an actor dies or cannot answer get_url(). Keys index all_engines locally.
+    engine_urls: dict[int, str] = dataclasses.field(default_factory=dict)
 
     @property
     def nodes_per_engine(self):
@@ -54,6 +104,8 @@ class ServerGroup:
 
     def parallel_config(self) -> dict[str, Any]:
         """Return the VLLM parallel args that affect rank-local expert routing."""
+        from vime.backends.vllm_utils.vllm_engine import _resolve_parallel_sizes
+
         overrides = {key.replace("-", "_"): value for key, value in self.vllm_overrides.items()}
         tp_size, pp_size, pcp_size, dp_size = _resolve_parallel_sizes(
             self.args,
@@ -74,6 +126,24 @@ class ServerGroup:
             "enable_expert_parallel": enable_expert_parallel,
             "ep_size": tp_size * pcp_size * dp_size if enable_expert_parallel else 1,
         }
+
+    def retire_engine(self, engine_id, *, timeout):
+        """Remove one serving unit from routing and terminate all of its nodes."""
+        first = engine_id * self.nodes_per_engine
+        if self.worker_type != "encoder":
+            unregister_worker(
+                f"http://{self.router_ip or self.args.vllm_router_ip}:{self.router_port or self.args.vllm_router_port}",
+                self.engine_urls[first],
+                timeout=timeout,
+            )
+        engines = self.all_engines[first : first + self.nodes_per_engine]
+        shutdowns = [engine.shutdown.remote() for engine in engines if engine is not None]
+        if shutdowns:
+            ray.wait(shutdowns, num_returns=len(shutdowns), timeout=timeout)
+        for engine in engines:
+            if engine is not None:
+                ray.kill(engine, no_restart=True)
+        self.all_engines[first : first + self.nodes_per_engine] = [None] * self.nodes_per_engine
 
     def start_engines(self, port_cursors: dict[int, int] | None = None) -> tuple[list, dict[int, int]]:
         """Create Ray actors, allocate ports, and fire ``engine.init()`` without waiting.
@@ -115,12 +185,16 @@ class ServerGroup:
                 "and --vllm-config server_groups."
             )
 
+        from vime.backends.vllm_utils.vllm_engine import VLLMEngine
+
         RolloutRayActor = ray.remote(VLLMEngine)
 
         rollout_engines = []
         platform = current_platform()
         for i in range(len(self.all_engines)):
             if self.all_engines[i] is not None:
+                # Startup and recovery share this slot map. Reuse live processes;
+                # only empty slots need new actors.
                 continue
 
             global_rank = self.rank_offset + i
@@ -185,6 +259,14 @@ class ServerGroup:
             base_port=base_port,
         )
 
+        # Cache URLs before init can fail. Deregistration must remain possible
+        # even if the actor dies before answering get_url().
+        for rank, _engine in rollout_engines:
+            address = addr_and_ports[rank]
+            host = address["host"]
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            self.engine_urls[rank - self.rank_offset] = f"http://{host}:{address['port']}"
         init_handles = [
             engine.init.remote(
                 **(addr_and_ports[rank]),
@@ -195,7 +277,7 @@ class ServerGroup:
         ]
         return init_handles, port_cursors
 
-    def offload(self):
+    def offload(self, level: int = 2):
         """Fire release_memory_occupation on all engines (non-blocking).
 
         Returns a list of Ray ObjectRefs.  Skipped for groups that do not
@@ -203,7 +285,7 @@ class ServerGroup:
         """
         if not self.needs_offload:
             return []
-        return [engine.release_memory_occupation.remote() for engine in self.engines if engine is not None]
+        return [engine.release_memory_occupation.remote(level=level) for engine in self.engines if engine is not None]
 
     def onload(self, tags: list[str] | None = None):
         """Fire resume_memory_occupation on all engines (non-blocking).
@@ -303,8 +385,13 @@ class RolloutServer:
             logger.info(f"Recovered {g.num_new_engines} dead rollout engines (worker_type={g.worker_type})")
             assert g.num_new_engines == len(dead_indices), "num_new_engines does not match dead_indices length"
             if g.needs_offload and dead_indices:
+                # Fresh engines allocate all memory at startup. Restore offload
+                # state before weight sync to avoid conflicts with colocated training.
                 new_engines = [g.all_engines[i] for i in dead_indices]
-                release_handles.extend(engine.release_memory_occupation.remote() for engine in new_engines)
+                release_handles.extend(
+                    engine.release_memory_occupation.remote(level=2 if self.update_weights else 1)
+                    for engine in new_engines
+                )
                 if self.update_weights:
                     updatable_new_engines.extend(new_engines)
                 elif g.model_path:
@@ -328,7 +415,7 @@ class RolloutServer:
         """Release memory occupation across all groups (concurrent)."""
         handles = []
         for g in self.server_groups:
-            handles.extend(g.offload())
+            handles.extend(g.offload(level=2 if self.update_weights else 1))
         return ray.get(handles) if handles else []
 
     def onload(self, tags: list[str] | None = None):
@@ -339,13 +426,7 @@ class RolloutServer:
         return ray.get(handles) if handles else []
 
     def onload_weights(self):
-        """Restore weights for offloaded groups.
-
-        All groups resume from CPU cache via ``resume_memory_occupation``.
-        For updatable servers, weights will be overwritten by
-        ``update_weights`` shortly after.  For non-updatable servers the
-        CPU backup already contains the correct (unchanged) weights.
-        """
+        """Restore weights for offloaded groups."""
         handles = []
         for g in self.server_groups:
             if not g.needs_offload:
@@ -393,7 +474,7 @@ class ServerGroupPlacement:
             for key, value in overrides_extra.items():
                 overrides.setdefault(key, value)
         if self.args.offload_rollout and not needs_offload:
-            overrides.setdefault("enable_memory_saver", False)
+            overrides.setdefault("enable_sleep_mode", False)
         logger.info(
             f"Engine group '{group_config.worker_type}' gpu_offset={self.gpu_offset} "
             f"(abs={group_abs_start}): needs_offload={needs_offload}"
@@ -432,12 +513,7 @@ def _allocate_rollout_engine_addr_and_ports_normal(
     rank_offset=0,
     base_port=15000,
 ):
-    # get ports
-    # there are 4 ports we need to allocate
-    # 1. server port
-    # 2. nccl port
-    # 3. dist_init_addr port
-    # 4. other ports for dp_attention, which is of size 4 + dp_size
+    """Allocate rank-local vLLM and distributed-init ports for one group."""
     _gpus_per_engine = num_gpus_per_engine or args.rollout_num_gpus_per_engine
     num_engines_per_node = max(1, args.num_gpus_per_node // _gpus_per_engine)
     addr_and_ports: dict[int, dict] = {}
@@ -491,6 +567,8 @@ def _allocate_rollout_engine_addr_and_ports_normal(
 
             if worker_type in ("prefill", "decode"):
                 addr_and_ports[current_rank]["disaggregation_bootstrap_port"] = get_port()
+            elif worker_type == "encoder":
+                addr_and_ports[current_rank]["disaggregation_bootstrap_port"] = get_port(_gpus_per_engine)
 
         if _gpus_per_engine > args.num_gpus_per_node:
             num_node_per_engine = _gpus_per_engine // args.num_gpus_per_node

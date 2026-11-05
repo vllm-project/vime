@@ -109,3 +109,7 @@ def test_sparse_options_rejected_before_import(quantization, error):
     )
     with pytest.raises(error):
         create_weight_updater(args, [], lambda: {}, model_name="test", quantization_config=quantization)
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__]))

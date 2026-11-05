@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -19,7 +20,7 @@ def _fake_platform(ray_ops, *, is_npu=False):
         ("npu", "ASCEND_RT_VISIBLE_DEVICES", "9", "NPU"),
     ],
 )
-def test_platform_ray_accelerator_ids_and_local_mapping(
+def test_platform_ray_accelerator_ids(
     monkeypatch,
     platform_name,
     visible_env,
@@ -40,7 +41,6 @@ def test_platform_ray_accelerator_ids_and_local_mapping(
 
     assert platform.ray.resource_name == expected_resource
     assert platform.ray.accelerator_ids() == [assigned_id]
-    assert platform.ray.local_device_id() == 1
 
 
 def test_placement_group_uses_platform_ray_resource_contract(monkeypatch):
@@ -109,8 +109,14 @@ def test_ray_noset_visible_devices_keeps_ascend_entry():
     assert "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES" in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
 
 
-def test_train_group_uses_npu_runtime_env_and_actor_resources(monkeypatch):
+def test_train_group_uses_npu_runtime_env_and_actor_resources(monkeypatch, tmp_path):
     from vime.ray import actor_group as actor_group_module
+
+    tms = types.ModuleType("torch_memory_saver")
+    tms.__file__ = str(tmp_path / "torch_memory_saver" / "__init__.py")
+    monkeypatch.setitem(sys.modules, "torch_memory_saver", tms)
+    preload_library = tmp_path / "torch_memory_saver_hook_mode_preload.abi3.so"
+    preload_library.touch()
 
     runtime_env_inputs = []
     ray_ops = SimpleNamespace(
@@ -162,13 +168,74 @@ def test_train_group_uses_npu_runtime_env_and_actor_resources(monkeypatch):
     )
     assert group.create() == [0]
 
-    assert runtime_env_inputs[0][0] is args
+    # RayTrainGroup deep-copies args, so identity against the caller's object no
+    # longer holds. The contract that matters is that the platform hook is handed
+    # the very args the group uses everywhere else, with the caller's values
+    # intact, so platform env choices cannot diverge from training choices.
+    received_args = runtime_env_inputs[0][0]
+    assert received_args is group.args
+    assert received_args is not args
+    assert received_args.train_env_vars == args.train_env_vars
+    assert received_args.offload_train == args.offload_train
+    assert received_args.colocate == args.colocate
     assert runtime_env_inputs[0][1]["USER_ENV"] == "yes"
+    assert runtime_env_inputs[0][1]["LD_PRELOAD"] == str(preload_library)
+    assert runtime_env_inputs[0][1]["TMS_INIT_ENABLE"] == "1"
+    assert runtime_env_inputs[0][1]["TMS_INIT_ENABLE_CPU_BACKUP"] == "1"
     assert remote_declarations[0]["runtime_env"]["env_vars"]["PLATFORM_ENV"] == "1"
     assert remote_declarations[0]["num_gpus"] == 1
     assert actor_allocations[0]["resources"] == {"ACCEL": 0.4}
     assert actor_allocations[0]["num_gpus"] == 0
     ray_ops.actor_options.assert_called_once_with(0.4)
+
+
+@pytest.mark.parametrize("backend", ["megatron", "fsdp"])
+@pytest.mark.parametrize("offload", [False, True])
+@pytest.mark.parametrize(
+    "library",
+    [
+        "torch_memory_saver_hook_mode_preload_cu13.abi3.so",
+        "torch_memory_saver_hook_mode_preload_cu12.abi3.so",
+        "torch_memory_saver_hook_mode_preload.abi3.so",
+        None,
+    ],
+)
+def test_train_group_preserves_main_offload_env(monkeypatch, tmp_path, backend, offload, library):
+    from vime.ray import actor_group as actor_group_module
+
+    tms = types.ModuleType("torch_memory_saver")
+    tms.__file__ = str(tmp_path / "torch_memory_saver" / "__init__.py")
+    monkeypatch.setitem(sys.modules, "torch_memory_saver", tms)
+    if library is not None:
+        (tmp_path / library).touch()
+    monkeypatch.setattr(
+        actor_group_module,
+        "current_platform",
+        lambda: _fake_platform(SimpleNamespace(train_runtime_env=lambda _args, env: env)),
+    )
+    remote = Mock(return_value=lambda actor: actor)
+    monkeypatch.setattr(actor_group_module.ray, "remote", remote)
+    args = SimpleNamespace(
+        train_env_vars={"USER_ENV": "yes"}, offload_train=offload, train_backend=backend, use_routing_replay=False
+    )
+    # No actor workers are created; inspect exactly what Ray would receive.
+    group = actor_group_module.RayTrainGroup(args, 0, 1, (object(), [], []), actor_cls=object)
+    if offload and library is None:
+        with pytest.raises(FileNotFoundError, match="Cannot find torch_memory_saver dynamic library"):
+            group._allocate_gpus_for_actor(group._pg, 1)
+        remote.assert_not_called()
+        return
+
+    group._allocate_gpus_for_actor(group._pg, 1)
+
+    env = remote.call_args.kwargs["runtime_env"]["env_vars"]
+    assert env["USER_ENV"] == "yes"
+    if offload:
+        assert Path(env["LD_PRELOAD"]) == tmp_path / library
+        assert env["TMS_INIT_ENABLE"] == "1"
+        assert env["TMS_INIT_ENABLE_CPU_BACKUP"] == "1"
+    else:
+        assert not {"LD_PRELOAD", "TMS_INIT_ENABLE", "TMS_INIT_ENABLE_CPU_BACKUP"} & env.keys()
 
 
 @pytest.mark.parametrize("is_npu", [False, True])
@@ -197,10 +264,12 @@ def test_rollout_engine_delegates_runtime_env_and_actor_options(monkeypatch, is_
             return FakeEngine()
 
     monkeypatch.setattr(rollout_module.ray, "remote", lambda _actor_impl: FakeRemoteActor())
+    # start_engines caches each engine's URL before init can fail, so the
+    # allocator has to hand back a real address, not an empty mapping.
     monkeypatch.setattr(
         rollout_module,
         "_allocate_rollout_engine_addr_and_ports_normal",
-        lambda **_kwargs: ({0: {}}, {0: 15001}),
+        lambda **_kwargs: ({0: {"host": "127.0.0.1", "port": 15000, "nccl_port": 15002}}, {0: 15001}),
     )
 
     args = SimpleNamespace(
@@ -223,6 +292,7 @@ def test_rollout_engine_delegates_runtime_env_and_actor_options(monkeypatch, is_
 
     assert handles == ["init-ref"]
     assert cursors == {0: 15001}
+    assert group.engine_urls[0] == "http://127.0.0.1:15000"
     if is_npu:
         assert runtime_env_inputs[0][0] is args
         assert actor_options[0]["runtime_env"]["env_vars"]["PLATFORM_ENV"] == "rollout"
@@ -243,18 +313,55 @@ def test_rollout_engine_delegates_runtime_env_and_actor_options(monkeypatch, is_
         group.start_engines()
 
 
-def test_train_actor_uses_npu_local_device_mapping(monkeypatch):
+@pytest.mark.parametrize(
+    "visible,assigned_id,expected",
+    [
+        (None, "7", 7),
+        (None, "7.0", 7),
+        ("", "7", 7),
+        ("4,7", "4", 0),
+        ("4,7", "7", 1),
+        ("4,7", "7.0", 1),
+        ("4,7", "1", 1),
+        ("4,7", "1.0", 1),
+        ("4,7", "0", 0),
+        ("1,4", "1", 0),
+        (" 4, 7 ", "7", 1),
+        ("7,4", "7", 0),
+    ],
+)
+def test_train_actor_uses_main_mapping_for_npu(monkeypatch, visible, assigned_id, expected):
+    from vime.platforms import get_platform
+    from vime.platforms.npu import NPUAccelerator
     from vime.ray import train_actor as train_actor_module
 
-    local_device_id = Mock(return_value=5)
-    monkeypatch.setattr(
-        train_actor_module,
-        "current_platform",
-        lambda: _fake_platform(SimpleNamespace(local_device_id=local_device_id), is_npu=True),
-    )
+    monkeypatch.setattr(train_actor_module, "current_platform", lambda: get_platform("npu"))
+    monkeypatch.setattr(train_actor_module.accelerator, "_ACCELERATOR", NPUAccelerator())
+    context = SimpleNamespace(get_accelerator_ids=lambda: {"NPU": [assigned_id]})
+    monkeypatch.setattr(train_actor_module.ray, "get_runtime_context", lambda: context)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    if visible is None:
+        monkeypatch.delenv("ASCEND_RT_VISIBLE_DEVICES", raising=False)
+    else:
+        monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", visible)
 
-    assert train_actor_module.get_local_gpu_id() == 5
-    local_device_id.assert_called_once_with()
+    assert train_actor_module.get_local_gpu_id() == expected
+
+
+@pytest.mark.parametrize("assigned_id", ["-1", "2", "8", "not-a-device", None])
+def test_train_actor_rejects_invalid_or_missing_npu_id(monkeypatch, assigned_id):
+    from vime.platforms import get_platform
+    from vime.platforms.npu import NPUAccelerator
+    from vime.ray import train_actor as train_actor_module
+
+    monkeypatch.setattr(train_actor_module, "current_platform", lambda: get_platform("npu"))
+    monkeypatch.setattr(train_actor_module.accelerator, "_ACCELERATOR", NPUAccelerator())
+    context = SimpleNamespace(get_accelerator_ids=lambda: {"NPU": [] if assigned_id is None else [assigned_id]})
+    monkeypatch.setattr(train_actor_module.ray, "get_runtime_context", lambda: context)
+    monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", "4,7")
+
+    with pytest.raises(RuntimeError, match="No NPU accelerator IDs" if assigned_id is None else "not valid under"):
+        train_actor_module.get_local_gpu_id()
 
 
 def test_train_actor_keeps_main_cuda_local_device_mapping(monkeypatch):

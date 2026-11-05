@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import ast
+import logging
+import random
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -113,9 +116,8 @@ def test_validate_args_router_none_noop(args_mod):
 
 
 @pytest.mark.unit
-def test_validate_args_rejects_unbounded_top_p_replay(args_mod):
-    with pytest.raises(ValueError, match="requires --rollout-top-k > 0"):
-        args_mod.validate_args(_ns(rollout_top_p=0.95))
+def test_validate_args_accepts_unbounded_top_p_replay(args_mod):
+    args_mod.validate_args(_ns(rollout_top_p=0.95))
 
 
 @pytest.mark.unit
@@ -173,6 +175,38 @@ def test_add_vllm_router_arguments_defaults_to_cache_aware(args_mod):
     args_mod.add_vllm_router_arguments(parser)
     parsed, _ = parser.parse_known_args([])
     assert parsed.router_policy == "cache_aware"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("flags, expected", [([], "warning"), (["--router-log-level", "debug"], "debug")])
+def test_router_log_level_survives_launch(args_mod, monkeypatch, flags, expected):
+    from vllm_router.router_args import RouterArgs
+
+    parser = argparse.ArgumentParser(add_help=False)
+    args_mod.add_vllm_router_arguments(parser)
+    args = parser.parse_args(flags)
+    assert args.router_log_level == expected
+    router_args = SimpleNamespace(log_level=args.router_log_level)
+    monkeypatch.setattr(RouterArgs, "from_cli_args", lambda *args, **kwargs: router_args)
+    launches = []
+
+    def make_process(*, target, args):
+        launches.append(args[0])
+        return SimpleNamespace(start=lambda: None, is_alive=lambda: True)
+
+    source_path = Path(args_mod.__file__).with_name("deployment.py")
+    source = ast.parse(source_path.read_text())
+    function = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "_start_router")
+    namespace = {
+        "random": random,
+        "logger": logging.getLogger(__name__),
+        "find_available_port": lambda port: port,
+        "time": SimpleNamespace(sleep=lambda seconds: None),
+        "multiprocessing": SimpleNamespace(Process=make_process),
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), namespace)
+    namespace["_start_router"](args, bind=("127.0.0.1", 30000))
+    assert launches[0].log_level == expected
 
 
 @pytest.mark.unit

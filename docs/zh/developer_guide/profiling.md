@@ -123,7 +123,7 @@ python tools/profile_rollout.py \
 
 1. `profile_rollout.py --action start`
 2. 向router或**直连worker**发送少量completion请求（通常2～4条即可，trace会很大）
-3. 如果依赖自动写入 trace，要注意 `max_iterations` 的停止条件是 `> N`。例如 `max_iterations=3` 时，需要发 4 条请求；否则请手动执行 `profile_rollout.py --action stop`
+3. 如果依赖自动写入 trace，`max_iterations=3` 会在记录 4 个 worker 步后停止，并非 4 条请求。一个请求可能跨越多步，一步也可能批量处理多个请求。也可手动执行 `profile_rollout.py --action stop` 结束采集。
 4. 在`torch_profiler_dir`查看trace
 
 请求示例（`model`使用HF checkpoint路径）：
@@ -160,7 +160,7 @@ python tools/analyze_profile.py --profile-dir /root/logs/vllm_profile --all-rank
 | 现象 | 处理 |
 |------|------|
 | `POST /start_profile` 404 | 用JSON传`--vllm-profiler-config`；重启job |
-| start成功但目录为空 | 确认curl打到worker且返回200；若 `max_iterations=3`，请发 4 条请求，或手动执行 `stop_profile` |
+| start成功但目录为空 | 确认请求到达正在采集的 worker；等待记录足够的 worker 步，或手动执行 `stop_profile` |
 | router 503 | 确认当前job的router端口；改直连worker |
 | stop 很慢 | 等待 trace 写盘完成；减少请求条数 |
 
@@ -285,7 +285,7 @@ run_profiling_session() {
   echo "=== 1/3 start_profile (all workers via router) ==="
   python tools/profile_rollout.py --router-url "${router_url}" --action start
 
-  echo "=== 2/3 send completions (direct to worker; 4 requests so max_iterations=3 can auto-flush) ==="
+  echo "=== 2/3 send completions (direct to worker; auto-flush counts worker steps, not requests) ==="
   for i in 1 2 3 4; do
     response="$(curl -sS -X POST "${worker_url}/v1/completions" \
       -H "Content-Type: application/json" \

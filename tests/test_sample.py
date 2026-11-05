@@ -24,12 +24,12 @@ import pytest
 from vime.utils.types import Sample
 
 
+NUM_GPUS = 0
+
+
 # ---------------------------------------------------------------------------
 # to_dict / from_dict round-trip
 # ---------------------------------------------------------------------------
-
-
-NUM_GPUS = 0
 
 
 def _make_sample(**overrides) -> Sample:
@@ -178,7 +178,7 @@ def test_round_trip_through_default_constructed_sample():
 
 
 def _make_args(speculative: bool = False) -> argparse.Namespace:
-    """``append_response_tokens`` only consults ``args.vllm_speculative_algorithm``
+    """``append_response_tokens`` only consults ``args.vllm_speculative_config``
     — minimal stub is enough."""
     return argparse.Namespace(vllm_speculative_config=speculative)
 
@@ -193,7 +193,7 @@ def _make_args(speculative: bool = False) -> argparse.Namespace:
     ],
 )
 def test_status_mapping_for_each_finish_reason(finish_reason, expected_status):
-    """The match statement at types.py:176-182 is the one place the engine's
+    """The match statement at types.py:176-182 is the one place vllm's
     finish_reason ever gets translated. Each branch must hit the right
     enum; a typo in the enum name would crash later in unrelated places."""
     sample = Sample()
@@ -223,10 +223,8 @@ def test_unknown_finish_reason_leaves_status_unchanged():
 
 
 @pytest.mark.unit
-def test_weight_version_is_appended_when_present():
-    """``weight_version`` in meta_info is appended to the sample's list
-    (types.py:173-174) — partial-rollout uses this to track which model
-    version produced each chunk."""
+def test_weight_version_is_not_appended_for_zero_token_segment():
+    """A terminal metadata-only update must not make an old sample look fresh."""
     sample = Sample()
     sample.weight_versions = ["v1"]
     sample.append_response_tokens(
@@ -238,7 +236,7 @@ def test_weight_version_is_appended_when_present():
             "weight_version": "v2",
         },
     )
-    assert sample.weight_versions == ["v1", "v2"]
+    assert sample.weight_versions == ["v1"]
 
 
 @pytest.mark.unit
@@ -266,7 +264,7 @@ def test_prefix_cache_info_is_accumulated_across_calls():
 def test_spec_info_only_updated_when_speculative_enabled():
     """``spec_info.add`` is gated on ``args.vllm_speculative_config``
     (types.py:166-168). Without the flag, spec stats stay at zero even
-    if the engine sends them."""
+    if vllm sends them."""
     meta_info = {
         "finish_reason": {"type": "stop"},
         "spec_accept_token_num": 7,
