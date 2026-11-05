@@ -196,14 +196,16 @@ def _get_model_provider_func(
                         spec_kwargs["moe_use_legacy_grouped_gemm"] = args.moe_use_legacy_grouped_gemm
                     transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(**spec_kwargs)
                 else:
-                    transformer_layer_spec = get_gpt_layer_local_spec(
-                        num_experts=args.num_experts,
-                        moe_grouped_gemm=args.moe_grouped_gemm,
-                        qk_layernorm=args.qk_layernorm,
-                        multi_latent_attention=args.multi_latent_attention,
-                        moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm,
-                        normalization=args.normalization,
-                    )
+                    spec_kwargs = {
+                        "num_experts": args.num_experts,
+                        "moe_grouped_gemm": args.moe_grouped_gemm,
+                        "qk_layernorm": args.qk_layernorm,
+                        "multi_latent_attention": args.multi_latent_attention,
+                        "normalization": args.normalization,
+                    }
+                    if "moe_use_legacy_grouped_gemm" in inspect.signature(get_gpt_layer_local_spec).parameters:
+                        spec_kwargs["moe_use_legacy_grouped_gemm"] = args.moe_use_legacy_grouped_gemm
+                    transformer_layer_spec = get_gpt_layer_local_spec(**spec_kwargs)
 
         if (
             args.multi_latent_attention

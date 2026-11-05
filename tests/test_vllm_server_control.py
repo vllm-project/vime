@@ -11,6 +11,56 @@ from vime.utils import http_utils
 NUM_GPUS = 0
 
 
+@pytest.mark.parametrize(
+    "operation,endpoint,payload",
+    [
+        ("init", "init_weight_transfer_engine", {"init_info": {}}),
+        ("shutdown", "shutdown_weight_transfer_engine", {}),
+        ("start", "start_weight_update", {}),
+        ("start_draft", "start_draft_weight_update", {}),
+        ("update", "update_weights", {"update_info": {}}),
+        ("finish", "finish_weight_update", {"weight_version": "1"}),
+    ],
+)
+@pytest.mark.parametrize("fail", [False, True])
+def test_weight_operation_routes_record_success_and_failure(monkeypatch, operation, endpoint, payload, fail):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from prometheus_client import CollectorRegistry
+
+    pytest.importorskip("vllm")
+    from vllm.entrypoints.rl.online import api_router
+    from vllm.entrypoints.rl.online import metrics as metrics_module
+
+    registry = CollectorRegistry()
+    metrics = metrics_module.WeightOperationMetrics(registry)
+    monkeypatch.setattr(api_router, "weight_operation_metrics", lambda: metrics)
+    timestamps = iter([1.0, 3.5])
+    monkeypatch.setattr(metrics_module, "perf_counter", lambda: next(timestamps))
+    labels = {"operation": operation}
+    in_flight = "vllm:rl_weight_update_operations_in_flight"
+    duration = "vllm:rl_weight_update_operation_duration_seconds"
+
+    async def execute(*args, **kwargs):
+        assert registry.get_sample_value(in_flight, labels) == 1
+        if fail:
+            raise RuntimeError("weight operation failed")
+
+    app = FastAPI()
+    app.include_router(api_router.router)
+    app.state.engine_client = SimpleNamespace(**{endpoint: execute})
+    with TestClient(app) as client:
+        if fail:
+            with pytest.raises(RuntimeError, match="weight operation failed"):
+                client.post(f"/{endpoint}", json=payload)
+        else:
+            assert client.post(f"/{endpoint}", json=payload).status_code == 200
+
+    assert registry.get_sample_value(in_flight, labels) == 0
+    assert registry.get_sample_value(f"{duration}_count", labels) == 1
+    assert registry.get_sample_value(f"{duration}_sum", labels) == 2.5
+
+
 @pytest.mark.parametrize("failure", ["connection", "timeout", "status"])
 def test_rollout_boundary_prunes_failed_router_workers(monkeypatch, failure):
     calls = []

@@ -122,6 +122,31 @@ def test_npu_training_adds_only_the_hook_mode_to_the_shared_contract(monkeypatch
     assert device_env.train_actor_env(SimpleNamespace(offload_train=False), inherited) == inherited
 
 
+@pytest.mark.parametrize("colocate", [False, True])
+def test_npu_serving_pools_override_expandable_segments(monkeypatch, colocate):
+    """Sleep-mode pools need this policy even when training is on other devices."""
+    monkeypatch.setattr(device_env, "_cann_site_packages", lambda: None)
+    inherited = {
+        "KEEP": "1",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+        "CUDA_VISIBLE_DEVICES": "0,1",
+        "HIP_VISIBLE_DEVICES": "0,1",
+    }
+    original = dict(inherited)
+
+    actor_env = device_env.engine_actor_env(SimpleNamespace(colocate=colocate), inherited)
+    subprocess_env = device_env.serving_subprocess_env(inherited, visible_devices="4,5", colocate=colocate)
+
+    for env in (actor_env, subprocess_env):
+        assert env["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:False"
+        assert env["VLLM_USE_AOT_COMPILE"] == "0"
+        assert env["KEEP"] == "1"
+    assert subprocess_env["ASCEND_RT_VISIBLE_DEVICES"] == "4,5"
+    assert "CUDA_VISIBLE_DEVICES" not in subprocess_env
+    assert "HIP_VISIBLE_DEVICES" not in subprocess_env
+    assert inherited == original
+
+
 def test_a_backend_without_an_override_gets_the_shared_default(monkeypatch):
     registry = accelerator._REGISTRY.copy()
     selected = accelerator._ACCELERATOR

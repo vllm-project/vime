@@ -76,10 +76,9 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG}
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 WORKDIR /root
 
-ARG MEGATRON_COMMIT=1dcf0dafa884ad52ffb243625717a3471643e087
-ARG MINDSPEED_COMMIT=fc63de5c48426dd019c3b3f39e65f5bdf56e4086
-ARG MEGATRON_ADAPTOR_COMMIT=15582addff3f3d4680e350826fa70d012b475509
-ARG TRANSFORMER_ENGINE_NPU_COMMIT=d743c83d060d5edc48867ecb9e93ec80d81860e4
+ARG MEGATRON_COMMIT=4b4acac9a1d28ea6829c8d4f566d75698a21249d
+ARG MEGATRON_ADAPTOR_COMMIT=c7e52b2c8482105e6ec7fcd8cdef364e7c7b22c5
+ARG TRANSFORMER_ENGINE_NPU_COMMIT=d405be23773968bf7fdc567854005054550830fc
 ARG SOC_VERSION="ascend910_9391"
 ARG PIP_INDEX_URL
 ARG APTMIRROR
@@ -138,35 +137,30 @@ RUN python3 -c 'import importlib.metadata as m; names = ["numpy", "ray", "torch"
 RUN git clone https://github.com/NVIDIA/Megatron-LM.git /root/Megatron-LM && \
     git -C /root/Megatron-LM checkout "${MEGATRON_COMMIT}"
 
-RUN git clone https://gitcode.com/Ascend/MindSpeed.git /root/MindSpeed && \
-    git -C /root/MindSpeed checkout "${MINDSPEED_COMMIT}"
-
 RUN git clone https://gitcode.com/Ascend/MegatronAdaptor.git /root/MegatronAdaptor && \
     git -C /root/MegatronAdaptor checkout "${MEGATRON_ADAPTOR_COMMIT}" && \
     git clone https://gitcode.com/Ascend/TransformerEngineNPU.git /root/TransformerEngineNPU && \
     git -C /root/TransformerEngineNPU checkout "${TRANSFORMER_ENGINE_NPU_COMMIT}"
 
-# Apply NPU training-stack patches from the build-context snapshot.
-# The standalone Megatron patch targets the pinned NPU training baseline.
-# fla 0.5.2 supplies the GDN kernels; the adaptor torch stand-in rejects
-# residual and must stay disabled.
+# Apply the training dependency patches.
 RUN git -C /root/Megatron-LM apply --check --whitespace=nowarn \
       /opt/npu_patch/megatron.patch && \
     git -C /root/Megatron-LM apply --whitespace=nowarn \
       /opt/npu_patch/megatron.patch && \
-    git -C /root/MindSpeed apply --whitespace=nowarn \
-      /opt/npu_patch/mindspeed.patch && \
     git -C /root/MegatronAdaptor apply --check --whitespace=nowarn \
       /opt/npu_patch/megatron-adaptor.patch && \
     git -C /root/MegatronAdaptor apply --whitespace=nowarn \
-      /opt/npu_patch/megatron-adaptor.patch
+      /opt/npu_patch/megatron-adaptor.patch && \
+    git -C /root/TransformerEngineNPU apply --check --whitespace=nowarn \
+      /opt/npu_patch/transformer-engine-npu.patch && \
+    git -C /root/TransformerEngineNPU apply --whitespace=nowarn \
+      /opt/npu_patch/transformer-engine-npu.patch
 
 RUN pip install --constraint /tmp/vime-npu-constraints.txt --no-build-isolation \
       "nvidia-modelopt==0.46.0" "nvdlfw-inspect==0.2.2" && \
     pip install --no-deps --no-build-isolation -e /root/Megatron-LM && \
     pip install --no-deps --no-build-isolation -e /root/TransformerEngineNPU && \
-    pip install --no-deps --no-build-isolation -e /root/MegatronAdaptor && \
-    pip install --no-deps --no-build-isolation -e /root/MindSpeed
+    pip install --no-deps --no-build-isolation -e /root/MegatronAdaptor
 
 # Defaults to the main branch for local builds. Release workflows should
 # pass an immutable commit SHA for reproducible images.
@@ -212,7 +206,7 @@ RUN git clone --depth 1 --branch 2026.6.0 \
 # Minimal import check.
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     python3 -c 'import numpy, pyarrow, datasets, fastapi, starlette; from ray._private.serialization import SerializationContext; from ray._private.worker import global_worker; SerializationContext(global_worker); print(f"Data/Ray check passed: numpy={numpy.__version__}, pyarrow={pyarrow.__version__}, datasets={datasets.__version__}, fastapi={fastapi.__version__}, starlette={starlette.__version__}")' && \
-    python3 -c 'import megatron, mindspeed, megatron_adaptor, transformer_engine, torch_memory_saver, vime, vllm, vllm_ascend;'
+    python3 -c 'import importlib.util; assert importlib.util.find_spec("mindspeed") is None, "MindSpeed must be absent to avoid automatic MegatronAdaptor patches"; import megatron_adaptor, megatron, transformer_engine, torch_memory_saver, vime, vllm, vllm_ascend'
 
 WORKDIR /root/vime
 ENTRYPOINT []

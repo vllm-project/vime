@@ -1,6 +1,7 @@
 """Sampler heads survive the real rollout-manager, DP and microbatch boundaries."""
 
 import asyncio
+import inspect
 import json
 import sys
 import types
@@ -26,12 +27,17 @@ def test_score_centering_reads_native_tito_integer_token_ids():
     from vime.rollout.vllm_rollout import _score_centering_metadata
 
     serving = object.__new__(ServingTokens)
+    kwargs = {}
+    if "num_output_top_logprobs" in inspect.signature(serving._create_tokens_logprobs).parameters:
+        kwargs["num_output_top_logprobs"] = 3
     logprobs = serving._create_tokens_logprobs(
         [42],
         [{42: Logprob(-3.0, 3), 4: Logprob(-0.1, 1), 7: Logprob(-0.2, 2)}],
-        num_output_top_logprobs=3,
+        **kwargs,
     )
-    metadata, sampled = _score_centering_metadata({"logprobs": logprobs.model_dump()}, [42], top_p=1.0, top_k=2)
+    wire = {"logprobs": json.loads(logprobs.model_dump_json())}
+    assert wire["logprobs"]["content"][0]["token_id"] == 42
+    metadata, sampled = _score_centering_metadata(wire, [42], top_p=1.0, top_k=2)
     ids, probabilities = metadata["score_centering_topk"]
     np.testing.assert_array_equal(ids, [[4, 7]])
     np.testing.assert_allclose(probabilities, [[-0.1, -0.2]])
@@ -64,7 +70,13 @@ def test_tito_stream_preserves_empty_finish_reason(finish_reason, return_token_i
         chunks = [([], finish_reason)] if terminal_only else [([42], None), ([], finish_reason)]
         for token_ids, reason in chunks:
             completion = outputs.CompletionOutput(
-                index=0, text="", token_ids=token_ids, cumulative_logprob=None, logprobs=None, finish_reason=reason
+                index=0,
+                text="",
+                token_ids=token_ids,
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason=reason,
+                sampling_mask=outputs.SamplingMask([[7, 42] for _ in token_ids], [[-1.2, -0.4] for _ in token_ids]),
             )
             yield outputs.RequestOutput("probe", None, [1, 2, 3], None, [completion], reason is not None)
 
@@ -80,6 +92,47 @@ def test_tito_stream_preserves_empty_finish_reason(finish_reason, return_token_i
     chunks = asyncio.run(collect())
     assert chunks[-1]["choices"][0]["finish_reason"] == finish_reason
     assert chunks[-1]["choices"][0]["token_ids"] == []
+    for chunk in chunks:
+        choice = chunk["choices"][0]
+        count = len(choice["token_ids"])
+        assert choice["sampling_mask"] == [[7, 42]] * count
+        assert choice["sampling_mask_logprobs"] == [[-1.2, -0.4]] * count
+
+
+@pytest.mark.parametrize("delta", [False, True])
+def test_sampling_masks_are_trimmed_and_drained_with_output_tokens(delta):
+    from vllm.sampling_params import RequestOutputKind
+    from vllm.v1.engine.output_processor import OutputProcessor, RequestState
+    from vllm.v1.outputs import SamplingMaskLists
+
+    state = SimpleNamespace(
+        request_index=0,
+        output_kind=RequestOutputKind.DELTA if delta else RequestOutputKind.FINAL_ONLY,
+        detokenizer=SimpleNamespace(
+            get_next_output_text=lambda *_: "", output_token_ids=[2, 3], num_output_tokens=lambda: 2
+        ),
+        logprobs_processor=SimpleNamespace(logprobs=None, cumulative_logprob=None),
+        sampling_mask_chunks=[],
+        routed_experts_chunks=[],
+        spec_decode_metrics=None,
+        _weight_version_spans=lambda: None,
+    )
+    engine_output = SimpleNamespace(
+        new_token_ids=[2, 3, 4],
+        new_logprobs=None,
+        new_sampling_mask=SamplingMaskLists(np.array([2, 3, 4]), np.arange(4), logprobs=np.zeros(3)),
+        routed_experts=None,
+    )
+    OutputProcessor._trim_surplus_tokens(state, engine_output, num_prev_tokens=0)
+    assert engine_output.new_token_ids == [2, 3]
+    state.sampling_mask_chunks.append(engine_output.new_sampling_mask)
+    output = RequestState._new_completion_output(state, engine_output.new_token_ids, None if delta else "abort", None)
+    assert output.sampling_mask.token_ids == [[2], [3]]
+    assert output.sampling_mask.logprobs == [[0.0], [0.0]]
+    if delta:
+        assert state.sampling_mask_chunks == []
+        terminal = RequestState._new_completion_output(state, [], "abort", None)
+        assert terminal.sampling_mask is None
 
 
 @pytest.mark.parametrize("aggregate", [False, True])

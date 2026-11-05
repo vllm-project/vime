@@ -52,7 +52,7 @@ def before_import() -> None:
         if selected.name != "npu":
             raise RuntimeError(f"Ascend startup cannot run under the already selected {selected.name!r} accelerator")
 
-        # MindSpeed and torch_memory_saver call the CUDA spelling. Alias it
+        # Compatibility callers such as torch_memory_saver use the CUDA spelling. Alias it
         # without swallowing allocator failures: an empty_cache that raises is
         # reporting a real device problem.
         torch = importlib.import_module("torch")

@@ -89,7 +89,6 @@ def npu_step(
         "HF_TOKEN": "${HF_TOKEN}",
         "HF_ENDPOINT": "https://hf-mirror.com",
         "ASCEND_RT_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15",
-        "HCCL_CONNECT_TIMEOUT": "300",
         "IMAGE_REGISTRY": IMAGE_REGISTRY,
         "IMAGE_NAME": IMAGE_NAME,
         "VIME_IMAGE_TAG": VIME_IMAGE_TAG,
@@ -106,6 +105,8 @@ def npu_step(
             "  source /workspace/build/buildkite/.buildkite/scripts/update-npu-environment.sh",
             "fi",
             "export HF_HUB_OFFLINE=0",
+            # Cover checkpoint conversion before the training launcher runs.
+            'export HCCL_CONNECT_TIMEOUT="$${HCCL_CONNECT_TIMEOUT:-600}"',
             f"python tests/{test_name}{' ' + extra_args if extra_args else ''}",
         ]
     )

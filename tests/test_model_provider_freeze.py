@@ -135,7 +135,10 @@ def test_freeze_indexer_rejects_unrecognized_attention(monkeypatch):
 @pytest.mark.parametrize("mla", [False, True])
 @pytest.mark.parametrize("legacy_mla", [False, True])
 @pytest.mark.parametrize("num_experts", [None, 4])
-def test_provider_supports_old_and_new_te_spec_signatures(monkeypatch, legacy_spec, mla, legacy_mla, num_experts):
+@pytest.mark.parametrize("transformer_impl", ["transformer_engine", "local"])
+def test_provider_supports_old_and_new_spec_signatures(
+    monkeypatch, legacy_spec, mla, legacy_mla, num_experts, transformer_impl
+):
     from types import SimpleNamespace
 
     module = _load_model_provider(monkeypatch)
@@ -153,28 +156,36 @@ def test_provider_supports_old_and_new_te_spec_signatures(monkeypatch, legacy_sp
     if legacy_spec:
 
         def build_spec(
-            num_experts, moe_grouped_gemm, qk_layernorm, multi_latent_attention, moe_use_legacy_grouped_gemm
+            num_experts,
+            moe_grouped_gemm,
+            qk_layernorm,
+            multi_latent_attention,
+            moe_use_legacy_grouped_gemm,
+            normalization=None,
         ):
             assert moe_use_legacy_grouped_gemm is True
-            calls.append((num_experts, moe_grouped_gemm, qk_layernorm, multi_latent_attention))
+            calls.append((num_experts, moe_grouped_gemm, qk_layernorm, multi_latent_attention, normalization))
             return layer_spec
 
     else:
 
-        def build_spec(num_experts, moe_grouped_gemm, qk_layernorm, multi_latent_attention):
-            calls.append((num_experts, moe_grouped_gemm, qk_layernorm, multi_latent_attention))
+        def build_spec(num_experts, moe_grouped_gemm, qk_layernorm, multi_latent_attention, normalization=None):
+            calls.append((num_experts, moe_grouped_gemm, qk_layernorm, multi_latent_attention, normalization))
             return layer_spec
 
-    monkeypatch.setattr(module, "get_gpt_layer_with_transformer_engine_spec", build_spec)
+    spec_function = (
+        "get_gpt_layer_local_spec" if transformer_impl == "local" else "get_gpt_layer_with_transformer_engine_spec"
+    )
+    monkeypatch.setattr(module, spec_function, build_spec)
     monkeypatch.setattr(module, "GPTModel", lambda **kwargs: SimpleNamespace(**kwargs))
     args = SimpleNamespace(
-        transformer_impl="transformer_engine",
+        transformer_impl=transformer_impl,
         spec=None,
         num_experts=num_experts,
         moe_grouped_gemm=False,
         qk_layernorm=mla,
         multi_latent_attention=mla,
-        moe_use_legacy_grouped_gemm=True,
+        normalization="RMSNorm",
         fp8_param_gather=False,
         padded_vocab_size=128,
         max_position_embeddings=64,
@@ -186,10 +197,13 @@ def test_provider_supports_old_and_new_te_spec_signatures(monkeypatch, legacy_sp
         use_rope_scaling=False,
         mtp_num_layers=None,
     )
+    if legacy_spec:
+        args.moe_use_legacy_grouped_gemm = True
     model = module._get_model_provider_func(args)()
     assert model.transformer_layer_spec is transformer_spec
     assert model.config is config
-    assert calls == ([] if num_experts else [(None, False, mla, mla)])
+    normalization = "RMSNorm" if transformer_impl == "local" else None
+    assert calls == ([] if num_experts else [(None, False, mla, mla, normalization)])
     expected_attention = module.MLASelfAttention if mla and not legacy_mla else module.MegatronMLASelfAttention
     assert layer_spec.submodules.self_attention.module is expected_attention
 
