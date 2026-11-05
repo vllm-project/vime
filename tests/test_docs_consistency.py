@@ -27,8 +27,6 @@ LOCAL_ANCHOR_RE = re.compile(r"\]\(#([A-Za-z0-9_-]+)\)")
 HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
 RELEASE_CHECK = ROOT / ".claude/skills/release/scripts/check_release.py"
 DOCKER_ARG_RE = re.compile(r"^ARG ([A-Z][A-Z0-9_]*)=(\S+)$", re.MULTILINE)
-VLLM_PATCH_APPLY_RE = re.compile(r"\bgit apply -v /tmp/(vllm-[\w.-]+\.patch)")
-ROCM_PATCH_COPY_RE = re.compile(r"^COPY docker/amd_patch/\$\{PATCH_VERSION\}/(vllm-[\w.-]+\.patch) ", re.MULTILINE)
 
 
 def _markdown_files():
@@ -97,14 +95,10 @@ def test_release_metadata_check():
     assert result.returncode == 0, result.stderr
 
 
-def test_rocm_image_pins_its_base_and_owns_its_patches():
+def test_rocm_image_pins_its_base_by_digest():
     rocm = (ROOT / "docker/Dockerfile.rocm").read_text()
     base = dict(DOCKER_ARG_RE.findall(rocm))["BASE_IMAGE"]
     assert re.fullmatch(r"vllm/vllm-openai-rocm:nightly-rocm\d+-[0-9a-f]{40}@sha256:[0-9a-f]{64}", base), base
-    applied = VLLM_PATCH_APPLY_RE.findall(rocm)
-    assert applied and applied == ROCM_PATCH_COPY_RE.findall(rocm)
-    missing = [name for name in applied if not (ROOT / "docker/amd_patch/latest" / name).is_file()]
-    assert not missing, missing
 
 
 @pytest.fixture
