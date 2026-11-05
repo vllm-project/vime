@@ -148,18 +148,17 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Weight sync strategy. 'full' (default) broadcasts every parameter "
                     "every sync. 'delta' diffs each sync against a pinned-CPU snapshot of the "
-                    "previous one and ships only the changed bytes (disk transport only)."
+                    "previous one and ships only changed bytes (disk) or elements (sparse_hccl)."
                 ),
             )
             parser.add_argument(
                 "--update-weight-transport",
-                choices=["nccl", "disk"],
+                choices=["nccl", "disk", "sparse_hccl"],
                 default="nccl",
                 help=(
                     "Carrier for weight sync. In full mode, 'nccl' broadcasts chunks and "
                     "'disk' writes a complete HF checkpoint under --update-weight-disk-dir "
-                    "before engines reload it. Delta mode is 'disk' only: each host applies the "
-                    "published deltas into its local checkpoint and reloads via update_weights_from_disk."
+                    "before engines reload it. Delta mode supports disk or Ascend sparse_hccl."
                 ),
             )
             parser.add_argument(
@@ -575,6 +574,22 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "buffer size for update weight, in bytes. "
                     "This is used for updating weights by chunk and should be useful for MoE models."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-delta-batch-diff",
+                type=int,
+                default=32,
+                help="Number of local shards processed per sparse diff batch.",
+            )
+            parser.add_argument(
+                "--update-weight-delta-batch-gather",
+                type=int,
+                default=32,
+                help=(
+                    "Number of globally ordered Megatron directory rows combined into one "
+                    "sparse gather count matrix. The trigger is row-count-only so all ranks "
+                    "issue collectives in identical order."
                 ),
             )
             parser.add_argument(
@@ -2360,9 +2375,9 @@ def vime_validate_args(args):
         if args.update_weight_mode != "full" or args.update_weight_transport != "disk":
             raise ValueError("--release-train requires --update-weight-mode=full and --update-weight-transport=disk.")
     if args.update_weight_mode == "delta":
-        if args.update_weight_transport != "disk":
+        if args.update_weight_transport not in {"disk", "sparse_hccl"}:
             raise ValueError(
-                "--update-weight-mode=delta requires --update-weight-transport=disk, "
+                "--update-weight-mode=delta requires --update-weight-transport=disk or sparse_hccl, "
                 f"got {args.update_weight_transport!r}."
             )
         if args.colocate:
@@ -2371,11 +2386,15 @@ def vime_validate_args(args):
                 "weights via CUDA IPC (only a handle crosses processes), so the delta bookkeeping "
                 "(snapshot + diff + encode) is pure overhead."
             )
-        if not args.update_weight_local_checkpoint_dir:
+        if args.update_weight_transport == "disk" and not args.update_weight_local_checkpoint_dir:
             raise ValueError(
                 "--update-weight-mode=delta requires --update-weight-local-checkpoint-dir "
                 "(a rollout-host-local NVMe directory)."
             )
+        if args.update_weight_delta_batch_diff < 1:
+            raise ValueError("--update-weight-delta-batch-diff must be at least 1.")
+        if args.update_weight_delta_batch_gather < 1:
+            raise ValueError("--update-weight-delta-batch-gather must be at least 1.")
 
     if args.flush_cache_interval != 1:
         if args.colocate or args.offload_rollout or args.release_train:
