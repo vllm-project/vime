@@ -20,8 +20,9 @@ ARG TE_TAG=v2.15_rocm
 # back to the base image's flash-attn. Set to 1 to build it in.
 ARG NVTE_FUSED_ATTN=0
 
-# ROCm/HIP fork of torch_memory_saver (--offload-train).
-ARG TMS_COMMIT=d64a639
+# ROCm/HIP fork of torch_memory_saver (--offload-train). Needs this commit or later: it rounds VMM sizes
+# to the granularity (else free fails in cuMemUnmap) and maps VMM memory for the host (else .item() faults).
+ARG TMS_COMMIT=118b09b3bc7b0cf386745db1eac2601d4aa7e681
 
 # Named TE_MAX_JOBS, not MAX_JOBS: the base image sets ENV MAX_JOBS=16, and an
 # inherited ENV shadows a same-named ARG inside RUN.
@@ -110,6 +111,7 @@ COPY docker/patch/${PATCH_VERSION}/vllm-deepep-optional-shrink.patch /tmp/vllm-d
 COPY docker/patch/${PATCH_VERSION}/vllm-glm5next-unbounded-gate.patch /tmp/vllm-glm5next-unbounded-gate.patch
 COPY docker/patch/${PATCH_VERSION}/vllm-tito-columnar-logprobs-render.patch /tmp/vllm-tito-columnar-logprobs-render.patch
 COPY docker/patch/${PATCH_VERSION}/vllm-watchdog-fatal-action.patch /tmp/vllm-watchdog-fatal-action.patch
+COPY docker/amd_patch/${PATCH_VERSION}/vllm-rocm-ipc-warmup.patch /tmp/vllm-rocm-ipc-warmup.patch
 RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirname(vllm.__file__)))')" && \
     cd "$VLLM_SITE" && \
     git apply -v /tmp/vllm-pull_weights.patch && \
@@ -122,6 +124,7 @@ RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirn
     git apply -v /tmp/vllm-glm5next-unbounded-gate.patch && \
     git apply -v /tmp/vllm-tito-columnar-logprobs-render.patch && \
     git apply -v /tmp/vllm-watchdog-fatal-action.patch && \
+    git apply -v /tmp/vllm-rocm-ipc-warmup.patch && \
     rm /tmp/vllm-pull_weights.patch \
        /tmp/vllm-score-centering.patch \
        /tmp/vllm-fine-grained-tracing.patch \
@@ -131,7 +134,13 @@ RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirn
        /tmp/vllm-deepep-optional-shrink.patch \
        /tmp/vllm-glm5next-unbounded-gate.patch \
        /tmp/vllm-tito-columnar-logprobs-render.patch \
-       /tmp/vllm-watchdog-fatal-action.patch
+       /tmp/vllm-watchdog-fatal-action.patch \
+       /tmp/vllm-rocm-ipc-warmup.patch
+
+COPY docker/amd_patch/${PATCH_VERSION}/nixl/__init__.py /tmp/nixl_alias.py
+RUN SITE="$(python3 -c 'import os, nixl_rocm; print(os.path.dirname(os.path.dirname(nixl_rocm.__file__)))')" && \
+    mkdir "$SITE/nixl" && mv /tmp/nixl_alias.py "$SITE/nixl/__init__.py" && \
+    python3 -c "from nixl._api import nixl_agent, nixl_agent_config"
 
 # ====================================== Install main package ============================================
 

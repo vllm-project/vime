@@ -127,9 +127,9 @@ MISC_ARGS=(
    --attention-backend flash
    # APEX not installed on this ROCm image -> disable fused grad accumulation.
    --no-gradient-accumulation-fusion
-   # Keep train state resident: the colocate offload path leaks VRAM on ROCm gfx950
-   # (torch_memory_saver VMM) and Qwen3-8B fits alongside vLLM, so offload is unneeded.
-   --no-offload-train
+   # With --offload-train, RCCL P2P collectives in the train workers return empty data on ROCm
+   # unless NCCL_CUMEM_ENABLE=1 (vime defaults it to 0).
+   --train-env-vars '{"NCCL_CUMEM_ENABLE":"1"}'
 )
 
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
