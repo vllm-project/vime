@@ -320,6 +320,40 @@ index 6c436f892866f271cc65ccb5aaa369c30e894b86..ab31713da64200b3a474bfba6fe44b4d
          engine_id = meta.remote.engine_id
          if engine_id in self._invalid_remote_engines:
              self._handle_failed_transfer(
+diff --git a/vllm/distributed/weight_transfer/nccl_engine.py b/vllm/distributed/weight_transfer/nccl_engine.py
+--- a/vllm/distributed/weight_transfer/nccl_engine.py
++++ b/vllm/distributed/weight_transfer/nccl_engine.py
+@@ -277,8 +277,8 @@
+         self.packed_buffer_size_bytes = packed_buffer_size_bytes
+         self.packed_num_buffers = packed_num_buffers
+         self.model_update_group: PyNcclCommunicator | None = None
+-        # Metadata the worker already holds; an unchanged round sends none.
+-        self._sent_meta: list[ParamMeta] | None = None
++        # Metadata the worker holds per target in this transfer session.
++        self._sent_meta: dict[bool, list[ParamMeta]] = {}
+ 
+     @classmethod
+     def trainer_init(
+@@ -342,7 +342,9 @@
+             self._post_send_sync()
+             return
+ 
+-        if meta == self._sent_meta:
++        # Vime's client selects the receiver with its existing draft flag.
++        draft = getattr(self.client, "draft", False)
++        if meta == self._sent_meta.get(draft):
+             update_info = NCCLWeightTransferUpdateInfo()
+         else:
+             update_info = NCCLWeightTransferUpdateInfo(
+@@ -374,7 +376,7 @@
+             # to exit cleanly after such a failure must not wait on it.)
+             exe.shutdown(wait=False)
+         self.client.finish_weight_update()
+-        self._sent_meta = meta
++        self._sent_meta[draft] = meta
+         self._post_send_sync()
+ 
+     def _broadcast(self, source: WeightSource, meta: list[ParamMeta]) -> None:
 diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
 index b0c418c53126242a2a94453e7e8a264c0a8a83f7..b8599874c4cfe57144723812b06a55b6655bfa67 100644
 --- a/vllm/engine/arg_utils.py
