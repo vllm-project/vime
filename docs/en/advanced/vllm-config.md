@@ -22,6 +22,43 @@ With `--vllm-config`, the vLLM deployment expands into a multi-model, multi-rout
 
 ---
 
+## Independent vLLM Python Environment
+
+Set `--vllm-python-executable` to launch vime-managed vLLM servers with a different Python environment from Megatron:
+
+```bash
+python train.py \
+  --vllm-python-executable /path/to/vllm-env/bin/python \
+  ...
+```
+
+Ray control actors and the router continue to use the training environment. Only the vLLM server and its workers use the selected executable, with server arguments passed as JSON. This works with the default deployment and `--vllm-config`, including PD and multi-node engines. Omitting the option keeps the existing multiprocessing launch path.
+
+Both environments must be able to import the same vime checkout, through an installation or the job's `PYTHONPATH`. The training environment still needs vLLM's Python helpers and the router package; keep the vLLM version consistent so argument schemas and weight-update protocols match. The serving environment needs its own vLLM dependencies, but does not need Megatron. Each environment can retain its own PyTorch, Triton, CUDA libraries, and compiled extensions. Avoid adding another environment's entire `site-packages` directory to `PYTHONPATH`.
+
+For a conda environment, create your own wrapper, such as `serve-python.sh`, replacing the placeholders with your conda installation and environment:
+
+```bash
+#!/usr/bin/env bash
+set -e
+source /path/to/miniconda/etc/profile.d/conda.sh
+conda activate your-serving-env
+exec python "$@"
+```
+
+Make it executable and pass its path to vime:
+
+```bash
+chmod +x /path/to/serve-python.sh
+python train.py \
+  --vllm-python-executable /path/to/serve-python.sh \
+  ...
+```
+
+Use `exec python "$@"` to forward Python arguments and preserve process ownership. The wrapper, conda installation, and serving environment must be available at the configured paths on every rollout node.
+
+Environment selection does not change weight synchronization: CUDA IPC and NCCL still require compatible libraries and hardware. Use disk transport when those requirements cannot be met; see [External Rollout Engines](external-rollout-engines.md#environment-and-hardware-decoupling).
+
 ## Config Format
 
 The config file is a YAML document with a top-level `vllm` key containing a list of model definitions:

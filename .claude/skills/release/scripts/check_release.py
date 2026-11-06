@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Check local vime release metadata and Docker/conda patch alignment."""
+"""Check local vime release metadata, Docker pins and patch coverage."""
 
 import argparse
 import ast
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -29,18 +30,6 @@ def _assigned_string(path: Path, name: str) -> str:
     raise ValueError(f"{name} not found in {path}")
 
 
-def _shell_exports(text: str) -> dict[str, str]:
-    return dict(re.findall(r'^export ([A-Z][A-Z0-9_]*)="([^"]+)"$', text, re.MULTILINE))
-
-
-def _docker_args(text: str) -> dict[str, str]:
-    return dict(re.findall(r"^ARG ([A-Z][A-Z0-9_]*)=(\S+)$", text, re.MULTILINE))
-
-
-def _loop_items(text: str, variable: str) -> list[list[str]]:
-    return [items.split() for items in re.findall(rf"for {variable} in ([^;]+); do", text)]
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, default=Path.cwd())
@@ -58,73 +47,46 @@ def main() -> int:
         errors.append(f"release version is {setup_version}, expected {args.expected_version}")
 
     docker_text = (repo / "docker/Dockerfile").read_text()
-    conda_text = (repo / "build_conda.sh").read_text()
-    readme_text = (repo / "docker/README.md").read_text()
-    justfile_text = (repo / "docker/justfile").read_text()
-    docker_args = _docker_args(docker_text)
-    conda_exports = _shell_exports(conda_text)
+    docker_args = {}
+    for name, value in re.findall(r"^ARG ([A-Z][A-Z0-9_]*)=(\S+)$", docker_text, re.MULTILINE):
+        if name in docker_args and docker_args[name] != value:
+            errors.append(f"Docker stages disagree on {name}")
+        docker_args[name] = value
+        if name.endswith("_COMMIT") and name != "VIME_COMMIT" and not re.fullmatch(r"[0-9a-f]{40}", value):
+            errors.append(f"{name} is not a full commit SHA: {value}")
+    for name in ("VLLM_COMMIT", "MEGATRON_COMMIT", "PATCH_VERSION"):
+        if name not in docker_args:
+            errors.append(f"Docker is missing {name}")
+    base_image = docker_args.get("BASE_IMAGE", "")
+    if not re.fullmatch(r"[^@\s]+@sha256:[0-9a-f]{64}", base_image):
+        errors.append("BASE_IMAGE must use an immutable sha256 digest")
 
-    image_tag = docker_args.get("VLLM_IMAGE_TAG", "")
-    docker_vllm_version = re.sub(r"-cu\d+$", "", image_tag)
-    conda_vllm_version = conda_exports.get("VLLM_VERSION", "")
-    if docker_vllm_version != conda_vllm_version:
-        errors.append(
-            f"Docker vLLM={docker_vllm_version or '<missing>'}, " f"conda vLLM={conda_vllm_version or '<missing>'}"
-        )
-
-    stable_match = re.search(r"current stable version is:\s*\n- vllm (v\S+)", readme_text)
-    readme_vllm_version = stable_match.group(1) if stable_match else ""
-    if readme_vllm_version != conda_vllm_version:
-        errors.append(
-            f"README stable vLLM={readme_vllm_version or '<missing>'}, "
-            f"conda vLLM={conda_vllm_version or '<missing>'}"
-        )
-
-    for tag in re.findall(r"VLLM_IMAGE_TAG=(v[^'\"\s]+)", justfile_text):
-        if re.sub(r"-cu\d+$", "", tag) != conda_vllm_version:
-            errors.append(f"docker/justfile uses inconsistent vLLM tag {tag}")
-
-    for pin in ("MEGATRON_COMMIT", "TMS_COMMIT", "FLASH_QLA_COMMIT"):
-        if docker_args.get(pin) != conda_exports.get(pin):
+    patch_dir = repo / "docker/patch" / docker_args.get("PATCH_VERSION", "latest")
+    patches = {path.name for path in patch_dir.glob("*.patch")}
+    if not patches:
+        errors.append(f"No patches found in {patch_dir}")
+    used = set()
+    for stage in re.split(r"^FROM ", docker_text.replace("\\\n", ""), flags=re.MULTILINE)[1:]:
+        copied = set()
+        for pattern in re.findall(r"^COPY docker/patch/\$\{PATCH_VERSION\}/(\S+)", stage, re.MULTILINE):
+            matches = {path.name for path in patch_dir.glob(pattern)}
+            if not matches:
+                errors.append(f"Docker COPY has no matching patch: {pattern}")
+            copied.update(matches)
+        applied = {
+            Path(token).name
+            for command in re.findall(r"\bgit apply ([^&;\n]+)", stage)
+            for token in shlex.split(command)
+            if token.endswith(".patch")
+        }
+        if copied != applied:
             errors.append(
-                f"{pin}: Docker={docker_args.get(pin, '<missing>')}, conda={conda_exports.get(pin, '<missing>')}"
+                f"Docker stage {stage.splitlines()[0]} patch coverage differs: "
+                f"not_applied={sorted(copied - applied)}, not_copied={sorted(applied - copied)}"
             )
-
-    patch_version = conda_exports.get("PATCH_VERSION", "")
-    if patch_version != conda_vllm_version:
-        errors.append(f"PATCH_VERSION={patch_version or '<missing>'}, expected {conda_vllm_version}")
-
-    latest_dir = repo / "docker/patch/latest"
-    stable_dir = repo / f"docker/patch/{patch_version}"
-    latest = {path.name: path.read_bytes() for path in latest_dir.glob("*.patch")}
-    stable = {path.name: path.read_bytes() for path in stable_dir.glob("*.patch")}
-    if latest.keys() != stable.keys():
-        errors.append(
-            "stable patch filenames differ from latest: "
-            f"only_latest={sorted(latest.keys() - stable.keys())}, "
-            f"only_stable={sorted(stable.keys() - latest.keys())}"
-        )
-    for name in latest.keys() & stable.keys():
-        if latest[name] != stable[name]:
-            errors.append(f"stable patch differs from latest: {name}")
-
-    docker_vllm_loops = _loop_items(docker_text, "patch")
-    conda_loops = _loop_items(conda_text, "patch_name")
-    docker_vllm_order = docker_vllm_loops[0] if docker_vllm_loops else []
-    conda_vllm_order = conda_loops[0] if conda_loops else []
-    expected_vllm = {name for name in latest if name.startswith("vllm")}
-    if docker_vllm_order != conda_vllm_order:
-        errors.append("Docker and conda vLLM patch order differs")
-    if set(docker_vllm_order) != expected_vllm:
-        errors.append("Docker/conda vLLM patch loop does not cover the latest patch set")
-
-    docker_megatron_order = re.findall(r"git apply (megatron[^ ]*\.patch)", docker_text)
-    conda_megatron_order = conda_loops[1] if len(conda_loops) > 1 else []
-    expected_megatron = {name for name in latest if name.startswith("megatron")}
-    if docker_megatron_order != conda_megatron_order:
-        errors.append("Docker and conda Megatron patch order differs")
-    if set(docker_megatron_order) != expected_megatron:
-        errors.append("Docker/conda Megatron patch logic does not cover the latest patch set")
+        used.update(copied)
+    if patches != used:
+        errors.append(f"Unused Docker patches: {sorted(patches - used)}")
 
     docker_version = (repo / "docker/version.txt").read_text().strip()
     if not re.fullmatch(r"nightly-dev-\d{8}[a-z]", docker_version):
@@ -135,7 +97,9 @@ def main() -> int:
             print(f"ERROR: {error}", file=sys.stderr)
         return 1
 
-    print(f"release={setup_version}, vllm={conda_vllm_version}, docker={docker_version}, patches={len(latest)}")
+    print(
+        f"release={setup_version}, vllm={docker_args['VLLM_COMMIT']}, docker={docker_version}, patches={len(patches)}"
+    )
     return 0
 
 

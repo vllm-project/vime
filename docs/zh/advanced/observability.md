@@ -1,6 +1,6 @@
 # 观测
 
-vime 的默认观测路径很简单：训练指标继续进 W&B / TensorBoard；vLLM 的高频 Prometheus metrics 不再上传 W&B；request timing 从 vLLM response `meta_info` 写进 sample trace，并在 rollout 结束时聚合成少量 `perf/...` 指标。
+vime 的默认观测路径很简单：训练指标继续进 W&B / TensorBoard；vLLM 的高频 Prometheus metrics 不再上传 W&B；request timing 从 vLLM response `metrics` 写进 sample trace，并在 rollout 结束时聚合成少量 `perf/...` 指标。
 
 ## W&B / TensorBoard 里会看到什么
 
@@ -12,25 +12,23 @@ perf/request/queue_time/median
 perf/request/count
 perf/request/profiled_count
 perf/decode/throughput/mean
-perf/prefill/bootstrap_queue_duration/mean
-perf/prefill/bootstrap_duration/mean
-perf/prefill/alloc_wait_duration/mean
-perf/prefill/forward_duration/max
+perf/prefill/queue_duration/mean
+perf/prefill/ttft_duration/max
 perf/prefill/transfer_speed_gb_s/mean
-perf/decode/prealloc_duration/mean
-perf/decode/bootstrap_duration/mean
-perf/decode/alloc_wait_duration/mean
-perf/decode/transfer_duration/max
-perf/decode/forward_duration/mean
+perf/decode/remote_kv_wait_duration/mean
+perf/decode/allocation_wait_duration/mean
+perf/decode/transfer_worker_duration/max
+perf/decode/handshake_wait_worker_duration/mean
+perf/decode/transfer_post_worker_duration/mean
 ```
 
 这些指标是每个 rollout step 聚合一次，不是每个 request 上报一次，所以不会像上传完整 Prometheus metrics 那样拖慢 W&B。
 
-不开 PD 时仍然会有通用的 `perf/request/...` 和可用的 `perf/decode/throughput/...`。`perf/prefill/...` 和更细的 `perf/decode/...duration` 只有在 vLLM 返回对应 `pd_*` timing 字段时才会出现。
+不开 PD 时仍然会有通用的 `perf/request/...` 和可用的 `perf/decode/throughput/...`。`perf/prefill/...` 和更细的 `perf/decode/...duration` 只有在 vLLM 返回对应 timing 字段时才会出现，vime 会将这些字段转换为 `pd_*` trace 属性。
 
 ## Prometheus metrics 存在哪里
 
-vime 自己不存 Prometheus 的每秒数据。vLLM / router 只暴露 `/metrics` 和 `/engine_metrics` HTTP endpoint；Prometheus 定期 scrape 这些 endpoint，并把时间序列写进 Prometheus 自己的 TSDB。
+vime 自己不存 Prometheus 的每秒数据。vLLM 在每个 engine 的 HTTP 端口暴露 `/metrics`，router 在独立的 Prometheus 端口暴露自身指标；Prometheus 定期 scrape 这些 endpoint，并把时间序列写进 Prometheus 自己的 TSDB。
 
 因此：
 
@@ -41,24 +39,22 @@ vime 自己不存 Prometheus 的每秒数据。vLLM / router 只暴露 `/metrics
 常用的 vLLM metrics 包括：
 
 ```text
-vllm:num_queue_reqs
-vllm:num_running_reqs
-vllm:num_prefill_bootstrap_queue_reqs
-vllm:num_prefill_inflight_queue_reqs
-vllm:num_decode_prealloc_queue_reqs
-vllm:num_decode_transfer_queue_reqs
-vllm:kv_transfer_speed_gb_s_bucket
-vllm:kv_transfer_latency_ms_bucket
-vllm:kv_transfer_total_mb_bucket
+vllm:num_requests_waiting
+vllm:num_requests_running
+vllm:num_requests_waiting_by_reason
+vllm:nixl_xfer_time_seconds_bucket
+vllm:nixl_bytes_transferred_bucket
+vllm:mooncake_xfer_time_seconds_bucket
+vllm:mooncake_bytes_transferred_bucket
 ```
 
-这些适合在 Grafana / Prometheus 里看实时 queue buildup、transfer speed、latency histogram、失败计数等 serving 状态。
+Connector 指标取决于所选 backend：NIXL 使用 `nixl_*`，Mooncake 使用 `mooncake_*`。这些适合在 Grafana / Prometheus 里看实时 queue buildup、传输量、latency histogram 等 serving 状态。
 
 ## 如何启动 Prometheus
 
 Prometheus 需要在训练运行时启动，因为它只能 scrape 当前正在暴露的 endpoint，不能在训练结束后从 vLLM endpoint 里补回过去的数据。它不需要放进训练 Python 进程里，推荐作为同一台机器或同一个作业里的旁路进程运行。
 
-最小配置如下，把 `ROUTER_IP:ROUTER_PORT` 换成 vime 日志里的 router 地址，或者用户显式设置的 `--vllm-router-ip` / `--vllm-router-port`：
+最小配置如下，`vime-vllm` 中列出每个 engine 的 HTTP 地址；`vime-router` 使用 vime 日志里的 router 地址和独立的 `Prometheus port`，不是 `--vllm-router-port`：
 
 ```yaml
 global:
@@ -66,10 +62,15 @@ global:
 
 scrape_configs:
   - job_name: vime-vllm
-    metrics_path: /engine_metrics
+    metrics_path: /metrics
     static_configs:
       - targets:
-          - "ROUTER_IP:ROUTER_PORT"
+          - "ENGINE_IP:ENGINE_PORT"
+  - job_name: vime-router
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - "ROUTER_IP:ROUTER_PROMETHEUS_PORT"
 ```
 
 启动 Prometheus 时把 TSDB 目录放到持久化路径上：
@@ -82,13 +83,13 @@ prometheus \
   --web.listen-address=0.0.0.0:9090
 ```
 
-vime 镜像里已经安装了 `prometheus`，可以直接在容器里用上面的命令启动。也可以从同一个镜像再起一个旁路容器，只要它能访问 router 地址，并把 `/path/to/prometheus-data` 挂到持久化目录即可。
+vime 镜像里已经安装了 `prometheus`，可以直接在容器里用上面的命令启动。也可以从同一个镜像再起一个旁路容器，只要它能访问配置的 engine 和 router 抓取地址，并把 `/path/to/prometheus-data` 挂到持久化目录即可。
 
 如果 `--storage.tsdb.path` 在容器本地盘里，容器回收后数据也会丢；如果挂到 NFS、持久化卷或作业输出目录，训练结束后可以重新启动 Prometheus 指向同一个 TSDB 目录，再用 Prometheus UI 或 Grafana 查询历史时间段。这里的“回放”是时间序列回放和图表分析，不是 per-request trace 的完整重放；per-sample request timing 仍然走 sample trace / debug rollout 数据。
 
 ## Trace viewer
 
-`--save-debug-rollout-data` 保存的 sample trace 会包含 vLLM `meta_info` 里的 timing 字段。trace viewer 直接读取这些 attrs，并用 `pd_*` 字段展示 `[P]` / `[D]` 虚拟 lane。
+`--save-debug-rollout-data` 保存的 sample trace 会包含从 vLLM `metrics` 转换的 timing 字段。trace viewer 直接读取这些 attrs，并用 `pd_*` 字段展示 `[P]` / `[D]` 虚拟 lane。
 
 ```bash
 python tools/trace_timeline_viewer.py /path/to/debug/rollout_0.pt

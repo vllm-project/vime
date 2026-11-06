@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG BASE_IMAGE=quay.io/atlas-ci/vllm-ascend
-ARG BASE_IMAGE_TAG=v0.31.0-007abb8-a3
+ARG BASE_IMAGE_TAG=v0.32.0-bf07462-a3
 ARG RUST_IMAGE=docker.m.daocloud.io/library/rust
 ARG RUST_IMAGE_TAG=1.95-bookworm
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
@@ -53,7 +53,7 @@ FROM wheel-builder-base AS sunabako-wheel
 COPY docker/patch/latest/sunabako-arm64.patch /tmp/sunabako-arm64.patch
 RUN apt-get update && apt-get install -y --no-install-recommends git curl && \
     python3 -m pip install "maturin>=1.8,<2" && \
-    curl -fsSL https://files.pythonhosted.org/packages/cd/16/d9fd84bbf784c19425d9d83d8d98deef6d5f107012e8d50bddeb5c11cf5c/sunabako-0.1.1.tar.gz -o /tmp/sdk.tar.gz && \
+    curl -fsSL https://files.pythonhosted.org/packages/32/04/17067354c37b23f7fe00e70c131c863f85acaac86874baa36e32426fb8b1/sunabako-0.1.2.tar.gz -o /tmp/sdk.tar.gz && \
     mkdir /sdk && tar -xf /tmp/sdk.tar.gz -C /sdk --strip-components=1 && cd /sdk && \
     git apply --check /tmp/sunabako-arm64.patch && \
     git apply /tmp/sunabako-arm64.patch && \
@@ -64,12 +64,18 @@ FROM wheel-builder-base AS vllm-router-wheel
 ARG VLLM_ROUTER_COMMIT=1fbcde7443d75b36befb61bc081f64c2a1f13a4b
 # Build the patched Python API and native Rust extension together.
 COPY docker/patch/latest/router-health-check.patch /tmp/router-health-check.patch
+COPY docker/patch/latest/router-pd-registration.patch /tmp/router-pd-registration.patch
+COPY docker/patch/latest/router-worker-registration.patch /tmp/router-worker-registration.patch
 RUN apt-get update && apt-get install -y --no-install-recommends git cmake pkg-config libssl-dev && \
     python3 -m pip install setuptools-rust wheel && \
     git init /router && cd /router && git remote add origin https://github.com/vllm-project/router.git && \
     git fetch --depth 1 origin ${VLLM_ROUTER_COMMIT} && git checkout FETCH_HEAD && \
     git apply --check /tmp/router-health-check.patch && \
     git apply /tmp/router-health-check.patch && \
+    git apply --check /tmp/router-pd-registration.patch && \
+    git apply /tmp/router-pd-registration.patch && \
+    git apply --check /tmp/router-worker-registration.patch && \
+    git apply /tmp/router-worker-registration.patch && \
     python3 -m pip wheel -v --no-deps --no-build-isolation --wheel-dir /wheels .
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG}
@@ -133,7 +139,9 @@ RUN git -C /vllm-workspace/vllm-ascend apply --check --whitespace=nowarn \
 
 # Protect the serving stack while installing Vime dependencies.
 RUN python3 -c 'import importlib.metadata as m; names = ["numpy", "ray", "torch", "torch-npu", "torchvision", "transformers", "triton-ascend", "vllm", "vllm-ascend", "fastapi", "starlette"]; open("/tmp/vime-npu-constraints.txt", "w").write("\n".join(f"{name}=={m.version(name)}" for name in names) + "\n")' && \
-    printf '%s\n' 'datasets==5.0.1' 'pyarrow==25.0.1' >> /tmp/vime-npu-constraints.txt
+    printf '%s\n' 'datasets==5.0.1' 'pyarrow==25.0.1' \
+      'straw-queue==0.1.6' 'sunabako==0.1.2' \
+      'wandb==0.31.0' 'opentelemetry-exporter-otlp==1.45.1' >> /tmp/vime-npu-constraints.txt
 
 # Training source dependencies.
 RUN git clone https://github.com/NVIDIA/Megatron-LM.git /root/Megatron-LM && \
@@ -181,10 +189,11 @@ RUN pip install --no-deps /tmp/sunabako-wheels/*.whl && \
 # ring_flash_attn is a CUDA extension and is not used on Ascend.
 RUN pip install \
       --constraint /tmp/vime-npu-constraints.txt \
-      --requirement /root/vime/requirements.txt && \
+      --requirement /root/vime/requirements.txt \
+      'opentelemetry-exporter-otlp==1.45.1' && \
     pip install --no-deps --no-build-isolation -e /root/vime
 
-# Keep the shared health-check patch in both the Python API and Rust extension.
+# Install the patched Python API and Rust extension together.
 COPY --from=vllm-router-wheel /wheels/ /tmp/router-wheels/
 RUN pip install --no-deps --force-reinstall /tmp/router-wheels/*.whl && \
     rm -rf /tmp/router-wheels

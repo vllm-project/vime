@@ -134,6 +134,11 @@ class NpuRayResourceSpec(RayResourceSpec):
 
     def train_runtime_env(self, args: Any, env_vars=None) -> dict[str, str]:
         env = dict(env_vars or {})
+        # TEST ONLY: pass the CI diagnostic destination to Ray trainers.
+        if os.environ.get("VIME_TEST_NPU_DIAGNOSTICS") == "1":
+            for key in ("VIME_TEST_NPU_DIAGNOSTICS", "VIME_NPU_DIAGNOSTICS_DIR", "RAY_DEDUP_LOGS"):
+                if key in os.environ:
+                    env[key] = os.environ[key]
         if not getattr(args, "offload_train", False):
             return env
 
@@ -204,6 +209,11 @@ class NpuTrainingBootstrap(TrainingBootstrap):
     def bootstrap(self) -> None:
         if self._bootstrapped or self._bootstrapping:
             return
+        # TEST ONLY: start before process groups exist, including conversion workers.
+        if os.environ.get("VIME_TEST_NPU_DIAGNOSTICS") == "1":
+            from vime.utils.npu_ci_diagnostics import start_worker_diagnostics
+
+            start_worker_diagnostics()
         self._bootstrapping = True
         try:
             _ensure_torch_npu()
@@ -235,6 +245,11 @@ class NpuTrainingBootstrap(TrainingBootstrap):
         # does not reinstall Vime's existing override.
         attention = importlib.import_module("vime.backends.megatron_utils.npu_attention_patch")
         attention.DotProductAttention.forward = attention.npu_dot_product_attention_forward
+        # TEST ONLY: wrap the final Adaptor implementations without changing their calls.
+        if os.environ.get("VIME_TEST_NPU_DIAGNOSTICS") == "1":
+            from vime.utils.npu_ci_diagnostics import install_training_diagnostics
+
+            install_training_diagnostics(args)
 
 
 class NpuCheckpointCapabilities(CheckpointCapabilities):

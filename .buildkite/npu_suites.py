@@ -92,6 +92,8 @@ def npu_step(
         "IMAGE_NAME": IMAGE_NAME,
         "VIME_IMAGE_TAG": VIME_IMAGE_TAG,
         "HF_HOME": "/root/.cache/huggingface",
+        # TEST ONLY: retain evidence across intermittent HCCL failures.
+        "VIME_TEST_NPU_DIAGNOSTICS": os.environ.get("VIME_TEST_NPU_DIAGNOSTICS", "1"),
         **env,
     }
 
@@ -104,7 +106,7 @@ def npu_step(
             "export HF_HUB_OFFLINE=0",
             # Cover checkpoint conversion before the training launcher runs.
             'export HCCL_CONNECT_TIMEOUT="$${HCCL_CONNECT_TIMEOUT:-600}"',
-            f"python tests/{test_name}{' ' + extra_args if extra_args else ''}",
+            f"python -m vime.utils.npu_ci_diagnostics -- python tests/{test_name}{' ' + extra_args if extra_args else ''}",
         ]
     )
     command = f"bash -c '{commands}'"
@@ -130,6 +132,7 @@ def npu_step(
             }
         ],
         "env": step_env,
+        "artifact_paths": [".npu-ci-diagnostics/**/*"],
     }
     return step
 
