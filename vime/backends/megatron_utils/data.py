@@ -150,18 +150,41 @@ def get_batch(
 
     multimodal_train_inputs = batch.get("multimodal_train_inputs", None)
     if multimodal_train_inputs is not None:
-        multimodal_data = {}
+        # Two passes, because whether a key can be torch.cat'ed depends on the
+        # shapes of ALL samples, which is only known after seeing every one:
+        #
+        #   pass 1  collect per key, in sample order, no decision yet
+        #           grouped["pixel_values"] = [A, B, C]
+        #   pass 2  decide per key, looking at the whole group
+        #
+        # Concatenate along dim 0 only when the pieces agree on every other dim
+        # (shape[1:]); otherwise keep a list with exactly one tensor per sample,
+        # in sample order (the order of the <image> tokens in the packed sequence):
+        #
+        #   Qwen VL, flattened patches (one row per patch):
+        #       [N_A, D] [N_B, D]                     -> cat -> [N_A + N_B, D]
+        #   Nemotron 3.5 VL, pixel_values (tiles, 3, H, W), same size:
+        #       (1,3,448,512) x3                      -> cat -> (3,3,448,512)
+        #   Nemotron 3.5 VL, H and W vary per image (cannot be concatenated):
+        #       (1,3,448,512) (1,3,320,640) (1,3,448,512)
+        #                                             -> list of 3, forward iterates it
+        #   pass 1  collect per key, in sample order
+        grouped = {}  # key -> per-sample tensors, in sample order
         for mm_input_dict in multimodal_train_inputs:
             if mm_input_dict is not None:
                 for key, mm_tensor in mm_input_dict.items():
                     mm_tensor = torch.atleast_1d(torch.as_tensor(mm_tensor))
-                    if key in multimodal_data:
-                        current = multimodal_data[key]
-                        max_len = max(current.shape[-1], mm_tensor.shape[-1])
-                        mm_tensor = torch.cat(
-                            [F.pad(tensor, (0, max_len - tensor.shape[-1])) for tensor in (current, mm_tensor)]
-                        )
-                    multimodal_data[key] = mm_tensor
+                    grouped.setdefault(key, []).append(mm_tensor)
+        #   pass 2  decide per key, looking at the whole group
+        multimodal_data = {}  # key -> concatenated tensor, or list of tensors
+        for key, tensors in grouped.items():
+            if key in ("input_features", "feature_attention_mask") and len(tensors) > 1:
+                max_len = max(tensor.shape[-1] for tensor in tensors)
+                tensors = [F.pad(tensor, (0, max_len - tensor.shape[-1])) for tensor in tensors]
+            if len(tensors) == 1 or all(t.shape[1:] == tensors[0].shape[1:] for t in tensors):
+                multimodal_data[key] = tensors[0] if len(tensors) == 1 else torch.cat(tensors, dim=0)
+            else:
+                multimodal_data[key] = tensors
         batch["multimodal_train_inputs"] = multimodal_data
 
     return batch

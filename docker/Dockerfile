@@ -37,7 +37,7 @@ FROM ${BASE_IMAGE}
 
 ARG PATCH_VERSION=latest
 ARG VLLM_COMMIT=83c078d955cd6e0c63d3b12abe669c8de936a370
-ARG MEGATRON_COMMIT=4b4acac9a1d28ea6829c8d4f566d75698a21249d
+ARG MEGATRON_COMMIT=ae76c60e6c35d913867d6dd7bad0f30b128b54e7
 ARG DEEPGEMM_COMMIT=8965e4a5cded4041c8dbbe8d35b0be31fd8da90b
 ARG DEEPEP_COMMIT=6845ffd9d59126ec0030c13e0e155935a61e5b5a
 ARG DEEPEP_CUDA_ARCH_LIST=9.0;10.0;10.3
@@ -49,6 +49,8 @@ ARG TMS_COMMIT=bdab8c55f490a00a746ec34e301391617f5ca878
 ARG TMS_CUDA_MAJOR=
 ARG NCCL_VERSION=2.30.7
 ARG MOONCAKE_VERSION=0.3.12
+ARG MAMBA_COMMIT=0048fbf2e7b2f214dcbe703ea3dec2b9647595e1
+ARG CAUSAL_CONV1D_VERSION=1.5.3.post1
 ARG MAX_JOBS=16
 ENV MAX_JOBS=${MAX_JOBS} CMAKE_BUILD_PARALLEL_LEVEL=${MAX_JOBS}
 ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib:${LD_LIBRARY_PATH}
@@ -145,6 +147,11 @@ RUN NVCC_APPEND_FLAGS="--threads 1" \
 RUN git clone https://github.com/NVIDIA/Megatron-LM.git --recursive && \
     cd Megatron-LM && git checkout ${MEGATRON_COMMIT}
 
+# Megatron dev reads cached checkpoint metadata (vime sets ckpt_assume_constant_structure)
+# and runs async checkpointing through nvidia-resiliency-ext, which sits in its `dev` extra
+# and is therefore not pulled in by `pip install -e .`. Keep the pin equal to Megatron's.
+RUN pip install --no-deps nvidia-resiliency-ext==0.7.0
+
 # zhuzilin fork builds, grouped together right after Megatron-LM:
 # torch_memory_saver, plus the GLM-5 train/rollout alignment kernels.
 RUN TMS_CUDA_MAJOR="${TMS_CUDA_MAJOR:-$(python -c 'import torch; print(torch.version.cuda.split(".")[0])')}" && \
@@ -189,6 +196,16 @@ RUN if [ "${ENABLE_CUDA_13}" != "1" ]; then \
 
 RUN pip install "scipy==1.17.1" "kernels<0.15.0"
 
+COPY docker/patch/${PATCH_VERSION}/mamba-cxx-standard.patch /tmp/mamba-cxx-standard.patch
+RUN export MAMBA_FORCE_BUILD=TRUE CAUSAL_CONV1D_FORCE_BUILD=TRUE NVCC_APPEND_FLAGS="--threads 4" && \
+    pip install --no-build-isolation --no-deps "causal-conv1d==${CAUSAL_CONV1D_VERSION}" && \
+    curl -fsSL "https://github.com/state-spaces/mamba/archive/${MAMBA_COMMIT}.tar.gz" -o /tmp/mamba.tar.gz && \
+    mkdir /tmp/mamba-build && tar -xf /tmp/mamba.tar.gz --strip-components=1 -C /tmp/mamba-build && \
+    cd /tmp/mamba-build && git apply /tmp/mamba-cxx-standard.patch && \
+    pip install --no-build-isolation --no-deps . && \
+    cd /root && rm -rf /tmp/mamba-build /tmp/mamba.tar.gz /tmp/mamba-cxx-standard.patch
+RUN python -c "import mamba_ssm, causal_conv1d; print('mamba_ssm', mamba_ssm.__version__, 'causal_conv1d', causal_conv1d.__version__)"
+
 RUN rm -rf /root/.cache/pip /root/flash-attention
 
 # ====================================== Patches ============================================
@@ -216,6 +233,8 @@ COPY docker/patch/${PATCH_VERSION}/vllm-deepep-optional-shrink.patch /tmp/vllm-d
 COPY docker/patch/${PATCH_VERSION}/vllm-glm5next-unbounded-gate.patch /tmp/vllm-glm5next-unbounded-gate.patch
 COPY docker/patch/${PATCH_VERSION}/vllm-tito-columnar-logprobs-render.patch /tmp/vllm-tito-columnar-logprobs-render.patch
 COPY docker/patch/${PATCH_VERSION}/vllm-watchdog-fatal-action.patch /tmp/vllm-watchdog-fatal-action.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-nemotron-reload.patch /tmp/vllm-nemotron-reload.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-tito-placeholder-mask.patch /tmp/vllm-tito-placeholder-mask.patch
 RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirname(vllm.__file__)))')" && \
     cd "$VLLM_SITE" && \
     git apply -v /tmp/vllm-pull_weights.patch && \
@@ -228,6 +247,8 @@ RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirn
     git apply -v /tmp/vllm-glm5next-unbounded-gate.patch && \
     git apply -v /tmp/vllm-tito-columnar-logprobs-render.patch && \
     git apply -v /tmp/vllm-watchdog-fatal-action.patch && \
+    git apply -v /tmp/vllm-nemotron-reload.patch && \
+    git apply -v /tmp/vllm-tito-placeholder-mask.patch && \
     rm /tmp/vllm-pull_weights.patch \
        /tmp/vllm-score-centering.patch \
        /tmp/vllm-fine-grained-tracing.patch \
@@ -237,7 +258,9 @@ RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirn
        /tmp/vllm-deepep-optional-shrink.patch \
        /tmp/vllm-glm5next-unbounded-gate.patch \
        /tmp/vllm-tito-columnar-logprobs-render.patch \
-       /tmp/vllm-watchdog-fatal-action.patch
+       /tmp/vllm-watchdog-fatal-action.patch \
+       /tmp/vllm-nemotron-reload.patch \
+       /tmp/vllm-tito-placeholder-mask.patch
 
 # ====================================== Install main package ============================================
 
