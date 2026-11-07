@@ -46,6 +46,7 @@ SUITES = {
         ("test_quick_start_glm4_9B.py", 8, "", {"ENABLE_EVAL": "0"}),
         ("test_glm4.7_30B_A3B_pd_mooncake.py", 8, "", {}),
         ("test_mooncake_memory_reregister.py", 2, "", {}),
+        ("test_nemotron35_super_vl_proxy_e2e.py", 8, "", {}),
         (
             "test_qwen3_30B_A3B.py",
             8,
@@ -249,6 +250,8 @@ def gpu_step(suite: str, test_file: str, num_gpus: int, extra_args: str, env: di
             "ls -l /dev/infiniband /sys/class/infiniband /host-sys/class/infiniband || true\n"
             "grep -E '^(Cap|Seccomp|NoNewPrivs)' /proc/self/status\n" + step["command"]
         )
+    if test_file == "test_nemotron35_super_vl_proxy_e2e.py":
+        step["timeout_in_minutes"] = 45
     if agent_e2e:
         step["command"] = "bash -c " + shlex.quote(command)
         step["timeout_in_minutes"] = 35

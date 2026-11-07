@@ -49,6 +49,8 @@ ARG TMS_COMMIT=bdab8c55f490a00a746ec34e301391617f5ca878
 ARG TMS_CUDA_MAJOR=
 ARG NCCL_VERSION=2.30.7
 ARG MOONCAKE_VERSION=0.3.12
+ARG MAMBA_COMMIT=0048fbf2e7b2f214dcbe703ea3dec2b9647595e1
+ARG CAUSAL_CONV1D_VERSION=1.5.3.post1
 ARG MAX_JOBS=16
 ENV MAX_JOBS=${MAX_JOBS} CMAKE_BUILD_PARALLEL_LEVEL=${MAX_JOBS}
 ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib:${LD_LIBRARY_PATH}
@@ -194,6 +196,16 @@ RUN if [ "${ENABLE_CUDA_13}" != "1" ]; then \
 
 RUN pip install "scipy==1.17.1" "kernels<0.15.0"
 
+COPY docker/patch/${PATCH_VERSION}/mamba-cxx-standard.patch /tmp/mamba-cxx-standard.patch
+RUN export MAMBA_FORCE_BUILD=TRUE CAUSAL_CONV1D_FORCE_BUILD=TRUE NVCC_APPEND_FLAGS="--threads 4" && \
+    pip install --no-build-isolation --no-deps "causal-conv1d==${CAUSAL_CONV1D_VERSION}" && \
+    curl -fsSL "https://github.com/state-spaces/mamba/archive/${MAMBA_COMMIT}.tar.gz" -o /tmp/mamba.tar.gz && \
+    mkdir /tmp/mamba-build && tar -xf /tmp/mamba.tar.gz --strip-components=1 -C /tmp/mamba-build && \
+    cd /tmp/mamba-build && git apply /tmp/mamba-cxx-standard.patch && \
+    pip install --no-build-isolation --no-deps . && \
+    cd /root && rm -rf /tmp/mamba-build /tmp/mamba.tar.gz /tmp/mamba-cxx-standard.patch
+RUN python -c "import mamba_ssm, causal_conv1d; print('mamba_ssm', mamba_ssm.__version__, 'causal_conv1d', causal_conv1d.__version__)"
+
 RUN rm -rf /root/.cache/pip /root/flash-attention
 
 # ====================================== Patches ============================================
@@ -221,6 +233,8 @@ COPY docker/patch/${PATCH_VERSION}/vllm-deepep-optional-shrink.patch /tmp/vllm-d
 COPY docker/patch/${PATCH_VERSION}/vllm-glm5next-unbounded-gate.patch /tmp/vllm-glm5next-unbounded-gate.patch
 COPY docker/patch/${PATCH_VERSION}/vllm-tito-columnar-logprobs-render.patch /tmp/vllm-tito-columnar-logprobs-render.patch
 COPY docker/patch/${PATCH_VERSION}/vllm-watchdog-fatal-action.patch /tmp/vllm-watchdog-fatal-action.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-nemotron-reload.patch /tmp/vllm-nemotron-reload.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-tito-placeholder-mask.patch /tmp/vllm-tito-placeholder-mask.patch
 RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirname(vllm.__file__)))')" && \
     cd "$VLLM_SITE" && \
     git apply -v /tmp/vllm-pull_weights.patch && \
@@ -233,6 +247,8 @@ RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirn
     git apply -v /tmp/vllm-glm5next-unbounded-gate.patch && \
     git apply -v /tmp/vllm-tito-columnar-logprobs-render.patch && \
     git apply -v /tmp/vllm-watchdog-fatal-action.patch && \
+    git apply -v /tmp/vllm-nemotron-reload.patch && \
+    git apply -v /tmp/vllm-tito-placeholder-mask.patch && \
     rm /tmp/vllm-pull_weights.patch \
        /tmp/vllm-score-centering.patch \
        /tmp/vllm-fine-grained-tracing.patch \
@@ -242,7 +258,9 @@ RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirn
        /tmp/vllm-deepep-optional-shrink.patch \
        /tmp/vllm-glm5next-unbounded-gate.patch \
        /tmp/vllm-tito-columnar-logprobs-render.patch \
-       /tmp/vllm-watchdog-fatal-action.patch
+       /tmp/vllm-watchdog-fatal-action.patch \
+       /tmp/vllm-nemotron-reload.patch \
+       /tmp/vllm-tito-placeholder-mask.patch
 
 # ====================================== Install main package ============================================
 
