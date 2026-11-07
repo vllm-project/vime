@@ -1,0 +1,180 @@
+diff --git a/rust/src/cmd/src/cli.rs b/rust/src/cmd/src/cli.rs
+index 1269e0b8afa..71b6635f450 100644
+--- a/rust/src/cmd/src/cli.rs
++++ b/rust/src/cmd/src/cli.rs
+@@ -205,6 +205,10 @@ pub struct JsonStringList(pub Vec<String>);
+ #[derive(Educe, Clone, Args, PartialEq, Eq, Deserialize)]
+ #[educe(Debug)]
+ pub struct SharedRuntimeArgs {
++    #[arg(skip)]
++    #[serde(default)]
++    #[educe(Debug(ignore))]
++    pub vllm_config: Option<Value>,
+     #[serde(rename = "model_tag")]
+     /// Model identifier or local model directory used for backend loading and
+     /// public model ID.
+@@ -529,6 +533,7 @@ impl SharedRuntimeArgs {
+                 Some(address) => CoordinatorMode::External { address },
+                 None => CoordinatorMode::None,
+             },
++            vllm_config: self.vllm_config,
+             model: self.model,
+             revision: self.revision,
+             hf_overrides: self.hf_overrides,
+@@ -591,6 +596,7 @@ impl SharedRuntimeArgs {
+                 local_output_address,
+             },
+             coordinator_mode: CoordinatorMode::MaybeInProc,
++            vllm_config: self.vllm_config,
+             model: self.model,
+             revision: self.revision,
+             hf_overrides: self.hf_overrides,
+diff --git a/rust/src/server/src/config.rs b/rust/src/server/src/config.rs
+index 8e51f1440b3..8ab2bce7a7f 100644
+--- a/rust/src/server/src/config.rs
++++ b/rust/src/server/src/config.rs
+@@ -211,6 +211,9 @@ impl FromStr for LoraModulePath {
+ #[derive(Educe, Clone, PartialEq, Eq, Serialize)]
+ #[educe(Debug)]
+ pub struct Config {
++    #[serde(skip_serializing)]
++    #[educe(Debug(ignore))]
++    pub vllm_config: Option<Value>,
+     /// Frontend-to-engine transport setup.
+     pub transport_mode: TransportMode,
+     /// Requested frontend-side coordinator behavior.
+diff --git a/rust/src/server/src/server_info.rs b/rust/src/server/src/server_info.rs
+index 24daa0ce8ce..e8b865aeee3 100644
+--- a/rust/src/server/src/server_info.rs
++++ b/rust/src/server/src/server_info.rs
+@@ -28,8 +28,9 @@ pub(crate) struct ServerInfoSnapshot {
+ impl ServerInfoSnapshot {
+     /// Capture the runtime configuration fields available to the Rust frontend.
+     pub(crate) fn from_config(config: &Config) -> Self {
+-        let vllm_config_json =
+-            serde_json::to_value(config).expect("server info value must serialize");
++        let vllm_config_json = config.vllm_config.clone().unwrap_or_else(|| {
++            serde_json::to_value(config).expect("server info value must serialize")
++        });
+ 
+         Self {
+             vllm_config_text: render_config_text(&vllm_config_json),
+diff --git a/vllm/entrypoints/cli/serve.py b/vllm/entrypoints/cli/serve.py
+index 4c9410488b3..7034727bbf5 100644
+--- a/vllm/entrypoints/cli/serve.py
++++ b/vllm/entrypoints/cli/serve.py
+@@ -371,6 +371,7 @@ def run_multi_api_server(args: argparse.Namespace):
+                 engine_count=expected_engine_count,
+                 data_parallel_size=parallel_config.data_parallel_size,
+                 stats_update_address=stats_update_address,
++                vllm_config=vllm_config,
+             )
+         else:
+             # Start API server(s).
+diff --git a/vllm/v1/utils.py b/vllm/v1/utils.py
+index ac877263a5f..64deef75111 100644
+--- a/vllm/v1/utils.py
++++ b/vllm/v1/utils.py
+@@ -37,6 +37,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
+ if TYPE_CHECKING:
+     import numpy as np
+ 
++    from vllm.config import VllmConfig
+     from vllm.v1.engine.coordinator import DPCoordinator
+     from vllm.v1.engine.utils import CoreEngineActorManager, CoreEngineProcManager
+ 
+@@ -355,6 +356,7 @@ class RustFrontendProcessManager:
+         data_parallel_size: int,
+         stats_update_address: str | None = None,
+         grpc_sock: Any | None = None,
++        vllm_config: "VllmConfig | None" = None,
+     ):
+         import os
+         import subprocess
+@@ -416,14 +418,22 @@ class RustFrontendProcessManager:
+         # frontends.
+         args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
+         args_dict["http_timeout_keep_alive"] = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+-        args_json = json.dumps(args_dict, sort_keys=True)
+-        cmd.extend(["--args-json", args_json])
+ 
+         # The subprocess needs the real values, but the log must not carry
+         # credentials such as api_key or hf_token.
+         from vllm.entrypoints.serve.utils.api_utils import redact_sensitive_args
+ 
+         redacted_json = json.dumps(redact_sensitive_args(args_dict), sort_keys=True)
++        if vllm_config is not None:
++            from pydantic import TypeAdapter
++
++            from vllm.config import VllmConfig
++
++            args_dict["vllm_config"] = TypeAdapter(VllmConfig).dump_python(
++                vllm_config, mode="json", fallback=str
++            )
++        args_json = json.dumps(args_dict, sort_keys=True)
++        cmd.extend(["--args-json", args_json])
+         logger.info("Launching Rust frontend: %s", " ".join(cmd[:-1] + [redacted_json]))
+         self._proc = subprocess.Popen(cmd, pass_fds=pass_fds)
+ 
+diff --git a/rust/src/server/examples/external_engine_openai_qwen.rs b/rust/src/server/examples/external_engine_openai_qwen.rs
+index 43192ab78f4..1c1035f1532 100644
+--- a/rust/src/server/examples/external_engine_openai_qwen.rs
++++ b/rust/src/server/examples/external_engine_openai_qwen.rs
+@@ -51,6 +51,7 @@ async fn main() -> Result<()> {
+     let args = Args::parse();
+     let port = unique_local_port()?;
+     let config = Config {
++        vllm_config: None,
+         transport_mode: TransportMode::HandshakeOwner {
+             handshake_address: args.handshake_address,
+             advertised_host: args.host,
+diff --git a/rust/src/cmd/src/cli/tests.rs b/rust/src/cmd/src/cli/tests.rs
+index 944febc36c1..fe536763ff3 100644
+--- a/rust/src/cmd/src/cli/tests.rs
++++ b/rust/src/cmd/src/cli/tests.rs
+@@ -1105,9 +1105,45 @@ fn frontend_args_json_applies_defaults() {
+     assert_eq!(args.runtime.renderer, RendererSelection::Auto);
+     assert_eq!(args.runtime.max_logprobs, None);
+     assert_eq!(args.runtime.shutdown_timeout, 0);
++    assert_eq!(args.runtime.vllm_config, None);
+     assert_eq!(args.into_config().transport_mode.data_parallel_size(), 4);
+ }
+ 
++#[test]
++fn frontend_args_json_preserves_resolved_engine_config() {
++    let resolved = serde_json::json!({
++        "ec_transfer_config": {
++            "ec_connector": "ECCPUConnector",
++            "ec_role": "ec_producer",
++        },
++        "kv_transfer_config": null,
++    });
++    let payload = serde_json::json!({
++        "model_tag": "test-model",
++        "vllm_config": resolved,
++    });
++    let cli = Cli::try_parse_from([
++        "vllm-rs",
++        "frontend",
++        "--listen-fd",
++        "3",
++        "--input-address",
++        "ipc:///tmp/input.sock",
++        "--output-address",
++        "ipc:///tmp/output.sock",
++        "--args-json",
++        &payload.to_string(),
++    ])
++    .unwrap();
++    let Command::Frontend(args) = cli.command else {
++        panic!("expected frontend args");
++    };
++    let config = args.into_config();
++    assert_eq!(config.vllm_config, Some(resolved));
++    assert!(serde_json::to_value(&config).unwrap().get("vllm_config").is_none());
++    assert!(!format!("{config:?}").contains("ec_producer"));
++}
++
+ #[test]
+ fn frontend_args_json_ignores_engine_owned_max_model_len() {
+     let cli = Cli::try_parse_from([

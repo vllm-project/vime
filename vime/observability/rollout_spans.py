@@ -1,7 +1,7 @@
 """Opt-in wall-clock spans for the RolloutManager post-rollout boundary.
 
 `RolloutManager.generate()` snapshots its own duration before
-`_convert_samples_to_train_data` and `_split_train_data_by_dp` run, and the
+`BatchBuilder.convert` and `BatchBuilder.split_by_dp` run, and the
 trainer only sees the result through `perf/data_preprocess_time`. The region in
 between -- sample -> train-data conversion, the DP split, tensorization, the
 object-store puts and the rollout metrics aggregation -- is therefore invisible

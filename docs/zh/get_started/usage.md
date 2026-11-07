@@ -21,7 +21,8 @@
 
 - `--rollout-num-gpus`：rollout （inference）一共需要多少卡。设置为 `0` 时，vime 仍会解析 vLLM 参数并启动 router，但不会启动本地 vLLM server；
 
-- `--rollout-num-gpus-per-engine`：单个 inference engine 使用的 worker GPU 总数；只有 data parallel 和 pipeline parallel 都为 1 时，它才等于 vLLM 的 `tensor_parallel_size`。例如用 2 机 16 卡 serving 一个模型时，这里的值应为 16。
+- `--rollout-num-gpus-per-engine`：单个 inference engine 使用的 worker GPU 总数；只有 data parallel、pipeline parallel 和 prefill context parallel 都为 1 时，它才等于 vLLM 的 `tensor_parallel_size`。例如用 2 机 16 卡 serving 一个模型时，这里的值应为 16。
+  vLLM 分别接收 data、pipeline 和 prefill context parallel 大小。默认 TP 大小为 engine GPU 总数除以这些并行大小；vLLM config 可以为 server group 覆盖并行配置。
 
 在默认的配置下，我们会根据这些参数，通过 ray 给训练部分分配 `actor_num_nodes * actor_num_gpus_per_node` 张 GPU，给推理分配 `rollout_num_gpus` 张 GPU，也就是实现了训推分离。
 
@@ -75,7 +76,7 @@ MODEL_ARGS=(
 )
 ```
 
-我们在 [scripts/models](../../../scripts/models) 提供了常用模型的配置，可以直接复用。如果你也在使用 megatron 进行 pretrain/sft 的话，可以直接复用 pretrain/sft 中的模型配置。
+我们在 [scripts/models](https://github.com/vllm-project/vime/tree/main/scripts/models) 提供了常用模型的配置，可以直接复用。如果你也在使用 megatron 进行 pretrain/sft 的话，可以直接复用 pretrain/sft 中的模型配置。
 
 注意：
 
@@ -108,7 +109,7 @@ megatron 支持多种其自定义的 ckpt 格式，这里介绍 2 种比较主�
 
 torch 格式是 megatron 的老存储格式，里面的结构大约是一些 `mp_rank_xxx` 的文件夹，每个文件夹对应了在对应的并行划分下，每个 rank 存储的 ckpt。也是因为如此，在加载 torch 格式的 ckpt 的时候，需要保证 ckpt 的并行策略和训练任务的并行策略是相同的。
 
-我们推荐使用 torch_dist 格式 ckpt，因为 torch_dist 格式可以支持自动并行切分，也就是不同并行的训练任务都可以共用同一个 ckpt，会方便很多。torch_dist 这也是开源 megatron 目前的默认格式。torch_dist 格式的 ckpt 中一般是一堆 `.distcp` 文件。在使用 torch_dist 时，可以使用 [README](../../../README_zh.md) 中介绍的 ckpt 转化方法从 huggingface 转化为 torch_dist，反之亦然。
+我们推荐使用 torch_dist 格式 ckpt，因为 torch_dist 格式可以支持自动并行切分，也就是不同并行的训练任务都可以共用同一个 ckpt，会方便很多。torch_dist 这也是开源 megatron 目前的默认格式。torch_dist 格式的 ckpt 中一般是一堆 `.distcp` 文件。在使用 torch_dist 时，可以使用 [README](https://github.com/vllm-project/vime/blob/main/README_zh.md) 中介绍的 ckpt 转化方法从 huggingface 转化为 torch_dist，反之亦然。
 
 在存储结构上，megatron 的 ckpt 一般是这样的结构，这里假设存储的路径为 `/ckpt/`：
 
@@ -153,6 +154,8 @@ vLLM 的加载非常简单，只需要：
 对于一些 vLLM 的自定义以及 vime 引入 vLLM 的原理，请见 vLLM 使用方法一节。
 
 ### 数据格式
+
+原始数据统一由 DataSource 管理。有 `--prompt-data` 时内置 DataSource 会加载数据；需要自行管理数据时可通过 `--data-source-path` 提供自定义实现。
 
 vime 支持加载 `.jsonl` 和 `.parquet` 格式文件；读取 Parquet 需要安装 `pyarrow`。两种格式中的每条记录都应包含 `--input-key` 和 `--label-key` 指定的字段。下面是一条 JSONL 数据展开后的示例：
 
@@ -206,6 +209,7 @@ vime 支持加载 `.jsonl` 和 `.parquet` 格式文件；读取 Parquet 需要�
   注意：在策略蒸馏 (OPD) 现在与 advantage estimator 正交，使用 `--use-opd` 和 `--opd-kl-coef` 可以在任意 estimator 之上启用 OPD。
 - `--calculate-per-token-loss`：vime 中默认的方案是 per sample loss，即 `mean(sum(sample_i) / len(sample_i))`，如果需要计算 per token loss，即 `sum(sum(sample_i)) / sum(len(sample_i))`，可以开启 `--calculate-per-token-loss`；
 - `--use-tis`：如果需要开启 tis（https://fengyao.notion.site/off-policy-rl），可以开启这一设置；
+- `--use-score-centering`：启用 [Score Centering](https://arxiv.org/abs/2609.20807)，可与 TIS 组合使用，详见下方的 [Score Centering](#score-centering)。
 
 #### GRPO 算法
 
@@ -254,6 +258,40 @@ PPO 相关参数：
 - `--eps-clip`：PPO clip 范围；
 - `--value-clip`：value loss 的 clip 范围；
 - `--kl-coef`：KL penalty 系数，用于 reward shaping。
+
+#### Score Centering
+
+[Score Centering Stabilizes Off-policy Reinforcement Learning](https://arxiv.org/abs/2609.20807) 提出了一种加性修正，用于减轻训练与推理不一致引起的梯度漂移，也可以与重要性采样组合使用。vime 的 score centering（SC）目前支持 Megatron backend 和非流式 vLLM rollout。
+
+在已有的 RL 启动命令中加入以下配置：
+
+```bash
+--use-score-centering \
+--score-centering-top-k 128 \
+--pg-loss-type reinforce \
+--advantage-estimator grpo \
+--disable-grpo-std-normalization \
+--calculate-per-token-loss \
+--rollout-temperature 1.0 \
+--rollout-top-p 1.0 \
+--rollout-top-k -1 \
+--entropy-coef 0 \
+--kl-coef 0
+```
+
+- `--use-score-centering`：启用 REINFORCE score-centering 目标。省略 `--pg-loss-type` 时，SC 会自动选择 `reinforce`；未开启 SC 时保留原有的 PPO/CISPO 默认行为。SC 不能与 `--pg-loss-type ppo` 或 GSPO/CISPO advantage estimator 组合，PPO clipping 参数不影响 REINFORCE 目标。
+- `--score-centering-top-k`：仅在 `--rollout-top-p 1` 时生效。每个 response token 保存的 sampler top-k token ID 和 logprob 数量，默认为 128，不能超过模型词表大小。top-k 概率保留其在完整词表上的概率质量；剩余的 sampler 概率质量按当前 trainer 的尾部概率分布估计。
+- `--use-tis`：可选，与 SC 独立开关。组合开启时，使用 `--tis-clip-low` 和 `--tis-clip` 对加权后的 score 做 centering。也支持通过 `--custom-tis-function-path` 选择内置的 `vime.backends.megatron_utils.loss.icepop_function`，但不支持与任意自定义 TIS 回调组合。REINFORCE 使用 detached 的当前 trainer/sampler 权重，PPO 保留原有的旧 trainer/sampler 权重。
+
+**采样要求：** temperature 必须为正，使用 `0 < top_p <= 1`、`top_k=-1`、`min_p=0`，不启用 repetition/frequency/presence penalty 或约束解码。所有 rollout engine 必须使用 `logprobs_mode=processed_logprobs`。目前不支持逐请求修改 temperature 或 top_p，也不支持流式 SC。评估不会请求 SC 数据，可以使用独立的采样配置。
+
+**与 top-p replay 组合：** 将上面的 `--rollout-top-p 1.0` 改为例如 `--rollout-top-p 0.9`，SC 会自动改用精确支持集求和，`--score-centering-top-k` 不再生效。rollout 返回每个 token 完整的 replay 支持集及其截断、归一化后的 sampler logprobs；trainer 在同一份支持集上归一化，并计算 `sum(stop_gradient(q * weight - weight(1) * p) * log p)` 的校正项，与非 top-p 路径在完整支持集上的中心化口径一致。减去的基线具有零 score 梯度，因此训练更新不变；训推分布一致时，`sc_correction` 为零（允许舍入误差）。不使用论文的长尾近似，也不把支持集外的 token 纳入求和。训练端的完整 logits 本身无法恢复 sampler 概率，因此仍需要保存原始采样概率。传输量随每步支持集大小变化，top-p 接近 1 时可能明显大于固定的 top-k。精确性针对保存的 replay 支持集；沿用 replay 对边界 sampled token 的保留规则。
+
+**vLLM 支持：** `top_p=1` 时，Vime 请求 vLLM 原生的 `k+1` 个 top logprobs，再保留概率最高的 `k` 个；`top_p<1` 时请求与 vLLM sampling mask 对齐的归一化 logprobs。自定义 generator 应调用 `vime.utils.score_centering` 中的 `score_centering_request`，并将等价 metadata 传给 `Sample.append_response_tokens`。
+
+top-p 概率与 replay ID/offset 一起驻留在 CPU，支持 partial rollout、masked tool token、DP、TP 和两种 CP 布局。响应载荷随记录的支持集大小变化，不再先传输完整词表的 logprob 向量。
+
+sampler top-k 数据支持 partial rollout 续接、masked tool token、DP 划分、microbatch 选择、TP 及两种 CP 布局；使用 R3 spill hook 时共享其文件生命周期。相关日志指标包括 `sc_correction`、`sc_sampler_head_mass`、`sc_train_head_mass` 和 `sc_importance_weight`。
 
 ### 高级 Megatron 配置（--megatron-config-path）
 
@@ -327,7 +365,10 @@ vime 支持不同程度的自定义数据生成（rollout）。
           f"http://{args.vllm_router_ip}:{args.vllm_router_port}/inference/v1/generate",
           {
               "token_ids": prompt_token_ids,
-              "sampling_params": {"max_tokens": sampling_params["max_new_tokens"]},
+              "sampling_params": {
+                  "max_tokens" if key == "max_new_tokens" else key: value
+                  for key, value in sampling_params.items()
+              },
           }
       )
   
@@ -353,11 +394,59 @@ vime 支持不同程度的自定义数据生成（rollout）。
 
 - 有的时候，我们还需要支持自定义的 reward model，可以通过配置 `--custom-rm-path` 来进行配置。
 
+### 持久化 rollout 队列和分布式 fully async
+
+默认 rollout 传输为 Ray `object-store`，不需要共享目录。`--rollout-data-transport nixl` 选择 Ray 的 NIXL 张量传输。需要跨机持久化队列和打包张量存储时，使用 [straw](../advanced/straw.md) 和共享 JuiceFS 目录。
+
+启用使用 straw 的分布式 fully async rollout：
+
+```bash
+--rollout-function-path vime.rollout.fully_async_rollout.generate_rollout_fully_async \
+--rollout-data-transport straw \
+--rollout-data-dir /shared/run/rollout_data
+```
+
+所有节点必须以相同绝对路径挂载该目录，并安装 `straw-queue`。标准 vime 安装已包含此依赖；已有环境可以执行 `pip install 'straw-queue>=0.1.2'`。JuiceFS storage profile 和部署声明的配置见 [straw 指南](../advanced/straw.md#启用方式)。只选择 straw 时使用同步 rollout 入口。新任务已设置 `--save` 时，省略 `--rollout-data-dir` 会使用 `<save>/rollout_data`。
+
+使用 straw 时，`--use-rollout-routing-replay` 和 `--use-score-centering` 将 R3、SC 张量随 sample 持久化，也支持 partial continuation。`--rollout-queue-online-gc` 可开启未使用存储的回收，默认关闭。恢复使用 `--load`、`--save` 和可选的 `--ckpt-step`。调度、checkpoint 恢复和 debug 回放见 [straw 指南](../advanced/straw.md)，自定义 rollout 函数见[自定义功能](customization.md)。
+
+### 跨权重更新保留 KV（PipelineRL）
+
+`--flush-cache-interval` 控制权重同步时的缓存刷新策略：
+
+| 值 | 行为 |
+| --- | --- |
+| `1`（默认） | abort 生成、flush KV、更新权重，再恢复生成。 |
+| `<= 0` | 原地暂停生成，更新权重后让未完成请求沿用已有 KV 继续生成。 |
+| `N > 1` | 每 N 次训练权重更新完整刷新一次，其余更新保留 KV。 |
+
+首次发布权重总会刷新，包括从 checkpoint 恢复时。例如 `2` 会在 serving
+version 2 保留 KV、version 3 刷新、version 4 再次保留。周期按权重同步次数
+计算，而不是 optimizer step 或 rollout batch 数。
+
+使用默认 rollout 函数时，非 `1` 的值会自动选择 fully async rollout 实现。
+自定义 rollout 函数保留自己的调度逻辑。训推需要使用独立 GPU，不能开启
+rollout offload 或 `--release-train`。默认评估仍使用标准 vLLM rollout 函数。
+
+```bash
+--flush-cache-interval 8 \
+--use-rollout-logprobs
+```
+
+实现使用 vLLM 已有的 `pause(mode="keep", clear_cache=false)` API。跨更新的请求
+会使用旧权重计算的 KV；rollout log probabilities 对应实际生成各 token 的策略。
+周期性完整刷新会 abort 未完成请求，fully async worker 会将其重新排队生成。
+
+公共 prefix 也可能在刷新前一直复用旧 KV。设为 `<= 0` 时，高频 prefix 没有
+缓存年龄上限。可关闭 vLLM 的 prefix caching，防止跨请求复用，同时保留未完成
+请求自身的 KV。周期性刷新则可以限制公共 KV 的存活时间，暂不引入权重版本
+缓存命名空间。
+
 ## vLLM 使用方法
 
 vime 以 server 模式运行 vLLM，通过 HTTP 与之通信。
 
-### 参数配置
+### vLLM 参数
 
 vime 通过转发 vLLM 的 `EngineArgs` CLI 参数，引入了几乎所有的 vLLM 参数。在设置一个 vLLM 参数的时候，需要在参数前加上 `--vllm-` 的前缀，例如：
 
@@ -367,7 +456,7 @@ vime 通过转发 vLLM 的 `EngineArgs` CLI 参数，引入了几乎所有的 vL
 
 有部分参数和 vime 的资源调度相关，会由 vime 自行配置，例如：
 
-- `--tensor-parallel-size` 在 vime 中会使用 `--rollout-num-gpus-per-engine`
+- `--tensor-parallel-size` 在 vime 中由 `--rollout-num-gpus-per-engine` 和配置的 DP、PP、PCP 大小共同确定
 - `--model` 在 vime 中会使用 `--hf-checkpoint`
 
 vLLM 参数引入 vime 的方式可以参考 [vime/backends/vllm_utils/arguments.py](https://github.com/vllm-project/vime/blob/main/vime/backends/vllm_utils/arguments.py)。
@@ -414,7 +503,7 @@ vllm:
 
 vime 通过复用 `megatron.training` 目录下的常规函数，如 `parse_args`， `save_checkpoint`，`load_checkpoint`，从而实现对不同版本以及轻度魔改的 megatron 的支持。所以在使用时，需要保证 `PYTHONPATH` 中能访问到 megatron，例如在运行时加入 `export PYTHONPATH=/root/Megatron-LM`。
 
-### 参数配置
+### Megatron 参数
 
 vime 通过直接引入 `from megatron.training.arguments import parse_args` 引入了当前环境中 megatron 的所有参数。如果当前使用的 megatron 有在 `parse_args` 之外的参数，可以通过像 [train.py](https://github.com/vllm-project/vime/blob/main/train.py) 中传入参数来进行配置，例如：
 

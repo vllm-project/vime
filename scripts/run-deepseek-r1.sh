@@ -119,12 +119,13 @@ VLLM_ARGS=(
    --vllm-data-parallel-size 8
 
     # enable deepep for vllm
+    --vllm-all2all-backend deepep_high_throughput
 
     # mtp
 
     # make every dp rank has 128 concurrency
     --vllm-server-concurrency 1024
-    --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":4}'
+    --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 )
 
 MISC_ARGS=(

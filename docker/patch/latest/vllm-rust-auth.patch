@@ -1,0 +1,83 @@
+diff --git a/rust/src/server/src/middleware/auth.rs b/rust/src/server/src/middleware/auth.rs
+index 93791fff623d..df97487448bb 100644
+--- a/rust/src/server/src/middleware/auth.rs
++++ b/rust/src/server/src/middleware/auth.rs
+@@ -13,11 +13,14 @@ use serde_json::json;
+ 
+ use crate::state::{ApiKeyHash, AppState, hash_api_key};
+ 
+-const GUARDED_PREFIXES: &[&str] = &["/v1", "/v2", "/inference", "/dumper"];
++/// The paths that answer without the API key: the liveness probe and the
++/// load/version endpoints used by orchestrators. Every other route on the
++/// app, present or added later, requires a bearer token by default.
++const UNGUARDED_PATHS: &[&str] = &["/health", "/load", "/version"];
+ 
+ /// Authenticate guarded HTTP routes with an OpenAI-compatible bearer token.
+ ///
+-/// Mirrors Python `AuthenticationMiddleware`: OPTIONS requests and non-guarded
++/// Mirrors Python `AuthenticationMiddleware`: OPTIONS requests and unguarded
+ /// helper endpoints such as `/health` are allowed through without a token.
+ pub async fn authenticate_api_key(
+     State(state): State<Arc<AppState>>,
+@@ -40,7 +43,7 @@ pub async fn authenticate_api_key(
+ }
+ 
+ fn requires_auth(path: &str) -> bool {
+-    GUARDED_PREFIXES.iter().any(|prefix| path.starts_with(prefix))
++    !UNGUARDED_PATHS.contains(&path)
+ }
+ 
+ fn verify_token(authorization: Option<&HeaderValue>, api_key_hashes: &[ApiKeyHash]) -> bool {
+diff --git a/rust/src/server/src/routes/tests.rs b/rust/src/server/src/routes/tests.rs
+index 5c1fff2cae76..faceb9259b43 100644
+--- a/rust/src/server/src/routes/tests.rs
++++ b/rust/src/server/src/routes/tests.rs
+@@ -1767,6 +1767,48 @@ async fn api_key_auth_allows_unguarded_route_without_token() {
+     assert_eq!(response.status(), StatusCode::OK);
+ }
+ 
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++#[serial]
++async fn api_key_auth_rejects_missing_token_on_tokenize() {
++    // Regression test: `/tokenize` renders arbitrary text through the chat
++    // template and was reachable without a token because the old allowlist
++    // only guarded "/v1", "/v2" and "/inference" prefixes.
++    let (mut app, _engine_task) = test_app_with_api_keys(vec!["secret".to_string()]).await;
++    let response = app
++        .call(
++            Request::builder()
++                .method("POST")
++                .uri("/tokenize")
++                .header("content-type", "application/json")
++                .body(Body::from("{}"))
++                .expect("build request"),
++        )
++        .await
++        .expect("call app");
++
++    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++#[serial]
++async fn api_key_auth_rejects_missing_token_on_metrics() {
++    // Regression test: "/metrics" was unreachable by GUARDED_PREFIXES and
++    // leaked server-internal metrics without a token.
++    let (mut app, _engine_task) = test_app_with_api_keys(vec!["secret".to_string()]).await;
++    let response = app
++        .call(
++            Request::builder()
++                .method("GET")
++                .uri("/metrics")
++                .body(Body::empty())
++                .expect("build request"),
++        )
++        .await
++        .expect("call app");
++
++    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
++}
++
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ #[serial]
+ async fn cors_default_simple_request_allows_any_origin() {

@@ -23,7 +23,7 @@ import os
 import subprocess
 
 GPU_QUEUE = "mithril-h100-pool"
-CI_IMAGE = "vllm/vime:latest"
+CI_IMAGE = os.environ.get("VIME_CI_IMAGE", "vllm/vime:latest")
 HF_CACHE_HOST_PATH = "/mnt/hf-cache"
 HF_HOME = "/root/.cache/huggingface"
 NODE_INSTANCE_TYPE = "gpu-h100-sxm"
@@ -31,7 +31,6 @@ NODE_INSTANCE_TYPE = "gpu-h100-sxm"
 # (test_file, num_gpus, extra_args, env overrides)
 SUITES = {
     "short": [
-        ("test_qwen3.5_0.8B_gsm8k_async_short.py", 4, "", {}),
         ("test_qwen3.5_0.8B_gsm8k_short.py", 4, "", {}),
         ("test_qwen2.5_0.5B_fully_async_short.py", 4, "", {}),
     ],
@@ -64,10 +63,55 @@ SUITES = {
         ("test_moonlight_16B_A3B_r3.py", 8, "", {"ENABLE_EVAL": "0"}),
         ("test_mimo_7B_mtp_only_grad.py", 8, "", {}),
         ("test_qwen2.5_0.5B_debug_rollout_then_train.py", 8, "", {}),
+        ("test_straw_checkpoint_fork.py", 4, "", {}),
         ("test_qwen2.5_0.5B_opd_vllm.py", 8, "", {}),
         ("test_qwen2.5_0.5B_fanout_short.py", 4, "", {}),
+        ("test_qwen2.5_0.5B_pipeline_rl.py", 4, "--transport nccl", {}),
+        ("test_qwen2.5_0.5B_pipeline_rl.py", 4, "--transport disk", {}),
+        ("test_qwen2.5_0.5B_rollout_health.py", 4, "--crash-mode server", {}),
+        ("test_qwen2.5_0.5B_rollout_health.py", 4, "--crash-mode actor", {}),
+        (
+            "test_qwen2.5_0.5B_training_recovery.py",
+            4,
+            "--mode straw --failure-rollout 1 --save-interval 3 --no-fault-tolerance",
+            {},
+        ),
+        (
+            "test_qwen2.5_0.5B_training_recovery.py",
+            4,
+            "--mode straw --failure-rollout 1 --save-interval 3 --kill-manager --no-fault-tolerance",
+            {},
+        ),
+        (
+            "test_qwen2.5_0.5B_training_recovery.py",
+            4,
+            "--mode straw --failure-rollout 1 --role-config --kill-manager --manager-crash-phase training",
+            {},
+        ),
+        (
+            "test_qwen2.5_0.5B_training_recovery.py",
+            4,
+            "--mode debug --failure-rollout 1 --save-interval 3 --kill-manager --no-fault-tolerance",
+            {},
+        ),
+        (
+            "test_qwen2.5_0.5B_training_recovery.py",
+            4,
+            "--mode straw --failure-rollout 1 --save-interval 1 --weight-sync disk-delta --kill-manager",
+            {},
+        ),
+        (
+            "test_qwen2.5_0.5B_training_recovery.py",
+            4,
+            "--mode straw --failure-rollout 1 --pd --wedge-engine --kill-manager",
+            {},
+        ),
+        ("test_qwen3_30B_A3B_training_recovery.py", 8, "", {}),
+        ("test_qwen2.5_0.5B_pipeline_rl.py", 4, "--transport nccl --flush-cache-interval 2", {}),
+        ("test_qwen2.5_0.5B_score_centering.py", 2, "", {}),
         ("test_qwen2.5_0.5B_debug_train_dump_e2e.py", 8, "", {}),
         ("test_qwen3_4B_external_pd.py", 6, "", {"VIME_TEST_UPDATE_MODE": "delta"}),
+        ("test_agent_sunabako_codex_e2e.py", 8, "", {}),
     ],
     "vime-customized": [
         ("test_qwen2_5_0_5B_non_colocate_pp.py", 4, "", {}),
@@ -107,6 +151,7 @@ def selected_suites() -> list:
 
 
 def gpu_step(suite: str, test_file: str, num_gpus: int, extra_args: str, env: dict) -> dict:
+    agent_e2e = test_file == "test_agent_sunabako_codex_e2e.py"
     vime_flags = {k: v for k, v in env.items() if k in ("USE_DEEPEP", "USE_FP8_ROLLOUT", "ENABLE_EVAL")}
     pod_env = [
         {"name": "HF_HOME", "value": HF_HOME},
@@ -124,7 +169,14 @@ def gpu_step(suite: str, test_file: str, num_gpus: int, extra_args: str, env: di
             'PR="${BUILDKITE_PULL_REQUEST:-false}"',
             '[ "$PR" = "false" ] && PR="non-pr"',
             'export GITHUB_COMMIT_NAME="${BUILDKITE_COMMIT}_${PR}"',
+            'ulimit -n "$(ulimit -Hn)"',
+            'echo "RLIMIT_NOFILE=$(ulimit -Sn)/$(ulimit -Hn)"',
             "pip install -e . --no-deps --break-system-packages",
+            *(
+                ["export VIME_AGENT_TEST_CACHE=$HF_HOME/agent-e2e/cache", "source tests/ci/setup_agent_e2e.sh"]
+                if agent_e2e
+                else []
+            ),
             f"python tests/ci/gpu_lock_exec.py --count {num_gpus} -- "
             f"python tests/{test_file}{' ' + extra_args if extra_args else ''}",
         ]
@@ -172,6 +224,10 @@ def gpu_step(suite: str, test_file: str, num_gpus: int, extra_args: str, env: di
             }
         ],
     }
+    if agent_e2e:
+        step["timeout_in_minutes"] = 35
+        step["artifact_paths"] = ".agent-e2e/**/*"
+        step["plugins"][0]["kubernetes"]["podSpec"]["containers"][0]["securityContext"] = {"privileged": True}
     return step
 
 

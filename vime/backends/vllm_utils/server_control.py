@@ -1,214 +1,220 @@
-"""Control-plane helpers for the rollout engines.
-
-Two related jobs live here:
-
-* aborting in-flight requests, which is inherently best-effort, and
-* verifying that every rollout engine has actually gone idle, which callers need
-  before they may treat a control-plane window as complete.
-"""
-
-from __future__ import annotations
-
 import asyncio
 import logging
-import math
-import time
-from dataclasses import dataclass
+from typing import Any
+from urllib.parse import quote
 
 import httpx
+import requests
 
-from vime.utils.http_utils import post
+from vime.utils.http_utils import get, post
 
 logger = logging.getLogger(__name__)
 
-# Only the per-queue counts matter for idleness, so ask for as few request
-# samples as the endpoint allows.
-_INFLIGHT_SAMPLE_LIMIT = 1
-
-# Upper bound on a single probe request. The caller's deadline still wins; this
-# only stops one unresponsive engine from consuming the whole budget.
-_PROBE_REQUEST_TIMEOUT_S = 5.0
+ABORT_RETRY_INTERVAL_SECONDS = 3
+DEFAULT_ABORT_TIMEOUT_SECONDS = 180.0
+DEFAULT_CONTROL_REQUEST_TIMEOUT_SECONDS = 10.0
 
 
-@dataclass(frozen=True)
-class EngineDrainState:
-    """What one engine reported about its in-flight queues.
+def unregister_worker(router_url: str, worker_url: str, *, timeout: float) -> None:
+    """Remove a worker even when its engine actor can no longer answer RPCs."""
+    with requests.Session() as client:
+        client.trust_env = False
+        response = client.get(f"{router_url}/workers", timeout=timeout)
+        response.raise_for_status()
+        for worker in response.json()["workers"]:
+            if worker["url"] == worker_url:
+                response = client.delete(f"{router_url}/workers/{quote(worker_url, safe='')}", timeout=timeout)
+                # Another health check may already have removed this worker.
+                if response.status_code != 404:
+                    response.raise_for_status()
 
-    ``num_requests is None`` means UNKNOWN, never idle: a failed request, a
-    malformed body or a missing count all land here.
+
+async def get_live_router_workers(router_url: str, *, timeout: float) -> list[dict]:
+    """Prune failed workers before rollout drains requests through the router.
+
+    This precedes the manager's end-of-rollout check: the rollout function itself
+    must finish abort/drain before it can return to that manager. Probe HTTP
+    directly so cleanup never waits for a dead engine actor to answer an RPC.
     """
+    async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+        response = await client.get(f"{router_url}/workers")
+        response.raise_for_status()
 
-    url: str
-    num_requests: int | None
-    detail: str = ""
+        async def check(worker):
+            try:
+                response = await client.get(f"{worker['url']}/health_generate")
+                response.raise_for_status()
+            except httpx.HTTPError as error:
+                # A registered URL is not proof of a live server. Remove it
+                # before abort/drain can wait on requests the server cannot finish.
+                logger.warning("Removing failed rollout worker %s: %s", worker["url"], error)
+                response = await client.delete(f"{router_url}/workers/{quote(worker['url'], safe='')}")
+                if response.status_code != 404:
+                    response.raise_for_status()
+                return None
+            return worker
 
-    @property
-    def idle(self) -> bool:
-        return self.num_requests == 0
-
-
-@dataclass(frozen=True)
-class DrainReport:
-    engines: tuple[EngineDrainState, ...]
-    elapsed_s: float
-    deadline_s: float
-
-    @property
-    def drained(self) -> bool:
-        """True only when every probed engine answered and reported zero."""
-        return bool(self.engines) and all(state.idle for state in self.engines)
-
-    @property
-    def unknown_urls(self) -> tuple[str, ...]:
-        return tuple(state.url for state in self.engines if state.num_requests is None)
-
-    @property
-    def busy(self) -> tuple[EngineDrainState, ...]:
-        return tuple(state for state in self.engines if state.num_requests not in (0, None))
-
-    def describe(self) -> str:
-        parts = [
-            f"{state.url}={'unknown' if state.num_requests is None else state.num_requests}"
-            + (f"({state.detail})" if state.detail else "")
-            for state in self.engines
-        ]
-        return (
-            f"drained={self.drained} elapsed={self.elapsed_s:.3f}s "
-            f"deadline={self.deadline_s:.3f}s engines=[{', '.join(parts)}]"
-        )
+        # Probe concurrently so multiple failed servers do not multiply the wait.
+        workers = await asyncio.gather(*(check(worker) for worker in response.json()["workers"]))
+        return [worker for worker in workers if worker is not None]
 
 
-async def abort_inflight_requests(urls: list[str]) -> dict[str, str]:
-    """Abort all in-flight requests on each worker (one best-effort sweep).
+def num_requests_from_load(load: Any) -> int:
+    """Return request counts or a nonzero busy marker for scheduler-owned work."""
+    if isinstance(load, list):
+        return sum(num_requests_from_load(item) for item in load)
+    if not isinstance(load, dict):
+        return 0
+    if "loads" in load:
+        return num_requests_from_load(load["loads"])
 
-    Posts to ``/abort_requests`` with an empty body; failures are logged, not
-    raised. Idempotent, so the caller may re-issue it to converge.
-
-    Returns the per-URL failure reason for the URLs that could not be reached,
-    so a caller that needs stronger semantics can tell "aborted" from "cannot
-    tell" instead of assuming success.
-    """
-
-    async def _abort_one(url: str) -> tuple[str, str]:
-        try:
-            await post(f"{url.rstrip('/')}/abort_requests", {}, max_retries=3)
-        except httpx.HTTPError as e:
-            logger.warning(f"Failed to abort requests on {url}: {e}")
-            return url, str(e)
-        return url, ""
-
-    return {url: reason for url, reason in await asyncio.gather(*(_abort_one(u) for u in urls)) if reason}
-
-
-def _discard_outcome(task: asyncio.Task[EngineDrainState]) -> None:
-    """Mark a probe's result as consumed so cancellation cannot warn at GC."""
-    if not task.cancelled():
-        task.exception()
+    core_requests = load.get("server_load", 0)
+    if not isinstance(core_requests, int) or isinstance(core_requests, bool):
+        core_requests = 0
+    detailed_counts = [core_requests, int(load.get("has_pending_work") is True)]
+    for key in ("inflight", "queues"):
+        if key in load:
+            detailed_counts.append(num_requests_from_load(load[key]))
+    for key in ("num_requests", "num_reqs"):
+        value = load.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            detailed_counts.append(value)
+    return max(detailed_counts, default=0)
 
 
-def _count_from_payload(payload: object) -> tuple[int | None, str]:
-    """Extract the total in-flight count from a ``/load`` response body.
+def non_idle_request_details(load: Any) -> list[dict[str, Any]]:
+    if not isinstance(load, dict):
+        return []
 
-    The engine reports one entry per data-parallel rank, and the counts live in
-    that rank's queue list::
-
-        {"inflight": [{"data_parallel_rank": 0,
-                       "queues": [{"name": "running", "num_requests": 3, ...}]}]}
-
-    Only ``num_requests`` is read. The ``requests`` sample list is capped by
-    ``inflight_limit`` and is legitimately empty while the count is not, so it
-    must never be used to decide idleness.
-    """
-    if not isinstance(payload, dict):
-        return None, "response is not an object"
-    ranks = payload.get("inflight")
-    if not isinstance(ranks, list) or not ranks:
-        return None, "response has no inflight ranks"
-    total = 0
-    for rank in ranks:
-        if not isinstance(rank, dict):
-            return None, "inflight rank entry is not an object"
-        queues = rank.get("queues")
-        if not isinstance(queues, list) or not queues:
-            return None, "inflight rank without queues"
+    details: list[dict[str, Any]] = []
+    inflight = load.get("inflight", [])
+    if not isinstance(inflight, list):
+        return details
+    for rank_load in inflight:
+        if not isinstance(rank_load, dict):
+            continue
+        dp_rank = rank_load.get("data_parallel_rank")
+        queues = rank_load.get("queues", [])
+        if not isinstance(queues, list):
+            continue
         for queue in queues:
-            if not isinstance(queue, dict) or "num_requests" not in queue:
-                return None, "queue entry without num_requests"
-            count = queue["num_requests"]
-            if type(count) is not int or count < 0:
-                return None, "num_requests is not a non-negative integer"
-            total += count
-    return total, ""
+            if not isinstance(queue, dict):
+                continue
+            requests = queue.get("requests") if isinstance(queue.get("requests"), list) else []
+            count = queue.get("num_requests", len(requests))
+            if isinstance(count, int) and count > 0:
+                details.append(
+                    {
+                        "data_parallel_rank": dp_rank,
+                        "queue": queue.get("name", "unknown"),
+                        "num_requests": count,
+                        "requests": requests,
+                    }
+                )
+    return details
 
 
-async def query_engine_inflight(
+async def _abort_server_once(url: str, request_timeout: float) -> None:
+    await asyncio.wait_for(
+        post(f"{url.rstrip('/')}/abort_requests", {}, max_retries=1, timeout=request_timeout),
+        timeout=request_timeout,
+    )
+
+
+async def _get_server_load(url: str, request_timeout: float) -> Any:
+    return await asyncio.wait_for(
+        get(
+            f"{url.rstrip('/')}/load?include_inflight=true&inflight_limit=100",
+            timeout=request_timeout,
+        ),
+        timeout=request_timeout,
+    )
+
+
+async def abort_server_until_idle(
     url: str,
+    retry_interval: float = ABORT_RETRY_INTERVAL_SECONDS,
     *,
-    timeout_s: float,
-    transport: httpx.AsyncBaseTransport | None = None,
-) -> EngineDrainState:
-    """Ask one engine for its in-flight queue counts within ``timeout_s``."""
-    if isinstance(timeout_s, bool) or not math.isfinite(timeout_s) or timeout_s <= 0:
-        raise ValueError("probe timeout must be finite and positive")
-    endpoint = f"{url.rstrip('/')}/load"
-    params = {"include_inflight": "true", "inflight_limit": _INFLIGHT_SAMPLE_LIMIT}
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s), transport=transport) as client:
-            response = await client.get(endpoint, params=params)
-            response.raise_for_status()
-            payload = response.json()
-    except httpx.TimeoutException:
-        return EngineDrainState(url, None, f"timeout after {timeout_s:.3f}s")
-    except httpx.HTTPError as e:
-        return EngineDrainState(url, None, f"http error: {e}")
-    except ValueError as e:
-        return EngineDrainState(url, None, f"invalid json: {e}")
+    timeout: float = DEFAULT_ABORT_TIMEOUT_SECONDS,
+    request_timeout: float = DEFAULT_CONTROL_REQUEST_TIMEOUT_SECONDS,
+) -> None:
+    if timeout <= 0 or request_timeout <= 0:
+        raise ValueError("abort and control-request timeouts must be positive")
 
-    count, detail = _count_from_payload(payload)
-    return EngineDrainState(url, count, detail)
+    loop = asyncio.get_running_loop()
+    # Abort acknowledgements do not prove the scheduler is idle. Bound retries
+    # with one overall deadline while checking all outstanding request queues.
+    deadline = loop.time() + timeout
+    attempt = 1
+    last_error: Exception | None = None
+    last_num_requests: int | None = None
+    last_load: Any = None
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            detail = (
+                f"last observed pending activity (count/busy marker)={last_num_requests}"
+                if last_num_requests is not None
+                else f"last error={last_error!r}"
+            )
+            if last_load is not None:
+                detail += f", non-idle queues={non_idle_request_details(last_load)!r}"
+            raise TimeoutError(f"Timed out draining vLLM server {url} after {timeout:.1f}s ({detail})")
+
+        per_request_timeout = min(request_timeout, remaining)
+        logger.info(f"Abort request for vLLM server {url}")
+        try:
+            await _abort_server_once(url, per_request_timeout)
+        except Exception as error:
+            # Retry within the deadline; a transient abort failure does not
+            # prove that the server is either busy or already idle.
+            last_error = error
+            logger.warning(f"Failed to abort vLLM server at {url}: {error}")
+
+        try:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                continue
+            load = await _get_server_load(url, min(request_timeout, remaining))
+            num_requests = num_requests_from_load(load)
+        except Exception as error:
+            last_error = error
+            # An unavailable load response cannot be treated as zero requests.
+            logger.warning(f"Failed to get vLLM server load from {url}: {error}")
+        else:
+            last_load = load
+            last_num_requests = num_requests
+            if num_requests <= 0:
+                return
+            logger.info(
+                "vLLM server %s still has pending activity (count/busy marker=%d) after abort attempt %d; "
+                "non-idle queues=%r; retrying in %s seconds.",
+                url,
+                num_requests,
+                attempt,
+                non_idle_request_details(load),
+                retry_interval,
+            )
+
+        remaining = deadline - loop.time()
+        if remaining > 0:
+            await asyncio.sleep(min(retry_interval, remaining))
+        attempt += 1
 
 
-async def verify_server_drain(
+async def abort_servers_until_idle(
     urls: list[str],
     *,
-    deadline_s: float,
-    transport: httpx.AsyncBaseTransport | None = None,
-) -> DrainReport:
-    """Check whether every engine has gone idle, inside a single deadline.
-
-    All engines are probed in parallel and ``deadline_s`` bounds the whole
-    operation, not each request: a slow engine consumes the shared budget rather
-    than extending it. Anything other than an explicit zero count is reported as
-    UNKNOWN/FAILED, so an unreachable or unrecognised engine can never be
-    mistaken for an idle one.
-    """
-    if isinstance(deadline_s, bool) or not math.isfinite(deadline_s) or deadline_s <= 0:
-        raise ValueError("drain deadline must be finite and positive")
-    started = time.monotonic()
-    if not urls:
-        return DrainReport((), time.monotonic() - started, deadline_s)
-
-    per_request_timeout = min(_PROBE_REQUEST_TIMEOUT_S, max(deadline_s, 0.0))
-    tasks = [
-        asyncio.create_task(query_engine_inflight(url, timeout_s=per_request_timeout, transport=transport))
-        for url in urls
-    ]
-    done: set[asyncio.Task[EngineDrainState]] = set()
-    try:
-        done, _ = await asyncio.wait(tasks, timeout=deadline_s)
-    finally:
-        # Runs on every exit path, including the caller being cancelled: an
-        # unfinished probe must never be left polling an engine in the
-        # background. The callback consumes each outcome so a cancelled probe
-        # cannot surface later as "exception was never retrieved".
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-            task.add_done_callback(_discard_outcome)
-
-    states = [task.result() for task in done]
-    probed = {state.url for state in states}
-    states.extend(
-        EngineDrainState(url, None, "deadline exceeded before a result arrived") for url in urls if url not in probed
+    timeout: float = DEFAULT_ABORT_TIMEOUT_SECONDS,
+    request_timeout: float = DEFAULT_CONTROL_REQUEST_TIMEOUT_SECONDS,
+) -> None:
+    # Let every server finish its own bounded drain, then report all failures.
+    # Proceeding after only some servers became idle would make controls unsafe.
+    results = await asyncio.gather(
+        *(abort_server_until_idle(url, timeout=timeout, request_timeout=request_timeout) for url in urls),
+        return_exceptions=True,
     )
-    return DrainReport(tuple(states), time.monotonic() - started, deadline_s)
+    failures = [(url, result) for url, result in zip(urls, results, strict=True) if isinstance(result, BaseException)]
+    if failures:
+        detail = "; ".join(f"{url}: {error}" for url, error in failures)
+        raise RuntimeError(f"Failed to abort all vLLM servers to a confirmed idle state: {detail}") from failures[0][1]

@@ -2,7 +2,7 @@
 
 `--draft-feature-mode collect-only` 在已有 actor log-probability forward 中导出最终无 bias LM head 的选中输入，不训练或发布 draft 模型。默认 `off` 路径不会创建导出目录或 hook。
 
-首版支持 TP=PP=CP=DP=1、无 VPP、micro-batch=1 和 actor 模型。关闭 `--keep-old-actor`、`--use-rollout-logprobs`，并设置 `--update-weights-interval 1`，避免 version counter 落后于 actor 更新。如果真实 batch 复用训练 forward，没有独立 actor log-probability forward，会在导出之前报错；采集不会补做 forward。同步 GRPO 可配置每轮多个 optimizer step，让正常 actor 路径本来就需要独立计算 log probabilities。
+首版支持 TP=PP=CP=DP=1、无 VPP、micro-batch=1 和 actor 模型。关闭 `--use-rollout-logprobs`。训练端每次 actor 更新后都会发布权重，所以 version counter 不会落后于 actor 更新。如果真实 batch 复用训练 forward，没有独立 actor log-probability forward，会在导出之前报错；采集不会补做 forward。同步 GRPO 可配置每轮多个 optimizer step，让正常 actor 路径本来就需要独立计算 log probabilities。
 
 在已跑通的训练 recipe 中追加：
 

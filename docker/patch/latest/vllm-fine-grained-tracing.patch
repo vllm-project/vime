@@ -1,0 +1,626 @@
+diff --git a/vllm/tracing/__init__.py b/vllm/tracing/__init__.py
+--- a/vllm/tracing/__init__.py
++++ b/vllm/tracing/__init__.py
+@@ -15,6 +15,7 @@
+     is_otel_available,
+     manual_instrument_otel,
+     otel_import_error_traceback,
++    start_request_span_otel,
+ )
+ from .utils import (
+     SpanAttributes,
+@@ -36,11 +37,13 @@
+     "log_tracing_disabled_warning",
+     "contains_trace_headers",
+     "otel_import_error_traceback",
++    "start_request_span",
+ ]
+ 
+ BackendAvailableFunc: TypeAlias = Callable[[], bool]
+ InstrumentFunc: TypeAlias = Callable[..., Any]
+ InstrumentManualFunc: TypeAlias = Callable[..., Any]
++StartRequestSpanFunc: TypeAlias = Callable[..., Any]
+ InitTracerFunc: TypeAlias = Callable[..., Any]
+ InitWorkerTracerFunc: TypeAlias = Callable[..., Any]
+ _REGISTERED_TRACING_BACKENDS: dict[
+@@ -51,6 +54,7 @@
+         InitWorkerTracerFunc,
+         InstrumentFunc,
+         InstrumentManualFunc,
++        StartRequestSpanFunc,
+     ],
+ ] = {
+     "otel": (
+@@ -59,6 +63,7 @@
+         init_otel_worker_tracer,
+         instrument_otel,
+         manual_instrument_otel,
++        start_request_span_otel,
+     ),
+ }
+ 
+@@ -68,7 +73,7 @@
+     otlp_traces_endpoint: str,
+     extra_attributes: dict[str, str] | None = None,
+ ):
+-    is_available, init_tracer_fn, _, _, _ = _REGISTERED_TRACING_BACKENDS["otel"]
++    is_available, init_tracer_fn, _, _, _, _ = _REGISTERED_TRACING_BACKENDS["otel"]
+     if is_available():
+         return init_tracer_fn(
+             instrumenting_module_name, otlp_traces_endpoint, extra_attributes
+@@ -80,7 +85,9 @@
+     process_kind: str,
+     process_name: str,
+ ):
+-    is_available, _, init_worker_tracer_fn, _, _ = _REGISTERED_TRACING_BACKENDS["otel"]
++    is_available, _, init_worker_tracer_fn, _, _, _ = _REGISTERED_TRACING_BACKENDS[
++        "otel"
++    ]
+     if is_available():
+         return init_worker_tracer_fn(
+             instrumenting_module_name, process_kind, process_name
+@@ -104,7 +111,7 @@
+         )
+ 
+     # Dispatch to OTel (and potentially others later)
+-    is_available, _, _, otel_instrument, _ = _REGISTERED_TRACING_BACKENDS["otel"]
++    is_available, _, _, otel_instrument, _, _ = _REGISTERED_TRACING_BACKENDS["otel"]
+     if is_available():
+         return otel_instrument(
+             func=obj,
+@@ -135,7 +142,9 @@
+         kind: Optional SpanKind (e.g., SpanKind.SERVER).
+ 
+     """
+-    is_available, _, _, _, manual_instrument_fn = _REGISTERED_TRACING_BACKENDS["otel"]
++    is_available, _, _, _, manual_instrument_fn, _ = _REGISTERED_TRACING_BACKENDS[
++        "otel"
++    ]
+     if is_available():
+         return manual_instrument_fn(
+             span_name, start_time, end_time, attributes, context, kind
+@@ -144,12 +153,35 @@
+         return None
+ 
+ 
++def start_request_span(
++    span_name: str,
++    start_time: int,
++    attributes: dict[str, Any] | None = None,
++    context: Any = None,
++    kind: Any = None,
++) -> tuple[Any, dict[str, str] | None]:
++    """Start a span and return it along with injected W3C trace headers.
++
++    Args:
++        span_name: Name of the span to create.
++        start_time: Start time in nanoseconds since epoch.
++        attributes: Optional dict of span attributes.
++        context: Optional trace context (e.g., from extract_trace_context).
++        kind: Optional SpanKind (e.g., SpanKind.SERVER).
++    """
++    is_available, _, _, _, _, start_span_fn = _REGISTERED_TRACING_BACKENDS["otel"]
++    if is_available():
++        return start_span_fn(span_name, start_time, attributes, context, kind)
++    else:
++        return None, None
++
++
+ def is_tracing_available() -> bool:
+     """Returns True if any tracing backend (OTel, Profiler, etc.) is available.
+     Use this to guard expensive tracing logic in the main code.
+     """
+     check_available = [
+         is_available
+-        for is_available, _, _, _, _ in _REGISTERED_TRACING_BACKENDS.values()
++        for is_available, _, _, _, _, _ in _REGISTERED_TRACING_BACKENDS.values()
+     ]
+     return any(check_available)
+diff --git a/vllm/tracing/otel.py b/vllm/tracing/otel.py
+--- a/vllm/tracing/otel.py
++++ b/vllm/tracing/otel.py
+@@ -7,7 +7,7 @@
+ import os
+ import traceback
+ from collections.abc import Mapping
+-from contextlib import contextmanager
++from contextlib import contextmanager, suppress
+ from typing import Any
+ 
+ from vllm.logger import init_logger
+@@ -52,9 +52,17 @@
+     Resource = None  # type: ignore
+     SpanKind = Any  # type: ignore
+ 
++_GLOBAL_TRACER_PROVIDER: Any = None
++
+ 
+ def is_otel_available() -> bool:
+     return _IS_OTEL_AVAILABLE
++
++
++def _get_tracer(name: str = __name__) -> Tracer:
++    if _GLOBAL_TRACER_PROVIDER is not None:
++        return _GLOBAL_TRACER_PROVIDER.get_tracer(name)
++    return trace.get_tracer(name)
+ 
+ 
+ def init_otel_tracer(
+@@ -74,6 +82,7 @@
+     os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = otlp_traces_endpoint
+ 
+     resource_attrs = {}
++    resource_attrs["service.name"] = instrumenting_module_name
+     resource_attrs["vllm.instrumenting_module_name"] = instrumenting_module_name
+     resource_attrs["vllm.process_id"] = str(os.getpid())
+     if extra_attributes:
+@@ -83,7 +92,10 @@
+     trace_provider = TracerProvider(resource=resource)
+     span_exporter = get_span_exporter(otlp_traces_endpoint)
+     trace_provider.add_span_processor(BatchSpanProcessor(span_exporter))
+-    set_tracer_provider(trace_provider)
++    with suppress(Exception):
++        set_tracer_provider(trace_provider)
++    global _GLOBAL_TRACER_PROVIDER
++    _GLOBAL_TRACER_PROVIDER = trace_provider
+ 
+     atexit.register(trace_provider.shutdown)
+ 
+@@ -91,12 +103,17 @@
+     return tracer
+ 
+ 
+-def get_span_exporter(endpoint):
++def get_span_exporter(endpoint: str):
++    # Normalize endpoint: strip grpc:// prefix if present for OTLPGrpcExporter
++    clean_endpoint = endpoint
++    if clean_endpoint.startswith("grpc://"):
++        clean_endpoint = clean_endpoint[len("grpc://") :]
++
+     protocol = os.environ.get(OTEL_EXPORTER_OTLP_TRACES_PROTOCOL, "grpc")
+     if protocol == "grpc":
+-        exporter = OTLPGrpcExporter(endpoint=endpoint, insecure=True)
++        exporter = OTLPGrpcExporter(endpoint=clean_endpoint, insecure=True)
+     elif protocol == "http/protobuf":
+-        exporter = OTLPHttpExporter(endpoint=endpoint)
++        exporter = OTLPHttpExporter(endpoint=clean_endpoint)
+     else:
+         raise ValueError(f"Unsupported OTLP protocol '{protocol}' is configured")
+     return exporter
+@@ -146,7 +163,7 @@
+ 
+     @functools.wraps(func)
+     async def async_wrapper(*args, **kwargs):
+-        tracer = trace.get_tracer(module_name)
++        tracer = _get_tracer(module_name)
+         ctx = _get_smart_context()
+         with (
+             tracer.start_as_current_span(
+@@ -161,7 +178,7 @@
+ 
+     @functools.wraps(func)
+     def sync_wrapper(*args, **kwargs):
+-        tracer = trace.get_tracer(module_name)
++        tracer = _get_tracer(module_name)
+         ctx = _get_smart_context()
+         with (
+             tracer.start_as_current_span(
+@@ -189,7 +206,7 @@
+     if not _IS_OTEL_AVAILABLE:
+         return
+ 
+-    tracer = trace.get_tracer(__name__)
++    tracer = _get_tracer(__name__)
+     # Use provided context, or fall back to smart context detection
+     ctx = context if context is not None else _get_smart_context()
+ 
+@@ -208,6 +225,46 @@
+         span.end(end_time=end_time)
+     else:
+         span.end()
++
++
++def start_request_span_otel(
++    span_name: str,
++    start_time: int,
++    attributes: dict[str, Any] | None = None,
++    context: Context | None = None,
++    kind: Any = None,
++) -> tuple[Any, dict[str, str] | None]:
++    """Start an OpenTelemetry span and inject its context into a carrier dict.
++
++    Returns:
++        (span, trace_headers): The active span object and a dict of W3C
++        trace headers (e.g. {'traceparent': ...}) representing this span's
++        context for propagation to downstream workers/subsystems.
++    """
++    if not _IS_OTEL_AVAILABLE:
++        return None, None
++
++    tracer = _get_tracer(__name__)
++    ctx = context if context is not None else _get_smart_context()
++
++    span_kwargs: dict[str, Any] = {
++        "name": span_name,
++        "context": ctx,
++        "start_time": start_time,
++    }
++    if kind is not None:
++        span_kwargs["kind"] = kind
++
++    span = tracer.start_span(**span_kwargs)
++    if attributes:
++        span.set_attributes(attributes)
++
++    # Inject the new span's context into W3C trace headers
++    carrier: dict[str, str] = {}
++    span_ctx = trace.set_span_in_context(span)
++    TraceContextTextMapPropagator().inject(carrier, context=span_ctx)
++
++    return span, carrier
+ 
+ 
+ def _get_smart_context() -> Context | None:
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -1307,6 +1307,7 @@
+                     # into the WAITING_FOR_REMOTE_KV state.
+                     request.start_remote_kv_wait()
+                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
++                    request.async_kv_load_start_time_ns = time.time_ns()
+                     # Set num_computed_tokens even though KVs are not yet loaded.
+                     # request.num_computed_tokens will not be used anywhere until
+                     # the request finished the KV transfer.
+@@ -1337,9 +1338,15 @@
+                         EngineCoreEventType.SCHEDULED, scheduled_timestamp
+                     )
+                 if request.status == RequestStatus.WAITING:
++                    request.trace_end_queuing()
++                    if request.num_computed_tokens > 0:
++                        request.decode_start_time_ns = time.time_ns()
++                    else:
++                        request.prefill_start_time_ns = time.time_ns()
+                     scheduled_new_reqs.append(request)
+                 elif request.status == RequestStatus.PREEMPTED:
+                     scheduled_resumed_reqs.append(request)
++                    request.prefill_start_time_ns = time.time_ns()
+                 else:
+                     raise RuntimeError(f"Invalid request status: {request.status}")
+ 
+@@ -1583,6 +1590,8 @@
+         )
+         if self.aux_output_connector is not None:
+             self.aux_output_connector.request_finished(request)
++        # Close active prefill or decode spans
++        request.trace_preempt()
+         self._free_request_blocks(request)
+         self.encoder_cache_manager.free(request)
+         self._inflight_prefills.discard(request)
+@@ -2103,6 +2112,11 @@
+             generated_token_ids = (
+                 sampled_token_ids[req_index] if sampled_token_ids else []
+             )
++
++            if generated_token_ids:
++                request.trace_end_prefill()
++                if request.decode_start_time_ns is None:
++                    request.decode_start_time_ns = time.time_ns()
+ 
+             scheduled_spec_token_ids = (
+                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
+@@ -2764,6 +2778,7 @@
+ 
+         if self.aux_output_connector is not None:
+             self.aux_output_connector.request_finished(request)
++        request.trace_cleanup()
+         self._inflight_prefills.discard(request)
+         self._set_kv_fetch_stage(request, None)
+         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
+@@ -3221,6 +3236,7 @@
+             self._update_waiting_for_remote_kv(request)
+             request.stop_remote_kv_wait()
+             request.kv_queue_started_at["post_receive"] = time.monotonic()
++            request.trace_end_kv_transfer()
+             if request.num_preemptions:
+                 request.status = RequestStatus.PREEMPTED
+             else:
+diff --git a/vllm/v1/engine/output_processor.py b/vllm/v1/engine/output_processor.py
+--- a/vllm/v1/engine/output_processor.py
++++ b/vllm/v1/engine/output_processor.py
+@@ -27,6 +27,8 @@
+     SpanKind,
+     extract_trace_context,
+     instrument_manual,
++    is_tracing_available,
++    start_request_span,
+ )
+ from vllm.utils import length_from_prompt_token_ids_or_embeds
+ from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
+@@ -202,6 +204,9 @@
+             deque() if stream_input else None
+         )
+ 
++        # Tracing span
++        self.trace_span: Any | None = None
++
+     def apply_streaming_update(self, update: StreamingUpdate) -> None:
+         # Apply the update to the request state.
+         self.streaming_input = not update.final
+@@ -574,6 +579,8 @@
+         for request_id in internal_req_ids:
+             req_state = self.request_states.pop(request_id, None)
+             if req_state is not None:
++                if req_state.trace_span is not None:
++                    req_state.trace_span.end()
+                 self.lora_states.request_finished(request_id, req_state.lora_name)
+                 request_ids_to_abort.append(request_id)
+                 # Produce final abort output.
+@@ -624,9 +631,23 @@
+             parent_req=parent_req,
+             request_index=request_index,
+             queue=queue,
+-            log_stats=self.log_stats,
++            log_stats=self.log_stats or self.tracing_enabled,
+             stream_interval=self.stream_interval,
+         )
++
++        if self.tracing_enabled and is_tracing_available():
++            arrival_time_ns = int(request.arrival_time * 1e9)
++            trace_context = extract_trace_context(request.trace_headers)
++            span, updated_headers = start_request_span(
++                span_name="llm_request",
++                start_time=arrival_time_ns,
++                context=trace_context,
++                kind=SpanKind.SERVER,
++            )
++            req_state.trace_span = span
++            if updated_headers:
++                request.trace_headers = updated_headers
++
+         self.request_states[request_id] = req_state
+         if parent_req:
+             self.parent_requests[parent_req.request_id] = parent_req
+@@ -854,39 +875,53 @@
+         req_state: RequestState,
+         iteration_stats: IterationStats | None,
+     ) -> None:
+-        assert req_state.stats is not None
+-        assert iteration_stats is not None
+-
+-        metrics = req_state.stats
+-        arrival_time_ns = int(metrics.arrival_time * 1e9)
+         trace_context = extract_trace_context(engine_core_output.trace_headers)
+         prompt_length = length_from_prompt_token_ids_or_embeds(
+             req_state.prompt_token_ids, req_state.prompt_embeds
+         )
+ 
+-        # Calculate timing metrics
+-        e2e_time = iteration_stats.iteration_timestamp - metrics.arrival_time
+-        queued_time = metrics.scheduled_ts - metrics.queued_ts
+-        prefill_time = metrics.first_token_ts - metrics.scheduled_ts
+-        decode_time = metrics.last_token_ts - metrics.first_token_ts
+-        inference_time = metrics.last_token_ts - metrics.scheduled_ts
++        arrival_time_ns = (
++            int(req_state.stats.arrival_time * 1e9)
++            if req_state.stats is not None
++            else 0
++        )
++        completion_tokens = (
++            req_state.stats.num_generation_tokens if req_state.stats is not None else 0
++        )
+ 
+         # Build attributes dict
+         attributes: dict[str, Any] = {
+-            SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN: (
+-                metrics.first_token_latency
+-            ),
+-            SpanAttributes.GEN_AI_LATENCY_E2E: e2e_time,
+-            SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE: queued_time,
+             SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS: prompt_length,
+-            SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS: (
+-                metrics.num_generation_tokens
+-            ),
+-            SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL: prefill_time,
+-            SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE: decode_time,
+-            SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE: inference_time,
++            SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS: completion_tokens,
+             SpanAttributes.GEN_AI_REQUEST_ID: req_state.external_req_id,
+         }
++
++        # Calculate timing metrics if stats available
++        if req_state.stats is not None and iteration_stats is not None:
++            metrics = req_state.stats
++            e2e_time = iteration_stats.iteration_timestamp - metrics.arrival_time
++            queued_time = metrics.scheduled_ts - metrics.queued_ts
++            prefill_time = metrics.first_token_ts - metrics.scheduled_ts
++            decode_time = metrics.last_token_ts - metrics.first_token_ts
++            inference_time = metrics.last_token_ts - metrics.scheduled_ts
++
++            attributes.update(
++                {
++                    SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN: (
++                        metrics.first_token_latency
++                    ),
++                    SpanAttributes.GEN_AI_LATENCY_E2E: e2e_time,
++                    SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE: queued_time,
++                    SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS: (
++                        metrics.num_generation_tokens
++                    ),
++                    SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL: (prefill_time),
++                    SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE: (decode_time),
++                    SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE: (
++                        inference_time
++                    ),
++                }
++            )
+ 
+         # Add optional request parameters
+         if req_state.top_p:
+@@ -902,13 +937,17 @@
+         if req_state.n:
+             attributes[SpanAttributes.GEN_AI_REQUEST_N] = req_state.n
+ 
+-        instrument_manual(
+-            span_name="llm_request",
+-            start_time=arrival_time_ns,
+-            attributes=attributes,
+-            context=trace_context,
+-            kind=SpanKind.SERVER,
+-        )
++        if req_state.trace_span is not None:
++            req_state.trace_span.set_attributes(attributes)
++            req_state.trace_span.end()
++        else:
++            instrument_manual(
++                span_name="llm_request",
++                start_time=arrival_time_ns,
++                attributes=attributes,
++                context=trace_context,
++                kind=SpanKind.SERVER,
++            )
+ 
+     def _update_stats_from_output(
+         self,
+diff --git a/vllm/v1/engine/utils.py b/vllm/v1/engine/utils.py
+--- a/vllm/v1/engine/utils.py
++++ b/vllm/v1/engine/utils.py
+@@ -1151,6 +1151,8 @@
+     addresses: EngineZmqAddresses,
+ ) -> Iterator[CoreEngineLaunch]:
+     """Launch engine and DP coordinator processes as needed."""
++    if endpoint := vllm_config.observability_config.otlp_traces_endpoint:
++        os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = endpoint
+     parallel_config = vllm_config.parallel_config
+     dp_size = parallel_config.data_parallel_size
+     local_engine_count = parallel_config.data_parallel_size_local
+diff --git a/vllm/v1/request.py b/vllm/v1/request.py
+--- a/vllm/v1/request.py
++++ b/vllm/v1/request.py
+@@ -111,6 +111,12 @@
+         # E/P/D: Connector-specific encoder-cache transfer parameters.
+         self.ec_transfer_params: dict[str, Any] | None = None
+ 
++        # Distributed Tracing: Explicit state transition timing fields.
++        self.arrival_time_ns: int | None = int(self.arrival_time * 1e9)
++        self.async_kv_load_start_time_ns: int | None = None
++        self.prefill_start_time_ns: int | None = None
++        self.decode_start_time_ns: int | None = None
++
+         if pooling_params is not None:
+             # Pooling models.
+             self.max_tokens = 1
+@@ -381,6 +387,113 @@
+             return self.request_id < other.request_id
+         return id(self) < id(other)
+ 
++    def emit_span(
++        self,
++        span_name: str,
++        start_time: int,
++        end_time: int,
++        attributes: dict[str, Any] | None = None,
++    ) -> None:
++        """Helper to manually emit an OTel trace span linked to this request's
++        context."""
++        if not self.trace_headers:
++            return
++        from vllm.tracing import extract_trace_context, instrument_manual
++
++        trace_context = (
++            extract_trace_context(self.trace_headers) if self.trace_headers else None
++        )
++
++        merged_attributes = {"request_id": self.request_id}
++        if attributes:
++            merged_attributes.update(attributes)
++
++        instrument_manual(
++            span_name=span_name,
++            start_time=start_time,
++            end_time=end_time,
++            context=trace_context,
++            attributes=merged_attributes,
++        )
++
++    def trace_end_queuing(self) -> None:
++        """Transition request out of the queue. Closes vllm.request.queue span."""
++        if self.arrival_time_ns is None:
++            return
++
++        now = time.time_ns()
++        self.emit_span("vllm.request.queue", self.arrival_time_ns, now)
++        self.arrival_time_ns = None  # prevent double queue spans
++
++    def trace_end_kv_transfer(self, aborted: bool = False) -> None:
++        """Transition request out of KV transfer. Closes
++        vllm.request.wait_remote_kv span.
++        """
++        if self.async_kv_load_start_time_ns is None:
++            return
++
++        now = time.time_ns()
++        attributes = {"aborted": True} if aborted else None
++        self.emit_span(
++            "vllm.request.wait_remote_kv",
++            self.async_kv_load_start_time_ns,
++            now,
++            attributes,
++        )
++        self.async_kv_load_start_time_ns = None
++
++    def trace_end_prefill(self, aborted: bool = False) -> None:
++        """Transition request out of prefill. Closes vllm.request.prefill span."""
++        if self.prefill_start_time_ns is None:
++            return
++
++        now = time.time_ns()
++        attributes = {"aborted": True} if aborted else None
++        self.emit_span(
++            "vllm.request.prefill", self.prefill_start_time_ns, now, attributes
++        )
++        self.prefill_start_time_ns = None
++
++    def trace_end_decode(self, aborted: bool = False) -> None:
++        """Transition request out of decode. Closes vllm.request.decode span."""
++        if self.decode_start_time_ns is None:
++            return
++
++        now = time.time_ns()
++        attributes = {"aborted": True} if aborted else None
++        self.emit_span(
++            "vllm.request.decode", self.decode_start_time_ns, now, attributes
++        )
++        self.decode_start_time_ns = None
++
++    def trace_preempt(self) -> None:
++        """Transition request to PREEMPTED. Closes active prefill or decode spans."""
++        now = time.time_ns()
++        attributes = {"preempted": True}
++
++        if self.prefill_start_time_ns is not None:
++            self.emit_span(
++                "vllm.request.prefill", self.prefill_start_time_ns, now, attributes
++            )
++            self.prefill_start_time_ns = None
++
++        if self.decode_start_time_ns is not None:
++            self.emit_span(
++                "vllm.request.decode", self.decode_start_time_ns, now, attributes
++            )
++            self.decode_start_time_ns = None
++
++    def trace_cleanup(self) -> None:
++        """Catch-all transition to clean up any lingering active spans when
++        request is freed."""
++        is_aborted = (
++            self.status == RequestStatus.FINISHED_ABORTED
++            or self.status == RequestStatus.FINISHED_ERROR
++        )
++        self.trace_end_kv_transfer(aborted=is_aborted)
++        self.trace_end_prefill(aborted=is_aborted)
++        self.trace_end_decode(aborted=is_aborted)
++
+ 
+ class RequestStatus(enum.IntEnum):
+     """Status of a request."""
