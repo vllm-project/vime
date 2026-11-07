@@ -1,4 +1,5 @@
 import inspect
+import logging
 import re
 from argparse import Namespace
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -9,7 +10,10 @@ import torch.distributed as dist
 from megatron.core import mpu
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
+from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.types import ParamInfo
+
+logger = logging.getLogger(__name__)
 
 
 def _merge_param_partitions(name, partitions, partition_dim, partition_sections=None):
@@ -245,16 +249,41 @@ class HfWeightSource:
 
 
 class VimeRayWeightSyncClient:
+    """Drives the rollout engines' weight-transfer session for a vLLM trainer.
+
+    With ``latch_errors`` (the IPC trainer), a failed start/update/finish call is
+    recorded in ``error`` and later calls of the session become no-ops instead of
+    raising. The IPC trainer runs a gather and a barrier over all trainer ranks for
+    every chunk, so raising on the sender alone would leave the other ranks waiting
+    in those collectives; latching lets every rank finish the pass and then agree
+    on a resend (see ``send_weights_with_resync``).
+    """
+
     def __init__(
         self,
         engines: Sequence[Any],
         version_getter: Callable[[], int],
         engine_gpu_counts: Sequence[int] | None = None,
+        *,
+        latch_errors: bool = False,
     ) -> None:
         self.engines = list(engines)
         self.version_getter = version_getter
         self.engine_gpu_counts = engine_gpu_counts
         self.draft = False
+        self.latch_errors = latch_errors
+        self.error: BaseException | None = None
+
+    def _session_call(self, call: Callable[[], None]) -> None:
+        if self.latch_errors and self.error is not None:
+            return
+        try:
+            call()
+        except Exception as error:
+            if not self.latch_errors:
+                raise
+            logger.exception("Weight-update request failed; skipping the rest of this push")
+            self.error = error
 
     def init_weight_transfer_engine(self, init_info: dict[str, Any]) -> None:
         import ray
@@ -273,15 +302,161 @@ class VimeRayWeightSyncClient:
         import ray
 
         method = "start_draft_weight_update" if self.draft else "start_weight_update"
-        ray.get([getattr(engine, method).remote() for engine in self.engines])
+        self._session_call(lambda: ray.get([getattr(engine, method).remote() for engine in self.engines]))
 
     def update_weights(self, update_info: dict[str, Any] | list[dict[str, Any]]) -> None:
         import ray
 
-        ray.get([engine.update_weights.remote(update_info) for engine in self.engines])
+        self._session_call(lambda: ray.get([engine.update_weights.remote(update_info) for engine in self.engines]))
 
     def finish_weight_update(self, weight_version: str | None = None) -> None:
         import ray
 
         version = str(self.version_getter()) if weight_version is None else str(weight_version)
-        ray.get([engine.finish_weight_update.remote(weight_version=version) for engine in self.engines])
+        self._session_call(
+            lambda: ray.get([engine.finish_weight_update.remote(weight_version=version) for engine in self.engines])
+        )
+
+    def close_open_sessions(self) -> None:
+        """Best effort: end a session a failed push may have left open on an engine.
+
+        An engine rejects a new start while a session is open, and this vLLM has no
+        abort. Finishing without a version keeps the old version visible; the full
+        resend that follows overwrites any partially loaded weights.
+        """
+        import ray
+
+        for engine in self.engines:
+            try:
+                ray.get(engine.finish_weight_update.remote(weight_version=None))
+            except Exception as error:  # no open session, or the engine refused to finish it
+                logger.info("finish_weight_update while closing a failed push: %r", error)
+
+
+class ResumableWeightSource:
+    """A weight source that remembers the pass it handed to the trainer.
+
+    Iterating a source is a collective: every trainer rank gathers each tensor
+    together. The NCCL trainer raises on the sender when a request fails, so the
+    sender stops iterating while the other ranks wait in the next gather.
+    ``finish_pass`` runs the rest of that pass, or a full pass if the trainer had
+    not started one, so the sender joins every gather the other ranks are in.
+    """
+
+    def __init__(self, source) -> None:
+        self.source = source
+        self._pass: Iterator[tuple[str, torch.Tensor]] | None = None
+
+    def metadata(self):
+        return self.source.metadata()
+
+    def __iter__(self):
+        self._pass = iter(self.source)
+        return self._pass
+
+    def begin_send(self) -> None:
+        self._pass = None
+
+    def finish_pass(self) -> None:
+        remaining = iter(self.source) if self._pass is None else self._pass
+        for _ in remaining:
+            pass
+        self._pass = None
+
+
+def _rank() -> int:
+    return dist.get_rank() if dist.is_initialized() else 0
+
+
+def all_ranks_ok(ok: bool) -> bool:
+    """True only if ``ok`` holds on every trainer rank (gloo all-reduce)."""
+    if not dist.is_initialized() or dist.get_world_size() == 1:
+        return ok
+    flag = torch.tensor([1 if ok else 0], dtype=torch.int32)
+    dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=get_gloo_group())
+    return bool(flag.item())
+
+
+def _send_once(trainer) -> bool:
+    source = trainer.source
+    if isinstance(source, ResumableWeightSource):
+        source.begin_send()
+    trainer.client.error = None
+    try:
+        trainer.send_weights()
+    except Exception:
+        logger.exception("Weight push failed on rank %d", _rank())
+        if isinstance(source, ResumableWeightSource):
+            source.finish_pass()
+        return False
+    return trainer.client.error is None
+
+
+def send_weights_with_resync(trainer, *, reconnect: Callable[[], Any] | None = None, max_attempts: int = 2):
+    """Push the trainer's source to the rollout engines; resend everything if any rank failed.
+
+    Every trainer rank calls this. Each attempt ends with every rank having run
+    the same collectives (see ``VimeRayWeightSyncClient`` and
+    ``ResumableWeightSource``), then the ranks agree on the result over the gloo
+    group. A failed attempt closes any session left open on the engines,
+    rebuilds the transfer channel with ``reconnect`` (NCCL, where the
+    communicator may be broken) and sends the whole model again, because an
+    engine can hold a mix of new and old layers after a partial update.
+
+    Returns the trainer to keep using: the one ``reconnect`` returned, if any.
+    Raises on every rank when the last attempt fails; callers must then leave
+    generation paused.
+
+    Failures inside the data plane are not recovered: a sender blocked in an NCCL
+    broadcast, or a gather that fails on one rank, ends this rank's pass and the
+    other ranks wait in the trainer's collectives.
+    """
+    draft = trainer.client.draft
+    for attempt in range(1, max_attempts + 1):
+        if all_ranks_ok(_send_once(trainer)):
+            return trainer
+        if attempt == max_attempts:
+            break
+        logger.warning("Weight push attempt %d failed; resending the full model", attempt)
+        ok = True
+        try:
+            if trainer.is_sender:
+                trainer.client.close_open_sessions()
+            if reconnect is not None:
+                trainer = reconnect()
+                trainer.client.draft = draft
+        except Exception:
+            logger.exception("Rebuilding the weight-transfer channel failed on rank %d", _rank())
+            ok = False
+        if not all_ranks_ok(ok):
+            raise RuntimeError(
+                "Could not rebuild the weight-transfer channel after a failed push; rollout engines stay paused"
+            )
+    raise RuntimeError(
+        f"Weight push failed on all {max_attempts} attempts; rollout engines may hold partial weights and stay paused"
+    )
+
+
+def resume_generation_on_all_ranks(rollout_engines: Sequence[Any], weight_version: int) -> None:
+    """Resume generation only if every engine reports the version just pushed.
+
+    Every trainer rank calls this; rank 0 queries the engines (an engine whose
+    node rank is not 0 reports ``None`` and is skipped) and the ranks agree on the
+    result, so all of them raise when generation stays paused.
+    """
+    import ray
+
+    ok = True
+    if _rank() == 0:
+        expected = str(weight_version)
+        try:
+            versions = ray.get([engine.get_weight_version.remote() for engine in rollout_engines])
+            stale = [(index, version) for index, version in enumerate(versions) if version not in (None, expected)]
+            if stale:
+                raise RuntimeError(f"rollout engines report weight versions {stale}, expected {expected}")
+            ray.get([engine.continue_generation.remote() for engine in rollout_engines])
+        except Exception:
+            logger.exception("Not resuming generation after the weight push")
+            ok = False
+    if not all_ranks_ok(ok):
+        raise RuntimeError("Rollout engines did not confirm the pushed weight version; generation stays paused")

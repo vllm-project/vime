@@ -82,6 +82,10 @@ def _install_fake_deps(monkeypatch):
     update_weight_common_mod = types.ModuleType("vime.backends.megatron_utils.update_weight.common")
     update_weight_common_mod.HfWeightSource = object
     update_weight_common_mod.VimeRayWeightSyncClient = object
+    update_weight_common_mod.ResumableWeightSource = lambda source: source
+    update_weight_common_mod.all_ranks_ok = lambda ok: ok
+    update_weight_common_mod.resume_generation_on_all_ranks = lambda *args, **kwargs: None
+    update_weight_common_mod.send_weights_with_resync = lambda trainer, **kwargs: trainer
 
     megatron_to_hf_mod = types.ModuleType("vime.backends.megatron_utils.megatron_to_hf")
     megatron_to_hf_mod.convert_to_hf = lambda *args, **kwargs: []

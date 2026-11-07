@@ -1,3 +1,4 @@
+import logging
 import socket
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
@@ -12,8 +13,17 @@ from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.weight_sync import should_flush_cache
 
 from ..dspark.export import export_dspark_model_weights
-from .common import HfWeightSource, VimeRayWeightSyncClient
+from .common import (
+    HfWeightSource,
+    ResumableWeightSource,
+    VimeRayWeightSyncClient,
+    all_ranks_ok,
+    resume_generation_on_all_ranks,
+    send_weights_with_resync,
+)
 from .hf_weight_iterator_direct import HfWeightIteratorDirect
+
+logger = logging.getLogger(__name__)
 
 
 class UpdateWeightFromDistributed:
@@ -48,7 +58,9 @@ class UpdateWeightFromDistributed:
             else None
         )
         self._source = HfWeightSource(iterator, weights_getter, draft_weights_getter)
+        self._resumable_source = ResumableWeightSource(self._source)
         self._trainer = None
+        self._engine_gpu_counts: list[int] = []
 
     def connect_rollout_engines(
         self,
@@ -61,19 +73,34 @@ class UpdateWeightFromDistributed:
         del rollout_engine_lock, engine_gpu_offsets, engine_parallel_configs
         self.rollout_engines = list(rollout_engines)
         self.disconnect_rollout_engines()
-        engine_gpu_counts = list(
+        self._engine_gpu_counts = list(
             engine_gpu_counts or [self.args.rollout_num_gpus_per_engine] * len(self.rollout_engines)
         )
+        ok = True
+        try:
+            self._connect()
+        except Exception:
+            logger.exception("Connecting the rollout engines for weight transfer failed on rank %d", dist.get_rank())
+            ok = False
+        if not all_ranks_ok(ok):
+            raise RuntimeError("Rollout engines could not join the weight-transfer channel")
+
+    def _connect(self):
         client = VimeRayWeightSyncClient(
             self.rollout_engines,
             lambda: self.weight_version,
-            engine_gpu_counts,
+            self._engine_gpu_counts,
         )
         self._trainer = connect_rollout_engines_from_distributed(
             client,
-            self._source,
-            engine_gpu_counts,
+            self._resumable_source,
+            self._engine_gpu_counts,
         )
+        return self._trainer
+
+    def _reconnect(self):
+        self.disconnect_rollout_engines()
+        return self._connect()
 
     def disconnect_rollout_engines(self) -> None:
         if self._trainer is not None:
@@ -109,18 +136,19 @@ class UpdateWeightFromDistributed:
                 )
         dist.barrier(group=get_gloo_group())
 
-        client = self._trainer.client
-        client.draft = False
-        self._trainer.send_weights()
+        self._trainer.client.draft = False
+        self._trainer = send_weights_with_resync(self._trainer, reconnect=self._reconnect)
         update_draft = self.args.dspark_enabled or (
             self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp"
         )
         if update_draft:
             self._source.draft = self.args.dspark_enabled
-            client.draft = True
-            self._trainer.send_weights()
-            self._source.draft = False
-            client.draft = False
+            self._trainer.client.draft = True
+            try:
+                self._trainer = send_weights_with_resync(self._trainer, reconnect=self._reconnect)
+            finally:
+                self._source.draft = False
+                self._trainer.client.draft = False
 
         if dist.get_rank() == 0:
             if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
@@ -129,7 +157,7 @@ class UpdateWeightFromDistributed:
                     post_process_quantization=True,
                     rollout_engines=self.rollout_engines,
                 )
-            ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
+        resume_generation_on_all_ranks(self.rollout_engines, self.weight_version)
         dist.barrier(group=get_gloo_group())
 
 

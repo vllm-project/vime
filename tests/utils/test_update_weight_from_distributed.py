@@ -58,12 +58,13 @@ class RemoteCall:
 
 
 class RecordingRemoteMethod:
-    def __init__(self):
+    def __init__(self, result="ref"):
         self.calls: list[RemoteCall] = []
+        self.result = result
 
     def remote(self, *args, **kwargs):
         self.calls.append(RemoteCall(args, kwargs))
-        return "ref"
+        return self.result
 
 
 @dataclass
@@ -78,6 +79,20 @@ class RecordingEngine:
     flush_cache: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     continue_generation: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     post_process_weights: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
+    # None: the engine does not report a version (node rank != 0), so the check skips it
+    get_weight_version: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod(result=None))
+
+
+class CountingSource:
+    """A weight source with no tensors that counts the passes made over it."""
+
+    def __init__(self):
+        self.draft = False
+        self.passes = 0
+
+    def __iter__(self):
+        self.passes += 1
+        return iter(())
 
 
 class RecordingTrainer:
@@ -257,6 +272,7 @@ def test_connect_replaces_existing_trainer(update_module, monkeypatch):
     updater.args = types.SimpleNamespace(rollout_num_gpus_per_engine=2)
     updater.weight_version = 0
     updater._source = object()
+    updater._resumable_source = update_module.ResumableWeightSource(updater._source)
     old_trainer = RecordingTrainer(object())
     updater._trainer = old_trainer
     engine = RecordingEngine()
@@ -271,7 +287,8 @@ def test_connect_replaces_existing_trainer(update_module, monkeypatch):
 
     assert old_trainer.shutdown_calls == 1
     assert len(engine.destroy_weights_update_group.calls) == 1
-    assert created[0][1:] == (updater._source, [4])
+    assert created[0][1:] == (updater._resumable_source, [4])
+    assert updater._resumable_source.source is updater._source
     assert updater._trainer is not old_trainer
 
 
@@ -305,9 +322,23 @@ def _updater_for_transfer(update_module, *, mtp=False, dspark=False, fail=False)
     updater.update_weight_metrics = {}
     updater.rollout_engines = [RecordingEngine()]
     client = update_module.VimeRayWeightSyncClient(updater.rollout_engines, lambda: updater.weight_version)
-    updater._source = types.SimpleNamespace(draft=False)
+    updater._source = CountingSource()
+    updater._resumable_source = update_module.ResumableWeightSource(updater._source)
+    updater._engine_gpu_counts = [1]
     updater._trainer = RecordingTrainer(client, source=updater._source, fail=fail)
     return updater
+
+
+def _reconnect_to(update_module, monkeypatch, *, fail):
+    """Make reconnects hand out fresh RecordingTrainers that fail (or not) on every push."""
+    created = []
+
+    def create_trainer(client, source, gpu_counts):
+        created.append(RecordingTrainer(client, source=source, fail=fail))
+        return created[-1]
+
+    monkeypatch.setattr(update_module, "connect_rollout_engines_from_distributed", create_trainer)
+    return created
 
 
 @pytest.mark.unit
@@ -349,10 +380,77 @@ def test_failed_transfer_does_not_resume_generation(update_module, monkeypatch):
     monkeypatch.setattr(update_module.dist, "get_rank", lambda: 0)
     monkeypatch.setattr(update_module.dist, "barrier", lambda *args, **kwargs: None)
 
-    with pytest.raises(RuntimeError, match="transfer failed"):
+    created = _reconnect_to(update_module, monkeypatch, fail=True)
+
+    with pytest.raises(RuntimeError, match="failed on all 2 attempts"):
         updater.update_weights()
 
-    assert updater.rollout_engines[0].continue_generation.calls == []
+    engine = updater.rollout_engines[0]
+    assert len(created) == 1  # one reconnect before the second attempt
+    # the reconnected sender iterates the resumable source, so after its failed push it runs the
+    # pass the other trainer ranks are still gathering in
+    assert updater._source.passes == 1
+    assert len(engine.destroy_weights_update_group.calls) == 1
+    # the session the failed push left open is closed without committing a version
+    assert engine.finish_weight_update.calls[0].kwargs == {"weight_version": None}
+    assert engine.continue_generation.calls == []
+
+
+@pytest.mark.unit
+def test_failed_push_is_resent_on_a_new_channel(update_module, monkeypatch):
+    updater = _updater_for_transfer(update_module, fail=True)
+    monkeypatch.setattr(update_module.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(update_module.dist, "barrier", lambda *args, **kwargs: None)
+    first = updater._trainer
+    created = _reconnect_to(update_module, monkeypatch, fail=False)
+
+    updater.update_weights()
+
+    engine = updater.rollout_engines[0]
+    assert first.shutdown_calls == 1
+    assert updater._trainer is created[0]
+    assert len(engine.start_weight_update.calls) == 2  # the failed push, then the full resend
+    assert engine.finish_weight_update.calls[-1].kwargs == {"weight_version": "1"}
+    assert len(engine.continue_generation.calls) == 1
+
+
+@pytest.mark.unit
+def test_failed_draft_push_is_resent_as_a_draft_push(update_module, monkeypatch):
+    updater = _updater_for_transfer(update_module, mtp=True)
+    monkeypatch.setattr(update_module.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(update_module.dist, "barrier", lambda *args, **kwargs: None)
+    first = updater._trainer
+    send = first.send_weights
+
+    def fail_draft_push():
+        send()
+        if first.client.draft:
+            raise RuntimeError("draft transfer failed")
+
+    first.send_weights = fail_draft_push
+    created = _reconnect_to(update_module, monkeypatch, fail=False)
+
+    updater.update_weights()
+
+    assert first.draft_states == [False, True]
+    assert created[0].draft_states == [True]
+    assert created[0].client.draft is False
+    assert len(updater.rollout_engines[0].start_draft_weight_update.calls) == 2
+    assert len(updater.rollout_engines[0].continue_generation.calls) == 1
+
+
+@pytest.mark.unit
+def test_stale_weight_version_keeps_generation_paused(update_module, monkeypatch):
+    updater = _updater_for_transfer(update_module)
+    monkeypatch.setattr(update_module.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(update_module.dist, "barrier", lambda *args, **kwargs: None)
+    engine = updater.rollout_engines[0]
+    engine.get_weight_version.result = ["0"]  # the stub ray.get returns the list it is given
+
+    with pytest.raises(RuntimeError, match="did not confirm the pushed weight version"):
+        updater.update_weights()
+
+    assert engine.continue_generation.calls == []
 
 
 @pytest.fixture

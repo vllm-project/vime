@@ -84,12 +84,17 @@ class RemoteCall:
 
 
 class RecordingRemoteMethod:
-    def __init__(self):
+    def __init__(self, result="ref", error=None):
         self.calls: list[RemoteCall] = []
+        self.result = result
+        self.error = error
 
     def remote(self, *args, **kwargs):
         self.calls.append(RemoteCall(args, kwargs))
-        return "ref"
+        if self.error is not None:
+            error, self.error = self.error, None  # fail once
+            raise error
+        return self.result
 
 
 @dataclass
@@ -103,6 +108,8 @@ class RecordingEngine:
     pause_generation: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     flush_cache: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     continue_generation: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
+    # None: the engine does not report a version (node rank != 0), so the check skips it
+    get_weight_version: RecordingRemoteMethod = field(default_factory=lambda: RecordingRemoteMethod(result=None))
 
 
 class RecordingTrainer:
@@ -159,6 +166,9 @@ def _updater(update_module, **overrides):
     updater._full_param_info_buckets = None
     updater._non_expert_param_info_buckets = None
     updater._source = types.SimpleNamespace(draft=False)
+    updater._resumable_source = update_module.ResumableWeightSource(updater._source)
+    updater._distributed_rollout_engines = []
+    updater._distributed_gpu_counts = []
     updater._ipc_gather_group = None
     updater._ipc_gather_src = None
     updater._ipc_engine = None
@@ -218,8 +228,10 @@ def test_connect_uses_native_ipc_and_nccl_trainers(update_module, monkeypatch, b
     assert len(engines[1].destroy_weights_update_group.calls) == int(backend == "nccl" and is_sender)
     assert len(updater._native_trainers) == 2
     assert ipc_created[0][0].packed is True
+    assert ipc_created[0][1].latch_errors is True
     assert ipc_created[0][2] is updater._source
-    assert nccl_created[0][1:] == (updater._source, [2])
+    assert nccl_created[0][0].latch_errors is False
+    assert nccl_created[0][1:] == (updater._resumable_source, [2])
 
 
 @pytest.mark.unit
@@ -325,13 +337,38 @@ def test_failed_native_update_does_not_resume_generation(update_module, monkeypa
     engine = RecordingEngine()
     updater._all_rollout_engines = [engine]
     client = update_module.VimeRayWeightSyncClient([engine], lambda: updater.weight_version)
-    updater._native_trainers = [RecordingTrainer(client, fail=True)]
+    updater._native_trainers = [RecordingTrainer(client, fail=True, backend="ipc")]
     monkeypatch.setattr(update_module.dist, "barrier", lambda *args, **kwargs: None)
 
-    with pytest.raises(RuntimeError, match="transfer failed"):
+    with pytest.raises(RuntimeError, match="failed on all 2 attempts"):
         updater.update_weights()
 
+    assert len(engine.start_weight_update.calls) == 2
     assert engine.continue_generation.calls == []
+
+
+@pytest.mark.unit
+def test_ipc_client_latches_a_failed_request_and_the_push_is_resent(update_module, monkeypatch):
+    updater = _updater(update_module)
+    engine = RecordingEngine()
+    engine.update_weights.error = RuntimeError("update rejected")
+    updater._all_rollout_engines = [engine]
+    client = update_module.VimeRayWeightSyncClient([engine], lambda: updater.weight_version, latch_errors=True)
+    updater._native_trainers = [RecordingTrainer(client, backend="ipc")]
+    monkeypatch.setattr(update_module.dist, "barrier", lambda *args, **kwargs: None)
+
+    updater.update_weights()
+
+    # first push: the failed update is latched, so the trainer finishes its pass without
+    # raising and finish is skipped; the stale session is closed, then the full resend succeeds
+    assert len(engine.start_weight_update.calls) == 2
+    assert len(engine.update_weights.calls) == 2
+    assert [call.kwargs for call in engine.finish_weight_update.calls] == [
+        {"weight_version": None},
+        {"weight_version": "1"},
+    ]
+    assert client.error is None
+    assert len(engine.continue_generation.calls) == 1
 
 
 @pytest.mark.unit

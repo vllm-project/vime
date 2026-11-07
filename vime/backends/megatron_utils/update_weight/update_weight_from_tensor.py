@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import logging
 from argparse import Namespace
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
@@ -20,7 +22,14 @@ from vime.utils.weight_sync import should_flush_cache
 
 from ..dspark.export import export_dspark_model_weights
 from ..megatron_to_hf import convert_to_hf
-from .common import HfWeightSource, VimeRayWeightSyncClient
+from .common import (
+    HfWeightSource,
+    ResumableWeightSource,
+    VimeRayWeightSyncClient,
+    all_ranks_ok,
+    resume_generation_on_all_ranks,
+    send_weights_with_resync,
+)
 from .expert_routing import configure_expert_routing
 from .hf_weight_iterator_direct import HfWeightIteratorDirect
 from .update_weight_from_distributed import (
@@ -28,6 +37,8 @@ from .update_weight_from_distributed import (
     disconnect_rollout_engines_from_distributed,
     post_process_weights,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _native_ipc_buffer_size(args: Namespace, param_info_buckets: Sequence[Sequence[ParamInfo]] | None) -> int:
@@ -130,12 +141,15 @@ class UpdateWeightFromTensor:
             else None
         )
         self._source = HfWeightSource(self._hf_weight_iterator, self.weights_getter, draft_weights_getter)
+        self._resumable_source = ResumableWeightSource(self._source)
 
         self._ipc_gather_group = None
         self._ipc_gather_src = None
         self._ipc_engine = None
         self._expert_transfer_plan = []
         self._native_trainers = []
+        self._distributed_rollout_engines = []
+        self._distributed_gpu_counts = []
 
     def connect_rollout_engines(
         self,
@@ -194,37 +208,37 @@ class UpdateWeightFromTensor:
         )
 
         if not self._expert_transfer_plan or self.args.dspark_enabled:
-            if self.rollout_engines:
-                from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
-                from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
+            ok = True
+            try:
+                if self.rollout_engines:
+                    from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
+                    from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 
-                client = VimeRayWeightSyncClient(self.rollout_engines, lambda: self.weight_version)
-                trainer = WeightTransferTrainerFactory.trainer_init(
-                    IPCTrainerInitInfo(
-                        rank=dist.get_rank(),
-                        packed=True,
-                        packed_buffer_size_bytes=_native_ipc_buffer_size(
-                            self.args,
-                            self._full_param_info_buckets,
+                    client = VimeRayWeightSyncClient(
+                        self.rollout_engines, lambda: self.weight_version, latch_errors=True
+                    )
+                    trainer = WeightTransferTrainerFactory.trainer_init(
+                        IPCTrainerInitInfo(
+                            rank=dist.get_rank(),
+                            packed=True,
+                            packed_buffer_size_bytes=_native_ipc_buffer_size(
+                                self.args,
+                                self._full_param_info_buckets,
+                            ),
                         ),
-                    ),
-                    client=client,
-                    source=self._source,
-                )
-                self._native_trainers.append(trainer)
-            if distributed_rollout_engines:
-                distributed_gpu_counts = engine_gpu_counts[colocate_engine_nums:]
-                client = VimeRayWeightSyncClient(
-                    distributed_rollout_engines,
-                    lambda: self.weight_version,
-                    distributed_gpu_counts,
-                )
-                trainer = connect_rollout_engines_from_distributed(
-                    client,
-                    self._source,
-                    distributed_gpu_counts,
-                )
-                self._native_trainers.append(trainer)
+                        client=client,
+                        source=self._source,
+                    )
+                    self._native_trainers.append(trainer)
+                if distributed_rollout_engines:
+                    self._distributed_rollout_engines = distributed_rollout_engines
+                    self._distributed_gpu_counts = engine_gpu_counts[colocate_engine_nums:]
+                    self._native_trainers.append(self._connect_distributed())
+            except Exception:
+                logger.exception("Connecting the rollout engines for weight transfer failed on rank %d", self.rank)
+                ok = False
+            if not all_ranks_ok(ok):
+                raise RuntimeError("Rollout engines could not join the weight-transfer channel")
 
             if not self._expert_transfer_plan:
                 return
@@ -256,6 +270,34 @@ class UpdateWeightFromTensor:
                     for engine in self.rollout_engines
                 ]
             )
+
+    def _connect_distributed(self):
+        client = VimeRayWeightSyncClient(
+            self._distributed_rollout_engines,
+            lambda: self.weight_version,
+            self._distributed_gpu_counts,
+        )
+        return connect_rollout_engines_from_distributed(
+            client,
+            self._resumable_source,
+            self._distributed_gpu_counts,
+        )
+
+    def _reconnect_distributed(self, trainer):
+        disconnect_rollout_engines_from_distributed(trainer, self._distributed_rollout_engines)
+        return self._connect_distributed()
+
+    def _send_native(self, *, draft: bool) -> None:
+        for index, trainer in enumerate(self._native_trainers):
+            reconnect = (
+                partial(self._reconnect_distributed, trainer) if trainer.init_info_cls.backend == "nccl" else None
+            )
+            trainer.client.draft = draft
+            try:
+                trainer = send_weights_with_resync(trainer, reconnect=reconnect)
+            finally:
+                trainer.client.draft = False
+            self._native_trainers[index] = trainer
 
     def pop_metrics(self) -> dict[str, float]:
         out, self.update_weight_metrics = self.update_weight_metrics, {}
@@ -382,9 +424,7 @@ class UpdateWeightFromTensor:
             megatron_local_weights = self.weights_getter()
             self._update_rollout_weights(megatron_local_weights, draft=False)
         else:
-            for trainer in self._native_trainers:
-                trainer.client.draft = False
-                trainer.send_weights()
+            self._send_native(draft=False)
 
         update_draft = self.args.dspark_enabled or (
             self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp"
@@ -392,11 +432,10 @@ class UpdateWeightFromTensor:
         if update_draft:
             if self._native_trainers:
                 self._source.draft = self.args.dspark_enabled
-                for trainer in self._native_trainers:
-                    trainer.client.draft = True
-                    trainer.send_weights()
-                    trainer.client.draft = False
-                self._source.draft = False
+                try:
+                    self._send_native(draft=True)
+                finally:
+                    self._source.draft = False
             else:
                 self._update_rollout_weights(megatron_local_weights, draft=True)
 
@@ -408,10 +447,11 @@ class UpdateWeightFromTensor:
                     post_process_quantization=True,
                     rollout_engines=self._all_rollout_engines,
                 )
-            ray.get([engine.continue_generation.remote() for engine in self._all_rollout_engines])
+        resume_generation_on_all_ranks(self._all_rollout_engines, self.weight_version)
         dist.barrier(group=get_gloo_group())
 
     def _update_rollout_weights(self, megatron_local_weights, *, draft: bool) -> None:
+        # TODO: this expert-routing path drives start/finish itself and has no resend after a failed push.
         if self._ipc_engine is not None and self.rank == self._ipc_gather_src:
             method = self._ipc_engine.start_draft_weight_update if draft else self._ipc_engine.start_weight_update
             ray.get(method.remote())

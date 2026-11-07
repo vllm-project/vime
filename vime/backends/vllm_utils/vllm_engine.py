@@ -354,7 +354,9 @@ class VLLMEngine(RayActor):
             payload.append(worker_payload)
         if not isinstance(update_info, list):
             payload = payload[0]
-        return self._make_request("update_weights", {"update_info": payload})
+        return self._make_request(
+            "update_weights", {"update_info": payload}, timeout=self.args.update_weight_request_timeout
+        )
 
     def flush_cache(self):
         """Flush the cache of the server."""
@@ -448,17 +450,17 @@ class VLLMEngine(RayActor):
         raise NotImplementedError("vLLM weight checking is not implemented")
 
     def init_weight_transfer_engine(self, payload: dict) -> dict:
-        return self._make_request("init_weight_transfer_engine", payload)
+        return self._make_request("init_weight_transfer_engine", payload, timeout=self.args.update_weight_init_timeout)
 
     def start_weight_update(self) -> dict:
-        return self._make_request("start_weight_update", {})
+        return self._make_request("start_weight_update", {}, timeout=self.args.update_weight_request_timeout)
 
     def start_draft_weight_update(self) -> dict:
-        return self._make_request("start_draft_weight_update", {})
+        return self._make_request("start_draft_weight_update", {}, timeout=self.args.update_weight_request_timeout)
 
     def finish_weight_update(self, weight_version: str | None = None) -> dict:
         payload = {} if weight_version is None else {"weight_version": str(weight_version)}
-        return self._make_request("finish_weight_update", payload)
+        return self._make_request("finish_weight_update", payload, timeout=self.args.update_weight_request_timeout)
 
     def pull_weights(self, target_version: int):
         """Have the engine sync every host it spans to target_version: each host pulls the
@@ -508,6 +510,7 @@ class VLLMEngine(RayActor):
                     "world_size": world_size,
                 }
             },
+            timeout=self.args.update_weight_init_timeout,
         )
 
     def destroy_weights_update_group(self, group_name):
@@ -540,7 +543,9 @@ class VLLMEngine(RayActor):
             "shapes": [list(s) for s in shapes],
             "packed": True,
         }
-        result = self._make_request("update_weights", {"update_info": update_info})
+        result = self._make_request(
+            "update_weights", {"update_info": update_info}, timeout=self.args.update_weight_request_timeout
+        )
         del weight_version
         return result
 
