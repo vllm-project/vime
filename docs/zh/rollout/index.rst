@@ -14,3 +14,4 @@ Rollout 与调度
    ../advanced/delta-weight-sync.md
    ../advanced/vllm-config.md
    ../advanced/speculative-decoding.md
+   ../advanced/draft-feature-collection.md

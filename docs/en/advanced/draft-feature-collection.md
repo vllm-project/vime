@@ -2,7 +2,7 @@
 
 `--draft-feature-mode collect-only` exports selected inputs to the actor's final, bias-free LM head during an existing log-probability forward. It does not train or publish a draft model. The default `off` path creates no export directory or hook.
 
-The first version supports TP=PP=CP=DP=1, no VPP, micro-batch=1 and the actor model. Disable `--keep-old-actor` and `--use-rollout-logprobs`, and use `--update-weights-interval 1` so the version counter cannot lag actor updates. A batch that reuses the training forward instead of doing a separate actor log-probability forward is rejected before exporting; collection never inserts a compensating forward. For synchronous GRPO, use more than one optimizer step per rollout so the ordinary actor path already computes log probabilities separately.
+The first version supports TP=PP=CP=DP=1, no VPP, micro-batch=1 and the actor model. Disable `--use-rollout-logprobs`. The trainer publishes weights after every actor update, so the version counter cannot lag behind it. A batch that reuses the training forward instead of doing a separate actor log-probability forward is rejected before exporting; collection never inserts a compensating forward. For synchronous GRPO, use more than one optimizer step per rollout so the ordinary actor path already computes log probabilities separately.
 
 Add these options to a working training recipe:
 

@@ -301,14 +301,13 @@ def test_build_inference_sampling_params_forwards_disabled_top_k():
 
 @pytest.mark.unit
 def test_inference_generate_tokens_and_logprobs_aligns_partial_content():
-    token_ids, log_probs = mod._inference_generate_tokens_and_logprobs(
-        {
-            "token_ids": [11, 12, 13],
-            "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
-        }
-    )
-    assert token_ids == [11, 12]
-    assert log_probs == [-0.1, -0.2]
+    with pytest.raises(ValueError, match="token/logprob length mismatch"):
+        mod._inference_generate_tokens_and_logprobs(
+            {
+                "token_ids": [11, 12, 13],
+                "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
+            }
+        )
 
 
 @pytest.mark.unit
@@ -1077,13 +1076,6 @@ def test_eval_rollout_passk_requests_do_not_share_session_ids(patch_generate_sta
 def test_abort_deletes_inflight_without_pause_resume(patch_generate_state, monkeypatch, rollout_external):
     state = _PatchedGenerateState(_rollout_args())
     state.active_server_generations = 1
-    monkeypatch.setattr(
-        mod,
-        "verify_server_drain",
-        AsyncMock(
-            return_value=server_control.DrainReport((server_control.EngineDrainState("http://w0:9000", 0),), 0, 5)
-        ),
-    )
     monkeypatch.setattr(mod, "GenerateState", lambda args: state)
 
     aborted = asyncio.Event()
