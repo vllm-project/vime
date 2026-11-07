@@ -222,7 +222,8 @@ def test_generate_requests_sampler_topk(monkeypatch):
     sample = asyncio.run(rollout.generate(a, Sample(prompt="test"), {"max_new_tokens": 8}))
     payload, kwargs = captured[0]
     assert payload["sampling_params"]["logprobs"] == 4
-    assert kwargs == {"headers": None}
+    assert list(kwargs) == ["headers"]
+    assert list(kwargs["headers"]) == ["x-request-id"]
     assert sample.rollout_topk_token_ids.tolist() == [[3, 1, 4]]
 
 
@@ -471,7 +472,8 @@ def test_generate_requests_complete_top_p_probabilities(monkeypatch):
 
     async def post(url, payload, **kwargs):
         assert payload["sampling_params"]["logprobs"] == 1
-        assert kwargs == {"headers": None}
+        assert list(kwargs) == ["headers"]
+        assert list(kwargs["headers"]) == ["x-request-id"]
         return {
             "choices": [
                 {

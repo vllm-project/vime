@@ -2047,10 +2047,8 @@ def vime_validate_args(args):
             )
         ):
             raise ValueError("collect-only draft features support TP=PP=CP=DP=1 without VPP")
-        if args.keep_old_actor or args.use_rollout_logprobs or not args.compute_advantages_and_returns:
+        if args.use_rollout_logprobs or not args.compute_advantages_and_returns:
             raise ValueError("collect-only draft features require an actor log-prob forward")
-        if args.update_weights_interval != 1:
-            raise ValueError("collect-only draft features require publication after every actor update")
 
     if args.rollout_temperature <= 0:
         raise ValueError(
