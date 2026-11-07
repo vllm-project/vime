@@ -2,7 +2,9 @@
 
 import ast
 import importlib.util
+import json
 import math
+import os
 import pickle
 import sys
 import types
@@ -87,6 +89,118 @@ def load_module(name, filename):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_nvme_store_module(monkeypatch):
+    fp8 = types.ModuleType("megatron.core.fp8_utils")
+    fp8.is_float8tensor = lambda tensor: False
+    monkeypatch.setitem(sys.modules, fp8.__name__, fp8)
+    path = Path(__file__).resolve().parents[1] / "vime_plugins/optimizers/nvme_stream.py"
+    spec = importlib.util.spec_from_file_location("nvme_checkpoint_durability", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("resident", [False, True])
+def test_nvme_checkpoint_syncs_payload_manifest_and_directories(tmp_path, monkeypatch, resident):
+    stream = load_nvme_store_module(monkeypatch)
+    source = tmp_path / "scratch.bin"
+    source.write_bytes(b"optimizer state")
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    base = checkpoint / "iter_0000001"
+    synced = []
+    native_fsync = os.fsync
+
+    def tracking_fsync(fd):
+        synced.append(Path(os.readlink(f"/proc/self/fd/{fd}")))
+        native_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+    main_param = torch.zeros(1)
+    # Metadata saving must not try to serialize an evicted parameter's storage.
+    main_param.untyped_storage().resize_(0)
+    saved_settings = {"step": 1, "lr": 0.01, "betas": (0.7, 0.95), "eps": 1e-4, "weight_decay": 0.2}
+    with source.open("rb") as handle:
+        bucket = types.SimpleNamespace(
+            fd=handle.fileno(),
+            path=str(source),
+            numel=1,
+            group_indices=[4],
+            entries=[types.SimpleNamespace(main_param=main_param)],
+            adam=types.SimpleNamespace(param_groups=[{**saved_settings, "params": [main_param]}], state={}),
+            allocate_moments=lambda: None,
+        )
+        store = object.__new__(stream.NVMeOptimizerStateStore)
+        store._rank = store._instance = store.uid = 0
+        store.buckets = [bucket]
+        store.dtypes = {name: torch.float32 for name in stream.SEGMENTS}
+        store._fp32_adam = types.SimpleNamespace(state_dict=lambda: {"step": 1}) if resident else None
+        store.save_to(str(base))
+
+    directory = base / store.relative_dir
+    payload = directory / source.name
+    manifest = directory / "manifest.json"
+    assert payload.read_bytes() == source.read_bytes()
+    metadata = json.loads(manifest.read_text())
+    assert metadata["buckets"][0]["file"] == source.name
+    groups_path = directory / metadata["param_groups_file"]
+    assert torch.load(groups_path, weights_only=True) == [{"group_indices": [4], "param_groups": [saved_settings]}]
+    expected = [payload, groups_path]
+    if resident:
+        expected.append(directory / "fp32_resident_optimizer.pt")
+    expected.extend([manifest, directory, directory.parent, base, checkpoint])
+    assert synced == expected
+    with pytest.raises(FileExistsError, match="Refusing to overwrite NVMe optimizer checkpoint"):
+        store.save_to(str(base))
+    assert payload.read_bytes() == source.read_bytes()
+    assert synced == expected
+    if not resident:
+        bucket.adam.param_groups[0].update(lr=0.1, betas=(0.9, 0.999), eps=1e-8, weight_decay=0)
+        assert store.load_from(str(base))
+        group = bucket.adam.param_groups[0]
+        assert {k: v for k, v in group.items() if k != "params"} == saved_settings
+        assert group["params"][0] is main_param
+        assert main_param.untyped_storage().nbytes() == 0
+
+
+@pytest.mark.parametrize("failed_file", ["scratch.bin", "bucket_param_groups.pt"])
+def test_nvme_checkpoint_fsync_failure_prevents_manifest(tmp_path, monkeypatch, failed_file):
+    stream = load_nvme_store_module(monkeypatch)
+    native_fsync = os.fsync
+    source = tmp_path / "scratch.bin"
+    source.write_bytes(b"optimizer state")
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    with source.open("rb") as handle:
+        bucket = types.SimpleNamespace(
+            fd=handle.fileno(),
+            path=str(source),
+            numel=0,
+            group_indices=[],
+            entries=[],
+            adam=types.SimpleNamespace(param_groups=[], state={}),
+        )
+        store = object.__new__(stream.NVMeOptimizerStateStore)
+        store._rank = store._instance = store.uid = 0
+        store.buckets = [bucket]
+        store.dtypes = {name: torch.float32 for name in stream.SEGMENTS}
+        store._fp32_adam = None
+
+        def fail_fsync(fd):
+            if Path(os.readlink(f"/proc/self/fd/{fd}")).name == failed_file:
+                raise OSError("checkpoint payload sync failed")
+            native_fsync(fd)
+
+        monkeypatch.setattr(os, "fsync", fail_fsync)
+        with pytest.raises(OSError, match="checkpoint payload sync failed"):
+            store.save_to(str(checkpoint / "iter_0000001"))
+        manifest = checkpoint / "iter_0000001" / store.relative_dir / "manifest.json"
+        assert not manifest.exists()
+        monkeypatch.setattr(os, "fsync", native_fsync)
+        store.save_to(str(checkpoint / "iter_0000001"))
+    assert manifest.is_file()
 
 
 @pytest.mark.parametrize("remainders", [False, True])

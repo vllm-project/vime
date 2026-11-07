@@ -44,6 +44,7 @@ def test_optimizer_construction_keeps_fp32_shards_out_of_autograd():
         get_model=lambda provider, model_type: [model],
         ModelType=SimpleNamespace(encoder_or_decoder=None),
         get_megatron_optimizer=optimizer_factory,
+        _stream_optimizer_state_if_requested=lambda args, optimizer, role: None,
         get_optimizer_param_scheduler=lambda args, optimizer: None,
     )
     module = ast.Module(
