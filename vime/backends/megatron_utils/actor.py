@@ -381,6 +381,7 @@ class MegatronTrainRayActor(TrainRayActor):
         num_microbatches: list[int],
         store_prefix: str = "",
         use_rollout_top_p_replay: bool = True,
+        draft_feature_collector=None,
     ) -> dict[str, list[torch.Tensor]]:
         with timer(f"{store_prefix}log_probs"):
             return forward_only(
@@ -391,6 +392,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 num_microbatches,
                 store_prefix=store_prefix,
                 use_rollout_top_p_replay=use_rollout_top_p_replay,
+                draft_feature_collector=draft_feature_collector,
             )
 
     def train(self, rollout_id: int, rollout_data_ref: Box, external_data=None):
@@ -464,7 +466,6 @@ class MegatronTrainRayActor(TrainRayActor):
                     and not self.args.use_rollout_logprobs
                     and not self.args.get_mismatch_metrics
                     and not self.args.use_critic
-                    and not self.args.keep_old_actor
                     and not self.args.use_opd
                     and (not self.args.use_routing_replay or self.args.use_rollout_routing_replay)
                     and self.args.advantage_estimator != "gspo"
@@ -509,6 +510,13 @@ class MegatronTrainRayActor(TrainRayActor):
                     and (not self.args.use_routing_replay or self.args.use_rollout_routing_replay)
                     and self.args.advantage_estimator != "gspo"
                 )
+                draft_feature_collector = None
+                if self.args.draft_feature_mode == "collect-only":
+                    from .draft_feature_collector import DraftFeatureCollector
+
+                    draft_feature_collector = DraftFeatureCollector(
+                        self.args, unwrap_model(self.model[0]), rollout_id, str(self.weight_updater.weight_version)
+                    )
                 if (
                     not self.args.use_rollout_logprobs or self.args.get_mismatch_metrics
                 ) and not can_reuse_log_probs_in_loss:

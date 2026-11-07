@@ -33,7 +33,15 @@ def test_reference_log_probs_use_full_vocab_while_actor_replays_top_p(monkeypatc
     monkeypatch.setattr(mpu, "get_tensor_model_parallel_rank", lambda: 0, raising=False)
 
     def fake_forward_only(
-        callback, args, model, data_iterator, _num_microbatches, *, store_prefix, use_rollout_top_p_replay
+        callback,
+        args,
+        model,
+        data_iterator,
+        _num_microbatches,
+        *,
+        store_prefix,
+        use_rollout_top_p_replay,
+        draft_feature_collector=None,
     ):
         kwargs = {}
         if use_rollout_top_p_replay:

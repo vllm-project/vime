@@ -258,10 +258,33 @@ def _inference_generate_tokens_and_logprobs(choice: dict[str, Any]) -> tuple[lis
         raise ValueError("token_ids must be a list of non-negative integers")
 
     logprobs = choice.get("logprobs")
-    content = logprobs.get("content") if isinstance(logprobs, dict) else []
-    content = content or []
-    pairs = list(zip(token_ids, content, strict=False))
-    return [token_id for token_id, _ in pairs], [float(item["logprob"]) for _, item in pairs]
+    if not token_ids and logprobs is None:
+        return [], []
+    if not isinstance(logprobs, dict):
+        raise ValueError("logprobs must be an object for nonempty trainable token_ids")
+    content = logprobs.get("content")
+    if not token_ids and content is None:
+        return [], []
+    if not isinstance(content, list):
+        raise ValueError("logprobs.content must be a list")
+    if len(content) != len(token_ids):
+        raise ValueError(f"token/logprob length mismatch: {len(token_ids)} tokens, {len(content)} entries")
+
+    log_probs = []
+    for index, entry in enumerate(content):
+        if not isinstance(entry, dict) or "logprob" not in entry:
+            raise ValueError(f"missing logprob at token index {index}")
+        value = entry["logprob"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"non-numeric logprob at token index {index}")
+        try:
+            value = float(value)
+        except OverflowError as exc:
+            raise ValueError(f"non-finite logprob at token index {index}") from exc
+        if not math.isfinite(value):
+            raise ValueError(f"non-finite logprob at token index {index}")
+        log_probs.append(value)
+    return token_ids, log_probs
 
 
 def _score_centering_metadata(
@@ -483,10 +506,16 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
             if hasattr(span, "update"):
                 span.update(build_vllm_meta_trace_attrs(output))
 
-    choice = output["choices"][0]
+    # Never include prompts, token values, or raw response metadata in errors.
+    try:
+        choices = output.get("choices") if isinstance(output, dict) else None
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("response must contain a nonempty choices list")
+        choice = choices[0]
+        new_response_tokens, new_response_log_probs = _inference_generate_tokens_and_logprobs(choice)
+    except ValueError as exc:
+        raise ValueError(f"Invalid vLLM generation metadata (request_id={request_id}): {exc}") from exc
 
-    # Parse token_ids and logprobs from vLLM response
-    new_response_tokens, new_response_log_probs = _inference_generate_tokens_and_logprobs(choice)
     meta_info = _inference_generate_meta_info(output)
     if routed_experts_start:
         meta_info["routed_experts_start_len"] = routed_experts_start
@@ -781,15 +810,6 @@ async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
                     sample.metadata["start_rollout_id"] = rollout_id
             aborted_samples.append(group)
             count += len(group)
-
-    if server_abort:
-        # Local pending tasks being empty does not prove the engines are idle:
-        # the abort sweep is best-effort and a late request can still be queued
-        # server-side. Report what the engines actually say so the gap is
-        # observable; enforcing it is a separate, deliberate step.
-        report = await verify_server_drain(urls, deadline_s=_ABORT_DRAIN_VERIFY_DEADLINE_S)
-        if not report.drained:
-            logger.warning(f"Rollout engines not confirmed idle after abort: {report.describe()}")
 
     if args.partial_rollout:
         logger.info(f"Collected {count} partial samples into the data buffer")

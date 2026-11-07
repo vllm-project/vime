@@ -9,6 +9,7 @@ Training & systems workflows
    ../../examples/qwen3-4b-base-openhermes.md
    ../../_examples_synced/fully_async/README.md
    ../../_examples_synced/dspark/README.md
+   ../../_examples_synced/ouro/README.md
    ../../_examples_synced/mem_agent/README.md
    ../../_examples_synced/delta_weight_sync/README.md
    ../../_examples_synced/eval_multi_task/README.md
