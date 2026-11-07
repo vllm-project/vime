@@ -17,6 +17,9 @@ from vime.observability.rollout_data_utils import (
     validate_rollout_id_annotated,
 )
 from vime.observability.rollout_metrics import log_eval_rollout_data, log_rollout_data
+from vime.observability.rollout_spans import emit as emit_rollout_spans
+from vime.observability.rollout_spans import reset as reset_rollout_spans
+from vime.observability.rollout_spans import span as rollout_span
 from vime.rollout.base_types import RolloutFnTrainOutput, call_rollout_fn
 from vime.rollout.sample_hooks import set_current_rollout_id
 from vime.utils.cleanup import Cleanup
@@ -320,6 +323,8 @@ class RolloutManager:
         return len(self.data_source) // self.args.rollout_batch_size
 
     def generate(self, rollout_id):
+        reset_rollout_spans()
+        manager_start = time.perf_counter()
         start_time = time.time()
         self.rollout_id = rollout_id
         self.batch_builder.rollout_id = rollout_id
@@ -335,6 +340,7 @@ class RolloutManager:
             # Refresh the local snapshot before offload/pause can target a dead
             # actor. Replacement engines are created only before weight update.
             self.servers = ray.get(self.serving.finish_rollout.remote())
+        emit_rollout_spans(rollout_id, time.perf_counter() - manager_start, logger)
         return result
 
     def _generate(self, rollout_id, start_time):
@@ -357,15 +363,17 @@ class RolloutManager:
             if self.args.rollout_data_transport == "straw":
                 self.batch_builder.raw_ref = batch.raw
         else:
-            data, metrics = self._get_rollout_data(rollout_id=rollout_id)
-            save_debug_rollout_data(
-                self.args.save_debug_rollout_data,
-                data,
-                rollout_id=rollout_id,
-                evaluation=False,
-                args=self.args,
-                reference=self.batch_builder.raw_ref if self.args.rollout_data_transport == "straw" else None,
-            )
+            with rollout_span("manager.rollout_fn"):
+                data, metrics = self._get_rollout_data(rollout_id=rollout_id)
+            with rollout_span("manager.save_debug"):
+                save_debug_rollout_data(
+                    self.args.save_debug_rollout_data,
+                    data,
+                    rollout_id=rollout_id,
+                    evaluation=False,
+                    args=self.args,
+                    reference=self.batch_builder.raw_ref if self.args.rollout_data_transport == "straw" else None,
+                )
             if self.recovery is not None:
                 self.recovery.remember_raw(
                     rollout_id,
@@ -376,9 +384,10 @@ class RolloutManager:
                     ),
                     source_state=self._source_state(),
                 )
-        log_rollout_data(
-            rollout_id, self.args, data, metrics, time.time() - start_time, weight_version=self.weight_version
-        )
+        with rollout_span("manager.log_rollout_data"):
+            log_rollout_data(
+                rollout_id, self.args, data, metrics, time.time() - start_time, weight_version=self.weight_version
+            )
         if self.args.debug_rollout_only:
             # if debug rollout only, we don't convert samples to train data and directly return
             return
@@ -387,12 +396,14 @@ class RolloutManager:
         )
         if cached is not None:
             return cached
-        data = self.batch_builder.convert(data)
+        with rollout_span("manager.convert_samples"):
+            data = self.batch_builder.convert(data)
         if self.args.rollout_data_transport == "straw":
             data = self.batch_builder.publish_converted(data)
         if self.recovery is not None:
             self.recovery.remember_converted(rollout_id, data, self.batch_builder.batch_id)
-        return self.batch_builder.split_by_dp(data)
+        with rollout_span("manager.split_by_dp"):
+            return self.batch_builder.split_by_dp(data)
 
     def eval(self, rollout_id):
         if self.args.debug_train_only:

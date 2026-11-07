@@ -20,6 +20,7 @@ from vime.observability.rollout_data_utils import (
     tensorize_rollout_data_for_training,
     validate_rollout_routed_experts_for_replay,
 )
+from vime.observability.rollout_spans import span as rollout_span
 from vime.utils.data import get_source
 from vime.utils.dp_schedule import build_dp_schedule
 from vime.utils.misc import Box, load_function
@@ -263,7 +264,8 @@ class BatchBuilder:
         if self.custom_convert_samples_to_train_data_func is not None:
             return self.custom_convert_samples_to_train_data_func(self.args, samples)
 
-        raw_rewards, rewards = self._post_process_rewards(samples)
+        with rollout_span("convert.reward_postprocess"):
+            raw_rewards, rewards = self._post_process_rewards(samples)
 
         assert len(raw_rewards) == len(samples)
         assert len(rewards) == len(samples)
@@ -298,18 +300,19 @@ class BatchBuilder:
         # loss mask
         # TODO: compress the loss mask
         loss_masks = []
-        for sample in samples:
-            # always instantiate loss_mask if not provided
-            if sample.loss_mask is None:
-                sample.loss_mask = [1] * sample.response_length
+        with rollout_span("convert.loss_masks"):
+            for sample in samples:
+                # always instantiate loss_mask if not provided
+                if sample.loss_mask is None:
+                    sample.loss_mask = [1] * sample.response_length
 
-            assert (
-                len(sample.loss_mask) == sample.response_length
-            ), f"loss mask length {len(sample.loss_mask)} != response length {sample.response_length}"
-            if sample.remove_sample:
-                sample.loss_mask = [0] * sample.response_length
-            loss_masks.append(sample.loss_mask)
-        train_data["loss_masks"] = loss_masks
+                assert (
+                    len(sample.loss_mask) == sample.response_length
+                ), f"loss mask length {len(sample.loss_mask)} != response length {sample.response_length}"
+                if sample.remove_sample:
+                    sample.loss_mask = [0] * sample.response_length
+                loss_masks.append(sample.loss_mask)
+            train_data["loss_masks"] = loss_masks
 
         # Per-rollout aggregate, precomputed at the step level (where we can
         # see every sample of every rollout) and broadcast per-sample so the
@@ -322,11 +325,12 @@ class BatchBuilder:
         #   so summing partial contributions across mbs yields one
         #   token-weighted mean per rollout.
         rollout_id_list = train_data["rollout_ids"]
-        mask_sums_per_sample = [sum(m) for m in loss_masks]
-        rollout_total_mask: dict[int, int] = {}
-        for rid, ms in zip(rollout_id_list, mask_sums_per_sample, strict=True):
-            rollout_total_mask[rid] = rollout_total_mask.get(rid, 0) + ms
-        train_data["rollout_mask_sums"] = [rollout_total_mask[rid] for rid in rollout_id_list]
+        with rollout_span("convert.rollout_mask_sums"):
+            mask_sums_per_sample = [sum(m) for m in loss_masks]
+            rollout_total_mask: dict[int, int] = {}
+            for rid, ms in zip(rollout_id_list, mask_sums_per_sample, strict=True):
+                rollout_total_mask[rid] = rollout_total_mask.get(rid, 0) + ms
+            train_data["rollout_mask_sums"] = [rollout_total_mask[rid] for rid in rollout_id_list]
 
         # Overwrite raw_reward when available. Mixed-source batches may only
         # populate this field for a subset of samples (e.g. SWE but not code).
@@ -462,13 +466,14 @@ class BatchBuilder:
         if total_lengths is None:
             total_lengths = [len(tokens) for tokens in data["tokens"]]
         data["total_lengths"] = total_lengths
-        partitions, micro_batch_indices, num_microbatches, global_batch_sizes = build_dp_schedule(
-            self.args,
-            self.train_parallel_config,
-            total_lengths,
-            global_batch_size=self.args.global_batch_size,
-            rollout_indices=data["rollout_ids"],
-        )
+        with rollout_span("split.build_dp_schedule"):
+            partitions, micro_batch_indices, num_microbatches, global_batch_sizes = build_dp_schedule(
+                self.args,
+                self.train_parallel_config,
+                total_lengths,
+                global_batch_size=self.args.global_batch_size,
+                rollout_indices=data["rollout_ids"],
+            )
         fields = [
             "tokens",
             "multimodal_train_inputs",
@@ -505,36 +510,39 @@ class BatchBuilder:
                 }
             )
         result = []
-        for rank, partition in enumerate(partitions):
-            schedule = {
-                "partition": partition,
-                "global_batch_sizes": global_batch_sizes,
-                "num_microbatches": num_microbatches,
-                "micro_batch_indices": micro_batch_indices[rank],
-            }
-            if transport == "straw":
-                selection = {key: partition for key in fields}
-                # Training's pass-rate and load metrics use the global arrays;
-                # all per-sample tensors are selected before storage reads.
-                selection.update(raw_reward=None, total_lengths=None)
-                value = TrainBatchRef(
-                    reference.manifest,
-                    reference.root,
-                    self.batch_id,
-                    rank,
-                    plan_digest,
-                    selection=selection,
-                    schedule=schedule,
-                )
-            else:
-                value = {key: [data[key][index] for index in partition] for key in fields if key in data}
-                value.update({key: data[key] for key in ("raw_reward", "total_lengths") if key in data})
-                value.update(schedule)
-                tensorize_rollout_data_for_training(value)
-            if transport == "nixl":
-                result.append(Box(ray.put(value, _tensor_transport="nixl")))
-            elif transport in {"straw", "object-store"}:
-                result.append(Box(ray.put(value)))
-            else:
-                raise ValueError(f"Unsupported rollout data transport: {transport!r}")
+        with rollout_span("split.package_ranks"):
+            for rank, partition in enumerate(partitions):
+                schedule = {
+                    "partition": partition,
+                    "global_batch_sizes": global_batch_sizes,
+                    "num_microbatches": num_microbatches,
+                    "micro_batch_indices": micro_batch_indices[rank],
+                }
+                if transport == "straw":
+                    selection = {key: partition for key in fields}
+                    # Training's pass-rate and load metrics use the global arrays;
+                    # all per-sample tensors are selected before storage reads.
+                    selection.update(raw_reward=None, total_lengths=None)
+                    value = TrainBatchRef(
+                        reference.manifest,
+                        reference.root,
+                        self.batch_id,
+                        rank,
+                        plan_digest,
+                        selection=selection,
+                        schedule=schedule,
+                    )
+                else:
+                    value = {key: [data[key][index] for index in partition] for key in fields if key in data}
+                    value.update({key: data[key] for key in ("raw_reward", "total_lengths") if key in data})
+                    value.update(schedule)
+                    with rollout_span("split.tensorize"):
+                        tensorize_rollout_data_for_training(value)
+                with rollout_span("split.ray_put"):
+                    if transport == "nixl":
+                        result.append(Box(ray.put(value, _tensor_transport="nixl")))
+                    elif transport in {"straw", "object-store"}:
+                        result.append(Box(ray.put(value)))
+                    else:
+                        raise ValueError(f"Unsupported rollout data transport: {transport!r}")
         return result
