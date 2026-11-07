@@ -1,7 +1,8 @@
 # vime on AMD ROCm (gfx950): base ships inference (ROCm/torch/triton/aiter/fa/vLLM), this adds training.
 # Build: DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm/vime-rocm:latest .
 
-ARG BASE_IMAGE=vllm/vllm-openai-rocm:nightly
+# Pinned by digest. Its vLLM commit must accept docker/patch/latest/ (today: VLLM_COMMIT in docker/Dockerfile).
+ARG BASE_IMAGE=vllm/vllm-openai-rocm:nightly-rocm100-83c078d955cd6e0c63d3b12abe669c8de936a370@sha256:d92e7eb1171463b6a653eb0573e64ffdab15b668a26b3bef24b469914c707174
 FROM ${BASE_IMAGE}
 
 # ======================================== Arguments =============================================
@@ -97,48 +98,40 @@ RUN pip install --no-cache-dir "numpy==1.26.4" "scipy==1.17.1" "pyarrow==25.0.1"
 
 # ====================================== Patches ============================================
 
-# vLLM is a pip install, so `patch` not `git apply`. These 3 are ROCm-rebased for the
-# nightly base (docker/amd_patch/); the shared docker/patch/ copies are CUDA-only.
-COPY docker/amd_patch/${PATCH_VERSION}/vllm-pull_weights.patch /tmp/vllm-pull_weights.patch
-COPY docker/amd_patch/${PATCH_VERSION}/vllm.patch /tmp/vllm.patch
-COPY docker/amd_patch/${PATCH_VERSION}/vllm-inflight-queue-diagnostics.patch /tmp/vllm-inflight.patch
-# Adds the /health_generate route the rollout health monitor polls. Shared with CUDA
-# (docker/patch/); applied after inflight since check_health_generate() calls its diagnostics.
+# The shared vLLM patches (read-only here), in docker/Dockerfile's order, with strict `git apply`
+# (vLLM is a pip install). ROCm-only patches go in docker/amd_patch/.
+COPY docker/patch/${PATCH_VERSION}/vllm-pull_weights.patch /tmp/vllm-pull_weights.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-score-centering.patch /tmp/vllm-score-centering.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-fine-grained-tracing.patch /tmp/vllm-fine-grained-tracing.patch
 COPY docker/patch/${PATCH_VERSION}/vllm-generation-health.patch /tmp/vllm-generation-health.patch
-# Base already carries Qwen3-Omni/PD-metrics and lacks SamplingMaskLists.merge, so those
-# hunks (and tests/ hunks) are dropped; the guards below fail the build once that changes.
+COPY docker/patch/${PATCH_VERSION}/vllm-tensor-dump.patch /tmp/vllm-tensor-dump.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-deepgemm-bf16.patch /tmp/vllm-deepgemm-bf16.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-deepep-optional-shrink.patch /tmp/vllm-deepep-optional-shrink.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-glm5next-unbounded-gate.patch /tmp/vllm-glm5next-unbounded-gate.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-tito-columnar-logprobs-render.patch /tmp/vllm-tito-columnar-logprobs-render.patch
+COPY docker/patch/${PATCH_VERSION}/vllm-watchdog-fatal-action.patch /tmp/vllm-watchdog-fatal-action.patch
 RUN VLLM_SITE="$(python3 -c 'import os, vllm; print(os.path.dirname(os.path.dirname(vllm.__file__)))')" && \
     cd "$VLLM_SITE" && \
-    grep -q 'disable_tp' vllm/model_executor/models/qwen3_omni_moe_thinker.py && \
-    if [ ! -f vllm/v1/outputs.py ] || grep -q 'def merge' vllm/v1/outputs.py; then \
-      echo "vllm/v1/outputs.py moved, or the base gained SamplingMaskLists.merge —" && \
-      echo "recheck whether the output_processor hunk still has to be dropped." && \
-      exit 1; \
-    fi && \
-    if [ -e vllm/entrypoints/openai/engine/protocol.py ]; then \
-      echo "Base converged on the CUDA protocol layout — apply vllm-pd-request-metrics.patch here." && \
-      exit 1; \
-    fi && \
-    awk '/^diff --git /{keep = ($0 !~ /qwen3_omni_moe_thinker|v1\/engine\/output_processor/)} keep' \
-      /tmp/vllm.patch > /tmp/vllm-rocm.patch && \
-    awk '/^diff --git /{keep = ($0 !~ / b\/tests\//)} keep' \
-      /tmp/vllm-inflight.patch > /tmp/vllm-inflight-rocm.patch && \
-    patch -p1 --forward --fuzz=1 --no-backup-if-mismatch < /tmp/vllm-pull_weights.patch && \
-    patch -p1 --forward --fuzz=1 --no-backup-if-mismatch < /tmp/vllm-rocm.patch && \
-    patch -p1 --forward --fuzz=1 --no-backup-if-mismatch < /tmp/vllm-inflight-rocm.patch && \
-    patch -p1 --forward --fuzz=1 --no-backup-if-mismatch < /tmp/vllm-generation-health.patch && \
-    if find . -name '*.rej' | grep -q .; then \
-      echo "A vLLM patch did not apply cleanly — rebase docker/patch/${PATCH_VERSION}/." && \
-      exit 1; \
-    fi && \
-    if ! python3 -m compileall -q vllm >/dev/null; then \
-      echo "Patched vLLM does not compile. A fuzzy hunk landed in the wrong place:" && \
-      echo "re-cut docker/patch/${PATCH_VERSION}/ against this base rather than widening --fuzz." && \
-      python3 -m compileall -q vllm; \
-      exit 1; \
-    fi && \
-    rm /tmp/vllm-pull_weights.patch /tmp/vllm.patch /tmp/vllm-rocm.patch \
-       /tmp/vllm-inflight.patch /tmp/vllm-inflight-rocm.patch /tmp/vllm-generation-health.patch
+    git apply -v /tmp/vllm-pull_weights.patch && \
+    git apply -v /tmp/vllm-score-centering.patch && \
+    git apply -v /tmp/vllm-fine-grained-tracing.patch && \
+    git apply -v /tmp/vllm-generation-health.patch && \
+    git apply -v /tmp/vllm-tensor-dump.patch && \
+    git apply -v /tmp/vllm-deepgemm-bf16.patch && \
+    git apply -v /tmp/vllm-deepep-optional-shrink.patch && \
+    git apply -v /tmp/vllm-glm5next-unbounded-gate.patch && \
+    git apply -v /tmp/vllm-tito-columnar-logprobs-render.patch && \
+    git apply -v /tmp/vllm-watchdog-fatal-action.patch && \
+    rm /tmp/vllm-pull_weights.patch \
+       /tmp/vllm-score-centering.patch \
+       /tmp/vllm-fine-grained-tracing.patch \
+       /tmp/vllm-generation-health.patch \
+       /tmp/vllm-tensor-dump.patch \
+       /tmp/vllm-deepgemm-bf16.patch \
+       /tmp/vllm-deepep-optional-shrink.patch \
+       /tmp/vllm-glm5next-unbounded-gate.patch \
+       /tmp/vllm-tito-columnar-logprobs-render.patch \
+       /tmp/vllm-watchdog-fatal-action.patch
 
 # ====================================== Install main package ============================================
 
@@ -170,9 +163,9 @@ RUN python3 -c "\
 import torch, vllm, vime, transformer_engine, megatron.core; \
 import fake_int4_quant_cuda; \
 from vllm.distributed.weight_transfer.ipc_engine import IPCWeightTransferEngine; \
-from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateTokensResponse; \
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateTokensChoice; \
 from vime.backends.vllm_utils.vllm_engine import VLLMEngine; \
-assert 'weight_version' in GenerateTokensResponse.model_fields, 'vllm.patch did not apply'; \
+assert 'weight_versions' in GenerateTokensChoice.model_fields, 'vLLM base lacks per-choice weight_versions'; \
 print('torch', torch.__version__, 'hip', torch.version.hip); \
 print('vllm', vllm.__version__); \
 print('transformer_engine', transformer_engine.__version__); \

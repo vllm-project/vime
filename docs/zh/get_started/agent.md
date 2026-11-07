@@ -33,7 +33,7 @@ vime 提供已有 agent runtime 可用的协议 adapter：
 - `vime.agent.adapters.AnthropicAdapter`：Anthropic Messages API，用于 Claude Code 风格 agent。
 - `vime.agent.adapters.OpenAIAdapter`：OpenAI Chat Completions 和 Responses API，用于 OpenAI SDK / OpenAI Agents SDK 风格 client。
 
-adapter 是一个便利层，不是单独的 agent framework。它的 contract 是 message history in，sampled tokens out：adapter 会渲染 chat template，用 `input_ids` 和 `return_logprob=True` 调 vLLM，并把返回的 token ids/logprobs 导出为可训练的 trajectory segments；不会从 response text 重新分词恢复训练目标。
+adapter 是一个便利层，不是单独的 agent framework。它的 contract 是 message history in，sampled tokens out：adapter 会渲染 chat template，用 `token_ids` 和 `sampling_params.logprobs=1` 调 vLLM，并把返回的 token ids/logprobs 导出为可训练的 trajectory segments；不会从 response text 重新分词恢复训练目标。
 
 在自定义 generate 函数里实例化对应协议的 adapter，用 aiohttp 跑它的 `app`，然后通过 adapter 实例管理每次 rollout：
 
@@ -52,11 +52,7 @@ adapter.open_session(session_id, sampling_defaults=sampling_params)
 segments = await adapter.finish_session(session_id)
 ```
 
-多轮 agent 应使用稳定的 `session_id`。adapter 会把它作为 `X-SMG-Routing-Key` 传给 vLLM，让同一个 session 尽量落到同一个 worker，复用 prefix cache。
-
-## 沙盒后端
-
-Coding-agent 示例内置面向 E2B 兼容服务的 `vime.agent.sandbox.E2BSandbox`。其余 agent 生命周期只依赖 provider-neutral 的 `vime.agent.sandbox.Sandbox` 协议，因此 Docker、Modal 或本地虚拟机后端可以实现同一协议，而无需修改 rollout 逻辑。参见[移植到新的沙盒后端](../_examples_synced/coding_agent_rl/README.md#porting-to-a-new-sandbox-backend)。
+多轮 agent 应使用稳定的 `session_id`。adapter 会把它作为 `x-session-id` 传给 vLLM，让同一个 session 尽量落到同一个 worker，复用 prefix cache。
 
 ## Agent Serving 与性能配置
 

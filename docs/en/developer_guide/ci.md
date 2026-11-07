@@ -80,11 +80,11 @@ the container, with local Ray and sandbox traffic bypassing the proxy.
 The Buildkite `megatron` suite includes this GPU test. The automatic
 `agent-adapter` step covers the CPU contracts.
 
-`tests/ci/setup_agent_e2e.sh` installs the released `sunabako==0.1.1` wheel from PyPI,
-as pinned in `examples/coding_agent_rl/requirements-sunabako.txt`. It also prepares
+`tests/ci/setup_agent_e2e.sh` installs `sunabako>=0.1.2` from PyPI,
+as required by `examples/coding_agent_rl/requirements-sunabako.txt`. It also prepares
 the Ray authentication token before starting the head, reusing any existing token
-and keeping its value out of CI logs. This sunabako release
-supports native guest users with `uid_range_size`; the local node reserves 65,536 UIDs/GIDs for each of eight
+and keeping its value out of CI logs. Sunabako supports native guest users with
+`uid_range_size`; the local node reserves 65,536 UIDs/GIDs for each of eight
 sandboxes. State is mounted under `/workspace` so mapped users can traverse its
 parent directories. This runs inside the privileged Buildkite test pod
 without an inner Docker daemon or PRoot. The explicitly enabled RSS test mode is
@@ -123,7 +123,7 @@ straw end-to-end tests explicitly set `--rollout-data-transport straw`, so local
 - R3: `test_qwen3_30B_A3B_r3.py` and `test_moonlight_16B_A3B_r3.py`.
 - SC: `test_qwen2.5_0.5B_score_centering.py`, checking both top-k and top-p data.
 - Fully async rollout, fanout, PPO, MTP, PD/NIXL, distributed vLLM, fault recovery with mixed memory offload, debug replay, and continued rollout after releasing training resources.
-- Checkpoint saving and loading: phases share a straw storage pool to check queue and training-state recovery. `test_straw_checkpoint_fork.py` also checks step selection, repeated rollback, automatic branch selection, and debug replay.
+- Checkpoint saving and loading: phases share a straw storage pool to check queue and training-state recovery. `test_straw_checkpoint_rewind.py` also checks step selection, repeated rollback in the same directory, regenerated inputs, and debug replay.
 
 R3, SC, and fully async tests also enable online GC. Ordinary straw tests use isolated temporary directories and clean them up afterward. Single-host GPU tests use the local filesystem profile; multi-host JuiceFS durability needs separate validation. Other end-to-end tests continue to cover Ray object-store and NIXL transport.
 

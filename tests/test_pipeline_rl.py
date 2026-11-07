@@ -25,5 +25,35 @@ def test_first_publication_after_resume_flushes_health_check_cache(interval):
     assert should_flush_cache(interval, weight_version=7, initial_weight_version=5) == should_flush_cache(interval, 7)
 
 
+def test_engine_reset_uses_consistent_collective_order_across_workers(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from types import SimpleNamespace
+
+    import _unit_stubs
+
+    _unit_stubs.install_vllm_cli_stubs()
+    from vime.backends.vllm_utils import vllm_engine as engine_module
+
+    collective = Barrier(2)
+    engines = []
+    calls = [[], []]
+    for index in range(2):
+        engine = engine_module.VLLMEngine.__new__(engine_module.VLLMEngine)
+        engine.args = SimpleNamespace(rollout_health_check_timeout=2)
+
+        def request(route, payload, timeout, index=index):
+            assert route == "shutdown_weight_transfer_engine"
+            assert payload == {}
+            collective.wait(timeout=timeout)
+            calls[index].append(route)
+
+        monkeypatch.setattr(engine, "_make_request", request)
+        engines.append(engine)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda engine: engine.reset_weights_update_groups(), engines))
+    assert calls == [["shutdown_weight_transfer_engine"], ["shutdown_weight_transfer_engine"]]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

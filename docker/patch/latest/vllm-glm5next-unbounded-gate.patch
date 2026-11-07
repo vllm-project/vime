@@ -1,0 +1,45 @@
+diff --git a/vllm/models/glm5next/amd/ops/third_party/kda/kernels.py b/vllm/models/glm5next/amd/ops/third_party/kda/kernels.py
+index 0e32c945435..08c4f4021e4 100644
+--- a/vllm/models/glm5next/amd/ops/third_party/kda/kernels.py
++++ b/vllm/models/glm5next/amd/ops/third_party/kda/kernels.py
+@@ -172,6 +172,11 @@ def fused_recurrent_kda(
+     if scale is None:
+         scale = k.shape[-1] ** -0.5
+ 
++    if compute_gate and lower_bound is None:
++        assert a_log is not None
++        g = fused_kda_gate(g.flatten(-2), a_log, k.shape[-1], g_bias)
++        compute_gate = False
++
+     # q/k/v/beta are consumed in place with an explicit token stride, so
+     # column slices of the fused projection buffer need no copy; layouts the
+     # kernel cannot address fail loudly in `token_stride`.
+diff --git a/vllm/models/glm5next/common/kda.py b/vllm/models/glm5next/common/kda.py
+index 68d405b40cf..84aacb8dbd6 100644
+--- a/vllm/models/glm5next/common/kda.py
++++ b/vllm/models/glm5next/common/kda.py
+@@ -334,7 +334,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
+ 
+         # GLM-5.3-Flash uses a bounded sigmoid gate instead of the default
+         # unbounded softplus gate.
+-        self.kda_safe_gate = True
++        self.kda_safe_gate = config.linear_lower_bound is not None
+         self.kda_lower_bound = config.linear_lower_bound
+         # Process-global conv-state layout, resolved once here instead of on
+         # every _forward call (it reads an env-derived flag each time).
+diff --git a/vllm/models/glm5next/nvidia/ops/third_party/kda/kernels.py b/vllm/models/glm5next/nvidia/ops/third_party/kda/kernels.py
+index da498b5855e..c7122df6631 100644
+--- a/vllm/models/glm5next/nvidia/ops/third_party/kda/kernels.py
++++ b/vllm/models/glm5next/nvidia/ops/third_party/kda/kernels.py
+@@ -174,6 +174,11 @@ def fused_recurrent_kda(
+     if scale is None:
+         scale = k.shape[-1] ** -0.5
+ 
++    if compute_gate and lower_bound is None:
++        assert a_log is not None
++        g = fused_kda_gate(g.flatten(-2), a_log, k.shape[-1], g_bias)
++        compute_gate = False
++
+     # q/k/v/beta are consumed in place with an explicit token stride, so
+     # column slices of the fused projection buffer need no copy; layouts the
+     # kernel cannot address fail loudly in `token_stride`.

@@ -258,6 +258,10 @@ async def _run_rollout() -> tuple[Any, list[RequestEvent]]:
 
 
 def _validate_result(sample: Any, events: list[RequestEvent]) -> None:
+    from examples.geo3k_vlm_multi_turn.rollout import _observation_token_ids
+    from vime.utils.processing_utils import load_tokenizer
+    from vime.utils.types import Sample
+
     assert [event.endpoint for event in events] == [RENDER_ENDPOINT, GENERATE_ENDPOINT, GENERATE_ENDPOINT]
     first, second = events[1:]
     assert first.request_token_ids and first.response_token_ids
@@ -266,9 +270,24 @@ def _validate_result(sample: Any, events: list[RequestEvent]) -> None:
     assert second.request_token_ids[:generated_start] == first.request_token_ids
     assert second.request_token_ids[generated_start:generated_end] == first.response_token_ids
     assert len(second.request_token_ids) > generated_end
-    assert sample.tokens == list(second.request_token_ids + second.response_token_ids)
+    canonical_ids = list(second.request_token_ids + second.response_token_ids)
+    tokenizer = load_tokenizer(str(MODEL_PATH), trust_remote_code=True)
+    final_suffix = _observation_token_ids(
+        tokenizer,
+        {"role": "user", "content": "Continue the reasoning."},
+        canonical_ids,
+        tools=sample.metadata.get("tools"),
+        template_kwargs=None,
+    )
+    assert final_suffix
+    assert sample.tokens == canonical_ids + final_suffix
+    assert sample.loss_mask[-len(final_suffix) :] == [0] * len(final_suffix)
+    assert sample.rollout_log_probs[-len(final_suffix) :] == [0.0] * len(final_suffix)
+    assert sample.response == tokenizer.decode(sample.tokens[generated_start:], skip_special_tokens=False)
+    assert sample.status == Sample.Status.COMPLETED
     assert first.has_features and second.has_features
     assert sample.response_length == len(sample.loss_mask) == len(sample.rollout_log_probs)
+    assert sample.response_length == len(sample.tokens) - generated_start
 
 
 def execute() -> None:

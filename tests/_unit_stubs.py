@@ -29,6 +29,7 @@ import sys
 import types
 from collections.abc import Iterable
 from contextlib import contextmanager
+from importlib.machinery import ModuleSpec
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -36,7 +37,7 @@ from unittest.mock import MagicMock
 def real_module_available(name: str) -> bool:
     """True when the real package is importable and should not be shadowed."""
     if name in sys.modules:
-        return True
+        return isinstance(getattr(sys.modules[name], "__spec__", None), ModuleSpec)
     try:
         return importlib.util.find_spec(name) is not None
     except (ImportError, ValueError):
@@ -123,6 +124,12 @@ def install_vllm_router_stub() -> None:
                 type=str,
                 default="cache_aware",
                 choices=["random", "round_robin", "cache_aware", "power_of_two", "consistent_hash"],
+            )
+            parser.add_argument(
+                f"--{prefix}kv-connector",
+                dest=f"{dprefix}kv_connector",
+                default="nixl",
+                choices=["nixl", "mooncake"],
             )
             parser.add_argument(
                 f"--{prefix}request-timeout-secs",
@@ -270,6 +277,7 @@ def install_vllm_cli_stubs() -> None:
             return parser
 
     arg_utils.AsyncEngineArgs = AsyncEngineArgs
+    arg_utils._expand_json_human_readable_numbers = MagicMock(side_effect=AssertionError("requires real vLLM parser"))
     engine_mod.arg_utils = arg_utils
     system_utils_mod = types.ModuleType("vllm.utils.system_utils")
     system_utils_mod.kill_process_tree = lambda pid, include_parent=True: None  # noqa: ARG005
@@ -280,9 +288,9 @@ def install_vllm_cli_stubs() -> None:
     entrypoints_mod.__path__ = []
     openai_mod = types.ModuleType("vllm.entrypoints.openai")
     openai_mod.__path__ = []
-    launchers_mod = types.ModuleType("vllm.entrypoints.launchers")
-    launchers_mod.__path__ = []
-    cli_args_mod = types.ModuleType("vllm.entrypoints.launchers.cli_args")
+    common_mod = types.ModuleType("vllm.entrypoints.common")
+    common_mod.__path__ = []
+    cli_args_mod = types.ModuleType("vllm.entrypoints.common.cli_args")
 
     import dataclasses as _dc
 
@@ -295,9 +303,9 @@ def install_vllm_cli_stubs() -> None:
     cli_args_mod.FrontendArgs = FrontendArgs
     cli_args_mod.make_arg_parser = lambda parser=None: parser
     cli_args_mod.validate_parsed_serve_args = lambda args: args
-    launchers_mod.cli_args = cli_args_mod
+    common_mod.cli_args = cli_args_mod
     entrypoints_mod.openai = openai_mod
-    entrypoints_mod.launchers = launchers_mod
+    entrypoints_mod.common = common_mod
     vllm_mod.entrypoints = entrypoints_mod
 
     cli_mod = types.ModuleType("vllm.entrypoints.cli")
@@ -323,8 +331,8 @@ def install_vllm_cli_stubs() -> None:
     sys.modules["vllm.engine.arg_utils"] = arg_utils
     sys.modules["vllm.entrypoints"] = entrypoints_mod
     sys.modules["vllm.entrypoints.openai"] = openai_mod
-    sys.modules["vllm.entrypoints.launchers"] = launchers_mod
-    sys.modules["vllm.entrypoints.launchers.cli_args"] = cli_args_mod
+    sys.modules["vllm.entrypoints.common"] = common_mod
+    sys.modules["vllm.entrypoints.common.cli_args"] = cli_args_mod
     sys.modules["vllm.entrypoints.cli"] = cli_mod
     sys.modules["vllm.entrypoints.cli.serve"] = serve_mod
 

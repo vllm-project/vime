@@ -4,6 +4,8 @@ import time
 import traceback
 from copy import deepcopy
 
+import torch
+
 from vime.rollout.rm_hub import batched_async_rm
 from vime.rollout.vllm_rollout import (
     _build_inference_sampling_params,
@@ -14,6 +16,25 @@ from vime.utils.http_utils import post
 from vime.utils.types import Sample
 
 from .prompts import SOLVER_PROMPT_TEMPLATE, generate_rewriter_template, generate_select_template
+
+
+def reward_post_process(args, samples):
+    """Preserve legacy normalization for independently rewarded agent segments."""
+    raw_rewards = [sample.get_reward_value(args) for sample in samples]
+    if (
+        args.advantage_estimator not in ("grpo", "gspo", "cispo", "reinforce_plus_plus_baseline")
+        or not args.rewards_normalization
+    ):
+        return raw_rewards, raw_rewards
+    rewards = torch.tensor(raw_rewards, dtype=torch.float)
+    if len(rewards) == args.n_samples_per_prompt * args.rollout_batch_size:
+        rewards = rewards.reshape(-1, args.n_samples_per_prompt)
+    else:
+        rewards = rewards.view(1, -1)
+    rewards = rewards - rewards.mean(dim=-1, keepdim=True)
+    if args.advantage_estimator in ("grpo", "gspo", "cispo") and args.grpo_std_normalization:
+        rewards = rewards / (rewards.std(dim=-1, keepdim=True) + 1e-6)
+    return raw_rewards, rewards.flatten().tolist()
 
 
 async def generate_response(args, prompt, key):
@@ -73,6 +94,10 @@ async def generate_response(args, prompt, key):
         args.results_dict[key].append(sample)
 
         final = response_text.replace("<|user|>", "")
+        if "<think>" not in final and "</think>" not in final:
+            sample.reason_content = None
+            sample.response_content = final.strip() or None
+            return sample.response_content
         if "</think>" in final:
             contents = final.split("</think>")
             if len(contents) == 2 and contents[1] != "":
@@ -216,8 +241,8 @@ async def run_agent_system(args, sample):
     input_rollout_id = sample.index
 
     def _emit(samples_list):
-        for emitted_sample in samples_list:
-            emitted_sample.rollout_id = input_rollout_id
+        for s in samples_list:
+            s.rollout_id = input_rollout_id
         return samples_list
 
     problem_statement = sample.prompt
