@@ -668,6 +668,46 @@ def test_vime_validate_args_derives_dspark_from_speculative_method(monkeypatch):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "min_lr, draft_min_lr, expected_min",
+    [(0.0, None, 0.0), (1e-7, None, 1e-5), (0.0, 2e-5, 2e-5)],
+)
+def test_vime_validate_args_resolves_dspark_draft_lr(monkeypatch, min_lr, draft_min_lr, expected_min):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(
+        vllm_speculative_config={"method": "dspark"},
+        lr=1e-6,
+        min_lr=min_lr,
+        dspark_draft_lr=1e-4,
+        dspark_draft_min_lr=draft_min_lr,
+    )
+
+    args, _ = module.vime_validate_args(args)
+
+    assert args.dspark_draft_lr == 1e-4
+    assert args.dspark_draft_min_lr == pytest.approx(expected_min)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"vllm_speculative_config": {"method": "mtp"}, "dspark_draft_lr": 1e-4}, "trainer-owned DSpark draft"),
+        ({"dspark_draft_min_lr": 1e-5}, "needs --dspark-draft-lr"),
+        ({"dspark_draft_lr": 1e-5, "dspark_draft_min_lr": 1e-4}, "0 <= --dspark-draft-min-lr"),
+        ({"dspark_draft_lr": -1e-4}, "0 <= --dspark-draft-min-lr"),
+    ],
+)
+def test_vime_validate_args_rejects_invalid_dspark_draft_lr(monkeypatch, overrides, message):
+    module = load_vime_arguments_module(monkeypatch)
+    values = {"vllm_speculative_config": {"method": "dspark"}, "lr": 1e-6, "min_lr": 0.0} | overrides
+    args = make_vime_validate_args(**values)
+
+    with pytest.raises(ValueError, match=message):
+        module.vime_validate_args(args)
+
+
+@pytest.mark.unit
 def test_vime_validate_args_rejects_equal_debug_data_paths(monkeypatch):
     module = load_vime_arguments_module(monkeypatch)
     args = make_vime_validate_args(

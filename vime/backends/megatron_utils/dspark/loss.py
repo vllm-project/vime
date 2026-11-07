@@ -75,6 +75,35 @@ def _build_loss_weight_mask(
     return loss_weight_mask
 
 
+def _chunk_logsumexp(chunk: torch.Tensor) -> torch.Tensor:
+    return torch.logsumexp(chunk.float(), dim=-1, keepdim=True)
+
+
+def _vocab_chunked_logsumexp(logits: torch.Tensor) -> torch.Tensor:
+    """float32 logsumexp over the vocab dimension, upcasting one chunk at a time.
+
+    Never materializes a float32 copy of ``logits`` (2 GiB per sequence for
+    512 anchors x 7 positions x 152k vocab). With gradients enabled each chunk
+    is checkpointed, so the backward pass recomputes it from the bf16 slice
+    instead of keeping its float32 copy alive.
+    """
+    result = None
+    for start in range(0, logits.shape[-1], _L1_VOCAB_CHUNK_SIZE):
+        chunk = logits[..., start : start + _L1_VOCAB_CHUNK_SIZE]
+        if torch.is_grad_enabled() and chunk.requires_grad:
+            lse = checkpoint.checkpoint(_chunk_logsumexp, chunk, use_reentrant=False)
+        else:
+            lse = _chunk_logsumexp(chunk)
+        result = lse if result is None else torch.logaddexp(result, lse)
+    return result
+
+
+def _chunk_l1(a_chunk, b_chunk, log_za, log_zb):
+    pa = torch.exp(a_chunk.float() - log_za)
+    pb = torch.exp(b_chunk.float() - log_zb)
+    return (pa - pb).abs().sum(dim=-1)
+
+
 def _compute_accept_rate_3d(
     *,
     outputs: DSparkForwardOutput,
@@ -83,24 +112,22 @@ def _compute_accept_rate_3d(
     """Compute per-position acceptance rate: 1 - 0.5 * L1(draft_probs, target_probs).
 
     Computed without gradients (only used as a detached target for the
-    confidence head). Uses chunked logsumexp to avoid materializing the full
-    vocab-dimension softmax or difference tensors.
+    confidence head). Upcasts one vocab chunk at a time, so neither the
+    float32 logits nor the vocab-dimension softmax or difference tensors are
+    materialized in full.
     """
     if aligned_target_logits is None:
         return None
     with torch.no_grad():
-        draft_logits = outputs.draft_logits.float()
-        target_logits = aligned_target_logits.float()
-        vocab_size = draft_logits.shape[-1]
-        log_Z_draft = torch.logsumexp(draft_logits, dim=-1, keepdim=True)
-        log_Z_target = torch.logsumexp(target_logits, dim=-1, keepdim=True)
-        l1_shape = draft_logits.shape[:-1]
-        l1_dist = torch.zeros(l1_shape, device=draft_logits.device, dtype=torch.float32)
-        for start in range(0, vocab_size, _L1_VOCAB_CHUNK_SIZE):
-            end = min(start + _L1_VOCAB_CHUNK_SIZE, vocab_size)
-            pa = torch.exp(draft_logits[..., start:end] - log_Z_draft)
-            pb = torch.exp(target_logits[..., start:end] - log_Z_target)
-            l1_dist += (pa - pb).abs().sum(dim=-1)
+        draft_logits = outputs.draft_logits
+        log_Z_draft = _vocab_chunked_logsumexp(draft_logits)
+        log_Z_target = _vocab_chunked_logsumexp(aligned_target_logits)
+        l1_dist = torch.zeros(draft_logits.shape[:-1], device=draft_logits.device, dtype=torch.float32)
+        for start in range(0, draft_logits.shape[-1], _L1_VOCAB_CHUNK_SIZE):
+            end = start + _L1_VOCAB_CHUNK_SIZE
+            l1_dist += _chunk_l1(
+                draft_logits[..., start:end], aligned_target_logits[..., start:end], log_Z_draft, log_Z_target
+            )
         accept_rate_3d = (1.0 - 0.5 * l1_dist).clamp_(0.0, 1.0)
     return accept_rate_3d
 
@@ -113,41 +140,28 @@ def _compute_local_l1_term(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute L1/TV loss numerator and denominator.
 
-    Uses logsumexp + chunked exp + gradient checkpointing to avoid OOM.
-    The full softmax tensors are never materialized; each vocab chunk is
-    recomputed during backward via torch.utils.checkpoint.
+    Uses chunked logsumexp + chunked exp + gradient checkpointing to avoid OOM.
+    Each vocab chunk is upcast to float32 inside a checkpointed function, so
+    only bf16 slices of the logits are kept for backward and neither the
+    float32 logits nor the full softmax tensors are ever materialized.
     """
     zero = outputs.draft_logits.new_zeros((), dtype=torch.float32)
     if aligned_target_logits is None:
         return zero, zero
-    draft_logits = outputs.draft_logits.float()
-    target_logits = aligned_target_logits.float()
-    vocab_size = draft_logits.shape[-1]
+    draft_logits = outputs.draft_logits
+    target_logits = aligned_target_logits
 
-    # Log partition functions (small, no OOM risk)
-    log_Z_draft = torch.logsumexp(draft_logits, dim=-1, keepdim=True)
-    log_Z_target = torch.logsumexp(target_logits, dim=-1, keepdim=True)
+    log_Z_draft = _vocab_chunked_logsumexp(draft_logits)
+    with torch.no_grad():
+        log_Z_target = _vocab_chunked_logsumexp(target_logits)
 
-    # Chunked L1: sum_i |exp(a_i - log_Z_a) - exp(b_i - log_Z_b)|
-    # Each chunk creates a temporary of shape (..., chunk_size), well under
-    # the torch_memory_saver margin. Gradient checkpointing ensures chunk
-    # intermediates are NOT saved for backward (recomputed instead).
-    l1_shape = draft_logits.shape[:-1]
-    l1_dist = torch.zeros(l1_shape, device=draft_logits.device, dtype=torch.float32)
-
-    def _chunk_l1(a_chunk, b_chunk, log_za, log_zb):
-        pa = torch.exp(a_chunk - log_za)
-        pb = torch.exp(b_chunk - log_zb)
-        return (pa - pb).abs().sum(dim=-1)
-
-    for start in range(0, vocab_size, _L1_VOCAB_CHUNK_SIZE):
-        end = min(start + _L1_VOCAB_CHUNK_SIZE, vocab_size)
-        a_slice = draft_logits[..., start:end]
-        b_slice = target_logits[..., start:end]
+    l1_dist = torch.zeros(draft_logits.shape[:-1], device=draft_logits.device, dtype=torch.float32)
+    for start in range(0, draft_logits.shape[-1], _L1_VOCAB_CHUNK_SIZE):
+        end = start + _L1_VOCAB_CHUNK_SIZE
         chunk_l1 = checkpoint.checkpoint(
             _chunk_l1,
-            a_slice,
-            b_slice,
+            draft_logits[..., start:end],
+            target_logits[..., start:end],
             log_Z_draft,
             log_Z_target,
             use_reentrant=False,

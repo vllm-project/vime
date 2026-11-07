@@ -312,11 +312,24 @@ def setup_model_and_optimizer(
         assert config.optimizer == "adam", "Stateless Adam only supports --optimizer adam."
         assert args.no_save_optim, "Stateless Adam does not save Adam moment states. Please set --no-save-optim."
 
+    config_overrides = None
+    if getattr(args, "dspark_enabled", False) and getattr(args, "dspark_draft_lr", None) is not None:
+        from megatron.core.optimizer import get_standard_config_overrides
+        from megatron.core.optimizer.optimizer_config import ParamKey, ParamPredicate
+
+        from .dspark.modeling import dspark_draft_lr_override, is_dspark_draft_parameter
+
+        # Megatron applies its standard overrides (weight-decay skips) only when none are passed.
+        config_overrides = get_standard_config_overrides(config)
+        draft_key = ParamKey(predicate=ParamPredicate(name="dspark_draft", fn=is_dspark_draft_parameter))
+        config_overrides[draft_key] = dspark_draft_lr_override(args)
+
     optimizer_context = _patch_megatron_adam(StatelessAdam) if args.use_stateless_adam else nullcontext()
     with optimizer_context:
         optimizer = get_megatron_optimizer(
             config=config,
             model_chunks=model,
+            config_overrides=config_overrides,
             use_gloo_process_groups=args.enable_gloo_process_groups,
         )
     if config.use_precision_aware_optimizer:

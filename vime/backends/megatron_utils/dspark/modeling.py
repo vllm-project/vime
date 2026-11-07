@@ -15,6 +15,7 @@ The model is attached as ``policy_chunk.draft_model`` before DDP wrapping,
 following the NeMo RL Eagle3 pattern.
 """
 
+import importlib
 import logging
 
 import torch
@@ -35,6 +36,8 @@ from .common import (
 from .markov_head import build_markov_head
 
 logger = logging.getLogger(__name__)
+
+DSPARK_GRAD_NORM_GROUP = "dspark"
 
 
 def _all_gather_vocab_weight(weight: torch.Tensor) -> torch.Tensor:
@@ -563,6 +566,30 @@ def build_dspark_model(
     return model
 
 
+def register_dspark_grad_norm_group() -> None:
+    """Clip the draft's gradients by their own norm, apart from the policy's.
+
+    Megatron rejects a ``grad_norm_group`` tag that is not listed in
+    ``SEPARATE_GRAD_NORM_GROUPS`` (only ``"mtp"`` out of the box). Versions
+    without that list ignore the tag, so the draft is clipped with the policy.
+    """
+    optimizer = importlib.import_module("megatron.core.optimizer.optimizer")
+    groups = getattr(optimizer, "SEPARATE_GRAD_NORM_GROUPS", None)
+    if groups is not None and DSPARK_GRAD_NORM_GROUP not in groups:
+        optimizer.SEPARATE_GRAD_NORM_GROUPS = (*groups, DSPARK_GRAD_NORM_GROUP)
+
+
+def is_dspark_draft_parameter(param: torch.nn.Parameter) -> bool:
+    return getattr(param, "grad_norm_group", None) == DSPARK_GRAD_NORM_GROUP
+
+
+def dspark_draft_lr_override(args) -> dict[str, float] | None:
+    """Megatron param-group override giving the draft its own learning rates, or None to share the policy's."""
+    if not getattr(args, "dspark_enabled", False) or getattr(args, "dspark_draft_lr", None) is None:
+        return None
+    return {"max_lr": args.dspark_draft_lr, "min_lr": args.dspark_draft_min_lr}
+
+
 def attach_dspark_model(model, args, config) -> None:
     dspark_config = DSparkConfig(
         block_size=args.dspark_block_size,
@@ -598,5 +625,6 @@ def attach_dspark_model(model, args, config) -> None:
         policy_lm_head,
         args.dspark_pretrained_model,
     )
+    register_dspark_grad_norm_group()
     for param in model.draft_model.parameters():
-        param.grad_norm_group = "dspark"
+        param.grad_norm_group = DSPARK_GRAD_NORM_GROUP

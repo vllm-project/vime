@@ -1720,6 +1720,20 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 help="Weight multiplying draft loss added to policy loss.",
             )
             parser.add_argument(
+                "--dspark-draft-lr",
+                type=float,
+                default=None,
+                help="Peak learning rate of the DSpark draft parameters, which otherwise share --lr with "
+                "the policy. The draft keeps the policy's schedule and optimizer.",
+            )
+            parser.add_argument(
+                "--dspark-draft-min-lr",
+                type=float,
+                default=None,
+                help="Minimum learning rate of the DSpark draft parameters. Defaults to --min-lr scaled "
+                "by --dspark-draft-lr / --lr.",
+            )
+            parser.add_argument(
                 "--dspark-disable-confidence-head",
                 action="store_true",
                 default=False,
@@ -2024,6 +2038,21 @@ def vime_validate_args(args):
     validate_score_centering_args(args)
     args.eval_datasets = _resolve_eval_datasets(args)
     args.dspark_enabled = (getattr(args, "vllm_speculative_config", None) or {}).get("method") == "dspark"
+    draft_lr = getattr(args, "dspark_draft_lr", None)
+    draft_min_lr = getattr(args, "dspark_draft_min_lr", None)
+    if draft_lr is not None or draft_min_lr is not None:
+        if not args.dspark_enabled:
+            raise ValueError(
+                "--dspark-draft-lr and --dspark-draft-min-lr need a trainer-owned DSpark draft "
+                '(--vllm-speculative-config with "method": "dspark").'
+            )
+        if draft_lr is None:
+            raise ValueError("--dspark-draft-min-lr needs --dspark-draft-lr.")
+        if draft_min_lr is None:
+            draft_min_lr = (args.min_lr or 0.0) * draft_lr / args.lr if args.lr else 0.0
+        if not 0.0 <= draft_min_lr <= draft_lr:
+            raise ValueError("DSpark draft learning rates need 0 <= --dspark-draft-min-lr <= --dspark-draft-lr.")
+        args.dspark_draft_min_lr = draft_min_lr
 
     if args.draft_feature_mode == "collect-only":
         if args.micro_batch_size != 1:
