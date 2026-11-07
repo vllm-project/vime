@@ -13,8 +13,10 @@ protocols handle identically.
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import logging
+import math
 import time
 from collections.abc import Callable
 from typing import Any
@@ -23,10 +25,19 @@ import aiohttp
 from aiohttp import web
 
 from vime.agent.parsing import parse_model_output
-from vime.agent.trajectory import TrajectoryManager, TurnRecord
-
+from vime.agent.trajectory import REPLAY_FIELDS, TrajectoryManager, TurnRecord
+from vime.rollout.vllm_rollout import _inference_generate_meta_info, _score_centering_metadata
+from vime.utils.score_centering import score_centering_request
+from vime.utils.types import Sample
 
 __all__ = ["TurnRecord"]
+
+
+@dataclasses.dataclass
+class PromptPrefix:
+    messages: list[dict]
+    tools: list[dict] | None
+    turn: TurnRecord
 
 
 @dataclasses.dataclass
@@ -39,6 +50,8 @@ class Session:
 
     sampling_defaults: dict = dataclasses.field(default_factory=dict)
     max_context_tokens: int = 0
+    apply_chat_template_kwargs: dict = dataclasses.field(default_factory=dict)
+    prompt_prefixes: list[PromptPrefix] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass
@@ -60,6 +73,7 @@ def _render_token_ids(
     *,
     tools: list[dict] | None,
     add_generation_prompt: bool = True,
+    apply_chat_template_kwargs: dict | None = None,
 ) -> list[int]:
     """Render a chat-message list to token ids with the served chat template."""
     enc = tokenizer.apply_chat_template(
@@ -67,9 +81,56 @@ def _render_token_ids(
         tools=tools,
         tokenize=True,
         add_generation_prompt=add_generation_prompt,
+        **(apply_chat_template_kwargs or {}),
     )
     ids = enc["input_ids"] if hasattr(enc, "__getitem__") and "input_ids" in enc else enc
     return list(ids)
+
+
+def _session_prompt_ids(messages, tokenizer, *, tools, session: Session) -> list[int]:
+    """Extend a replayed assistant message using its original model tokens.
+
+    Wire clients can omit reasoning and reformat tool arguments. Match the
+    complete message history and tool schema first, then use the template only
+    for the new suffix. A changed/compacted history remains a separate branch.
+    The end-of-message special token is the splice boundary; if the template
+    cannot prove that boundary, leave its normal rendering intact.
+    """
+    kwargs = session.apply_chat_template_kwargs
+    rendered = _render_token_ids(messages, tokenizer, tools=tools, apply_chat_template_kwargs=kwargs)
+    special_ids = set(getattr(tokenizer, "all_special_ids", ()))
+    for prefix in sorted(session.prompt_prefixes, key=lambda p: len(p.messages), reverse=True):
+        turn = prefix.turn
+        depth = len(prefix.messages)
+        if (
+            prefix.tools != tools
+            or depth >= len(messages)
+            or prefix.messages != messages[:depth]
+            or turn.finish_reason != "stop"
+            or not turn.output_ids
+            or turn.output_ids[-1] not in special_ids
+        ):
+            continue
+        # Two branches may have identical visible replies but different hidden
+        # reasoning. Without a unique token history, do not guess which one the
+        # client echoed.
+        if any(
+            other.messages == prefix.messages
+            and other.tools == tools
+            and (other.turn.prompt_ids != turn.prompt_ids or other.turn.output_ids != turn.output_ids)
+            for other in session.prompt_prefixes
+        ):
+            continue
+        anchor = _render_token_ids(
+            messages[:depth], tokenizer, tools=tools, add_generation_prompt=False, apply_chat_template_kwargs=kwargs
+        )
+        if rendered[: len(anchor)] != anchor:
+            continue
+        end = next((i for i in range(len(anchor) - 1, -1, -1) if anchor[i] == turn.output_ids[-1]), None)
+        if end is None or tokenizer.decode(anchor[end + 1 :], skip_special_tokens=False).strip():
+            continue
+        return turn.prompt_ids + turn.output_ids + rendered[end + 1 :]
+    return rendered
 
 
 def flatten_content(c: Any) -> str:
@@ -147,8 +208,10 @@ class BaseAdapter:
         max_turns_per_sid: int | None = None,
         fork_threshold_tokens: int | None = None,
         debug_callback: Callable[..., None] | None = None,
+        rollout_args: Any = None,
     ) -> None:
         self.tokenizer = tokenizer
+        self.rollout_args = rollout_args
         self.vllm_url = vllm_url.rstrip("/") if isinstance(vllm_url, str) else vllm_url
         self.tool_parser = tool_parser
         self.reasoning_parser = reasoning_parser
@@ -212,6 +275,7 @@ class BaseAdapter:
         *,
         sampling_defaults: dict | None = None,
         max_context_tokens: int = 0,
+        apply_chat_template_kwargs: dict | None = None,
     ) -> None:
         """Register a fresh per-sid Session; sids must be unique."""
         if sid in self.store:
@@ -219,6 +283,7 @@ class BaseAdapter:
         self.store[sid] = Session(
             sampling_defaults=dict(sampling_defaults or {}),
             max_context_tokens=int(max_context_tokens or 0),
+            apply_chat_template_kwargs=dict(apply_chat_template_kwargs or {}),
         )
 
     async def shutdown_session(self, sid: str, *, wait_timeout: float = 5.0) -> None:
@@ -338,7 +403,12 @@ class BaseAdapter:
         t0 = time.monotonic()
         try:
             translated, tools_schema = self._translate(body)
-            prompt_ids = _render_token_ids(translated, tok, tools=tools_schema, add_generation_prompt=True)
+            prompt_ids = _session_prompt_ids(
+                translated,
+                tok,
+                tools=tools_schema,
+                session=s,
+            )
 
             turn = await call_vllm_generate(prompt_ids, s, body, adapter=self, session_id=sid)
 
@@ -387,6 +457,9 @@ class BaseAdapter:
                 prompt_messages=translated,
                 response_message=reply.manager_message,
                 metadata={"sid": sid},
+            )
+            s.prompt_prefixes.append(
+                PromptPrefix(copy.deepcopy(translated + [reply.manager_message]), copy.deepcopy(tools_schema), turn)
             )
             return response
         finally:
@@ -488,18 +561,9 @@ def _tokens_and_logprobs_from_choice(choice: dict) -> tuple[list[int], list[floa
         return [], []
     tids = [int(x) for x in tids_raw]
     lp = choice.get("logprobs")
-    if not isinstance(lp, dict):
-        return tids, [0.0] * len(tids)
-    content = lp.get("content")
-    if isinstance(content, list) and content:
-        lps: list[float] = []
-        for i in range(len(tids)):
-            if i < len(content) and isinstance(content[i], dict):
-                lps.append(float(content[i].get("logprob", 0.0)))
-            else:
-                lps.append(0.0)
-        return tids, lps
-    return tids, [0.0] * len(tids)
+    content = (lp.get("content") or []) if isinstance(lp, dict) else []
+    pairs = list(zip(tids, content, strict=False))
+    return [token_id for token_id, _ in pairs], [float(item["logprob"]) for _, item in pairs]
 
 
 async def call_vllm_generate(
@@ -516,16 +580,24 @@ async def call_vllm_generate(
     """
     logger = adapter.logger
     sp = _sampling_params(session, body, max_token_keys=adapter.max_token_keys, stop_keys=adapter.stop_keys)
+    score_centering_request(adapter.rollout_args, sp)
+    score_centering = getattr(adapter.rollout_args, "use_score_centering", False)
+    routing_replay = getattr(adapter.rollout_args, "use_rollout_routing_replay", False)
 
-    if session.max_context_tokens > 0:
-        remaining_context = session.max_context_tokens - len(prompt_ids)
+    context_limit = session.max_context_tokens
+    server_context = int(getattr(adapter.rollout_args, "vllm_max_model_len", 0) or context_limit)
+    bounded_context = context_limit > 0 or server_context > 0
+    if server_context > 0:
+        context_limit = min(context_limit, server_context) if context_limit > 0 else server_context
+    if bounded_context:
+        remaining_context = context_limit - len(prompt_ids)
         if remaining_context <= 0:
             logger.warning(
                 "[%s] sid=%s prompt exceeds max_context_tokens (%d >= %d)",
                 adapter.log_prefix,
                 session_id,
                 len(prompt_ids),
-                session.max_context_tokens,
+                context_limit,
             )
             return TurnRecord(prompt_ids=list(prompt_ids), output_ids=[], finish_reason="length")
         sp["max_new_tokens"] = min(int(sp.get("max_new_tokens", remaining_context)), remaining_context)
@@ -535,6 +607,14 @@ async def call_vllm_generate(
         "token_ids": list(prompt_ids),
         "sampling_params": _vllm_sampling_body(sp),
     }
+    if sp.get("top_p", 1.0) < 1:
+        payload["sampling_params"]["return_sampling_mask"] = True
+        if score_centering:
+            payload["sampling_params"]["return_sampling_mask_logprobs"] = True
+    elif score_centering:
+        payload["sampling_params"]["logprobs"] = adapter.rollout_args.score_centering_top_k + 1
+    if routing_replay:
+        payload["sampling_params"]["routed_experts_prompt_start"] = 0
     # session_id routes via vllm-router's consistent_hash policy (x-session-id header);
     # see vime ``vllm_rollout.py`` headers handling.
     headers = {"x-session-id": session_id} if session_id and session_id != "default" else None
@@ -557,12 +637,41 @@ async def call_vllm_generate(
                 raise RuntimeError(f"vllm upstream {r.status}: {text[:400]}")
             data = await r.json(content_type=None)
         choice = (data.get("choices") or [{}])[0]
+        if choice.get("logprobs") is None:
+            raise ValueError("vLLM must return sampled token logprobs for token-exact training")
         output_ids, output_log_probs = _tokens_and_logprobs_from_choice(choice)
+        meta = _inference_generate_meta_info(data)
+        if "completion_tokens" in meta and int(meta["completion_tokens"]) != len(output_ids):
+            raise ValueError("vLLM completion_tokens does not match the captured output token count")
+        if choice.get("token_ids") != output_ids:
+            raise ValueError("vLLM token_ids do not match the token IDs paired with logprobs")
+        if [entry.get("token_id") for entry in choice["logprobs"].get("content", [])] != output_ids:
+            raise ValueError("vLLM logprob token IDs do not match token_ids")
         fr = choice.get("finish_reason")
         finish = fr if isinstance(fr, str) and fr else "stop"
+        if any(not isinstance(token, int) or token < 0 for token in output_ids) or not all(
+            math.isfinite(lp) for lp in output_log_probs
+        ):
+            raise ValueError("vLLM returned invalid output token IDs or non-finite logprobs")
+        if score_centering:
+            score_meta, normalized = _score_centering_metadata(
+                choice, output_ids, top_p=sp.get("top_p", 1.0), top_k=adapter.rollout_args.score_centering_top_k
+            )
+            meta.update(score_meta)
+            if normalized is not None:
+                output_log_probs = normalized
+        captured = Sample(tokens=list(prompt_ids))
+        captured.append_response_tokens(
+            adapter.rollout_args, tokens=output_ids, log_probs=output_log_probs, meta_info=meta
+        )
+        if output_ids and sp.get("top_p", 1.0) < 1 and captured.rollout_top_p_token_ids is None:
+            raise ValueError("vLLM must return nucleus token IDs and offsets for top-p replay")
+        if output_ids and routing_replay and captured.rollout_routed_experts is None:
+            raise ValueError("vLLM must return routed experts for R3")
+        replay = {key: getattr(captured, key) for key in REPLAY_FIELDS if getattr(captured, key) is not None}
     except (asyncio.CancelledError, aiohttp.ClientError, asyncio.TimeoutError) as e:
-        # vLLM has no per-request abort endpoint. Closing this router request also
-        # closes its selected worker request, so vLLM cancels the engine request.
+        # Close the HTTP request context on cancellation; do not issue a
+        # separate worker-broadcast abort here.
         logger.debug("[%s] sid=%s turn aborted: %s", adapter.log_prefix, session_id, type(e).__name__)
         raise
 
@@ -571,6 +680,7 @@ async def call_vllm_generate(
         output_ids=output_ids,
         finish_reason=finish,
         output_log_probs=output_log_probs,
+        replay=replay or None,
     )
 
 

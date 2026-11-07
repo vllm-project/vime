@@ -60,9 +60,8 @@ def update_module():
     hf_direct.HfWeightIteratorDirect = MagicMock(return_value=iterator)
     sys.modules[HF_DIRECT_MODULE] = hf_direct
 
-    distributed = types.ModuleType(DISTRIBUTED_MODULE)
+    distributed = importlib.import_module(DISTRIBUTED_MODULE)
     distributed.post_process_weights = MagicMock()
-    sys.modules[DISTRIBUTED_MODULE] = distributed
 
     torch_dist.get_rank = MagicMock(return_value=0)
     torch_dist.get_world_size = MagicMock(return_value=1)
@@ -96,6 +95,7 @@ class RecordingRemoteMethod:
 @dataclass
 class RecordingEngine:
     init_weight_transfer_engine: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
+    destroy_weights_update_group: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     start_weight_update: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     start_draft_weight_update: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
     update_weights: RecordingRemoteMethod = field(default_factory=RecordingRemoteMethod)
@@ -106,8 +106,10 @@ class RecordingEngine:
 
 
 class RecordingTrainer:
-    def __init__(self, client, *, source=None, fail=False):
+    def __init__(self, client, *, source=None, fail=False, backend="nccl", is_sender=True):
         self.client = client
+        self.init_info_cls = types.SimpleNamespace(backend=backend)
+        self.is_sender = is_sender
         self.source = source
         self.fail = fail
         self.draft_states = []
@@ -133,6 +135,7 @@ def _args(**overrides):
         "actor_num_gpus_per_node": 2,
         "rollout_num_gpus_per_engine": 2,
         "update_weight_buffer_size": 1024,
+        "flush_cache_interval": 1,
         "enable_mtp_training": False,
         "dspark_enabled": False,
         "dspark_pretrained_model": None,
@@ -178,7 +181,7 @@ def _install_ipc_trainer_stubs(monkeypatch, created):
         @staticmethod
         def trainer_init(init_info, *, client, source):
             created.append((init_info, client, source))
-            return RecordingTrainer(client)
+            return RecordingTrainer(client, backend="ipc")
 
     factory_module.WeightTransferTrainerFactory = Factory
     ipc_module.IPCTrainerInitInfo = IPCTrainerInitInfo
@@ -187,9 +190,10 @@ def _install_ipc_trainer_stubs(monkeypatch, created):
 
 
 @pytest.mark.unit
-def test_connect_uses_native_ipc_and_nccl_trainers(update_module, monkeypatch):
+@pytest.mark.parametrize("backend,is_sender", [("nccl", True), ("nccl", False), ("ipc", True)])
+def test_connect_uses_native_ipc_and_nccl_trainers(update_module, monkeypatch, backend, is_sender):
     updater = _updater(update_module)
-    old_trainer = RecordingTrainer(object())
+    old_trainer = RecordingTrainer(object(), backend=backend, is_sender=is_sender)
     updater._native_trainers = [old_trainer]
     engines = [RecordingEngine(), RecordingEngine()]
     ipc_created = []
@@ -201,7 +205,7 @@ def test_connect_uses_native_ipc_and_nccl_trainers(update_module, monkeypatch):
         nccl_created.append((client, source, gpu_counts))
         return RecordingTrainer(client)
 
-    monkeypatch.setattr(update_module, "create_nccl_trainer", create_nccl)
+    monkeypatch.setattr(update_module, "connect_rollout_engines_from_distributed", create_nccl)
     updater.connect_rollout_engines(
         engines,
         object(),
@@ -210,6 +214,8 @@ def test_connect_uses_native_ipc_and_nccl_trainers(update_module, monkeypatch):
     )
 
     assert old_trainer.shutdown_calls == 1
+    assert engines[0].destroy_weights_update_group.calls == []
+    assert len(engines[1].destroy_weights_update_group.calls) == int(backend == "nccl" and is_sender)
     assert len(updater._native_trainers) == 2
     assert ipc_created[0][0].packed is True
     assert ipc_created[0][2] is updater._source

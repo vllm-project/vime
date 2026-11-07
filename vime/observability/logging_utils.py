@@ -1,8 +1,5 @@
 import logging
 
-import wandb
-
-from vime.observability import wandb_utils
 from vime.observability.tensorboard_utils import _TensorboardAdapter
 
 _LOGGER_CONFIGURED = False
@@ -25,6 +22,11 @@ def configure_logger(prefix: str = ""):
 
 
 def init_tracking(args, primary: bool = True, **kwargs):
+    if not args.use_wandb:
+        args.wandb_run_id = None
+        return
+    from vime.observability import wandb_utils
+
     if primary:
         wandb_utils.init_wandb_primary(args, **kwargs)
     else:
@@ -34,6 +36,8 @@ def init_tracking(args, primary: bool = True, **kwargs):
 def finish_tracking(args):
     if not args.use_wandb:
         return
+    import wandb
+
     try:
         if wandb.run is not None:
             wandb.finish()
@@ -44,6 +48,8 @@ def finish_tracking(args):
 # TODO further refactor, e.g. put TensorBoard init to the "init" part
 def log(args, metrics, step_key: str):
     if args.use_wandb:
+        import wandb
+
         wandb.log(metrics)
 
     if args.use_tensorboard:

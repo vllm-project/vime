@@ -65,6 +65,7 @@ WORKER_COMMAND = shlex.split(
     f"vllm serve {MODEL_PATH} --host {HOST} --port {WORKER_PORT} --dtype bfloat16 "
     f"--tensor-parallel-size {NUM_GPUS} --gpu-memory-utilization {GPU_MEMORY_UTILIZATION} "
     f"--max-model-len {MAX_MODEL_LEN} --max-num-seqs {MAX_NUM_SEQS} --enforce-eager "
+    "--enable-scale-out "
     "--generation-config vllm --logprobs-mode processed_logprobs"
 )
 ROUTER_COMMAND = shlex.split(

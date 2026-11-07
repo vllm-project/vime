@@ -37,6 +37,7 @@ def _attention_tensor(
         "self_attention.linear_proj.weight": "self_attn.o_proj.weight",
         "self_attention.linear_proj.bias": "self_attn.o_proj.bias",
         "self_attention.linear_qkv.layer_norm_weight": "input_layernorm.weight",
+        "input_layernorm.weight": "input_layernorm.weight",
         "self_attention.q_layernorm.weight": "self_attn.q_norm.weight",
         "self_attention.k_layernorm.weight": "self_attn.k_norm.weight",
         "self_attention.core_attention.softmax_offset": "self_attn.sinks",

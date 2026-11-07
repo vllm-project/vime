@@ -108,17 +108,16 @@ VLLM_ARGS=(
    --vllm-gpu-memory-utilization 0.70
    --vllm-enable-expert-parallel
    --vllm-data-parallel-size 64
-
-
+   --vllm-all2all-backend deepep_high_throughput
    --prefill-num-servers 1
 
    # mtp
 
    # dsa
-   --vllm-max-cudagraph-capture-size 40
+   --vllm-max-cudagraph-capture-size 32
 
    --vllm-max-num-seqs 512
-   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":4}'
+   --vllm-speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 
 )
 

@@ -1,254 +1,255 @@
-diff --git a/vllm/entrypoints/scale_out/token_in_token_out/protocol.py b/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
-index f304bf677ba..71a17e9363d 100644
 --- a/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
 +++ b/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
-@@ -240,6 +240,8 @@ class GenerateStreamResponse(BaseModel):
-     )
-     choices: list[GenerateResponseStreamChoice]
-     usage: UsageInfo | None = Field(default=None)
+@@ -469,6 +469,7 @@
+     prompt_token_ids: list[NonNegativeInt] | None = None
+     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+     metrics: PerRequestMetrics | None = None
 +    weight_version: str | None = None
-+    request_spec_decode_stats: dict[str, Any] | None = Field(default=None)
  
  
- class GenerateResponse(BaseModel):
-@@ -255,6 +257,8 @@ class GenerateResponse(BaseModel):
-     created: int | None = None
-     choices: list[GenerateResponseChoice]
-     usage: UsageInfo | None = Field(default=None)
+ class GenerateTokensStreamResponse(GenerateStreamResponseBase):
+@@ -498,6 +499,7 @@
+     prompt_token_ids: list[NonNegativeInt] | None = None
+     mm_placeholders: dict[str, list[PlaceholderRangeInfo]] | None = None
+     metrics: PerRequestMetrics | None = None
 +    weight_version: str | None = None
-+    request_spec_decode_stats: dict[str, Any] | None = Field(default=None)
-     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
  
      kv_transfer_params: dict[str, Any] | None = Field(
-diff --git a/vllm/entrypoints/scale_out/token_in_token_out/serving.py b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
-index bbbd85137ce..2edec47e1b1 100644
+         default=None,
 --- a/vllm/entrypoints/scale_out/token_in_token_out/serving.py
 +++ b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
-@@ -14,6 +14,7 @@ from vllm.engine.protocol import EngineClient
- from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
- from vllm.entrypoints.generate.base.serving import (
-     GenerateBaseServing,
-+    build_spec_decoding_metrics,
-     clamp_prompt_logprobs,
- )
- from vllm.entrypoints.openai.chat_completion.protocol import (
-@@ -261,6 +262,7 @@ class ServingTokens(GenerateBaseServing):
-         )
- 
-         assert result_generator is not None
-+        weight_version = await self.engine_client.get_weight_version()
- 
-         if request.stream:
-             return self.serve_tokens_stream_generator(
-@@ -269,10 +271,16 @@ class ServingTokens(GenerateBaseServing):
-                 request_id,
-                 model_name,
-                 request_metadata,
-+                weight_version,
-             )
- 
-         return await self.serve_tokens_full_generator(
--            request, result_generator, request_id, model_name, request_metadata
-+            request,
-+            result_generator,
-+            request_id,
-+            model_name,
-+            request_metadata,
-+            weight_version,
-         )
- 
-     async def serve_tokens_full_generator(
-@@ -282,6 +290,7 @@ class ServingTokens(GenerateBaseServing):
-         request_id: str,
-         model_name: str,
-         request_metadata: RequestResponseMetadata,
-+        weight_version: str | None,
-     ) -> ErrorResponse | GenerateResponse:
-         created_time = int(time.time())
-         final_res: RequestOutput | None = None
-@@ -355,6 +364,11 @@ class ServingTokens(GenerateBaseServing):
-                 cached_tokens=final_res.num_cached_tokens
-             )
- 
-+        spec_decode_metrics = build_spec_decoding_metrics(final_res)
-+        request_spec_decode_stats = (
-+            spec_decode_metrics.model_dump() if spec_decode_metrics else None
-+        )
-+
-         request_metadata.final_usage_info = usage
- 
-         response = GenerateResponse(
-@@ -363,6 +377,8 @@ class ServingTokens(GenerateBaseServing):
-             model=model_name,
-             choices=choices,
-             usage=usage,
-+            weight_version=weight_version,
-+            request_spec_decode_stats=request_spec_decode_stats,
-             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
+@@ -504,6 +504,7 @@
+             ),
+             mm_placeholders=request._response_mm_placeholders,
+             metrics=per_request_metrics,
++            weight_version=final_res.weight_version,
              kv_transfer_params=final_res.kv_transfer_params,
              ec_transfer_params=final_res.ec_transfer_params,
-@@ -396,11 +412,13 @@ class ServingTokens(GenerateBaseServing):
-         request_id: str,
-         model_name: str,
-         request_metadata: RequestResponseMetadata,
-+        weight_version: str | None,
-     ) -> AsyncGenerator[str, None]:
-         num_prompt_tokens = 0
-         num_generated_tokens: list[int] = []
-         first_iteration = True
-         num_cached_tokens = None
-+        request_spec_decode_stats: dict[str, object] | None = None
-         sampling_params: SamplingParams = request.sampling_params
+         )
+@@ -630,6 +631,7 @@
+                     if text_mode:
+                         chunk = GenerateTextStreamResponse(
+                             request_id=request_id,
++                            weight_version=res.weight_version,
+                             choices=[
+                                 GenerateTextStreamChoice(
+                                     text=output.text, **choice_fields
+@@ -639,6 +641,7 @@
+                     else:
+                         chunk = GenerateTokensStreamResponse(
+                             request_id=request_id,
++                            weight_version=res.weight_version,
+                             choices=[GenerateTokensStreamChoice(**choice_fields)],
+                         )
  
-         include_usage, include_continuous_usage = should_include_usage(
-@@ -409,6 +427,9 @@ class ServingTokens(GenerateBaseServing):
- 
-         try:
-             async for res in result_generator:
-+                spec_decode_metrics = build_spec_decoding_metrics(res)
-+                if spec_decode_metrics is not None:
-+                    request_spec_decode_stats = spec_decode_metrics.model_dump()
-                 if first_iteration:
-                     if res.prompt_token_ids is not None:
-                         num_prompt_tokens = len(res.prompt_token_ids)
-@@ -427,9 +448,9 @@ class ServingTokens(GenerateBaseServing):
-                     self._raise_if_error(finish_reason, request_id)
- 
--                    if not delta_token_ids:
-+                    if not delta_token_ids and finish_reason is None:
-                         continue
- 
--                    if sampling_params.logprobs is not None:
-+                    if sampling_params.logprobs is not None and delta_token_ids:
-                         out_logprobs = output.logprobs
-                         assert out_logprobs is not None, "Did not output logprobs"
-                         logprobs = self._create_tokens_logprobs(
-@@ -448,6 +469,8 @@ class ServingTokens(GenerateBaseServing):
- 
-                     chunk = GenerateStreamResponse(
-                         request_id=request_id,
-+                        weight_version=weight_version,
-+                        request_spec_decode_stats=request_spec_decode_stats,
-                         choices=[
-                             GenerateResponseStreamChoice(
-                                 index=i,
-@@ -455,6 +478,11 @@ class ServingTokens(GenerateBaseServing):
-                                 finish_reason=finish_reason,
-                                 token_ids=as_list(delta_token_ids),
-                                 routed_experts=routed_experts_b64,
-+                                sampling_mask=(
-+                                    output.sampling_mask.token_ids
-+                                    if output.sampling_mask is not None
-+                                    else None
-+                                ),
-                             )
-                         ],
+@@ -656,7 +659,12 @@
+                     # Omit fields that are absent from token-bearing chunks.
+                     exclude = {
+                         name
+-                        for name in ("prompt_token_ids", "mm_placeholders", "metrics")
++                        for name in (
++                            "prompt_token_ids",
++                            "mm_placeholders",
++                            "metrics",
++                            "weight_version",
++                        )
+                         if getattr(chunk, name) is None
+                     }
+                     yield f"data: {chunk.model_dump_json(exclude=exclude)}\n\n"
+@@ -688,6 +696,7 @@
+                         choices=[],
+                         usage=final_usage_info,
+                         metrics=per_request_metrics,
++                        weight_version=last_res.weight_version if last_res else None,
                      )
-@@ -482,6 +510,8 @@ class ServingTokens(GenerateBaseServing):
-             if include_usage:
-                 final_chunk = GenerateStreamResponse(
-                     request_id=request_id,
-+                    weight_version=weight_version,
-+                    request_spec_decode_stats=request_spec_decode_stats,
-                     choices=[],
-                     usage=final_usage_info,
-                 )
-diff --git a/vllm/model_executor/models/qwen3_omni_moe_thinker.py b/vllm/model_executor/models/qwen3_omni_moe_thinker.py
---- a/vllm/model_executor/models/qwen3_omni_moe_thinker.py
-+++ b/vllm/model_executor/models/qwen3_omni_moe_thinker.py
-@@ -45,6 +45,6 @@ from vllm.compilation.decorators import support_torch_compile
- from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
- from vllm.config.speech_to_text import SpeechToTextParams
--from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-+from vllm.distributed import get_pp_group
- from vllm.inputs import PromptType
- from vllm.logger import init_logger
- from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
-@@ -188,8 +188,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
-         self.embed_dim = config.d_model
-         self.num_heads = config.encoder_attention_heads
-         self.head_dim = self.embed_dim // self.num_heads
--        tp_size = get_tensor_model_parallel_world_size()
--        self.num_local_heads = self.num_heads // tp_size
-+        self.num_local_heads = self.num_heads
+                 else:
+                     final_chunk = GenerateTokensStreamResponse(
+@@ -695,6 +704,7 @@
+                         choices=[],
+                         usage=final_usage_info,
+                         metrics=per_request_metrics,
++                        weight_version=last_res.weight_version if last_res else None,
+                     )
+                 yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
  
-         if (self.head_dim * self.num_heads) != self.embed_dim:
-             raise ValueError(
-@@ -213,6 +212,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
-             total_num_kv_heads=self.num_heads,
-             bias=True,
-             prefix=f"{prefix}.qkv_proj",
-+            disable_tp=True,
-         )
- 
-         self.out_proj = RowParallelLinear(
-@@ -213,6 +213,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
-             output_size=self.embed_dim,
-             bias=True,
-             prefix=f"{prefix}.out_proj",
-+            disable_tp=True,
-         )
- 
-         self.attn = MMEncoderAttention(
-diff --git a/vllm/outputs.py b/vllm/outputs.py
-index 84b9fccdc88..5f1685bef83 100644
 --- a/vllm/outputs.py
 +++ b/vllm/outputs.py
-@@ -189,6 +189,13 @@ class RequestOutput:
-                         if next_completion.logprobs:
-                             assert completion.logprobs is not None
-                             completion.logprobs.extend(next_completion.logprobs)  # type: ignore[arg-type]
-+                        if next_completion.sampling_mask is not None:
-+                            if completion.sampling_mask is None:
-+                                completion.sampling_mask = next_completion.sampling_mask
-+                            else:
-+                                completion.sampling_mask.token_ids.extend(
-+                                    next_completion.sampling_mask.token_ids
-+                                )
-                         completion.cumulative_logprob = (
-                             next_completion.cumulative_logprob
-                         )
-diff --git a/vllm/v1/engine/output_processor.py b/vllm/v1/engine/output_processor.py
-index 6238fbc8175..8260c3d326e 100644
+@@ -143,6 +143,7 @@
+             prefix-cache writes for this request.
+         kv_transfer_params: The params for remote K/V transfer.
+         ec_transfer_params: The params for remote encoder-cache transfer.
++        weight_version: The weight version for this output.
+ 
+     """
+ 
+@@ -164,6 +165,7 @@
+         prompt_token_id_logprobs: np.ndarray | None = None,
+         kv_transfer_params: dict[str, Any] | None = None,
+         ec_transfer_params: dict[str, Any] | None = None,
++        weight_version: str | None = None,
+         # Forward compatibility, code that uses args added in new release can
+         # still run with older versions of vLLM without breaking.
+         **kwargs: Any,
+@@ -187,12 +189,14 @@
+         self.num_cache_creation_tokens = num_cache_creation_tokens
+         self.kv_transfer_params = kv_transfer_params
+         self.ec_transfer_params = ec_transfer_params
++        self.weight_version = weight_version
+ 
+     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
+         """Merge subsequent RequestOutput into this one"""
+         self.finished |= next_output.finished
+         self.kv_transfer_params = next_output.kv_transfer_params
+         self.ec_transfer_params = next_output.ec_transfer_params
++        self.weight_version = next_output.weight_version
+ 
+         for next_completion in next_output.outputs:
+             for i, completion in enumerate(self.outputs):
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -2003,6 +2003,7 @@
+         self,
+         scheduler_output: SchedulerOutput,
+         model_runner_output: ModelRunnerOutput,
++        weight_version: str | None = None,
+     ) -> dict[int, EngineCoreOutputs]:
+         sampled_token_ids = model_runner_output.sampled_token_ids
+         logprobs = model_runner_output.logprobs
+@@ -2240,6 +2241,7 @@
+                     EngineCoreOutput(
+                         request_id=req_id,
+                         new_token_ids=new_token_ids,
++                        weight_version=weight_version,
+                         finish_reason=finish_reason,
+                         new_logprobs=new_logprobs,
+                         new_sampling_mask=new_sampling_mask,
+@@ -2295,6 +2297,7 @@
+                     EngineCoreOutput(
+                         request_id=request.request_id,
+                         new_token_ids=[],
++                        weight_version=weight_version,
+                         finish_reason=request.get_finished_reason(),
+                         events=request.take_events(),
+                         trace_headers=request.trace_headers,
+--- a/vllm/v1/engine/__init__.py
++++ b/vllm/v1/engine/__init__.py
+@@ -238,6 +238,9 @@
+ 
+     # [num_scored_rows, num_token_ids]; appended last for array_like compatibility.
+     prompt_token_id_logprobs: torch.Tensor | None = None
++    weight_version: str | None = None
++    remote_kv_wait_time: float | None = None
++    kv_transfer_metrics: dict[str, float] | None = None
+ 
+     @property
+     def finished(self) -> bool:
+--- a/vllm/v1/engine/core.py
++++ b/vllm/v1/engine/core.py
+@@ -652,7 +652,7 @@
+         # during the model execution.
+         self._process_aborts_queue()
+         engine_core_outputs = self.scheduler.update_from_output(
+-            scheduler_output, model_output
++            scheduler_output, model_output, self._weight_version
+         )
+         self._attach_iteration_details(engine_core_outputs, iteration_details)
+ 
+@@ -753,7 +753,7 @@
+         # during the model execution.
+         self._process_aborts_queue()
+         engine_core_outputs = self.scheduler.update_from_output(
+-            scheduler_output, model_output
++            scheduler_output, model_output, self._weight_version
+         )
+         self._attach_iteration_details(engine_core_outputs, iteration_details)
+ 
+@@ -2050,7 +2050,12 @@
+         self, req_ids: list[str], client_index: int, finish_reason: FinishReason
+     ) -> None:
+         outputs = [
+-            EngineCoreOutput(req_id, [], finish_reason=finish_reason)
++            EngineCoreOutput(
++                req_id,
++                [],
++                finish_reason=finish_reason,
++                weight_version=self._weight_version,
++            )
+             for req_id in req_ids
+         ]
+         eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
 --- a/vllm/v1/engine/output_processor.py
 +++ b/vllm/v1/engine/output_processor.py
-@@ -418,9 +418,11 @@ class RequestState:
-             logprobs = logprobs[-num_new_tokens:] if num_new_tokens else logprobs[:0]
-
-         sampling_mask = None
--        if finished and self.sampling_mask_chunks:
-+        if self.sampling_mask_chunks and (delta or finished):
-             merged = SamplingMaskLists.merge(self.sampling_mask_chunks)
--            sampling_mask = SamplingMask(merged.to_nested_list())
-+            sampling_mask = SamplingMask(merged.to_nested_list()[: len(token_ids)])
-+            if delta:
-+                self.sampling_mask_chunks.clear()
-
-         # Concatenate routed experts on finish
-         routed_experts = None
-diff --git a/vllm/v1/engine/input_processor.py b/vllm/v1/engine/input_processor.py
-index 4cc433cbfe3..4281a707af8 100644
---- a/vllm/v1/engine/input_processor.py
-+++ b/vllm/v1/engine/input_processor.py
-@@ -101,17 +101,10 @@ class InputProcessor:
-                 self.tokenizer,
-             )
-
--            if self.model_config.return_sampling_mask:
--                if params.temperature <= 0:
--                    raise ValueError(
--                        "sampling distribution replay requires temperature > 0"
--                    )
--                if params.top_k <= 0:
--                    raise ValueError(
--                        "sampling distribution replay requires top_k > 0 to "
--                        "bound sampling mask size, reduce transfer overhead, "
--                        "and avoid potential OOMs"
--                    )
-+            if self.model_config.return_sampling_mask and params.temperature <= 0:
-+                raise ValueError(
-+                    "sampling distribution replay requires temperature > 0"
-+                )
-             if params.thinking_token_budget is not None and (
-                 self.vllm_config.reasoning_config is None
-                 or not self.vllm_config.reasoning_config.enabled
+@@ -184,6 +184,7 @@
+         # Per-sequence spec-decode accumulator; arrives once (on finish) via
+         # EngineCoreOutput, then attached to this sequence's CompletionOutput.
+         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
++        self.weight_version: str | None = None
+ 
+         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
+ 
+@@ -306,6 +307,7 @@
+         kv_transfer_params: dict[str, Any] | None = None,
+         ec_transfer_params: dict[str, Any] | None = None,
+         error: RequestError | None = None,
++        weight_version: str | None = None,
+     ) -> RequestOutput | PoolingRequestOutput | None:
+         finished = finish_reason is not None
+         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
+@@ -363,6 +365,7 @@
+             finished,
+             kv_transfer_params,
+             ec_transfer_params,
++            weight_version=weight_version,
+         )
+ 
+     def _new_request_output(
+@@ -373,6 +377,7 @@
+         kv_transfer_params: dict[str, Any] | None = None,
+         ec_transfer_params: dict[str, Any] | None = None,
+         error: RequestError | None = None,
++        weight_version: str | None = None,
+     ) -> RequestOutput | PoolingRequestOutput:
+         # If prompt embeds were used, put placeholder prompt token ids
+         prompt_token_ids = self.prompt_token_ids
+@@ -413,6 +418,7 @@
+             finished=finished,
+             kv_transfer_params=kv_transfer_params,
+             ec_transfer_params=ec_transfer_params,
++            weight_version=weight_version,
+             num_cached_tokens=self.num_cached_tokens,
+             num_cache_creation_tokens=self.num_cache_creation_tokens,
+             metrics=self.stats,
+@@ -576,6 +582,7 @@
+                         stop_reason=None,
+                         kv_transfer_params=None,
+                         ec_transfer_params=None,
++                        weight_version=req_state.weight_version,
+                     )
+                 ):
+                     req_state.queue.put(request_output)
+@@ -753,6 +760,7 @@
+                 req_state.logprobs_processor.update_from_output(engine_core_output)
+ 
+             # 4) Create and handle RequestOutput objects.
++            req_state.weight_version = engine_core_output.weight_version
+             if request_output := req_state.make_request_output(
+                 new_token_ids,
+                 pooling_output,
+@@ -761,6 +769,7 @@
+                 kv_transfer_params,
+                 ec_transfer_params,
+                 error=request_error,
++                weight_version=engine_core_output.weight_version,
+             ):
+                 if req_state.streaming_input:
+                     request_output.finished = False
+--- a/vllm/v1/core/sched/interface.py
++++ b/vllm/v1/core/sched/interface.py
+@@ -94,6 +94,7 @@
+         self,
+         scheduler_output: "SchedulerOutput",
+         model_runner_output: "ModelRunnerOutput",
++        weight_version: str | None = None,
+     ) -> dict[int, "EngineCoreOutputs"]:
+         """Update the scheduler state based on the model runner output.
+ 
