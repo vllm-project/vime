@@ -13,6 +13,7 @@ from vime.observability.metric_utils import (
     dict_add_prefix,
     has_repetition,
 )
+from vime.observability.spec_tail_metrics import compute_spec_length_tier_metrics, compute_tail_wall_metrics
 from vime.utils.misc import group_by, load_function
 from vime.utils.staleness import compute_staleness_metrics
 from vime.utils.types import Sample
@@ -95,6 +96,7 @@ def compute_perf_metrics_from_samples(args, samples, rollout_time):
     token_perf([sample.response_length for sample in samples], non_generation_time, key="")
     token_perf([sample.effective_response_length for sample in samples], non_generation_time, key="effective_")
     log_dict |= _compute_vllm_request_perf_metrics(samples)
+    log_dict |= compute_tail_wall_metrics(samples, rollout_time)
 
     return log_dict
 
@@ -207,6 +209,7 @@ def _compute_spec_metrics(args, all_samples: list[Sample]):
     metrics = {}
     metrics["spec_accept_rate"] = sum(sample.spec_info.spec_accept_rate for sample in all_samples) / num_samples
     metrics["spec_accept_length"] = sum(sample.spec_info.spec_accept_length for sample in all_samples) / num_samples
+    metrics |= compute_spec_length_tier_metrics(all_samples)
     return metrics
 
 

@@ -39,6 +39,12 @@ draft TP 等）请参考 vLLM 的 speculative decoding [文档](https://docs.vll
 
 向导配置的是推理，不会开启在线 MTP 或独立投机头训练。随着 RL 改变目标模型，需要观察 `spec_accept_rate`、`spec_accept_length` 和 rollout 延迟。投机头权重、验证 buffers，以及 hybrid 递归状态快照也会占用显存。
 
+投机采样在 rollout 末尾收益最大，此时只剩少量长请求。为观察这段长尾，vime 还会记录：
+
+- `rollout/spec_accept_length/token_weighted` 以及 `rollout/spec_accept_length/len_p0_p50`、`len_p50_p90`、`len_p90_p99`、`len_p99_p100`：按 completion 长度分档，档内每次目标模型验证产生的 token 数（按 token 加权）。没有验证步的样本不计入。
+- `perf/tail/last_10pct_wall_share`：90% 的样本完成生成之后所占的 rollout 生成墙钟时间比例，以及 `perf/tail/generate_wall_time`。两者来自每个样本的 `vllm_generate` trace span，无论是否开启投机采样都会记录。
+- `perf/update_draft_weights_time`：推送 draft（DSpark 或 MTP）权重的耗时，已包含在 `perf/update_weights_time` 中。
+
 ## 为什么需要验证
 
 [EAGLE](https://arxiv.org/abs/2401.15077) 用轻量投机头结合目标模型特征提出候选，再交给目标模型验证。下面是 [Accelerating Large Language Model Decoding with Speculative Sampling](https://arxiv.org/abs/2302.01318) 中标准单路径拒绝采样的概率推导，描述理想采样过程，不意味着各后端的 kernel 完全相同。

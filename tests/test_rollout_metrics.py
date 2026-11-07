@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from vime.observability.rollout_metrics import _compute_spec_metrics, _compute_top_p_kept_vocab_metrics
+from vime.observability.spec_tail_metrics import compute_spec_length_tier_metrics, compute_tail_wall_metrics
 from vime.utils.misc import decode_int32_meta_array
 from vime.utils.types import Sample
 
@@ -228,6 +229,80 @@ def test_append_response_tokens_rejects_non_trainable_log_probs():
 
     with pytest.raises(ValueError, match="non-trainable response tokens should not pass rollout log probabilities"):
         sample.append_response_tokens(tokens=[10], log_probs=[-0.1], trainable=False)
+
+
+def _spec_sample(completion_tokens, verify_steps):
+    sample = Sample()
+    sample.spec_info.completion_token_num = completion_tokens
+    sample.spec_info.spec_verify_ct = verify_steps
+    return sample
+
+
+@pytest.mark.unit
+def test_spec_length_tiers_are_token_weighted_and_skip_unverified_samples():
+    # 99 short samples accept 2 tokens per verify step; one long sample accepts 4.
+    samples = [_spec_sample(10, 5) for _ in range(99)] + [_spec_sample(1000, 250)]
+    # Aborted before decoding: no verify steps, must not drag any tier towards 0.
+    samples.append(_spec_sample(0, 0))
+
+    metrics = compute_spec_length_tier_metrics(samples)
+
+    assert metrics["spec_accept_length/token_weighted"] == pytest.approx((99 * 10 + 1000) / (99 * 5 + 250))
+    assert metrics["spec_accept_length/len_p0_p50"] == pytest.approx(2.0)
+    assert metrics["spec_accept_length/len_p99_p100"] == pytest.approx(4.0)
+    assert compute_spec_length_tier_metrics([_spec_sample(0, 0)]) == {}
+
+
+@pytest.mark.unit
+def test_spec_metrics_include_length_tiers_only_with_speculation():
+    sample = _spec_sample(12, 3)
+    args = Namespace(vllm_speculative_config={"method": "dspark", "num_speculative_tokens": 4})
+    assert _compute_spec_metrics(args, [sample])["spec_accept_length/token_weighted"] == pytest.approx(4.0)
+    assert _compute_spec_metrics(_make_args(), [sample]) == {}
+
+
+def _traced_sample(*spans):
+    sample = Sample()
+    sample.trace = {"events": []}
+    for start, end in spans:
+        sample.trace["events"].append({"type": "span_start", "name": "vllm_generate", "ts": start})
+        sample.trace["events"].append({"type": "span_end", "name": "vllm_generate", "ts": end})
+    # Other spans (reward, tool calls) after the last generate do not count.
+    sample.trace["events"].append({"type": "span_end", "name": "reward", "ts": 10_000.0})
+    return sample
+
+
+@pytest.mark.unit
+def test_tail_wall_share_measures_time_after_ninety_percent_finished():
+    samples = [_traced_sample((100.0, 100.0 + i)) for i in range(1, 10)]
+    # Multi-turn straggler: its last generate ends at t=200.
+    samples.append(_traced_sample((100.0, 105.0), (150.0, 200.0)))
+    samples.append(Sample())  # untraced samples are ignored
+
+    metrics = compute_tail_wall_metrics(samples)
+
+    # 90% (9 of 10) finished by t=109; the last one finished at t=200.
+    assert metrics["tail/generate_wall_time"] == pytest.approx(100.0)
+    assert metrics["tail/last_10pct_wall_share"] == pytest.approx((200.0 - 109.0) / 100.0)
+
+
+@pytest.mark.unit
+def test_tail_wall_share_ignores_spans_from_an_earlier_partial_rollout_step():
+    samples = [_traced_sample((100.0, 100.0 + i)) for i in range(1, 11)]
+    # Aborted in the previous step at t=10..40 and resumed in this one.
+    samples.append(_traced_sample((10.0, 40.0), (100.0, 150.0)))
+
+    metrics = compute_tail_wall_metrics(samples, rollout_time=55.0)
+
+    # Without the window, start would be t=10 and the wall time 140 s.
+    assert metrics["tail/generate_wall_time"] == pytest.approx(50.0)
+    assert metrics["tail/last_10pct_wall_share"] == pytest.approx((150.0 - 110.0) / 50.0)
+
+
+@pytest.mark.unit
+def test_tail_wall_share_needs_traced_samples():
+    assert compute_tail_wall_metrics([Sample(), Sample()]) == {}
+    assert compute_tail_wall_metrics([_traced_sample((0.0, 1.0))]) == {}
 
 
 if __name__ == "__main__":

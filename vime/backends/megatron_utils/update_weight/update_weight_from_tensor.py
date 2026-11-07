@@ -13,6 +13,7 @@ from ray import ObjectRef
 from ray.actor import ActorHandle
 from tqdm import tqdm
 
+from vime.observability.timer import timer
 from vime.utils import accelerator
 from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.types import ParamInfo
@@ -390,15 +391,16 @@ class UpdateWeightFromTensor:
             self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp"
         )
         if update_draft:
-            if self._native_trainers:
-                self._source.draft = self.args.dspark_enabled
-                for trainer in self._native_trainers:
-                    trainer.client.draft = True
-                    trainer.send_weights()
-                    trainer.client.draft = False
-                self._source.draft = False
-            else:
-                self._update_rollout_weights(megatron_local_weights, draft=True)
+            with timer("update_draft_weights"):
+                if self._native_trainers:
+                    self._source.draft = self.args.dspark_enabled
+                    for trainer in self._native_trainers:
+                        trainer.client.draft = True
+                        trainer.send_weights()
+                        trainer.client.draft = False
+                    self._source.draft = False
+                else:
+                    self._update_rollout_weights(megatron_local_weights, draft=True)
 
         # int4/fp4 post_process
         if self.rank == 0:

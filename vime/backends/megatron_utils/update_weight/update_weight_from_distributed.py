@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 from ray.actor import ActorHandle
 
+from vime.observability.timer import timer
 from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.weight_sync import should_flush_cache
 
@@ -116,11 +117,12 @@ class UpdateWeightFromDistributed:
             self.args.enable_mtp_training and (self.args.vllm_speculative_config or {}).get("method") == "mtp"
         )
         if update_draft:
-            self._source.draft = self.args.dspark_enabled
-            client.draft = True
-            self._trainer.send_weights()
-            self._source.draft = False
-            client.draft = False
+            with timer("update_draft_weights"):
+                self._source.draft = self.args.dspark_enabled
+                client.draft = True
+                self._trainer.send_weights()
+                self._source.draft = False
+                client.draft = False
 
         if dist.get_rank() == 0:
             if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:

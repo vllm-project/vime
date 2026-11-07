@@ -42,6 +42,12 @@ Managed deployments receive `--vllm-speculative-config` arguments in `experiment
 
 The builder configures inference. It does not enable online MTP or separate-head training. As the target changes during RL, monitor `spec_accept_rate`, `spec_accept_length` and rollout latency. Extra draft weights, verification buffers and hybrid recurrent-state snapshots also consume memory.
 
+Speculation helps most at the end of a rollout, when only a few long requests remain. To see that tail, vime also logs:
+
+- `rollout/spec_accept_length/token_weighted` and `rollout/spec_accept_length/len_p0_p50`, `len_p50_p90`, `len_p90_p99`, `len_p99_p100`: tokens produced per target verify step, summed over the samples in each completion-length tier. Samples without verify steps are left out.
+- `perf/tail/last_10pct_wall_share`: the share of rollout generation wall time after 90% of samples had finished generating, and `perf/tail/generate_wall_time`. Both come from the per-sample `vllm_generate` trace spans and are logged with or without speculation.
+- `perf/update_draft_weights_time`: time spent pushing draft (DSpark or MTP) weights, already included in `perf/update_weights_time`.
+
 ## Why verification is needed
 
 [EAGLE](https://arxiv.org/abs/2401.15077) uses a lightweight head to propose candidates using target-model features. The target then verifies them. The probability argument below is the standard single-path rejection-sampling construction from [Accelerating Large Language Model Decoding with Speculative Sampling](https://arxiv.org/abs/2302.01318); it describes the ideal sampler, not a claim that every backend uses identical kernels.

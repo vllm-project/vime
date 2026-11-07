@@ -119,6 +119,8 @@ SUITES = {
         ("test_qwen2.5_vl_3B_ep_disaggregation.py", 3, "", {}),
         ("test_moonlight_16B_A3B_non_colocate_nccl.py", 8, "", {}),
         ("test_qwen3_5_0_8B_top_p_cp2.py", 4, "", {}),
+        ("test_qwen3_4B_dspark.py", 8, "--layout colocate", {}),
+        ("test_qwen3_4B_dspark.py", 8, "--layout non-colocate", {}),
     ],
     "precision": [
         ("test_qwen3_0.6B_parallel_check.py", 8, "", {}),

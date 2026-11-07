@@ -98,7 +98,7 @@ steps:
         python:3.11 bash -c '
           set -euo pipefail
           pip install -q torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle blake3 xxhash zstandard psutil wandb "straw-queue>=0.1.2"
+          pip install -q pytest numpy packaging pyyaml omegaconf tqdm httpx requests ray pybase64 pylatexenc sympy aiohttp pillow safetensors transformers cloudpickle blake3 xxhash zstandard psutil wandb tensorboard "straw-queue>=0.1.2"
           pip install -q -e . --no-deps
           python tests/test_megatron_argument_validation.py
           python tests/test_megatron_tokenizer_init.py
@@ -130,6 +130,8 @@ steps:
           python tests/test_reloadable_process_group_memory_check.py
           python tests/test_ppo_logprob_entropy.py
           python tests/utils/test_hf_checkpoint_saver.py
+          python tests/test_bench_spec_rollout.py
+          python tests/test_dspark_weight_export.py
         '
 
   - label: ":robot_face: agent adapter tests"

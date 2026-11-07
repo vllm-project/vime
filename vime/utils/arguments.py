@@ -1735,6 +1735,14 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 "convergence.",
             )
             parser.add_argument(
+                "--dspark-freeze-draft",
+                action="store_true",
+                default=False,
+                help="Serve the DSpark draft from the model path in --vllm-speculative-config "
+                "without building, training or syncing it on the trainer. Use as the "
+                "frozen-draft baseline for online draft training.",
+            )
+            parser.add_argument(
                 "--dspark-intermediate-size",
                 type=int,
                 default=0,
@@ -2023,7 +2031,14 @@ def vime_validate_args(args):
     get_pg_loss_type(args)
     validate_score_centering_args(args)
     args.eval_datasets = _resolve_eval_datasets(args)
-    args.dspark_enabled = (getattr(args, "vllm_speculative_config", None) or {}).get("method") == "dspark"
+    dspark_speculation = (getattr(args, "vllm_speculative_config", None) or {}).get("method") == "dspark"
+    if getattr(args, "dspark_freeze_draft", False):
+        if not dspark_speculation:
+            raise ValueError('--dspark-freeze-draft requires --vllm-speculative-config with "method": "dspark".')
+        if getattr(args, "dspark_freeze_policy", False):
+            raise ValueError("--dspark-freeze-draft and --dspark-freeze-policy cannot both be set.")
+    # dspark_enabled means the trainer owns the draft: builds, trains and syncs it.
+    args.dspark_enabled = dspark_speculation and not getattr(args, "dspark_freeze_draft", False)
 
     if args.draft_feature_mode == "collect-only":
         if args.micro_batch_size != 1:

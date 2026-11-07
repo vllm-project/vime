@@ -49,10 +49,11 @@ hf download --repo-type dataset zhuzilin/dapo-math-17k --local-dir /root/dapo-ma
 | `--dspark-num-draft-layers` | Number of decoder layers in the draft backbone (default: 5). |
 | `--dspark-target-layer-ids` | Comma-separated policy layer indices to capture hidden states from (default: "1,9,17,25,33"). |
 | `--dspark-freeze-policy` | Freeze policy and train only the draft model. |
+| `--dspark-freeze-draft` | Serve the pretrained draft from `--vllm-speculative-config`'s `model` without training or syncing it. Baseline for online draft training. |
 | `--dspark-ce-loss-alpha` | Weight for cross-entropy loss (default: 0.1). |
 | `--dspark-l1-loss-alpha` | Weight for L1/TV loss (default: 0.9). |
 | `--dspark-draft-loss-weight` | Weight multiplying draft loss added to policy loss (default: 1.0). |
-| `--vllm-speculative-config` | JSON config passed to vLLM. Setting `method: "dspark"` also enables DSpark draft training. |
+| `--vllm-speculative-config` | JSON config passed to vLLM. Setting `method: "dspark"` also enables DSpark draft training, unless `--dspark-freeze-draft` is set. |
 
 ## Mode Comparison
 
@@ -93,6 +94,36 @@ GPU layout:
 |------|------|
 | 0–3 | Policy Megatron train |
 | 4–7 | vLLM rollout (with DSpark speculative decoding) |
+
+### Script switches
+
+Both scripts read these environment variables:
+
+| Variable | Values | Effect |
+|----------|--------|--------|
+| `SPEC_MODE` | `online` (default), `frozen`, `off` | Train and sync the draft every step; serve the pretrained draft unchanged; or no speculative decoding. |
+| `DSPARK_FREEZE_POLICY` | `1` (default), `0` | With `online`, `1` trains only the draft and `0` also trains the policy. `frozen` and `off` always train the policy. |
+| `NUM_GPUS` | `8` (default) | GPUs on the node. Non-colocate trains on half and serves one engine on the other half. |
+| `TP_SIZE` | | Training tensor parallelism (colocate default 1, non-colocate default all training GPUs). |
+| `NO_SAVE` | `1` | Write no checkpoint, including the one after the last rollout. |
+| `EVAL_INTERVAL` | number or `off` | Evaluation cadence; `off` also skips the evaluation before training. |
+| `NUM_ROLLOUT`, `SAVE_INTERVAL`, `EXTRA_ARGS` | | Steps, checkpoint cadence, and extra `train.py` arguments. |
+
+### Benchmarking speculative rollout
+
+`tools/bench_spec_rollout.py` runs the `off`, `frozen` and `online` modes in both
+placements with the same seed and number of steps, then compares rollout and
+step time, acceptance over the run, draft sync time and train/rollout log-prob
+difference from each arm's TensorBoard log. All arms train the policy and write
+no checkpoints. In `online` the draft reads detached policy hidden states and
+logits, so its loss does not reach the policy; the arms still share the
+optimizer's global gradient-norm clipping. Use `--num-gpus 4` on a 4-GPU node.
+
+```bash
+python tools/bench_spec_rollout.py plan --out /root/spec-bench --num-rollout 20
+python tools/bench_spec_rollout.py run --out /root/spec-bench
+python tools/bench_spec_rollout.py summarize --out /root/spec-bench
+```
 
 ## What to Expect
 

@@ -668,6 +668,34 @@ def test_vime_validate_args_derives_dspark_from_speculative_method(monkeypatch):
 
 
 @pytest.mark.unit
+def test_vime_validate_args_frozen_draft_keeps_speculation_without_training(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(vllm_speculative_config={"method": "dspark"}, dspark_freeze_draft=True)
+
+    args, _ = module.vime_validate_args(args)
+
+    assert args.dspark_enabled is False
+    assert args.vllm_speculative_config == {"method": "dspark"}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"vllm_speculative_config": {"method": "mtp"}}, "requires --vllm-speculative-config"),
+        ({"vllm_speculative_config": None}, "requires --vllm-speculative-config"),
+        ({"vllm_speculative_config": {"method": "dspark"}, "dspark_freeze_policy": True}, "cannot both be set"),
+    ],
+)
+def test_vime_validate_args_rejects_invalid_frozen_draft(monkeypatch, overrides, message):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(dspark_freeze_draft=True, **overrides)
+
+    with pytest.raises(ValueError, match=message):
+        module.vime_validate_args(args)
+
+
+@pytest.mark.unit
 def test_vime_validate_args_rejects_equal_debug_data_paths(monkeypatch):
     module = load_vime_arguments_module(monkeypatch)
     args = make_vime_validate_args(

@@ -246,6 +246,7 @@ def test_qwen3_omni_encoder_mapping_is_replicated():
         ("deepseek_v3", "model.layers.3"),
         ("glm4_moe", "model.layers.3"),
         ("qwen3_next", "mtp.layers.1"),
+        ("qwen3_5", "mtp.layers.1"),
         ("qwen3_5_moe", "mtp.layers.1"),
     ],
 )

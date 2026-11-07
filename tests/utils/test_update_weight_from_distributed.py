@@ -319,6 +319,23 @@ def test_dspark_update_uses_nccl_draft_lifecycle(update_module, monkeypatch):
 
 
 @pytest.mark.unit
+def test_draft_push_is_timed_separately(update_module, monkeypatch):
+    from vime.observability.timer import Timer
+
+    monkeypatch.setattr(update_module.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(update_module.dist, "barrier", lambda *args, **kwargs: None)
+    Timer().reset()
+    try:
+        _updater_for_transfer(update_module).update_weights()
+        assert "update_draft_weights" not in Timer().log_dict()
+
+        _updater_for_transfer(update_module, dspark=True).update_weights()
+        assert Timer().log_dict()["update_draft_weights"] >= 0
+    finally:
+        Timer().reset()
+
+
+@pytest.mark.unit
 def test_failed_transfer_does_not_resume_generation(update_module, monkeypatch):
     updater = _updater_for_transfer(update_module, fail=True)
     monkeypatch.setattr(update_module.dist, "get_rank", lambda: 0)

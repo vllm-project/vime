@@ -297,6 +297,24 @@ def test_native_dspark_update_uses_draft_source_and_lifecycle(update_module, mon
 
 
 @pytest.mark.unit
+def test_native_draft_push_is_timed_separately(update_module, monkeypatch):
+    from vime.observability.timer import Timer
+
+    updater = _updater(update_module, dspark_enabled=True, vllm_speculative_config={"method": "dspark"})
+    engine = RecordingEngine()
+    updater._all_rollout_engines = [engine]
+    client = update_module.VimeRayWeightSyncClient([engine], lambda: updater.weight_version)
+    updater._native_trainers = [RecordingTrainer(client, source=updater._source)]
+    monkeypatch.setattr(update_module.dist, "barrier", lambda *args, **kwargs: None)
+    Timer().reset()
+    try:
+        updater.update_weights()
+        assert Timer().log_dict()["update_draft_weights"] >= 0
+    finally:
+        Timer().reset()
+
+
+@pytest.mark.unit
 def test_rank_local_experts_keep_dspark_draft_update(update_module, monkeypatch):
     updater = _updater(update_module, dspark_enabled=True)
     engine = RecordingEngine()
