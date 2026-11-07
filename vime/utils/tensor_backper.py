@@ -1,6 +1,7 @@
 import platform
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 
 import torch
 
@@ -39,3 +40,22 @@ class TensorBackuper:
             assert name in backup_dict
             param.copy_(backup_dict[name], non_blocking=True)
         accelerator.synchronize()
+
+
+@contextmanager
+def tensors_from_backup(params: Iterable[tuple[str, torch.Tensor]], backup: dict[str, torch.Tensor]) -> Iterator[None]:
+    """Let ``params`` read the values in ``backup`` for the duration of the block, then restore their storage.
+
+    Assigning ``param.data`` swaps a parameter's storage. A distributed optimizer keeps writing its updates into
+    the parameter's original DDP buffer view, so a parameter that is not pointed back at that view after the
+    block keeps its old values for good.
+    """
+    original = []
+    try:
+        for name, param in params:
+            original.append((param, param.data))
+            param.data = backup[name].to(param.device)
+        yield
+    finally:
+        for param, data in original:
+            param.data = data

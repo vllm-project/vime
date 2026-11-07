@@ -34,7 +34,7 @@ from vime.utils.routed_experts import RoutedExpertsLayerRef, RoutedExpertsMicrob
 from vime.utils.routing_replay import RoutingReplay
 from vime.utils.types import RolloutBatch
 
-from ...utils.tensor_backper import TensorBackuper
+from ...utils.tensor_backper import TensorBackuper, tensors_from_backup
 from .checkpoint import load_checkpoint
 from .cp_utils import prepare_routed_experts_for_routing_replay, slice_log_prob_with_cp
 from .data import DataIterator, get_data_iterator
@@ -698,14 +698,22 @@ class MegatronTrainRayActor(TrainRayActor):
                 ray.get(self.rollout_manager.clear_updatable_num_new_engines.remote())
 
         with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
+            # The paused training memory cannot be read, so the draft is exported from its CPU backup. The draft
+            # parameters must point back at their DDP buffer views afterwards, or optimizer updates stop reaching them.
+            draft = nullcontext()
             if self.args.dspark_enabled and self.args.offload_train:
-                backup = self.weights_backuper.get("actor")
-                for name, param in named_params_and_buffers(self.args, self.model):
-                    if ".draft_model." in name:
-                        param.data = backup[name].to(param.device)
-            print_memory("before update_weights")
-            self.weight_updater.update_weights()
-            print_memory("after update_weights")
+                draft = tensors_from_backup(
+                    (
+                        (name, param)
+                        for name, param in named_params_and_buffers(self.args, self.model)
+                        if ".draft_model." in name
+                    ),
+                    self.weights_backuper.get("actor"),
+                )
+            with draft:
+                print_memory("before update_weights")
+                self.weight_updater.update_weights()
+                print_memory("after update_weights")
 
         if reconnect_rollout_engines:
             self.sleep()
