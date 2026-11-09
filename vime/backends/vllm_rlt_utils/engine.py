@@ -152,4 +152,7 @@ class NativeEngine:
     def shutdown(self):
         import ray
 
+        # Serving disposal only calls shutdown; release the native engine first.
+        if hasattr(self, "llm"):
+            self.close()
         ray.actor.exit_actor()

@@ -21,17 +21,16 @@ from vime.utils.types import Sample
 def test_http_client_concurrency_matches_backend(backend, monkeypatch):
     from vime.utils import http_utils
 
-    args = Namespace(rollout_num_gpus=2, rollout_num_gpus_per_engine=1, use_distributed_post=False)
+    args = Namespace(
+        rollout_backend=backend, rollout_num_gpus=2, rollout_num_gpus_per_engine=1, use_distributed_post=False
+    )
     if backend == "vllm-rlt":
         args.rlt_max_num_seqs = 3
     else:
         args.vllm_server_concurrency = 3
     monkeypatch.setattr(http_utils, "_http_client", None)
     monkeypatch.setattr(http_utils, "_client_concurrency", 0)
-    if backend == "vllm-rlt":
-        http_utils.init_http_client(args, backend=backend)
-    else:
-        http_utils.init_http_client(args)
+    http_utils.init_http_client(args)
     assert http_utils._client_concurrency == 6
     asyncio.run(http_utils._http_client.aclose())
 
