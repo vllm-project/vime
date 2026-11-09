@@ -41,6 +41,9 @@ class RolloutManager:
     manager owns transient readers, conversion and the current trainer's shards.
     """
 
+    # Optional same-job TransferQueue runtime; set in __init__ when enabled.
+    transfer_queue = None
+
     def __init__(self, args, pg, *, restore_plan=None, serving=None, deployment=None):
         configure_logger()
 
@@ -147,6 +150,10 @@ class RolloutManager:
         if self.recovery is not None:
             self.recovery.source_state = self._source_state()
             self.recovery.persist()
+        if getattr(self.args, "transfer_queue_mode", "off") == "simple-storage":
+            from vime.rollout.transfer_queue_runtime import TransferQueueRuntime
+
+            self.transfer_queue = TransferQueueRuntime(self.args)
 
     def _get_metrics_router_addr(self) -> str | None:
         """Return the full Prometheus scrape URL for the rollout router.
@@ -323,6 +330,8 @@ class RolloutManager:
         start_time = time.time()
         self.rollout_id = rollout_id
         self.batch_builder.rollout_id = rollout_id
+        if self.transfer_queue is not None:
+            self.transfer_queue.begin_round(rollout_id)
         set_current_rollout_id(rollout_id)
         self.health_monitoring_resume()
         # The legacy flag still selects deliberate CI crash injection. It no
@@ -382,6 +391,8 @@ class RolloutManager:
         if self.args.debug_rollout_only:
             # if debug rollout only, we don't convert samples to train data and directly return
             return
+        if self.transfer_queue is not None:
+            data = self.transfer_queue.roundtrip(data, rollout_id)
         cached = self.batch_builder.begin(
             data, replay=self.recovery is not None and rollout_id in self.recovery.batches
         )
@@ -393,6 +404,34 @@ class RolloutManager:
         if self.recovery is not None:
             self.recovery.remember_converted(rollout_id, data, self.batch_builder.batch_id)
         return self.batch_builder.split_by_dp(data)
+
+    def queue_confirm_publication(self):
+        engines, *_ = self.get_updatable_engines_and_lock()
+        return self.transfer_queue.confirm_publication(engines)
+
+    def queue_training_boundary(self):
+        from vime.backends.vllm_utils.server_control import abort_servers_until_idle
+        from vime.utils.async_utils import run
+
+        engines, *_ = self.get_updatable_engines_and_lock()
+        if not engines:
+            raise RuntimeError("queue training boundary has no rollout engines to drain")
+        ray.get([engine.pause_generation.remote() for engine in engines], timeout=self.args.transfer_queue_timeout_s)
+        urls = ray.get([engine.get_url.remote() for engine in engines], timeout=self.args.transfer_queue_timeout_s)
+        # Raises unless every engine confirms an idle scheduler within the deadline;
+        # an unreachable engine is never treated as drained.
+        try:
+            run(abort_servers_until_idle(urls, timeout=self.args.transfer_queue_timeout_s))
+        except RuntimeError as error:
+            raise RuntimeError(f"queue training boundary is busy or unknown: {error}") from error
+        ray.get(self.transfer_queue.coordinator.start_training.remote(), timeout=self.args.transfer_queue_timeout_s)
+        return self.transfer_queue.coordinator
+
+    def queue_training_complete(self, rollout_id):
+        self.transfer_queue.training_complete(rollout_id)
+
+    def queue_save(self, rollout_id):
+        self.transfer_queue.save(rollout_id)
 
     def eval(self, rollout_id):
         if self.args.debug_train_only:
@@ -547,7 +586,20 @@ class RolloutManager:
                     str(version).isascii() and str(version).isdigit() for version in versions
                 )
                 self.weight_version = max(map(int, versions)) if valid else None
-            data = call_rollout_fn(self.generate_rollout, self.args, rollout_id, self.data_source, evaluation=False)
+            rollout_fn = self.generate_rollout
+            kwargs = {}
+            if self.transfer_queue is not None:
+                from vime.rollout.vllm_rollout import generate_queued_rollout
+
+                rollout_fn = generate_queued_rollout
+                kwargs["group_ready"] = self.transfer_queue.accept_group
+            completed = False
+            try:
+                data = call_rollout_fn(rollout_fn, self.args, rollout_id, self.data_source, evaluation=False, **kwargs)
+                completed = True
+            finally:
+                if self.transfer_queue is not None and not completed:
+                    self.transfer_queue.paused = True
             if self.args.rollout_data_transport == "straw":
                 samples = getattr(data, "samples", None)
                 data = accept_raw_rollout(data, self.args, rollout_id, controller=self.controller)

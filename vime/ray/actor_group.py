@@ -173,9 +173,12 @@ class RayTrainGroup:
             for actor in self._actor_handlers
         ]
 
-    def save_model(self, rollout_id, force_sync=False) -> None:
+    def save_model(self, rollout_id, force_sync=False, timeout_s: float | None = None) -> None:
         """Save on all ranks; force_sync also waits for asynchronous writes."""
-        ray.get([actor.save_model.remote(rollout_id, force_sync=force_sync) for actor in self._actor_handlers])
+        ray.get(
+            [actor.save_model.remote(rollout_id, force_sync=force_sync) for actor in self._actor_handlers],
+            timeout=timeout_s,
+        )
         if self._release_train_enabled():
             self.args.load = self.args.save
             self.args.ckpt_step = None
@@ -183,19 +186,19 @@ class RayTrainGroup:
             self.args.no_load_optim = self.args.no_save_optim
             self.args.no_load_rng = False
 
-    def update_weights(self) -> None:
+    def update_weights(self, timeout_s: float | None = None) -> None:
         """Publish actor weights; disk reload is coordinated after all ranks save."""
         if not self._full_disk_weight_update_enabled():
-            ray.get([actor.update_weights.remote() for actor in self._actor_handlers])
+            ray.get([actor.update_weights.remote() for actor in self._actor_handlers], timeout=timeout_s)
             return
 
         weight_version = self._disk_weight_version + 1
         disk_weight_dir = Path(self.args.update_weight_disk_dir) / f"weight_v{weight_version:06d}"
-        ray.get([actor.update_weights.remote() for actor in self._actor_handlers])
+        ray.get([actor.update_weights.remote() for actor in self._actor_handlers], timeout=timeout_s)
         self._disk_weight_version = weight_version
         if self._release_train_enabled():
             self.release()
-        self._reload_rollout_weights_from_disk(disk_weight_dir, str(weight_version))
+        self._reload_rollout_weights_from_disk(disk_weight_dir, str(weight_version), timeout_s=timeout_s)
 
     def onload(self):
         return ray.get([actor.wake_up.remote() for actor in self._actor_handlers])
@@ -253,11 +256,11 @@ class RayTrainGroup:
             and self.args.update_weight_transport == "disk"
         )
 
-    def _reload_rollout_weights_from_disk(self, disk_weight_dir, weight_version):
+    def _reload_rollout_weights_from_disk(self, disk_weight_dir, weight_version, timeout_s: float | None = None):
         assert self._rollout_manager is not None, "disk weight update requires a rollout manager."
         if self.args.offload_rollout:
-            ray.get(self._rollout_manager.onload_weights.remote())
-        engines, *_ = ray.get(self._rollout_manager.get_updatable_engines_and_lock.remote())
+            ray.get(self._rollout_manager.onload_weights.remote(), timeout=timeout_s)
+        engines, *_ = ray.get(self._rollout_manager.get_updatable_engines_and_lock.remote(), timeout=timeout_s)
         if not engines:
             if not self.args.update_weight_disk_keep_files:
                 shutil.rmtree(disk_weight_dir, ignore_errors=True)
@@ -266,16 +269,19 @@ class RayTrainGroup:
             # each host pulls the published checkpoint onto local disk (e.g. NVMe) and
             # the engines reload from there; the pull is disk-only, so it runs before
             # pause and overlaps generation
-            ray.get([engine.pull_weights.remote(int(weight_version)) for engine in engines])
+            ray.get([engine.pull_weights.remote(int(weight_version)) for engine in engines], timeout=timeout_s)
             model_path = self.args.update_weight_local_checkpoint_dir
         else:
             model_path = str(disk_weight_dir)
         flush_cache = should_flush_cache(
             self.args.flush_cache_interval, int(weight_version), getattr(self.args, "update_weight_start_version", 0)
         )
-        ray.get([engine.pause_generation.remote(mode="abort" if flush_cache else "in_place") for engine in engines])
+        ray.get(
+            [engine.pause_generation.remote(mode="abort" if flush_cache else "in_place") for engine in engines],
+            timeout=timeout_s,
+        )
         if flush_cache:
-            ray.get([engine.flush_cache.remote() for engine in engines])
+            ray.get([engine.flush_cache.remote() for engine in engines], timeout=timeout_s)
         ray.get(
             [
                 engine.update_weights_from_disk.remote(
@@ -284,10 +290,11 @@ class RayTrainGroup:
                     flush_cache=flush_cache,
                 )
                 for engine in engines
-            ]
+            ],
+            timeout=timeout_s,
         )
         if self.args.ci_test:
-            engine_versions = ray.get([engine.get_weight_version.remote() for engine in engines])
+            engine_versions = ray.get([engine.get_weight_version.remote() for engine in engines], timeout=timeout_s)
             mismatches = [
                 f"engine {idx}: {engine_version}"
                 for idx, engine_version in enumerate(engine_versions)
@@ -300,4 +307,4 @@ class RayTrainGroup:
                 )
         if not self.args.update_weight_disk_keep_files:
             shutil.rmtree(disk_weight_dir, ignore_errors=True)
-        ray.get([engine.continue_generation.remote() for engine in engines])
+        ray.get([engine.continue_generation.remote() for engine in engines], timeout=timeout_s)

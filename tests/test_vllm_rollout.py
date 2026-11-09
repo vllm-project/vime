@@ -30,6 +30,26 @@ from vime.utils.eval_config import EvalDatasetConfig
 from vime.utils.types import Sample
 
 
+def test_queue_generation_deadline_cancels_owned_tasks(monkeypatch):
+    state = Namespace(pendings=set(), cancellable_tasks=set(), aborted=False)
+    args = Namespace(transfer_queue_timeout_s=0.01)
+    monkeypatch.setattr(mod, "GenerateState", lambda _args: state)
+
+    async def stalled_rollout(*_args):
+        pending = asyncio.create_task(asyncio.Event().wait())
+        state.pendings.add(pending)
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(mod, "generate_rollout_async", stalled_rollout)
+
+    async def check():
+        with pytest.raises(TimeoutError):
+            await mod._queued_rollout(args, 0, lambda _size: [], AsyncMock())
+        assert state.aborted and all(task.cancelled() for task in state.pendings)
+
+    asyncio.run(check())
+
+
 class _FakeTokenizer:
     def encode(self, prompt: str, add_special_tokens: bool = False) -> list[int]:
         assert add_special_tokens is False

@@ -10,8 +10,45 @@ from vime.utils.cleanup import Cleanup
 from vime.utils.misc import should_run_periodic_action
 
 
+def train_queue_batch(args, actor_model, rollout_manager, rollout_id, rollout_data_ref):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    coordinator = ray.get(rollout_manager.queue_training_boundary.remote(), timeout=args.transfer_queue_timeout_s)
+    stopped = Event()
+
+    def heartbeat():
+        while not stopped.wait(args.transfer_queue_lease_s / 3):
+            ray.get(coordinator.heartbeat.remote(), timeout=args.transfer_queue_timeout_s)
+
+    completed = False
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending_heartbeat = executor.submit(heartbeat)
+        try:
+            ray.get(actor_model.async_train(rollout_id, rollout_data_ref), timeout=args.transfer_queue_timeout_s)
+            stopped.set()
+            pending_heartbeat.result()
+            ray.get(rollout_manager.queue_training_complete.remote(rollout_id), timeout=args.transfer_queue_timeout_s)
+            completed = True
+        finally:
+            stopped.set()
+            if not completed:
+                try:
+                    ray.get(coordinator.fail.remote(), timeout=args.transfer_queue_timeout_s)
+                except (TimeoutError, ray.exceptions.RayError):
+                    logging.getLogger(__name__).warning("Queue fail-stop acknowledgment failed", exc_info=True)
+
+
 def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
     release_train = args.release_train
+    queue_enabled = getattr(args, "transfer_queue_mode", "off") != "off"
+    queue_timeout = args.transfer_queue_timeout_s if queue_enabled else None
+
+    def publish_actor():
+        if queue_enabled:
+            actor_model.update_weights(timeout_s=queue_timeout)
+        else:
+            actor_model.update_weights()
 
     actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
 
@@ -19,7 +56,9 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
         ray.get(rollout_manager.onload_weights.remote())
 
     # Always push actor weights to rollout once weights are loaded.
-    actor_model.update_weights()
+    publish_actor()
+    if queue_enabled:
+        ray.get(rollout_manager.queue_confirm_publication.remote(), timeout=args.transfer_queue_timeout_s)
     # Reattached async producers stay paused until restored weights are installed.
     # This startup notification resumes them once, before entering the train loop.
     ray.get(rollout_manager.training_ready.remote())
@@ -43,12 +82,24 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
             else:
                 critic_model.clear_memory()
 
+    def save_training_state(rollout_id, actor_trains):
+        save_checkpoint(
+            args,
+            rollout_id,
+            actor_model,
+            critic_model,
+            rollout_manager,
+            actor_trains=actor_trains,
+            restore_plan=restore_plan,
+            timeout_s=queue_timeout,
+        )
+
     # train loop.
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
         if args.eval_interval is not None and rollout_id == 0 and not args.skip_eval_before_train:
             ray.get(rollout_manager.eval.remote(rollout_id))
 
-        rollout_data_ref = ray.get(rollout_manager.generate.remote(rollout_id))
+        rollout_data_ref = ray.get(rollout_manager.generate.remote(rollout_id), timeout=queue_timeout)
 
         if args.offload_rollout:
             ray.get(rollout_manager.offload.remote())
@@ -63,6 +114,8 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
                 ray.get(actor_model.async_train(rollout_id, rollout_data_ref, external_data=value_refs))
             else:
                 ray.get(value_refs)
+        elif queue_enabled:
+            train_queue_batch(args, actor_model, rollout_manager, rollout_id, rollout_data_ref)
         else:
             ray.get(actor_model.async_train(rollout_id, rollout_data_ref))
 
@@ -70,24 +123,22 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
         # model/optimizer or this data progress have a durable joint checkpoint.
         ray.get(rollout_manager.training_completed.remote(rollout_id))
 
-        if release_train or should_run_periodic_action(
+        save_this_round = release_train or should_run_periodic_action(
             rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout
-        ):
-            save_checkpoint(
-                args,
-                rollout_id,
-                actor_model,
-                critic_model,
-                rollout_manager,
-                actor_trains=actor_trains,
-                restore_plan=restore_plan,
-            )
+        )
+        if save_this_round and not queue_enabled:
+            save_training_state(rollout_id, actor_trains)
 
         offload_train(actor_trains)
         if args.offload_rollout and not release_train:
             ray.get(rollout_manager.onload_weights.remote())
         was_paused = ray.get(rollout_manager.pause_rollout_admission.remote())
-        actor_model.update_weights()
+        publish_actor()
+        if queue_enabled:
+            ray.get(rollout_manager.queue_confirm_publication.remote(), timeout=args.transfer_queue_timeout_s)
+            if save_this_round:
+                save_training_state(rollout_id, actor_trains)
+                ray.get(rollout_manager.queue_save.remote(rollout_id), timeout=args.transfer_queue_timeout_s)
         # Final evaluation uses the synchronized engines directly. Keep training
         # producers paused when no later rollout will consume their new work.
         if rollout_id + 1 < args.num_rollout:

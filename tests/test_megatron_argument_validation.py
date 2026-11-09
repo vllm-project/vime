@@ -349,6 +349,7 @@ def test_update_weight_disk_dir_required_for_disk_transport(monkeypatch):
 
 def make_vime_validate_args(**overrides):
     values = dict(
+        transfer_queue_mode="off",
         ckpt_format="torch_dist",
         flush_cache_interval=1,
         rollout_data_transport="object-store",
@@ -822,8 +823,68 @@ def test_force_fp8_ue8m0_scale_argument(monkeypatch):
     assert configured.force_fp8_ue8m0_scale is True
 
 
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__]))
+def make_queue_args(**overrides):
+    values = dict(
+        transfer_queue_mode="simple-storage",
+        transfer_queue_job_id="job-a",
+        transfer_queue_restart_epoch=0,
+        transfer_queue_max_groups=4,
+        transfer_queue_max_tokens=100,
+        transfer_queue_max_bytes=10000,
+        transfer_queue_timeout_s=30.0,
+        transfer_queue_lease_s=60.0,
+        actor_num_nodes=1,
+        actor_num_gpus_per_node=1,
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        context_parallel_size=1,
+        virtual_pipeline_model_parallel_size=None,
+        use_critic=False,
+        use_fault_tolerance=False,
+        partial_rollout=False,
+        custom_convert_samples_to_train_data_path=None,
+        rollout_sample_filter_path=None,
+        rollout_all_samples_process_path=None,
+        custom_reward_post_process_path=None,
+        rollout_function_path="vime.rollout.vllm_rollout.generate_rollout",
+        rollout_global_dataset=True,
+        save="/tmp/checkpoint",
+    )
+    values.update(overrides)
+    return make_vime_validate_args(**values)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"transfer_queue_max_groups": 0}, "capacities"),
+        ({"transfer_queue_max_groups": True}, "capacities"),
+        ({"transfer_queue_lease_s": float("nan")}, "finite"),
+        ({"transfer_queue_timeout_s": float("inf")}, "finite"),
+        ({"transfer_queue_restart_epoch": -1}, "epoch"),
+        ({"tensor_model_parallel_size": 2}, "TP=PP"),
+        ({"virtual_pipeline_model_parallel_size": 2}, "virtual pipeline"),
+        ({"rollout_batch_size": 5}, "group capacity"),
+        ({"rollout_batch_size": 2, "n_samples_per_prompt": 2, "transfer_queue_max_tokens": 3}, "token capacity"),
+        ({"use_critic": True}, "one text actor"),
+        ({"use_fault_tolerance": True}, "one text actor"),
+        ({"rollout_sample_filter_path": "custom.filter"}, "standard GRPO"),
+        ({"rollout_global_dataset": False}, "resumable"),
+        ({"rollout_data_transport": "straw"}, "object-store"),
+    ],
+)
+def test_queue_rejects_unsupported_configuration_early(monkeypatch, overrides, message):
+    module = load_vime_arguments_module(monkeypatch)
+    with pytest.raises(ValueError, match=message):
+        module.vime_validate_args(make_queue_args(**overrides))
+
+
+@pytest.mark.unit
+def test_queue_accepts_the_supported_configuration(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args, _ = module.vime_validate_args(make_queue_args())
+    assert args.start_rollout_id == 0
 
 
 def collect_args(**overrides):
@@ -872,3 +933,7 @@ def test_collect_only_rejects_before_side_effects(monkeypatch, tmp_path, overrid
 @pytest.mark.unit
 def test_collect_only_supported_arguments(monkeypatch):
     load_vime_arguments_module(monkeypatch).vime_validate_args(collect_args())
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__]))

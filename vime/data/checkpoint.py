@@ -36,8 +36,13 @@ class SourceRestore:
     source_ref: RecordSetRef | None = None
 
 
-def save_checkpoint(args, rollout_id, actor_model, critic_model, rollout_manager, *, actor_trains, restore_plan=None):
-    """Save training and rollout state, publishing a joint boundary for straw."""
+def save_checkpoint(
+    args, rollout_id, actor_model, critic_model, rollout_manager, *, actor_trains, restore_plan=None, timeout_s=None
+):
+    """Save training and rollout state, publishing a joint boundary for straw.
+
+    ``timeout_s`` bounds the actor and rollout-manager saves (the TransferQueue path).
+    """
     import ray
 
     from vime.ray.training_recovery import training_recovery_enabled
@@ -50,15 +55,25 @@ def save_checkpoint(args, rollout_id, actor_model, critic_model, rollout_manager
     )
     recoverable = training_recovery_enabled(args)
     # A recovery boundary must wait for async model writes to finish before it
-    # can declare earlier batches safe to discard.
-    force_sync = straw_checkpoint or recoverable or args.release_train or rollout_id == args.num_rollout - 1
+    # can declare earlier batches safe to discard. The TransferQueue ledger is
+    # saved right after this call, so its model writes must be durable too.
+    queue_checkpoint = getattr(args, "transfer_queue_mode", "off") != "off"
+    force_sync = (
+        straw_checkpoint or recoverable or queue_checkpoint or args.release_train or rollout_id == args.num_rollout - 1
+    )
     if straw_checkpoint and (Path(args.save) / "rollout" / f"committed_{rollout_id}.json").exists():
         raise FileExistsError("Refusing to overwrite a committed straw checkpoint")
     if actor_trains:
-        actor_model.save_model(rollout_id, force_sync=force_sync)
+        if timeout_s is None:
+            actor_model.save_model(rollout_id, force_sync=force_sync)
+        else:
+            actor_model.save_model(rollout_id, force_sync=force_sync, timeout_s=timeout_s)
     if args.use_critic:
         critic_model.save_model(rollout_id, force_sync=force_sync)
-    ray.get(rollout_manager.save.remote(rollout_id))
+    if timeout_s is None:
+        ray.get(rollout_manager.save.remote(rollout_id))
+    else:
+        ray.get(rollout_manager.save.remote(rollout_id), timeout=timeout_s)
     if straw_checkpoint:
         # Failed saves raise above; publish only after all saves return.
         model_args = [actor_model.args]

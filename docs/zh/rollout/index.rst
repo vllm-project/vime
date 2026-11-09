@@ -9,6 +9,7 @@ Rollout 与调度
    ../advanced/rl-systems.md
    ../advanced/rollout-scheduling.md
    ../advanced/straw.md
+   ../advanced/transferqueue.md
    ../advanced/pd-disaggregation.md
    ../advanced/external-rollout-engines.md
    ../advanced/delta-weight-sync.md

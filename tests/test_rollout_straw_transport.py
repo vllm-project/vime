@@ -1012,7 +1012,7 @@ def test_training_commits_only_after_save_calls_return(tmp_path, monkeypatch, fa
     manager = Mock()
     manager.save.remote.side_effect = save_rollout
     manager.get_weight_version.remote.side_effect = lambda: start + actor.update_weights.call_count
-    monkeypatch.setattr(module.ray, "get", lambda value: value)
+    monkeypatch.setattr(module.ray, "get", lambda value, timeout=None: value)
     monkeypatch.setattr(module, "create_training_models", lambda *a: (actor, critic))
     marker = tmp_path / "rollout" / f"committed_{start}.json"
     if fail_at:
@@ -1056,10 +1056,12 @@ def test_disk_weight_updates_do_not_require_actor_return_values(tmp_path, monkey
     worker.save_model.remote.return_value = None
     worker.init.remote.return_value = 8
     group._actor_handlers = [worker]
-    monkeypatch.setattr("vime.ray.actor_group.ray.get", lambda value: value)
+    monkeypatch.setattr("vime.ray.actor_group.ray.get", lambda value, timeout=None: value)
     reloaded = []
     monkeypatch.setattr(
-        group, "_reload_rollout_weights_from_disk", lambda path, version: reloaded.append((path, version))
+        group,
+        "_reload_rollout_weights_from_disk",
+        lambda path, version, timeout_s=None: reloaded.append((path, version)),
     )
     monkeypatch.setattr(group, "release", lambda: group._actor_handlers.clear())
     monkeypatch.setattr(group, "_allocate_gpus_for_actor", lambda *a: group._actor_handlers.append(worker))
