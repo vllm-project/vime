@@ -44,7 +44,9 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
                 critic_model.clear_memory()
 
     # train loop.
-    for rollout_id in range(args.start_rollout_id, args.num_rollout):
+    stop_after_rollout = getattr(args, "stop_after_rollout", None)
+    rollout_end = args.num_rollout if stop_after_rollout is None else min(args.num_rollout, stop_after_rollout)
+    for rollout_id in range(args.start_rollout_id, rollout_end):
         if args.eval_interval is not None and rollout_id == 0 and not args.skip_eval_before_train:
             ray.get(rollout_manager.eval.remote(rollout_id))
 
@@ -71,7 +73,7 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
         ray.get(rollout_manager.training_completed.remote(rollout_id))
 
         if release_train or should_run_periodic_action(
-            rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout
+            rollout_id, args.save_interval, num_rollout_per_epoch, rollout_end
         ):
             save_checkpoint(
                 args,
@@ -90,7 +92,7 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
         actor_model.update_weights()
         # Final evaluation uses the synchronized engines directly. Keep training
         # producers paused when no later rollout will consume their new work.
-        if rollout_id + 1 < args.num_rollout:
+        if rollout_id + 1 < rollout_end:
             ray.get(rollout_manager.resume_rollout_admission.remote(was_paused))
 
         if args.offload_rollout:
@@ -98,6 +100,12 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
 
         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
             ray.get(rollout_manager.eval.remote(rollout_id))
+
+    if getattr(args, "rollout_backend", "vllm") == "vllm-rlt":
+        # Native RLT trainers tear down their process groups before serving disposal.
+        actor_model.close()
+        if critic_model is not None:
+            critic_model.close()
 
 
 def main(args, restore_plan):

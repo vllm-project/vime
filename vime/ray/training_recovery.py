@@ -125,6 +125,7 @@ def retained_rollout_configuration(args):
         "vllm_router_ip",
         "vllm_router_port",
         "vllm_model_routers",
+        "rlt_engine",
         "distributed_init_method",
         "master_addr",
         "master_port",

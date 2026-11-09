@@ -1,0 +1,28 @@
+{
+  "status": "PASS_OFFICIAL_CONFIGURATION_META_LAYOUT_ONLY",
+  "model_revision": "b82e54bd609793562a75cbf9337970a93369eab5",
+  "config_git_blob": "e542b36686258dcc58de083c0fa7c81c9ebd65d6",
+  "roles": {
+    "actor": {
+      "unique_physical_parameters": 4169800704,
+      "named_parameter_tensors": 201,
+      "state_keys": 201,
+      "physical_layers": 22,
+      "logical_layer_visits": 44,
+      "loop_budget": 2,
+      "recompute": true
+    },
+    "critic": {
+      "unique_physical_parameters": 3659409408,
+      "named_parameter_tensors": 201,
+      "state_keys": 201,
+      "physical_layers": 22,
+      "logical_layer_visits": 44,
+      "loop_budget": 2,
+      "recompute": true
+    }
+  },
+  "cuda_initialized": false,
+  "weight_shards_loaded": 0,
+  "official_model_numerical_e2e": "NOT_RUN"
+}

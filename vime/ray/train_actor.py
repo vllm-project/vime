@@ -100,6 +100,13 @@ class TrainRayActor(RayActor):
         clear_memory()
         print_memory("after TrainRayActor.clear_memory")
 
+    def close(self):
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+    def shutdown(self):
+        ray.actor.exit_actor()
+
     @abc.abstractmethod
     def sleep(self, tags):
         raise NotImplementedError

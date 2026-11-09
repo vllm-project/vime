@@ -51,7 +51,10 @@ def save_checkpoint(args, rollout_id, actor_model, critic_model, rollout_manager
     recoverable = training_recovery_enabled(args)
     # A recovery boundary must wait for async model writes to finish before it
     # can declare earlier batches safe to discard.
-    force_sync = straw_checkpoint or recoverable or args.release_train or rollout_id == args.num_rollout - 1
+    rollout_end = args.num_rollout
+    if getattr(args, "stop_after_rollout", None) is not None:
+        rollout_end = min(rollout_end, args.stop_after_rollout)
+    force_sync = straw_checkpoint or recoverable or args.release_train or rollout_id == rollout_end - 1
     if straw_checkpoint and (Path(args.save) / "rollout" / f"committed_{rollout_id}.json").exists():
         raise FileExistsError("Refusing to overwrite a committed straw checkpoint")
     if actor_trains:

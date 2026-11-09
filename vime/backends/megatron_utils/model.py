@@ -15,8 +15,9 @@ from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import finalize_model_grads
 from megatron.core.enums import ModelType
 from megatron.core.models.gpt import GPTModel
+from megatron.core.optimizer import SGD as FusedSGD
 from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
-from megatron.core.optimizer.optimizer import MegatronOptimizer
+from megatron.core.optimizer.optimizer import ChainedOptimizer, Float16OptimizerWithFloat16Params, MegatronOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.core.utils import get_model_config
@@ -242,6 +243,43 @@ def _noop_init_state_fn(*args, **kwargs) -> None:
     return None
 
 
+def _init_fused_sgd_state(optimizer: FusedSGD, _config: OptimizerConfig) -> None:
+    for group in optimizer.param_groups:
+        optimizer.get_momentums(group["params"])
+
+
+def _load_stateless_sgd_state(load_state: Callable[[dict], None], mixed_precision: bool, state_dict: dict) -> None:
+    optimizer_state = state_dict["optimizer"] if mixed_precision else state_dict
+    optimizer_state.setdefault("state", {})
+    load_state(state_dict)
+
+
+def _prepare_sgd_checkpoint(optimizer: MegatronOptimizer) -> None:
+    optimizers = optimizer.chained_optimizers if isinstance(optimizer, ChainedOptimizer) else [optimizer]
+    for component in optimizers:
+        if isinstance(component.optimizer, torch.optim.SGD) and component.config.sgd_momentum == 0:
+            component.init_state_fn = _noop_init_state_fn
+            component.load_state_dict = partial(
+                _load_stateless_sgd_state,
+                component.load_state_dict,
+                isinstance(component, Float16OptimizerWithFloat16Params),
+            )
+        elif FusedSGD is not torch.optim.SGD and isinstance(component.optimizer, FusedSGD):
+            component.init_state_fn = _init_fused_sgd_state
+
+
+@contextmanager
+def _patch_momentum_free_sgd():
+    import megatron.core.optimizer as megatron_optimizer
+
+    original = megatron_optimizer.SGD
+    try:
+        megatron_optimizer.SGD = partial(torch.optim.SGD, fused=True)
+        yield
+    finally:
+        megatron_optimizer.SGD = original
+
+
 def _disable_distributed_optimizer_state_initialization(optimizer: MegatronOptimizer) -> None:
     for megatron_optimizer in getattr(optimizer, "chained_optimizers", [optimizer]):
         if megatron_optimizer.__class__.__name__ == "DistributedOptimizer":
@@ -312,7 +350,12 @@ def setup_model_and_optimizer(
         assert config.optimizer == "adam", "Stateless Adam only supports --optimizer adam."
         assert args.no_save_optim, "Stateless Adam does not save Adam moment states. Please set --no-save-optim."
 
-    optimizer_context = _patch_megatron_adam(StatelessAdam) if args.use_stateless_adam else nullcontext()
+    momentum_free_sgd = config.optimizer == "sgd" and config.sgd_momentum == 0 and not config.use_distributed_optimizer
+    optimizer_context = nullcontext()
+    if args.use_stateless_adam:
+        optimizer_context = _patch_megatron_adam(StatelessAdam)
+    elif momentum_free_sgd:
+        optimizer_context = _patch_momentum_free_sgd()
     with optimizer_context:
         optimizer = get_megatron_optimizer(
             config=config,
@@ -325,6 +368,8 @@ def setup_model_and_optimizer(
         patch_precision_aware_optimizer_checkpointing(optimizer)
     if args.use_stateless_adam:
         _disable_distributed_optimizer_state_initialization(optimizer)
+    if config.optimizer == "sgd" and not config.use_distributed_optimizer:
+        _prepare_sgd_checkpoint(optimizer)
     opt_param_scheduler = get_optimizer_param_scheduler(args, optimizer)
     return model, optimizer, opt_param_scheduler
 
@@ -397,6 +442,7 @@ def forward_only(
         "tokens",
         "loss_masks",
         "multimodal_train_inputs",
+        "recurrent_inputs",
         "total_lengths",
         "response_lengths",
     ]
@@ -443,6 +489,8 @@ def forward_only(
         }
         if batch["multimodal_train_inputs"] is not None:
             forward_kwargs.update(batch["multimodal_train_inputs"])
+        if batch["recurrent_inputs"] is not None:
+            forward_kwargs["recurrent_inputs"] = batch["recurrent_inputs"]
         if draft_feature_collector is None:
             output_tensor = model(**forward_kwargs)
         else:
@@ -599,6 +647,7 @@ def train_one_step(
                 [
                     "tokens",
                     "multimodal_train_inputs",
+                    "recurrent_inputs",
                     "packed_seq_params",
                     "total_lengths",
                     "response_lengths",
@@ -607,6 +656,7 @@ def train_one_step(
                     "ref_log_probs",
                     "values",
                     "advantages",
+                    "old_policy_log_probs",
                     "returns",
                     "rollout_log_probs",
                     "rollout_topk_token_ids",
@@ -665,6 +715,8 @@ def train_one_step(
 
             if batch["multimodal_train_inputs"] is not None:
                 forward_kwargs.update(batch["multimodal_train_inputs"])
+            if batch["recurrent_inputs"] is not None:
+                forward_kwargs["recurrent_inputs"] = batch["recurrent_inputs"]
 
             if args.enable_mtp_training:
                 forward_kwargs["mtp_kwargs"] = {"mtp_labels": batch["tokens"]}

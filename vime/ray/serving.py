@@ -36,7 +36,7 @@ class ServingCluster:
     """A named, detached owner for routers, engines and their GPU placements."""
 
     def __init__(self, args, restore_plan):
-        from vime.backends.vllm_utils.deployment import start_rollout_servers
+        from vime.backends.rollout_backend import start_rollout_servers
         from vime.observability.logging_utils import configure_logger
         from vime.ray.placement_group import create_placement_groups
 
@@ -89,7 +89,8 @@ class ServingCluster:
     def deployment(self, reused=False):
         routers = {
             name: getattr(self.args, name)
-            for name in ("vllm_router_ip", "vllm_router_port", "vllm_model_routers")
+            # Native RLT has no router; its rollout function calls the engine handle.
+            for name in ("vllm_router_ip", "vllm_router_port", "vllm_model_routers", "rlt_engine")
             if hasattr(self.args, name)
         }
         return ServingDeployment(

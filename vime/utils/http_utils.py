@@ -244,7 +244,14 @@ def init_http_client(args, *, concurrency: int | None = None):
     if num_engines <= 0:
         return
 
-    _client_concurrency = concurrency if concurrency is not None else args.vllm_server_concurrency * num_engines
+    if concurrency is None:
+        server_concurrency = (
+            args.rlt_max_num_seqs
+            if getattr(args, "rollout_backend", "vllm") == "vllm-rlt"
+            else args.vllm_server_concurrency
+        )
+        concurrency = server_concurrency * num_engines
+    _client_concurrency = concurrency
     if _http_client is None:
         _http_client = httpx.AsyncClient(
             transport=_ShardedHTTPTransport(_client_concurrency),

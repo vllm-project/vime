@@ -344,6 +344,11 @@ class BatchBuilder:
         if samples[0].rollout_log_probs is not None:
             train_data["rollout_log_probs"] = [sample.rollout_log_probs for sample in samples]
 
+        if any(sample.recurrent_trace is not None for sample in samples):
+            if any(sample.recurrent_trace is None for sample in samples):
+                raise ValueError("A native rollout batch must contain one complete recurrent cohort")
+            train_data["recurrent_inputs"] = [sample.recurrent_trace for sample in samples]
+
         if getattr(self.args, "use_score_centering", False):
             from vime.utils.score_centering import validate_sampler_top_p, validate_sampler_topk
 
@@ -472,6 +477,7 @@ class BatchBuilder:
         fields = [
             "tokens",
             "multimodal_train_inputs",
+            "recurrent_inputs",
             "response_lengths",
             "rewards",
             "truncated",

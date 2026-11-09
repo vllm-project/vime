@@ -1,0 +1,58 @@
+{
+  "status": "PASS_ACTUAL_RECIPE_AND_MCORE_ARGUMENTS_CPU_ONLY",
+  "runtime_head": "0ca616352e1aa6166217b21a068ba545f52bb4c7",
+  "records": [
+    {
+      "algorithm": "ppo",
+      "dtype": "torch.float32",
+      "offload_train": true,
+      "train_gpus": 1,
+      "rollout_gpus": 1,
+      "updates": 3,
+      "group_size": 1,
+      "steps_per_rollout": 1,
+      "critic": true,
+      "cuda_initialized": false
+    },
+    {
+      "algorithm": "grpo",
+      "dtype": "torch.float32",
+      "offload_train": true,
+      "train_gpus": 1,
+      "rollout_gpus": 1,
+      "updates": 3,
+      "group_size": 4,
+      "steps_per_rollout": 1,
+      "critic": false,
+      "cuda_initialized": false
+    },
+    {
+      "algorithm": "dppo",
+      "dtype": "torch.float32",
+      "offload_train": true,
+      "train_gpus": 1,
+      "rollout_gpus": 1,
+      "updates": 3,
+      "group_size": 1,
+      "steps_per_rollout": 1,
+      "critic": true,
+      "cuda_initialized": false
+    },
+    {
+      "algorithm": "flow-dppo",
+      "dtype": "torch.float32",
+      "offload_train": true,
+      "train_gpus": 1,
+      "rollout_gpus": 1,
+      "updates": 3,
+      "group_size": 1,
+      "steps_per_rollout": 2,
+      "critic": true,
+      "cuda_initialized": false
+    }
+  ],
+  "ray_launch_intercepted": true,
+  "weight_shards_loaded": 0,
+  "gpu_started": false,
+  "scientific_scope": "Argument parsing only; no rollout, optimizer update, reward or GPU e2e"
+}
