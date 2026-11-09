@@ -1,5 +1,5 @@
 import math
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -103,6 +103,25 @@ def _numel(value) -> int:
     return int(torch.as_tensor(value).reshape(-1).numel())
 
 
+@dataclass(frozen=True)
+class RecurrentTrace:
+    schema_version: int
+    model_family: str
+    model_revision: str
+    engine_revision: str
+    runtime_epoch: str
+    policy_version: int
+    publication_digest: str
+    request_id: str
+    seed: int
+    prefill_depth: int
+    decode_depths: list[int]
+    temperature: float
+    finish_reason: str | None
+    latent_seed: int | None = None
+    latent_profile: str | None = None
+
+
 @dataclass
 class Sample:
     """The sample generated"""
@@ -132,6 +151,7 @@ class Sample:
     loss_mask: list[int] | None = None
     weight_versions: list[str] = field(default_factory=list)
     rollout_log_probs: list[float] | None = None  # Log probabilities from rollout engine
+    recurrent_trace: RecurrentTrace | None = None
     rollout_topk_token_ids: np.ndarray | torch.Tensor | list[list[int]] | TensorRef | None = None
     rollout_topk_log_probs: np.ndarray | torch.Tensor | list[list[float]] | TensorRef | None = None
     # Ragged top-p nucleus token ids replayed from rollout sampling. For response
@@ -242,6 +262,7 @@ class Sample:
         value["status"] = self.status.value
         value["spec_info"] = self.spec_info.to_dict()
         value["prefix_cache_info"] = self.prefix_cache_info.to_dict()
+        value["recurrent_trace"] = asdict(self.recurrent_trace) if self.recurrent_trace is not None else None
         return value
 
     @staticmethod
@@ -250,6 +271,8 @@ class Sample:
         data["status"] = Sample.Status(data["status"])
         data["spec_info"] = Sample.SpecInfo.from_dict(data.get("spec_info", {}))
         data["prefix_cache_info"] = Sample.PrefixCacheInfo.from_dict(data.get("prefix_cache_info", {}))
+        if data.get("recurrent_trace") is not None:
+            data["recurrent_trace"] = RecurrentTrace(**data["recurrent_trace"])
 
         field_names = set(Sample.__dataclass_fields__.keys())
         init_data = {k: v for k, v in data.items() if k in field_names}
