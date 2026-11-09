@@ -8,29 +8,33 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import nullcontext
 from pathlib import Path
 
+import numpy as np
 import pytest
 from filelock import FileLock
 
 NUM_GPUS = 0
 
 
-def load_init(cache_dir, build_tokenizer):
+def load_init(cache_dir, build_tokenizer, **overrides):
     path = Path(__file__).resolve().parents[1] / "vime/backends/megatron_utils/initialize.py"
     function = next(
         node for node in ast.parse(path.read_text()).body if isinstance(node, ast.FunctionDef) and node.name == "init"
     )
     namespace = {
         "set_args": lambda args: None,
+        "set_run_config": None,
+        "pretrain_cfg_container_from_args": None,
         "_initialize_distributed": lambda args: None,
         "_set_random_seed": lambda *args: None,
         "_build_tokenizer": build_tokenizer,
         "init_num_microbatches_calculator": lambda *args: None,
-        "np": types.SimpleNamespace(__version__="1.26.4"),
+        "np": np,
         "nullcontext": nullcontext,
         "Path": Path,
         "FileLock": FileLock,
         "HF_MODULES_CACHE": str(cache_dir),
     }
+    namespace.update(overrides)
     exec(
         compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), str(path), "exec"), namespace
     )
@@ -54,6 +58,32 @@ def args(tokenizer_type="HuggingFaceTokenizer"):
         deterministic_mode=False,
         tp_comm_overlap=False,
     )
+
+
+def test_run_config_is_set_from_args_before_distributed_initialization(tmp_path):
+    events = []
+    run_args = args()
+    run_config = object()
+
+    def build_config(value):
+        assert value is run_args
+        events.append("build_config")
+        return run_config
+
+    def set_config(value):
+        assert value is run_config
+        events.append("set_config")
+
+    init = load_init(
+        tmp_path,
+        lambda value: events.append("tokenizer"),
+        set_args=lambda value: events.append("set_args"),
+        pretrain_cfg_container_from_args=build_config,
+        set_run_config=set_config,
+        _initialize_distributed=lambda value: events.append("distributed"),
+    )
+    init(run_args)
+    assert events == ["set_args", "build_config", "set_config", "distributed", "tokenizer"]
 
 
 def test_ranks_cannot_import_partially_written_tokenizer_code(tmp_path):

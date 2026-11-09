@@ -12,7 +12,7 @@ from pathlib import Path
 import torch
 from megatron.core import mpu
 from megatron.core.distributed import DistributedDataParallel as DDP
-from megatron.core.distributed import finalize_model_grads
+from megatron.core.distributed import finalize_model_grads as megatron_finalize_model_grads
 from megatron.core.enums import ModelType
 from megatron.core.models.gpt import GPTModel
 from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
@@ -29,8 +29,10 @@ try:
 except ImportError:
     from megatron.core.utils import unwrap_model
 from vime.observability import logging_utils, train_metric_utils
+from vime.utils import accelerator
 from vime.utils.memory_utils import clear_memory
 
+from .arguments import use_gloo_process_groups
 from .checkpoint import load_checkpoint, save_checkpoint
 from .data import DataIterator, get_batch
 from .loss import ROLLOUT_TOP_P_TOKEN_KEYS, get_rollout_top_p_logprob_kwargs, loss_function
@@ -38,6 +40,16 @@ from .model_provider import get_model_provider_func
 from .stateless_adam import StatelessAdam
 
 logger = logging.getLogger(__name__)
+
+
+def _finalize_model_grads(*args, **kwargs):
+    # NCCL initializes some gradient communicators only after the last
+    # backward. Its allocations bypass PyTorch's cache reclamation, so free
+    # unused blocks before entering that collective when device memory is low.
+    free, _ = accelerator.mem_get_info(accelerator.current_device())
+    if free < 3 * 1024**3:
+        clear_memory()
+    return megatron_finalize_model_grads(*args, **kwargs)
 
 
 def _disable_tqdm_for_non_main_rank() -> bool:
@@ -313,11 +325,13 @@ def setup_model_and_optimizer(
         assert args.no_save_optim, "Stateless Adam does not save Adam moment states. Please set --no-save-optim."
 
     optimizer_context = _patch_megatron_adam(StatelessAdam) if args.use_stateless_adam else nullcontext()
-    with optimizer_context:
+    # DistributedOptimizer slices FP32 parameters into optimizer shards. Those
+    # views must remain leaves rather than retaining an initialization graph.
+    with optimizer_context, torch.no_grad():
         optimizer = get_megatron_optimizer(
             config=config,
             model_chunks=model,
-            use_gloo_process_groups=args.enable_gloo_process_groups,
+            use_gloo_process_groups=use_gloo_process_groups(args),
         )
     if config.use_precision_aware_optimizer:
         from .transformer_engine import patch_precision_aware_optimizer_checkpointing
@@ -824,7 +838,7 @@ def train(
         config.param_sync_func = [model_chunk.start_param_sync for model_chunk in model]
         if len(model) == 1:
             config.param_sync_func = config.param_sync_func[0]
-    config.finalize_model_grads_func = finalize_model_grads
+    config.finalize_model_grads_func = _finalize_model_grads
 
     pre_hook_enabled = False
 
@@ -907,15 +921,38 @@ def train(
         if args.enable_mtp_training:
             from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
 
-            mtp_loss_scale = 1 / num_microbatches[step_id]
+            # This block reproduces Megatron's MTPLossLoggingHelper.track_mtp_metrics: reduce the tracker across
+            # ranks, take the reduced values, multiply by a scale, then clean the tracker. slime does not call it
+            # directly because it uses its own scale (1 / num_microbatches) and its own logging and CI check
+            # (check_mtp_loss).
             tracker = MTPLossLoggingHelper.tracker
+            # Megatron ae76c60e6 accumulates into "loss_sums" and reduces across ranks itself;
+            # "values" only exists after reduce_loss_in_tracker().
+            reduced_by_megatron = "loss_sums" in tracker and hasattr(MTPLossLoggingHelper, "reduce_loss_in_tracker")
+            if reduced_by_megatron and args.calculate_per_token_loss:
+                # tracker already holds sum(loss) / sum(tokens) after reduce_loss_in_tracker(), so it must not be
+                # averaged by the microbatch count again. Same rule as Megatron's own training loop
+                # (commit ae76c60e6c35d913867d6dd7bad0f30b128b54e7, megatron/training/training.py L5409-L5418):
+                # https://github.com/NVIDIA/Megatron-LM/blob/ae76c60e6c35d913867d6dd7bad0f30b128b54e7/megatron/training/training.py#L5409-L5418  # noqa: E501
+                # The division by the token count is in MTPLossLoggingHelper.reduce_loss_in_tracker()
+                # (megatron/core/transformer/multi_token_prediction.py L1647-L1673, same commit):
+                # https://github.com/NVIDIA/Megatron-LM/blob/ae76c60e6c35d913867d6dd7bad0f30b128b54e7/megatron/core/transformer/multi_token_prediction.py#L1647-L1673  # noqa: E501
+                mtp_loss_scale = 1.0
+            else:
+                # Microbatch-normalized losses were summed over the microbatches, so average them.
+                mtp_loss_scale = 1 / num_microbatches[step_id]
+            if reduced_by_megatron:
+                MTPLossLoggingHelper.reduce_loss_in_tracker()
             loss_key = "loss_values" if "loss_values" in tracker else "values"
             if loss_key in tracker:
                 values = tracker[loss_key]
-                if tracker.get("reduce_group") is not None:
-                    torch.distributed.all_reduce(values, group=tracker.get("reduce_group"))
-                if tracker.get("avg_group") is not None:
-                    torch.distributed.all_reduce(values, group=tracker["avg_group"], op=torch.distributed.ReduceOp.AVG)
+                if not reduced_by_megatron:
+                    if tracker.get("reduce_group") is not None:
+                        torch.distributed.all_reduce(values, group=tracker.get("reduce_group"))
+                    if tracker.get("avg_group") is not None:
+                        torch.distributed.all_reduce(
+                            values, group=tracker["avg_group"], op=torch.distributed.ReduceOp.AVG
+                        )
                 # Multi-head MTP losses have shape [num_mtp_layers]; aggregate below.
                 mtp_losses = values * mtp_loss_scale
                 if hasattr(MTPLossLoggingHelper, "clean_metrics_in_tracker"):

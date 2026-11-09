@@ -1,7 +1,8 @@
 diff --git a/vllm/config/vllm.py b/vllm/config/vllm.py
+index 4bcc5148417..c1d2a344311 100644
 --- a/vllm/config/vllm.py
 +++ b/vllm/config/vllm.py
-@@ -2110,6 +2110,13 @@
+@@ -2069,6 +2069,13 @@ class VllmConfig:
          self._resolve_mm_video_decode_device()
          self._validate_mm_processor_device()
  
@@ -16,23 +17,25 @@ diff --git a/vllm/config/vllm.py b/vllm/config/vllm.py
              self._disable_cudagraphs_for_v2_stock_torch_compile()
              self._validate_v2_model_runner()
 diff --git a/vllm/entrypoints/serve/__init__.py b/vllm/entrypoints/serve/__init__.py
+index d8254cb3354..6408f8dc7bb 100644
 --- a/vllm/entrypoints/serve/__init__.py
 +++ b/vllm/entrypoints/serve/__init__.py
-@@ -20,6 +20,10 @@
-     from .instrumentator import register_instrumentator_api_routers
+@@ -21,6 +21,10 @@ def register_vllm_serve_api_routers(app: FastAPI):
  
      register_instrumentator_api_routers(app)
-+
+ 
 +    from .tensor_dump.api_router import attach_router as attach_tensor_dump_router
 +
 +    attach_tensor_dump_router(app)
- 
++
      from vllm.entrypoints.serve.lora.api_router import (
          attach_router as attach_lora_router,
+     )
 diff --git a/vllm/entrypoints/serve/middleware/authenticate.py b/vllm/entrypoints/serve/middleware/authenticate.py
+index 0a0c1daeec4..eb928fa2055 100644
 --- a/vllm/entrypoints/serve/middleware/authenticate.py
 +++ b/vllm/entrypoints/serve/middleware/authenticate.py
-@@ -8,7 +8,7 @@
+@@ -8,7 +8,7 @@ from starlette.datastructures import Headers
  from starlette.responses import JSONResponse
  from starlette.types import ASGIApp, Receive, Scope, Send
  
@@ -43,12 +46,14 @@ diff --git a/vllm/entrypoints/serve/middleware/authenticate.py b/vllm/entrypoint
  class AuthenticationMiddleware:
 diff --git a/vllm/entrypoints/serve/tensor_dump/__init__.py b/vllm/entrypoints/serve/tensor_dump/__init__.py
 new file mode 100644
+index 00000000000..8b137891791
 --- /dev/null
 +++ b/vllm/entrypoints/serve/tensor_dump/__init__.py
 @@ -0,0 +1 @@
 +
 diff --git a/vllm/entrypoints/serve/tensor_dump/api_router.py b/vllm/entrypoints/serve/tensor_dump/api_router.py
 new file mode 100644
+index 00000000000..303ed2972be
 --- /dev/null
 +++ b/vllm/entrypoints/serve/tensor_dump/api_router.py
 @@ -0,0 +1,25 @@
@@ -78,9 +83,10 @@ new file mode 100644
 +    if os.getenv("DUMPER_SERVER_PORT") == "reuse":
 +        app.include_router(router)
 diff --git a/vllm/ray/ray_env.py b/vllm/ray/ray_env.py
+index 2e2ed48b85c..1f6a4bcdb71 100644
 --- a/vllm/ray/ray_env.py
 +++ b/vllm/ray/ray_env.py
-@@ -34,6 +34,7 @@
+@@ -34,6 +34,7 @@ except json.JSONDecodeError:
  # VLLM_RAY_EXTRA_ENV_VARS_TO_COPY (additive, not replacing).
  # ---------------------------------------------------------------------------
  DEFAULT_ENV_VAR_PREFIXES: set[str] = {
@@ -90,12 +96,14 @@ diff --git a/vllm/ray/ray_env.py b/vllm/ray/ray_env.py
      "LMCACHE_",
 diff --git a/vllm/utils/debug_utils/__init__.py b/vllm/utils/debug_utils/__init__.py
 new file mode 100644
+index 00000000000..8b137891791
 --- /dev/null
 +++ b/vllm/utils/debug_utils/__init__.py
 @@ -0,0 +1 @@
 +
 diff --git a/vllm/utils/debug_utils/dump_comparator.py b/vllm/utils/debug_utils/dump_comparator.py
 new file mode 100644
+index 00000000000..bb96d56d75d
 --- /dev/null
 +++ b/vllm/utils/debug_utils/dump_comparator.py
 @@ -0,0 +1,302 @@
@@ -403,6 +411,7 @@ new file mode 100644
 +    main(args)
 diff --git a/vllm/utils/debug_utils/dump_loader.py b/vllm/utils/debug_utils/dump_loader.py
 new file mode 100644
+index 00000000000..6c6769f9bdd
 --- /dev/null
 +++ b/vllm/utils/debug_utils/dump_loader.py
 @@ -0,0 +1,186 @@
@@ -594,6 +603,7 @@ new file mode 100644
 +dump_loader = DumpLoader()
 diff --git a/vllm/utils/debug_utils/dumper.py b/vllm/utils/debug_utils/dumper.py
 new file mode 100644
+index 00000000000..cf6ccfcc8e7
 --- /dev/null
 +++ b/vllm/utils/debug_utils/dumper.py
 @@ -0,0 +1,2004 @@
@@ -2603,6 +2613,7 @@ new file mode 100644
 +    )
 diff --git a/vllm/utils/debug_utils/source_patcher/__init__.py b/vllm/utils/debug_utils/source_patcher/__init__.py
 new file mode 100644
+index 00000000000..a2e65368d89
 --- /dev/null
 +++ b/vllm/utils/debug_utils/source_patcher/__init__.py
 @@ -0,0 +1,23 @@
@@ -2631,6 +2642,7 @@ new file mode 100644
 +]
 diff --git a/vllm/utils/debug_utils/source_patcher/code_patcher.py b/vllm/utils/debug_utils/source_patcher/code_patcher.py
 new file mode 100644
+index 00000000000..3ce13350b9e
 --- /dev/null
 +++ b/vllm/utils/debug_utils/source_patcher/code_patcher.py
 @@ -0,0 +1,200 @@
@@ -2836,6 +2848,7 @@ new file mode 100644
 +    return target
 diff --git a/vllm/utils/debug_utils/source_patcher/source_editor.py b/vllm/utils/debug_utils/source_patcher/source_editor.py
 new file mode 100644
+index 00000000000..c8a4706da2c
 --- /dev/null
 +++ b/vllm/utils/debug_utils/source_patcher/source_editor.py
 @@ -0,0 +1,148 @@
@@ -2989,6 +3002,7 @@ new file mode 100644
 +    return len(line) - len(line.lstrip(" "))
 diff --git a/vllm/utils/debug_utils/source_patcher/types.py b/vllm/utils/debug_utils/source_patcher/types.py
 new file mode 100644
+index 00000000000..9ff44cba6e0
 --- /dev/null
 +++ b/vllm/utils/debug_utils/source_patcher/types.py
 @@ -0,0 +1,63 @@
@@ -3056,18 +3070,10 @@ new file mode 100644
 +    def restore(self) -> None:
 +        self.target_fn.__code__ = self.original_code
 diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runner.py
+index 56fc63a2916..327ef3f639d 100644
 --- a/vllm/v1/worker/gpu/model_runner.py
 +++ b/vllm/v1/worker/gpu/model_runner.py
-@@ -32,7 +32,7 @@
- from vllm.compilation.counter import compilation_counter
- from vllm.compilation.cuda_graph import CUDAGraphStat
- from vllm.compilation.wrapper import compile_model_with_stock_torch
--from vllm.config import VllmConfig
-+from vllm.config import VllmConfig, set_current_vllm_config
- from vllm.config.compilation import CompilationMode, CUDAGraphMode
- from vllm.distributed.aux_output_connector.worker import (
-     AuxOutputWorkerConnector,
-@@ -60,6 +60,7 @@
+@@ -66,6 +66,7 @@ from vllm.multimodal.encoder_budget import (
  from vllm.platforms import current_platform
  from vllm.sequence import IntermediateTensors
  from vllm.tasks import SupportedTask
@@ -3075,7 +3081,7 @@ diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runne
  from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
  from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
  from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
-@@ -201,6 +202,7 @@
+@@ -212,6 +213,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
          )
          self.observability_config = vllm_config.observability_config
          self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
@@ -3083,7 +3089,7 @@ diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runne
  
          self.device = device
          self.dtype = self.model_config.dtype
-@@ -407,6 +409,9 @@
+@@ -425,6 +427,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                      eplb_models_added = self.eplb.maybe_register_speculator(
                          self.speculator, self.speculative_config, load_dummy_weights
                      )
@@ -3093,7 +3099,7 @@ diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runne
          time_after_load = time.perf_counter()
  
          self.model_memory_usage = m.consumed_memory
-@@ -1970,6 +1975,10 @@
+@@ -2013,6 +2018,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
              model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
              del intermediate_tensors
  
@@ -3104,7 +3110,7 @@ diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runne
          # Update the EPLB meta.
          ubatch_slices = ubatch_state.slices if ubatch_state is not None else None
          self.eplb.prepare_forward(
-@@ -2039,6 +2048,8 @@
+@@ -2074,6 +2083,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                      model_output = self.model(**model_inputs)
  
          self.kv_connector.finish_forward()
@@ -3114,9 +3120,10 @@ diff --git a/vllm/v1/worker/gpu/model_runner.py b/vllm/v1/worker/gpu/model_runne
          if self.is_last_pp_rank:
              if self.use_aux_hidden_state_outputs:
 diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
+index acdbb97094c..f02a4a4b13b 100644
 --- a/vllm/v1/worker/gpu_worker.py
 +++ b/vllm/v1/worker/gpu_worker.py
-@@ -1464,6 +1464,11 @@
+@@ -1492,6 +1492,11 @@ class Worker(WorkerBase):
      def pin_lora(self, lora_id: int) -> bool:
          return self.model_runner.pin_lora(lora_id)
  

@@ -1,0 +1,57 @@
+diff --git a/vllm/model_executor/models/nano_nemotron_vl.py b/vllm/model_executor/models/nano_nemotron_vl.py
+index b77206295d5..f317a75c313 100644
+--- a/vllm/model_executor/models/nano_nemotron_vl.py
++++ b/vllm/model_executor/models/nano_nemotron_vl.py
+@@ -1668,8 +1668,12 @@ class NemotronH_Nano_VL_V2(
+                     assert param_name in vision_norm_params, (
+                         f"Unexpected vision LayerNorm weight: {name}"
+                     )
++                    param = vision_norm_params[param_name]
++                    weight_loader = getattr(
++                        param, "weight_loader", default_weight_loader
++                    )
+                     with torch.no_grad():
+-                        default_weight_loader(vision_norm_params[param_name], w)
++                        weight_loader(param, w)
+ 
+         # Fully drain the generator so every mm tensor is buffered, even if
+         # the LLM loader stops iterating early.
+@@ -1682,8 +1686,9 @@ class NemotronH_Nano_VL_V2(
+             for trimmed_name, w in adapter_weights:
+                 # Load vision-language adapter weights directly
+                 param = adapter_dict[trimmed_name]
++                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                 with torch.no_grad():
+-                    default_weight_loader(param, w)
++                    weight_loader(param, w)
+             self.vision_model.load_weights(vision_weights)
+             if self.sound_encoder is not None and len(sound_weights) > 0:
+                 self.sound_encoder.load_weights(sound_weights)
+diff --git a/vllm/model_executor/models/nemotron_parse3_5.py b/vllm/model_executor/models/nemotron_parse3_5.py
+index 1ff0f1d0ac0..851b03c3671 100644
+--- a/vllm/model_executor/models/nemotron_parse3_5.py
++++ b/vllm/model_executor/models/nemotron_parse3_5.py
+@@ -875,7 +875,7 @@ class RadioMBartPrefixForCausalLM(nn.Module, SupportsMultiModal, SupportsEagle3)
+         radio_source_names = {name for name, _ in radio_weights}
+         synthetic_layerscales = {
+             name: param
+-            for name, param in self.encoder.model_encoder.named_parameters()
++            for name, param in self.encoder.model_encoder.named_buffers()
+             if name.endswith((".ls1", ".ls2")) and name not in radio_loaded
+         }
+         if synthetic_layerscales:
+diff --git a/vllm/model_executor/models/radio.py b/vllm/model_executor/models/radio.py
+index 355bfb056a9..226c5ee02a0 100644
+--- a/vllm/model_executor/models/radio.py
++++ b/vllm/model_executor/models/radio.py
+@@ -497,6 +497,10 @@ class RadioParallelAttention(InternParallelAttention):
+ class RadioVisionEncoderLayer(InternVisionEncoderLayer):
+     def __init__(self, *args, **kwargs) -> None:
+         super().__init__(*args, attn_cls=RadioParallelAttention, **kwargs)
++        for name in ("ls1", "ls2"):
++            scale = getattr(self, name).detach()
++            delattr(self, name)
++            self.register_buffer(name, scale)
+ 
+     def forward(
+         self,

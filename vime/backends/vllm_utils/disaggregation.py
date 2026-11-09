@@ -16,15 +16,17 @@ def start_pd_server_groups(
     placement: ServerGroupPlacement,
     router_ip: str | None,
     router_port: int | None,
-) -> tuple[list[ServerGroup], list[Any]]:
+    port_cursors: dict[int, int],
+) -> tuple[list[ServerGroup], list[Any], dict[int, int]]:
     """Start prefill/decode groups without waiting for final engine initialization."""
     server_groups = []
     init_handles = []
     for group_config in model_config.server_groups:
         group = placement.create(group_config, router_ip, router_port)
-        init_handles.extend(placement.start(group))
+        handles, port_cursors = group.start_engines(port_cursors)
+        init_handles.extend(handles)
         server_groups.append(group)
-    return server_groups, init_handles
+    return server_groups, init_handles, port_cursors
 
 
 def start_epd_server_groups(
@@ -32,7 +34,8 @@ def start_epd_server_groups(
     placement: ServerGroupPlacement,
     router_ip: str | None,
     router_port: int | None,
-) -> tuple[list[ServerGroup], list[Any], list[str]]:
+    port_cursors: dict[int, int],
+) -> tuple[list[ServerGroup], list[Any], dict[int, int], list[str]]:
     """Start encoder groups first, then return their endpoints for rollout."""
     server_groups = []
     transfer_overrides = {
@@ -45,7 +48,7 @@ def start_epd_server_groups(
         },
     }
 
-    encoder_endpoints: list[str] = []
+    encoder_urls: list[str] = []
     for group_config in model_config.server_groups:
         if group_config.worker_type != "encoder":
             continue
@@ -55,23 +58,21 @@ def start_epd_server_groups(
             router_port,
             overrides_extra=transfer_overrides,
         )
-        handles = placement.start(group)
+        handles, port_cursors = group.start_engines(port_cursors)
         if handles:
             ray.get(handles)
-        endpoints = ray.get([engine.get_url.remote() for engine in group.engines])
-        encoder_endpoints.extend(endpoint for endpoint in endpoints if endpoint is not None)
+        urls = ray.get([engine.get_url.remote() for engine in group.engines])
+        encoder_urls.extend(url for url in urls if url is not None)
         server_groups.append(group)
 
-    logger.info("EPD phase 1 done: collected %d encoder endpoints", len(encoder_endpoints))
+    logger.info(f"EPD phase 1 done: collected {len(encoder_urls)} encoder URLs: {encoder_urls}")
 
     init_handles = []
     for group_config in model_config.server_groups:
         if group_config.worker_type == "encoder":
             continue
         overrides_extra = (
-            transfer_overrides | {"mm_decoder_only": True}
-            if encoder_endpoints and group_config.worker_type in ("regular", "prefill")
-            else None
+            transfer_overrides if encoder_urls and group_config.worker_type in ("prefill", "regular") else None
         )
         group = placement.create(
             group_config,
@@ -79,25 +80,8 @@ def start_epd_server_groups(
             router_port,
             overrides_extra=overrides_extra,
         )
-        init_handles.extend(placement.start(group))
+        handles, port_cursors = group.start_engines(port_cursors)
+        init_handles.extend(handles)
         server_groups.append(group)
 
-    return server_groups, init_handles, encoder_endpoints
-
-
-def collect_pd_urls(server_groups: list[ServerGroup]) -> tuple[list[tuple[str, None]], list[str]]:
-    """Collect static prefill/decode endpoints after engine initialization."""
-    prefill_urls = []
-    decode_urls = []
-    for group in server_groups:
-        for engine in group.engines:
-            if engine is None:
-                continue
-            url = ray.get(engine.get_url.remote())
-            if not url:
-                continue
-            if group.worker_type == "prefill":
-                prefill_urls.append((url, None))
-            elif group.worker_type == "decode":
-                decode_urls.append(url)
-    return prefill_urls, decode_urls
+    return server_groups, init_handles, port_cursors, encoder_urls
