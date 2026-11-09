@@ -173,7 +173,12 @@ def get_batch(
         for mm_input_dict in multimodal_train_inputs:
             if mm_input_dict is not None:
                 for key, mm_tensor in mm_input_dict.items():
-                    mm_tensor = torch.atleast_1d(torch.as_tensor(mm_tensor))
+                    if not (
+                        isinstance(mm_tensor, (list, tuple))
+                        and mm_tensor
+                        and all(torch.is_tensor(item) for item in mm_tensor)
+                    ):
+                        mm_tensor = torch.atleast_1d(torch.as_tensor(mm_tensor))
                     grouped.setdefault(key, []).append(mm_tensor)
         #   pass 2  decide per key, looking at the whole group
         multimodal_data = {}  # key -> concatenated tensor, or list of tensors

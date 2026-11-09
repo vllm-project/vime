@@ -329,7 +329,9 @@ class NemotronHVLModel(MegatronModule):
                     image = image.unsqueeze(0)
                 if image.ndim != 4:
                     raise ValueError(f"Nemotron 3.5 VL images must be CHW or NCHW, got {tuple(image.shape)}")
-                features = self.vision_projector(image.to(dtype=projector_dtype), self.vision_model)
+                features = self.vision_projector(
+                    image.to(device=embeddings.device, dtype=projector_dtype), self.vision_model
+                )
                 per_image.append(features.reshape(-1, features.shape[-1]))
                 feature_counts.extend([features.shape[1]] * features.shape[0])
             vision_output = torch.cat(per_image, dim=0)
