@@ -154,7 +154,6 @@ def main(advantage_estimator="ppo", model_family: str | None = None):
         "disable-bias-linear",
         "offload-train",
         "accumulate-allreduce-grads-in-fp32",
-        "rollout-global-dataset",
         "no-gradient-accumulation-fusion",
         "no-rope-fusion",
         "deterministic-mode",

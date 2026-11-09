@@ -1,0 +1,44 @@
+diff --git a/vllm/config/model.py b/vllm/config/model.py
+index cfbb870e788..a3485ba9ed1 100644
+--- a/vllm/config/model.py
++++ b/vllm/config/model.py
+@@ -374,2 +374,3 @@ class ModelConfig:
+     """Parameter-name globs to preserve across level-2 sleep.
++    Use ``draft.<name>`` for draft-private parameters, or ``draft.*`` for all.
+     The sender must omit these parameters; loaders must preserve their storage."""
+diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
+index d4c64c55427..88657761bb6 100644
+--- a/vllm/v1/worker/gpu_worker.py
++++ b/vllm/v1/worker/gpu_worker.py
+@@ -252,2 +252,14 @@ class Worker(WorkerBase):
+ 
++    def _get_sleep_parameters(self, model: nn.Module) -> dict[str, nn.Parameter]:
++        parameters = dict(model.named_parameters())
++        draft = self.get_draft_model()
++        if draft is not None:
++            shared = {id(parameter) for parameter in parameters.values()}
++            parameters.update(
++                (f"draft.{name}", parameter)
++                for name, parameter in draft.named_parameters()
++                if id(parameter) not in shared
++            )
++        return parameters
++
+     def _save_sleep_parameters(self, model: nn.Module) -> None:
+@@ -257,3 +269,3 @@ class Worker(WorkerBase):
+             return
+-        parameters = dict(model.named_parameters())
++        parameters = self._get_sleep_parameters(model)
+         names: set[str] = set()
+@@ -261,3 +273,3 @@ class Worker(WorkerBase):
+             matches = fnmatch_filter(parameters, pattern)
+-            if not matches:
++            if not matches and pattern != "draft.*":
+                 raise ValueError(f"No parameter matches sleep retention: {pattern}")
+@@ -272,4 +284,5 @@ class Worker(WorkerBase):
+     def _restore_sleep_parameters(self, model: nn.Module) -> None:
++        parameters = self._get_sleep_parameters(model)
+         for name, value in self._sleep_saved_parameters.items():
+-            model.get_parameter(name).copy_(value)
++            parameters[name].copy_(value)
+         self._sleep_saved_parameters.clear()

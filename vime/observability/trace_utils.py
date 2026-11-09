@@ -169,7 +169,7 @@ def build_vllm_meta_trace_attrs(meta: dict[str, Any]) -> dict[str, Any]:
             meta["prompt_tokens"] = usage.get("prompt_tokens", 0)
             meta["completion_tokens"] = usage.get("completion_tokens", 0)
             meta["cached_tokens"] = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
-        request_metrics = meta.get("request_metrics")
+        request_metrics = meta.get("metrics", meta.get("request_metrics"))
         if isinstance(request_metrics, dict):
             meta = dict(meta)
             for target, source, scale in (

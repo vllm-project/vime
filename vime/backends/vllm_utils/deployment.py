@@ -53,10 +53,12 @@ def _start_router(
         router_args.prefill_urls = prefill_urls
         router_args.decode_urls = decode_urls
 
-    # Disable circuit breaker to prevent RDMA transfer timeouts from
-    # marking workers as dead. Timeouts are transient (PCIe contention under
-    # high load) and do not indicate a dead server.
+    # RDMA transfer timeouts are transient and should not mark decode workers dead.
     router_args.disable_circuit_breaker = True
+
+    # RolloutHealthMonitor owns engine health checks.
+    if hasattr(router_args, "disable_health_check"):
+        router_args.disable_health_check = True
 
     logger.info(f"Launch router with args: {router_args}")
 

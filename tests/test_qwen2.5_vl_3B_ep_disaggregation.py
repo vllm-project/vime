@@ -6,7 +6,6 @@ import asyncio
 import base64
 import io
 import os
-import shutil
 import sys
 import tempfile
 import time
@@ -132,26 +131,17 @@ def _deployment(pg, worker_types: tuple[str, ...]):
     config_path = _write_config(worker_types)
     args = _make_args(config_path, worker_types)
     servers: dict[str, Any] = {}
-    ec_path: Path | None = None
     try:
         servers, init_handles = start_rollout_servers(args, pg)
         if init_handles:
             ray.get(init_handles)
         init_http_client(args)
 
-        for group in servers["default"].server_groups:
-            config = group.vllm_overrides.get("ec_transfer_config") or {}
-            extra = config.get("ec_connector_extra_config") or {}
-            if path := extra.get("shared_storage_path"):
-                ec_path = Path(path)
-                break
         yield args, servers["default"]
     finally:
         try:
             _shutdown_servers(servers)
         finally:
-            if ec_path is not None:
-                shutil.rmtree(ec_path, ignore_errors=True)
             Path(config_path).unlink(missing_ok=True)
 
 
@@ -168,22 +158,20 @@ def _image_data_url() -> str:
 
 async def _generate(args, messages: list[dict[str, Any]], *, epd_server=None) -> list[int]:
     base_url = f"http://{args.vllm_router_ip}:{args.vllm_router_port}"
-    await vllm_rollout.prime_encoder(args, messages)
+    ec_transfer_params = await vllm_rollout.prime_encoder(args, messages)
     if epd_server is not None:
         assert getattr(args, "vllm_model_encoder_endpoints", {}), "EPD deployment did not expose an encoder endpoint"
-        storage_paths = [
-            group.vllm_overrides["ec_transfer_config"]["ec_connector_extra_config"]["shared_storage_path"]
-            for group in epd_server.server_groups
-            if group.worker_type == "encoder"
-        ]
-        assert any(
-            any(Path(path).glob("*/encoder_cache.safetensors")) for path in storage_paths
-        ), "encoder did not publish an external EC cache"
+        assert ec_transfer_params, "encoder did not publish external EC transfer parameters"
+        assert all("peer_host" in params and "peer_port" in params for params in ec_transfer_params.values())
     render_data = await post(
         f"{base_url}/v1/chat/completions/render",
         {"model": str(MODEL_PATH), "messages": messages},
     )
     body = vllm_rollout._mm_render_response_to_generate_body(render_data, str(MODEL_PATH))
+    if epd_server is not None:
+        assert body["features"].get("mm_metadata"), "renderer did not preserve encoder metadata"
+        body["features"].pop("kwargs_data")
+        body["ec_transfer_params"] = ec_transfer_params
     body["sampling_params"] = vllm_rollout._build_inference_sampling_params(
         {
             "max_new_tokens": MAX_NEW_TOKENS,
@@ -234,10 +222,10 @@ def _validate_epd_services(server) -> None:
     decode_kv = _find_config(info["decode"][1], "kv_transfer_config")
 
     assert encoder_ec is not None
-    assert encoder_ec["ec_connector"] == "ECExampleConnector"
+    assert encoder_ec["ec_connector"] == "ECCPUConnector"
     assert encoder_ec["ec_role"] == "ec_producer"
     assert prefill_ec is not None
-    assert prefill_ec["ec_connector"] == "ECExampleConnector"
+    assert prefill_ec["ec_connector"] == "ECCPUConnector"
     assert prefill_ec["ec_role"] == "ec_consumer"
     assert prefill_kv is not None and prefill_kv["kv_role"] == "kv_producer"
     assert decode_ec is None or decode_ec.get("ec_role") is None
@@ -249,9 +237,8 @@ def _validate_epd_services(server) -> None:
     assert {worker["worker_type"] for worker in workers} == {"prefill", "decode"}
     assert info["encoder"][0] not in {worker["url"] for worker in workers}
 
-    config = server.server_groups[0].vllm_overrides["ec_transfer_config"]
-    path = Path(config["ec_connector_extra_config"]["shared_storage_path"])
-    assert path.is_dir()
+    assert encoder_ec["ec_connector_extra_config"]["ec_enable_nixl"] is True
+    assert prefill_ec["ec_connector_extra_config"]["ec_enable_nixl"] is True
 
 
 def execute() -> None:
