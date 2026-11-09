@@ -1,3 +1,4 @@
+import socket
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
@@ -8,9 +9,10 @@ import torch.distributed as dist
 from ray.actor import ActorHandle
 
 from vime.utils.distributed_utils import get_gloo_group
+from vime.utils.weight_sync import should_flush_cache
 
 from ..dspark.export import export_dspark_model_weights
-from .common import HfWeightSource, VimeRayWeightSyncClient, create_nccl_trainer
+from .common import HfWeightSource, VimeRayWeightSyncClient
 from .hf_weight_iterator_direct import HfWeightIteratorDirect
 
 
@@ -57,8 +59,8 @@ class UpdateWeightFromDistributed:
         engine_parallel_configs: Sequence[Mapping[str, object]] | None = None,
     ) -> None:
         del rollout_engine_lock, engine_gpu_offsets, engine_parallel_configs
-        self.disconnect_rollout_engines()
         self.rollout_engines = list(rollout_engines)
+        self.disconnect_rollout_engines()
         engine_gpu_counts = list(
             engine_gpu_counts or [self.args.rollout_num_gpus_per_engine] * len(self.rollout_engines)
         )
@@ -67,7 +69,7 @@ class UpdateWeightFromDistributed:
             lambda: self.weight_version,
             engine_gpu_counts,
         )
-        self._trainer = create_nccl_trainer(
+        self._trainer = connect_rollout_engines_from_distributed(
             client,
             self._source,
             engine_gpu_counts,
@@ -75,7 +77,7 @@ class UpdateWeightFromDistributed:
 
     def disconnect_rollout_engines(self) -> None:
         if self._trainer is not None:
-            self._trainer.shutdown()
+            disconnect_rollout_engines_from_distributed(self._trainer, self.rollout_engines)
             self._trainer = None
 
     def pop_metrics(self) -> dict[str, float]:
@@ -86,10 +88,19 @@ class UpdateWeightFromDistributed:
     def update_weights(self) -> None:
         assert self._trainer is not None
         self.weight_version += 1
+        flush_cache = should_flush_cache(
+            self.args.flush_cache_interval, self.weight_version, getattr(self.args, "update_weight_start_version", 0)
+        )
 
         if dist.get_rank() == 0:
-            ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
-            ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
+            ray.get(
+                [
+                    engine.pause_generation.remote(mode="abort" if flush_cache else "in_place")
+                    for engine in self.rollout_engines
+                ]
+            )
+            if flush_cache:
+                ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
             if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
                 post_process_weights(
                     restore_weights_before_load=True,
@@ -120,6 +131,40 @@ class UpdateWeightFromDistributed:
                 )
             ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
+
+
+def connect_rollout_engines_from_distributed(
+    client: VimeRayWeightSyncClient,
+    source: HfWeightSource,
+    engine_gpu_counts: Sequence[int],
+):
+    from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
+    from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
+
+    rendezvous = [None]
+    if dist.get_rank() == 0:
+        with socket.socket() as sock:
+            sock.bind(("", 0))
+            rendezvous[0] = (ray._private.services.get_node_ip_address(), sock.getsockname()[1])
+    dist.broadcast_object_list(rendezvous, src=0, group=get_gloo_group())
+    master_address, master_port = rendezvous[0]
+    return WeightTransferTrainerFactory.trainer_init(
+        NCCLTrainerInitInfo(
+            master_address=master_address,
+            master_port=master_port,
+            world_size=sum(engine_gpu_counts) + 1,
+            rank=dist.get_rank(),
+            packed_num_buffers=1,
+        ),
+        client=client,
+        source=source,
+    )
+
+
+def disconnect_rollout_engines_from_distributed(trainer, rollout_engines):
+    refs = [engine.destroy_weights_update_group.remote(None) for engine in rollout_engines if trainer.is_sender]
+    trainer.shutdown()
+    ray.get(refs)
 
 
 def post_process_weights(

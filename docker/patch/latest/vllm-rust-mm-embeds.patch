@@ -1,0 +1,149 @@
+diff --git a/rust/src/cmd/src/cli.rs b/rust/src/cmd/src/cli.rs
+index 1269e0b8afa..55218ed216b 100644
+--- a/rust/src/cmd/src/cli.rs
++++ b/rust/src/cmd/src/cli.rs
+@@ -265,2 +265,5 @@ pub struct SharedRuntimeArgs {
+     pub language_model_only: bool,
++    #[arg(long)]
++    #[serde(default)]
++    pub enable_mm_embeds: bool,
+     /// Maximum number of log probabilities to return when `logprobs` is
+@@ -543,2 +546,3 @@ impl SharedRuntimeArgs {
+             language_model_only: self.language_model_only,
++            enable_mm_embeds: self.enable_mm_embeds,
+             chat_template: self.chat_template,
+@@ -605,2 +609,3 @@ impl SharedRuntimeArgs {
+             language_model_only: self.language_model_only,
++            enable_mm_embeds: self.enable_mm_embeds,
+             chat_template: self.chat_template,
+@@ -838,2 +843,3 @@ impl ServeArgs {
+             self.runtime.language_model_only,
++            self.runtime.enable_mm_embeds,
+             self.runtime.disable_log_stats,
+diff --git a/rust/src/managed-engine/src/cli.rs b/rust/src/managed-engine/src/cli.rs
+index 0a81ae598e9..e9df23d0bca 100644
+--- a/rust/src/managed-engine/src/cli.rs
++++ b/rust/src/managed-engine/src/cli.rs
+@@ -91,2 +91,3 @@ impl ManagedEngineArgs {
+         language_model_only: bool,
++        enable_mm_embeds: bool,
+         disable_log_stats: bool,
+@@ -122,2 +123,5 @@ impl ManagedEngineArgs {
+         }
++        if enable_mm_embeds {
++            python_args.push("--enable-mm-embeds".to_string());
++        }
+         if disable_log_stats {
+diff --git a/rust/src/server/examples/external_engine_openai_qwen.rs b/rust/src/server/examples/external_engine_openai_qwen.rs
+index 43192ab78f4..e73ec288867 100644
+--- a/rust/src/server/examples/external_engine_openai_qwen.rs
++++ b/rust/src/server/examples/external_engine_openai_qwen.rs
+@@ -77,2 +77,3 @@ async fn main() -> Result<()> {
+         language_model_only: false,
++        enable_mm_embeds: false,
+         chat_template: None,
+diff --git a/rust/src/server/src/config.rs b/rust/src/server/src/config.rs
+index 8e51f1440b3..e0199e3653e 100644
+--- a/rust/src/server/src/config.rs
++++ b/rust/src/server/src/config.rs
+@@ -244,2 +244,3 @@ pub struct Config {
+     pub language_model_only: bool,
++    pub enable_mm_embeds: bool,
+     /// Server-default chat template override, as a file path or inline
+diff --git a/rust/src/server/src/lib.rs b/rust/src/server/src/lib.rs
+index f54f8ce3e42..8238dec6b87 100644
+--- a/rust/src/server/src/lib.rs
++++ b/rust/src/server/src/lib.rs
+@@ -92,3 +92,3 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
+             renderer: config.renderer,
+-            language_model_only: config.language_model_only,
++            language_model_only: config.language_model_only && !config.enable_mm_embeds,
+             chat_template: config.chat_template.clone(),
+diff --git a/rust/src/cmd/src/cli/tests.rs b/rust/src/cmd/src/cli/tests.rs
+index 944febc36c1..a91672d2846 100644
+--- a/rust/src/cmd/src/cli/tests.rs
++++ b/rust/src/cmd/src/cli/tests.rs
+@@ -188,6 +188,7 @@ fn serve_args_forward_python_flags_with_separator() {
+                         tool_strict_level: Auto,
+                         renderer: Auto,
+                         language_model_only: false,
++                        enable_mm_embeds: false,
+                         max_logprobs: None,
+                         shutdown_timeout: 0,
+                         http_timeout_keep_alive: None,
+@@ -1029,6 +1030,7 @@ fn frontend_args_accept_json() {
+                         tool_strict_level: Auto,
+                         renderer: Auto,
+                         language_model_only: false,
++                        enable_mm_embeds: false,
+                         max_logprobs: None,
+                         shutdown_timeout: 0,
+                         http_timeout_keep_alive: None,
+@@ -1209,7 +1211,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
+         "--output-address",
+         "ipc:///tmp/output.sock",
+         "--args-json",
+-        r#"{"model_tag":"Qwen/Qwen3-0.6B","generation_config":"vllm","revision":"release","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_logprobs":-1,"shutdown_timeout":3}"#,
++        r#"{"model_tag":"Qwen/Qwen3-0.6B","generation_config":"vllm","revision":"release","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"enable_mm_embeds":true,"max_logprobs":-1,"shutdown_timeout":3}"#,
+     ])
+     .unwrap();
+ 
+@@ -1229,8 +1231,10 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
+     );
+     assert_eq!(args.runtime.renderer, RendererSelection::DeepSeekV32);
+     assert!(args.runtime.language_model_only);
++    assert!(args.runtime.enable_mm_embeds);
+     assert_eq!(args.runtime.max_logprobs, Some(-1));
+     assert_eq!(args.runtime.shutdown_timeout, 3);
++    assert!(args.into_config().enable_mm_embeds);
+ }
+ 
+ #[test]
+@@ -1241,6 +1245,7 @@ fn serve_args_forward_auto_max_model_len_to_managed_engine() {
+         "Qwen/Qwen3-0.6B",
+         "--max-model-len",
+         "auto",
++        "--enable-mm-embeds",
+     ])
+     .unwrap();
+ 
+@@ -1256,6 +1261,7 @@ fn serve_args_forward_auto_max_model_len_to_managed_engine() {
+             "auto",
+             "--reasoning-parser",
+             "qwen3",
++            "--enable-mm-embeds",
+         ]
+     "#]]
+     .assert_debug_eq(&config.python_args);
+@@ -1701,6 +1707,7 @@ fn serve_args_accept_handshake_aliases() {
+                         tool_strict_level: Auto,
+                         renderer: Auto,
+                         language_model_only: false,
++                        enable_mm_embeds: false,
+                         max_logprobs: None,
+                         shutdown_timeout: 0,
+                         http_timeout_keep_alive: None,
+@@ -1860,6 +1867,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
+             tool_strict_level: Auto,
+             renderer: Auto,
+             language_model_only: false,
++            enable_mm_embeds: false,
+             chat_template: None,
+             default_chat_template_kwargs: None,
+             limit_mm_per_prompt: {},
+@@ -1955,6 +1963,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
+             tool_strict_level: Auto,
+             renderer: Auto,
+             language_model_only: false,
++            enable_mm_embeds: false,
+             chat_template: None,
+             default_chat_template_kwargs: None,
+             limit_mm_per_prompt: {},
+@@ -2094,6 +2103,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
+             tool_strict_level: Auto,
+             renderer: Auto,
+             language_model_only: false,
++            enable_mm_embeds: false,
+             chat_template: None,
+             default_chat_template_kwargs: None,
+             limit_mm_per_prompt: {},

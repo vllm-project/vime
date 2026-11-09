@@ -2,9 +2,11 @@ import logging
 
 import ray
 
+from vime.data.checkpoint import save_checkpoint
 from vime.observability.logging_utils import configure_logger, finish_tracking, init_tracking
-from vime.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
+from vime.ray.placement_group import create_rollout_manager, create_training_models
 from vime.utils.arguments import parse_args
+from vime.utils.cleanup import Cleanup
 from vime.utils.misc import should_run_periodic_action
 
 
@@ -37,10 +39,9 @@ def train_queue_batch(args, actor_model, rollout_manager, rollout_id, rollout_da
                     logging.getLogger(__name__).warning("Queue fail-stop acknowledgment failed", exc_info=True)
 
 
-def train(args):
-    configure_logger()
+def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
     release_train = args.release_train
-    queue_enabled = args.transfer_queue_mode != "off"
+    queue_enabled = getattr(args, "transfer_queue_mode", "off") != "off"
     queue_timeout = args.transfer_queue_timeout_s if queue_enabled else None
 
     def publish_actor():
@@ -49,14 +50,6 @@ def train(args):
         else:
             actor_model.update_weights()
 
-    # allocate the GPUs
-    pgs = create_placement_groups(args)
-    init_tracking(args)
-
-    # create the rollout manager, with vLLM engines inside.
-    # need to initialize rollout manager first to calculate num_rollout
-    rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
-
     actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
 
     if args.offload_rollout and not release_train:
@@ -64,9 +57,11 @@ def train(args):
 
     # Always push actor weights to rollout once weights are loaded.
     publish_actor()
-
     if queue_enabled:
         ray.get(rollout_manager.queue_confirm_publication.remote(), timeout=args.transfer_queue_timeout_s)
+    # Reattached async producers stay paused until restored weights are installed.
+    # This startup notification resumes them once, before entering the train loop.
+    ray.get(rollout_manager.training_ready.remote())
 
     if args.check_weight_update_equal:
         ray.get(rollout_manager.check_weights.remote(action="compare"))
@@ -87,16 +82,17 @@ def train(args):
             else:
                 critic_model.clear_memory()
 
-    def save_training_state(rollout_id, actor_trains, force_sync):
-        if actor_trains:
-            if queue_enabled:
-                actor_model.save_model(rollout_id, force_sync=force_sync, timeout_s=queue_timeout)
-            else:
-                actor_model.save_model(rollout_id, force_sync=force_sync)
-        if args.use_critic:
-            critic_model.save_model(rollout_id, force_sync=force_sync)
-        if args.rollout_global_dataset:
-            ray.get(rollout_manager.save.remote(rollout_id), timeout=queue_timeout)
+    def save_training_state(rollout_id, actor_trains):
+        save_checkpoint(
+            args,
+            rollout_id,
+            actor_model,
+            critic_model,
+            rollout_manager,
+            actor_trains=actor_trains,
+            restore_plan=restore_plan,
+            timeout_s=queue_timeout,
+        )
 
     # train loop.
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
@@ -123,22 +119,30 @@ def train(args):
         else:
             ray.get(actor_model.async_train(rollout_id, rollout_data_ref))
 
+        # Runtime completion releases queue capacity, without claiming that the
+        # model/optimizer or this data progress have a durable joint checkpoint.
+        ray.get(rollout_manager.training_completed.remote(rollout_id))
+
         save_this_round = release_train or should_run_periodic_action(
             rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout
         )
-        force_sync = release_train or rollout_id == args.num_rollout - 1
         if save_this_round and not queue_enabled:
-            save_training_state(rollout_id, actor_trains, force_sync)
+            save_training_state(rollout_id, actor_trains)
 
         offload_train(actor_trains)
         if args.offload_rollout and not release_train:
             ray.get(rollout_manager.onload_weights.remote())
+        was_paused = ray.get(rollout_manager.pause_rollout_admission.remote())
         publish_actor()
         if queue_enabled:
             ray.get(rollout_manager.queue_confirm_publication.remote(), timeout=args.transfer_queue_timeout_s)
             if save_this_round:
-                save_training_state(rollout_id, actor_trains, force_sync=True)
+                save_training_state(rollout_id, actor_trains)
                 ray.get(rollout_manager.queue_save.remote(rollout_id), timeout=args.transfer_queue_timeout_s)
+        # Final evaluation uses the synchronized engines directly. Keep training
+        # producers paused when no later rollout will consume their new work.
+        if rollout_id + 1 < args.num_rollout:
+            ray.get(rollout_manager.resume_rollout_admission.remote(was_paused))
 
         if args.offload_rollout:
             ray.get(rollout_manager.onload_kv.remote())
@@ -146,10 +150,35 @@ def train(args):
         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
             ray.get(rollout_manager.eval.remote(rollout_id))
 
-    ray.get(rollout_manager.dispose.remote())
-    finish_tracking(args)
+
+def main(args, restore_plan):
+    """Own the attempt's exit policy; actors only clean up their own resources."""
+    with Cleanup() as cleanup:
+        init_tracking(args)
+        startup = None
+        try:
+            # Create or reattach rollout resources, then run this training attempt.
+            startup = create_rollout_manager(args, restore_plan=restore_plan)
+            train(
+                startup.args, startup.placements, startup.manager, startup.num_rollout_per_epoch, startup.restore_plan
+            )
+        except BaseException:
+            # Failures and interruptions retain serving and replay data for a manual
+            # restart. Detach this driver's trainers instead of disposing the session.
+            if startup is not None:
+                try:
+                    startup.close(failed=True)
+                except Exception:
+                    logging.getLogger(__name__).exception("Failed to clean up training attempt")
+            raise
+        else:
+            startup.close(failed=False)
+        finally:
+            # Finish this driver's tracking on success, startup failure, or interruption.
+            cleanup.run("finish driver tracking", finish_tracking, args)
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    train(args)
+    args, restore_plan = parse_args(return_restore_plan=True)
+    configure_logger()
+    main(args, restore_plan)
