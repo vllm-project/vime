@@ -6709,3 +6709,41 @@ index 04e1e7730b16455cf5df1ac922305ef56f204504..f02a4a4b13b82ddf61e98d8d7b5463e6
      def check_health(self) -> None:
          # worker will always be healthy as long as it's running.
          return
+diff --git a/vllm/v1/executor/multiproc_executor.py b/vllm/v1/executor/multiproc_executor.py
+index 515e330..44e087d 100644
+--- a/vllm/v1/executor/multiproc_executor.py
++++ b/vllm/v1/executor/multiproc_executor.py
+@@ -12,7 +12,7 @@ import weakref
+ from collections import deque
+ from collections.abc import Callable, Sequence
+ from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
+-from contextlib import suppress
++from contextlib import nullcontext, suppress
+ from dataclasses import dataclass
+ from enum import Enum, auto
+ from functools import partial
+@@ -463,6 +463,9 @@ class MultiprocExecutor(Executor):
+         if self.is_failed:
+             raise RuntimeError("Executor failed.")
+
++        if method == "compile_or_warm_up_model" and timeout is None:
++            timeout = envs.VLLM_ENGINE_READY_TIMEOUT_S
++
+         deadline = None if timeout is None else time.monotonic() + timeout
+         kwargs = kwargs or {}
+
+@@ -1174,7 +1177,13 @@ class WorkerProc:
+
+             watchdog = get_watch_dog()
+             watchdog.feed()
+-            output = func(*args, **kwargs)
++            # Warmup is bounded by the parent's startup RPC deadline.
++            with (
++                watchdog.disable()
++                if method == "compile_or_warm_up_model"
++                else nullcontext()
++            ):
++                output = func(*args, **kwargs)
+             # Feed again: the RPC itself may run close to the watchdog
+             # timeout, so the pre-call feed can go stale while the result
+             # is serialized/enqueued in handle_output().
