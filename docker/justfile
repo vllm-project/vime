@@ -81,7 +81,7 @@ build-test:
     docker push "{{ IMAGE }}:test-latest"
 
 # ---- ROCm (AMD) image ----
-# Single-arch amd64 on `vllm/vllm-openai-rocm:nightly`, so no manifest step.
+# Single-arch amd64 on the pinned vLLM ROCm base (see docker/Dockerfile.rocm), so no manifest step.
 # Targets gfx950 (MI350X/MI355X); override with VIME_GPU_ARCH.
 
 ROCM_IMAGE := "vllm/vime-rocm"

@@ -122,7 +122,7 @@ straw end-to-end tests explicitly set `--rollout-data-transport straw`, so local
 
 - R3: `test_qwen3_30B_A3B_r3.py` and `test_moonlight_16B_A3B_r3.py`.
 - SC: `test_qwen2.5_0.5B_score_centering.py`, checking both top-k and top-p data.
-- Fully async rollout, fanout, PPO, MTP, PD/NIXL, distributed vLLM, fault recovery with mixed memory offload, debug replay, and continued rollout after releasing training resources.
+- Fully async rollout, fanout, PPO, MTP, PD/Mooncake, distributed vLLM, fault recovery with mixed memory offload, debug replay, and continued rollout after releasing training resources.
 - Checkpoint saving and loading: phases share a straw storage pool to check queue and training-state recovery. `test_straw_checkpoint_rewind.py` also checks step selection, repeated rollback in the same directory, regenerated inputs, and debug replay.
 
 R3, SC, and fully async tests also enable online GC. Ordinary straw tests use isolated temporary directories and clean them up afterward. Single-host GPU tests use the local filesystem profile; multi-host JuiceFS durability needs separate validation. Other end-to-end tests continue to cover Ray object-store and NIXL transport.
@@ -152,7 +152,7 @@ The test checks that healthy vLLM processes, routers, and GPU placements are reu
 | straw with a model/optimizer checkpoint and Megatron YAML configuration | Killed during training | Restore from the checkpoint and check configuration and recovery state. |
 | Rollout debug files | Killed after failure | Restore data from debug files and reconnect a new manager to the original serving cluster. |
 | straw with disk-delta weight synchronization | Killed after failure | Publish restored weights as a new full baseline, then continue delta updates. |
-| straw with PD/NIXL serving | Killed after failure | Wedge the prefill actor, replace it within the reset timeout, and retain the healthy decode actor. |
+| straw with PD/Mooncake serving | Killed after failure | Wedge the prefill actor, replace it within the reset timeout, and retain the healthy decode actor. |
 
 `test_qwen3_30B_A3B_training_recovery.py` uses 8 GPUs for the same OOM/checkpoint/manager-loss workflow with a MoE model, R3, and stateless Adam. It omits optimizer tensors while checking scheduler progress, compares persisted routing bytes across the TP/DP change, and completes training after recovery. The dense cases cover ordinary Adam with optimizer checkpoints.
 

@@ -108,13 +108,24 @@ def test_ray_client_fans_out_and_offsets_nccl_ranks(update_module):
     engines = [RecordingEngine(), RecordingEngine()]
     client = update_module.VimeRayWeightSyncClient(engines, lambda: 7, [2, 4])
 
-    client.init_weight_transfer_engine({"rank_offset": 1, "world_size": 7})
+    init_info = {
+        "rank_offset": 1,
+        "world_size": 7,
+        "packed": True,
+        "packed_buffer_size_bytes": 65536,
+        "packed_num_buffers": 1,
+    }
+    client.init_weight_transfer_engine(init_info)
     client.start_weight_update()
     client.update_weights({"names": ["weight"]})
     client.finish_weight_update()
 
-    assert engines[0].init_weight_transfer_engine.calls[0].args[0]["init_info"]["rank_offset"] == 1
-    assert engines[1].init_weight_transfer_engine.calls[0].args[0]["init_info"]["rank_offset"] == 3
+    for engine, rank_offset in zip(engines, [1, 3], strict=True):
+        assert engine.init_weight_transfer_engine.calls[0].args[0]["init_info"] == {
+            **init_info,
+            "rank_offset": rank_offset,
+        }
+    assert init_info["rank_offset"] == 1
     assert len(engines[0].start_weight_update.calls) == 1
     assert len(engines[1].update_weights.calls) == 1
     assert engines[0].finish_weight_update.calls[0].kwargs == {"weight_version": "7"}
@@ -158,7 +169,8 @@ def test_ray_client_preserves_bucket_session(update_module, draft, payload):
 
 
 @pytest.mark.unit
-def test_weight_source_caches_metadata_and_reiterates(update_module, monkeypatch):
+@pytest.mark.parametrize("empty", [False, True])
+def test_weight_source_caches_metadata_and_reiterates(update_module, monkeypatch, empty):
     class ParamMeta:
         def __init__(self, name, dtype, shape):
             self.name = name
@@ -170,17 +182,23 @@ def test_weight_source_caches_metadata_and_reiterates(update_module, monkeypatch
     monkeypatch.setitem(sys.modules, "vllm.distributed.weight_transfer.base", base_module)
 
     calls = []
+    tensors = [] if empty else [("a", torch.zeros(2, dtype=torch.float16)), ("b", torch.ones(3, dtype=torch.float32))]
 
     class Iterator:
         def get_hf_weight_chunks(self, weights):
             calls.append(weights)
-            yield [("a", torch.zeros(2)), ("b", torch.ones(3))]
+            yield tensors
 
     source = update_module.HfWeightSource(Iterator(), lambda: {"version": len(calls)})
 
-    assert [item.name for item in source.metadata()] == ["a", "b"]
-    assert [item.name for item in source.metadata()] == ["a", "b"]
-    assert [name for name, _ in source] == ["a", "b"]
+    metadata = source.metadata()
+    assert [(item.name, item.dtype, item.shape) for item in metadata] == [
+        (name, tensor.dtype, tuple(tensor.shape)) for name, tensor in tensors
+    ]
+    assert source.metadata() is metadata
+    replayed = list(source)
+    assert [name for name, _ in replayed] == [name for name, _ in tensors]
+    assert all(actual is expected for (_, actual), (_, expected) in zip(replayed, tensors, strict=True))
     assert len(calls) == 2
 
 
