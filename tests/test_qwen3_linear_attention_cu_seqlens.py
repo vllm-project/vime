@@ -297,6 +297,64 @@ def test_batch_keeps_host_offsets_aligned_with_padded_device_offsets(monkeypatch
         assert packed.cu_seqlens_q_cpu[:3] == (0, padded_lengths[0], sum(padded_lengths))
 
 
+def _get_multimodal_batch(monkeypatch, inputs):
+    install_megatron_stubs()
+    from vime.backends.megatron_utils import data
+
+    monkeypatch.setattr(data.mpu, "get_context_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(data.mpu, "get_context_parallel_rank", lambda: 0)
+    monkeypatch.setattr(data.mpu, "get_tensor_model_parallel_world_size", lambda: 1, raising=False)
+    monkeypatch.setattr(data.accelerator, "device", lambda: "cpu")
+    batch = {
+        "tokens": [torch.arange(4) for _ in inputs],
+        "loss_masks": [torch.ones(2) for _ in inputs],
+        "total_lengths": [4] * len(inputs),
+        "response_lengths": [2] * len(inputs),
+        "multimodal_train_inputs": inputs,
+    }
+    return data.get_batch(SimpleNamespace(get_next=lambda keys: batch), list(batch), 1)["multimodal_train_inputs"]
+
+
+@pytest.mark.parametrize("layout", ["tensor", "list", "tuple", "mixed", "ragged", "single"])
+def test_multimodal_batch_preserves_sample_and_image_order(monkeypatch, layout):
+    images = [torch.full((1, 3, 2 + (layout == "ragged" and i == 1), 4), float(i)) for i in range(3)]
+    if layout == "tensor":
+        values = [torch.cat(images[:2]), images[2]]
+    elif layout == "tuple":
+        values = [tuple(images[:2]), (images[2],)]
+    elif layout == "mixed":
+        values = [images[:2], images[2]]
+    elif layout == "single":
+        values = [images]
+    else:
+        values = [images[:2], [images[2]]]
+    inputs = [None, *[{"pixel_values": value} for value in values], None]
+    result = _get_multimodal_batch(monkeypatch, inputs)["pixel_values"]
+    if layout == "ragged":
+        assert len(result) == 3
+        for actual, expected in zip(result, images, strict=True):
+            torch.testing.assert_close(actual, expected)
+    else:
+        torch.testing.assert_close(result, torch.cat(images))
+
+
+def test_multimodal_audio_lists_keep_padding_and_numeric_metadata(monkeypatch):
+    features = [torch.full((1, 2, length), float(i + 1)) for i, length in enumerate([3, 5, 4])]
+    masks = [torch.ones(1, feature.shape[-1]) for feature in features]
+    result = _get_multimodal_batch(
+        monkeypatch,
+        [
+            {"input_features": features[:2], "feature_attention_mask": masks[:2], "lengths": [3, 5]},
+            {"input_features": features[2], "feature_attention_mask": masks[2], "lengths": 4},
+        ],
+    )
+    for key, values in [("input_features", features), ("feature_attention_mask", masks)]:
+        expected = torch.cat([torch.nn.functional.pad(value, (0, 5 - value.shape[-1])) for value in values])
+        torch.testing.assert_close(result[key], expected)
+    assert result["lengths"].tolist() == [3, 5, 4]
+    assert [value.shape[-1] for value in features] == [3, 5, 4]
+
+
 def _cp_wrapper_collective_worker(rank, world_size, rendezvous):
     import torch.distributed as dist
 

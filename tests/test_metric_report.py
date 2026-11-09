@@ -16,6 +16,11 @@ end-to-end variants (real torch.distributed) live in
 
 from __future__ import annotations
 
+import ast
+import sys
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
+
 # Import the helpers BEFORE the vime imports so the megatron stub lands
 # in sys.modules first. pytest's prepend importmode puts this file's
 # directory (``tests/``) on sys.path, which is what makes the bare-name
@@ -34,6 +39,60 @@ from vime.observability.train_metric_utils import (  # noqa: E402
 )
 
 NUM_GPUS = 0
+
+
+@pytest.mark.parametrize("tracker_format", ["loss_sums", "loss_values", "values"])
+@pytest.mark.parametrize("per_token", [False, True])
+@pytest.mark.parametrize("microbatches", [1, 4])
+def test_mtp_reporting_reduces_once_and_preserves_normalization(monkeypatch, tracker_format, per_token, microbatches):
+    path = Path(__file__).resolve().parents[1] / "vime/backends/megatron_utils/model.py"
+    block = next(
+        node
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.If)
+        and ast.unparse(node.test) == "args.enable_mtp_training"
+        and any(
+            isinstance(child, ast.ImportFrom) and child.module.endswith("multi_token_prediction")
+            for child in node.body
+        )
+    )
+    tracker = {tracker_format: torch.tensor([6.0, 10.0]), "reduce_group": object(), "avg_group": object()}
+    reductions, cleaned, collectives = [], [], []
+
+    def reduce_tracker():
+        reductions.append(True)
+        # The native helper has already reduced and, in per-token mode, normalized these values.
+        tracker["values"] = torch.tensor([6.0, 10.0])
+
+    def clean():
+        cleaned.append(True)
+        for value in tracker.values():
+            if isinstance(value, torch.Tensor):
+                value.zero_()
+
+    helper = SimpleNamespace(tracker=tracker)
+    if tracker_format == "loss_sums":
+        helper.reduce_loss_in_tracker = reduce_tracker
+        helper.clean_metrics_in_tracker = clean
+    else:
+        helper.clean_loss_in_tracker = clean
+    module = ModuleType("megatron.core.transformer.multi_token_prediction")
+    module.MTPLossLoggingHelper = helper
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda values, **kwargs: collectives.append(kwargs))
+    namespace = {
+        "args": SimpleNamespace(enable_mtp_training=True, calculate_per_token_loss=per_token, ci_test=False),
+        "torch": torch,
+        "num_microbatches": [microbatches],
+        "step_id": 0,
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[block], type_ignores=[])), str(path), "exec"), namespace)
+    divisor = 1 if tracker_format == "loss_sums" and per_token else microbatches
+    torch.testing.assert_close(namespace["mtp_losses"], torch.tensor([6.0, 10.0]) / divisor)
+    assert reductions == ([True] if tracker_format == "loss_sums" else [])
+    assert len(collectives) == (0 if tracker_format == "loss_sums" else 2)
+    assert cleaned == [True]
+    assert all(value.count_nonzero() == 0 for value in tracker.values() if isinstance(value, torch.Tensor))
 
 
 def test_truncation_fraction_is_reported_once_for_all_rollout_sources(monkeypatch):

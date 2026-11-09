@@ -874,7 +874,7 @@ index 0000000000000000000000000000000000000000..99c715c85512f1071badf5d7c02c5abf
 +        out.append(piece)
 +    return out
 diff --git a/vllm/entrypoints/scale_out/token_in_token_out/protocol.py b/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
-index a74a0d20e7988492bc2d827b5e4a941dbe78676e..a9f8005bd79d1f3757bf9deea02ac211e211f998 100644
+index a74a0d2..4586183 100644
 --- a/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
 +++ b/vllm/entrypoints/scale_out/token_in_token_out/protocol.py
 @@ -1,5 +1,6 @@
@@ -882,28 +882,54 @@ index a74a0d20e7988492bc2d827b5e4a941dbe78676e..a9f8005bd79d1f3757bf9deea02ac211
  # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +from dataclasses import dataclass
  from typing import Annotated, Any, Literal, TypeAlias
- 
+
  from pydantic import (
-@@ -506,6 +507,7 @@ class GenerateChoiceBase(BaseModel):
+@@ -109,9 +110,22 @@ class PlaceholderRangeInfo(BaseModel):
+     length: int = Field(gt=0)
+     """Number of placeholder tokens."""
+
+-    # TODO: add `is_embed: list[bool] | None` once the /generate side
+-    # consumes features — some models (e.g. Qwen-VL) use sparse
+-    # placeholder masks that cannot be recomputed from offset+length alone.
++    is_embed: list[bool] | None = None
++    """Which positions in the span actually receive embeddings.
++
++    ``None`` means every position does. Models with sparse placeholder
++    masks (Gemma 3, Phi-3-V, the Qwen omni thinkers) mark only a subset,
++    and the mask cannot be recomputed from offset and length alone.
++    """
++
++    @model_validator(mode="after")
++    def _check_is_embed_length(self) -> "PlaceholderRangeInfo":
++        if self.is_embed is not None and len(self.is_embed) != self.length:
++            raise ValueError(
++                f"is_embed has {len(self.is_embed)} entries but the "
++                f"placeholder spans {self.length} tokens"
++            )
++        return self
+
+
+ def _has_serialized_mm_items(
+@@ -506,6 +520,7 @@ class GenerateChoiceBase(BaseModel):
      sampling_mask: list[list[int]] | None = None
      # Contiguous weight version spans over output-token indexes.
      weight_versions: list[WeightVersionSpan] | None = None
 +    sampling_mask_logprobs: list[list[float]] | None = None
- 
+
      @field_validator("token_ids")
      @classmethod
-@@ -543,6 +545,7 @@ class GenerateStreamChoiceBase(BaseModel):
+@@ -543,6 +558,7 @@ class GenerateStreamChoiceBase(BaseModel):
      sampling_mask: list[list[int]] | None = None
      # Set on the final chunk only; covers the whole output.
      weight_versions: list[WeightVersionSpan] | None = None
 +    sampling_mask_logprobs: list[list[float]] | None = None
- 
- 
+
+
  class GenerateTokensStreamChoice(GenerateStreamChoiceBase):
-@@ -635,6 +638,14 @@ class GenerateDerenderResponse(GenerateResponseBase):
+@@ -635,6 +651,14 @@ class GenerateDerenderResponse(GenerateResponseBase):
      choices: list[GenerateDerenderChoice]
- 
- 
+
+
 +@dataclass
 +class RenderedGenerateResponse:
 +    """A non-streaming generate response already rendered to its JSON body:
@@ -914,9 +940,9 @@ index a74a0d20e7988492bc2d827b5e4a941dbe78676e..a9f8005bd79d1f3757bf9deea02ac211
 +
  def output_mode_or_tokens(value: Any) -> Any:
      """Discriminator for `GenerateResponse` and `GenerateStreamResponse`.
- 
+
 diff --git a/vllm/entrypoints/scale_out/token_in_token_out/serving.py b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
-index b46720e8a29d8f06a8e74527698ebe5606da2f15..e80d372ca3bb7b6bf2e27e9510cd2993ea5a97d1 100644
+index b46720e..2f58a5d 100644
 --- a/vllm/entrypoints/scale_out/token_in_token_out/serving.py
 +++ b/vllm/entrypoints/scale_out/token_in_token_out/serving.py
 @@ -20,6 +20,7 @@ from vllm.entrypoints.generate.base.protocol import (
@@ -927,7 +953,7 @@ index b46720e8a29d8f06a8e74527698ebe5606da2f15..e80d372ca3bb7b6bf2e27e9510cd2993
      build_spec_decoding_metrics,
      chat_top_logprobs_limit,
      clamp_prompt_logprobs,
-@@ -42,7 +43,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+@@ -42,11 +43,10 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
  from vllm.exceptions import GenerationError, VLLMValidationError
  from vllm.inputs import EngineInput, TokensPrompt, mm_input
  from vllm.logger import init_logger
@@ -936,21 +962,29 @@ index b46720e8a29d8f06a8e74527698ebe5606da2f15..e80d372ca3bb7b6bf2e27e9510cd2993
  from vllm.multimodal.inputs import (
      MultiModalKwargsItem,
      MultiModalKwargsItems,
-@@ -57,6 +58,7 @@ from vllm.tokenizers import TokenizerLike
+-    PlaceholderRange,
+ )
+ from vllm.outputs import RequestOutput
+ from vllm.renderers.chat_utils import AsyncMultiModalItemTracker
+@@ -57,9 +57,11 @@ from vllm.tokenizers import TokenizerLike
  from vllm.utils.collection_utils import as_list
  from vllm.utils.serial_utils import numpy2base64
- 
+
 +from .logprobs_render import render_json_with_fragments, render_tokens_logprobs
  from .mm_features import (
      mm_kwargs_from_features,
      placeholder_ranges_from_engine_input,
++    rebuild_mm_placeholders,
+ )
+ from .protocol import (
+     GenerateDerenderChoice,
 @@ -77,6 +79,7 @@ from .protocol import (
      GenerateTokensResponse,
      GenerateTokensStreamChoice,
      GenerateTokensStreamResponse,
 +    RenderedGenerateResponse,
  )
- 
+
  logger = init_logger(__name__)
 @@ -131,6 +134,7 @@ class ServingTokens(GenerateBaseServing):
          force_no_detokenize: bool = False,
@@ -984,7 +1018,22 @@ index b46720e8a29d8f06a8e74527698ebe5606da2f15..e80d372ca3bb7b6bf2e27e9510cd2993
          error_check_ret = await self._check_model(request)
          if error_check_ret is not None:
              logger.error("Error with model %s", error_check_ret)
-@@ -363,6 +374,18 @@ class ServingTokens(GenerateBaseServing):
+@@ -295,13 +306,7 @@ class ServingTokens(GenerateBaseServing):
+                 [prompt]
+             )
+         elif features := request.features:
+-            # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
+-            mm_placeholders: dict[str, list[PlaceholderRange]] = {
+-                modality: [
+-                    PlaceholderRange(offset=p.offset, length=p.length) for p in ranges
+-                ]
+-                for modality, ranges in features.mm_placeholders.items()
+-            }
++            mm_placeholders = rebuild_mm_placeholders(features.mm_placeholders)
+
+             # Deserialize full tensor data and optional metadata-only data.
+             # Metadata-only items are valid when ec_transfer_params is set.
+@@ -363,6 +368,18 @@ class ServingTokens(GenerateBaseServing):
          sampling_params.output_kind = (
              RequestOutputKind.DELTA if request.stream else RequestOutputKind.FINAL_ONLY
          )
@@ -1000,10 +1049,10 @@ index b46720e8a29d8f06a8e74527698ebe5606da2f15..e80d372ca3bb7b6bf2e27e9510cd2993
 +            # entry. Prompt logprobs stay lists, as the response returns them.
 +            sampling_params._columnar_logprobs = True
 +            sampling_params._detokenize_logprobs = False
- 
+
          self._log_inputs(
              request_id,
-@@ -426,7 +449,7 @@ class ServingTokens(GenerateBaseServing):
+@@ -426,7 +443,7 @@ class ServingTokens(GenerateBaseServing):
          model_name: str,
          request_metadata: RequestResponseMetadata,
          derender_request: ChatCompletionRequest | None = None,
@@ -1012,18 +1061,18 @@ index b46720e8a29d8f06a8e74527698ebe5606da2f15..e80d372ca3bb7b6bf2e27e9510cd2993
          created_time = int(time.time())
          final_res: RequestOutput | None = None
          sampling_params: SamplingParams = request.sampling_params
-@@ -452,6 +475,8 @@ class ServingTokens(GenerateBaseServing):
- 
+@@ -452,6 +469,8 @@ class ServingTokens(GenerateBaseServing):
+
          assert final_res is not None
- 
+
 +        # choice position -> pre-rendered JSON of its logprobs
 +        fragments: dict[int, list[bytes]] = {}
          tokens_choices: list[GenerateTokensChoice] = []
          text_choices: list[GenerateTextChoice] = []
          derender_choice_fields: list[dict[str, Any]] = []
-@@ -463,10 +488,22 @@ class ServingTokens(GenerateBaseServing):
+@@ -463,10 +482,22 @@ class ServingTokens(GenerateBaseServing):
              out_logprobs = output.logprobs
- 
+
              # This is top_logprobs in completions API
 +            logprobs: GenerateLogProbs | ChatCompletionLogProbs | None = None
              if num_logprobs is not None:
@@ -1046,7 +1095,7 @@ index b46720e8a29d8f06a8e74527698ebe5606da2f15..e80d372ca3bb7b6bf2e27e9510cd2993
                      logprobs = self._create_text_logprobs(
                          token_ids=token_ids,
                          top_logprobs=out_logprobs,
-@@ -476,10 +513,8 @@ class ServingTokens(GenerateBaseServing):
+@@ -476,10 +507,8 @@ class ServingTokens(GenerateBaseServing):
                  else:
                      logprobs = self._create_tokens_logprobs(
                          token_ids=token_ids,
@@ -1055,21 +1104,21 @@ index b46720e8a29d8f06a8e74527698ebe5606da2f15..e80d372ca3bb7b6bf2e27e9510cd2993
                      )
 -            else:
 -                logprobs = None
- 
+
              routed_experts_b64 = (
                  numpy2base64(output.routed_experts)
-@@ -488,8 +523,10 @@ class ServingTokens(GenerateBaseServing):
+@@ -488,8 +517,10 @@ class ServingTokens(GenerateBaseServing):
              )
- 
+
              sampling_mask = None
 +            sampling_mask_logprobs = None
              if output.sampling_mask is not None:
                  sampling_mask = output.sampling_mask.token_ids
 +                sampling_mask_logprobs = output.sampling_mask.logprobs
- 
+
              choice_fields: dict[str, Any] = dict(
                  index=output.index,
-@@ -500,6 +537,7 @@ class ServingTokens(GenerateBaseServing):
+@@ -500,6 +531,7 @@ class ServingTokens(GenerateBaseServing):
                  routed_experts=routed_experts_b64,
                  sampling_mask=sampling_mask,
                  weight_versions=output.weight_versions,
@@ -1077,7 +1126,7 @@ index b46720e8a29d8f06a8e74527698ebe5606da2f15..e80d372ca3bb7b6bf2e27e9510cd2993
              )
              if derender_mode:
                  derender_choice_fields.append(choice_fields)
-@@ -540,6 +578,7 @@ class ServingTokens(GenerateBaseServing):
+@@ -540,6 +572,7 @@ class ServingTokens(GenerateBaseServing):
                      fields["logprobs"] = None
                      fields["token_ids"] = None
                      fields["sampling_mask"] = None
@@ -1085,10 +1134,10 @@ index b46720e8a29d8f06a8e74527698ebe5606da2f15..e80d372ca3bb7b6bf2e27e9510cd2993
                  derender_choices.append(
                      GenerateDerenderChoice(message=message, **fields)
                  )
-@@ -565,6 +604,19 @@ class ServingTokens(GenerateBaseServing):
+@@ -565,6 +598,19 @@ class ServingTokens(GenerateBaseServing):
          else:
              response = GenerateTokensResponse(choices=tokens_choices, **response_fields)
- 
+
 +        metrics = response.metrics
 +        if (
 +            self.enable_per_request_metrics
@@ -1105,22 +1154,22 @@ index b46720e8a29d8f06a8e74527698ebe5606da2f15..e80d372ca3bb7b6bf2e27e9510cd2993
          # Log complete response if output logging is enabled
          if self.enable_log_outputs and self.request_logger:
              for choice in response.choices:
-@@ -584,6 +636,11 @@ class ServingTokens(GenerateBaseServing):
+@@ -584,6 +630,11 @@ class ServingTokens(GenerateBaseServing):
                          delta=False,
                      )
- 
+
 +        if fragments:
 +            parts = render_json_with_fragments(
 +                response.model_dump(), "logprobs", fragments
 +            )
 +            return RenderedGenerateResponse(b"".join(parts))
          return response
- 
+
      def _build_response_fields(
-@@ -618,11 +675,20 @@ class ServingTokens(GenerateBaseServing):
- 
+@@ -618,11 +669,20 @@ class ServingTokens(GenerateBaseServing):
+
          request_metadata.final_usage_info = usage
- 
+
 -        per_request_metrics = None
 +        per_request_metrics = (
 +            build_per_request_timing_metrics(
@@ -1140,7 +1189,7 @@ index b46720e8a29d8f06a8e74527698ebe5606da2f15..e80d372ca3bb7b6bf2e27e9510cd2993
          return dict(
              request_id=request_id,
              created=created_time,
-@@ -734,6 +800,11 @@ class ServingTokens(GenerateBaseServing):
+@@ -734,6 +794,11 @@ class ServingTokens(GenerateBaseServing):
                          routed_experts=routed_experts_b64,
                          sampling_mask=sampling_mask,
                          weight_versions=output.weight_versions,
@@ -1152,9 +1201,9 @@ index b46720e8a29d8f06a8e74527698ebe5606da2f15..e80d372ca3bb7b6bf2e27e9510cd2993
                      )
                      chunk: GenerateTokensStreamResponse | GenerateTextStreamResponse
                      if text_mode:
-@@ -783,13 +854,20 @@ class ServingTokens(GenerateBaseServing):
+@@ -783,13 +848,20 @@ class ServingTokens(GenerateBaseServing):
                  )
- 
+
              if include_usage:
 -                per_request_metrics = None
 +                per_request_metrics = (
@@ -6747,3 +6796,131 @@ index 515e330..44e087d 100644
              # Feed again: the RPC itself may run close to the watchdog
              # timeout, so the pre-call feed can go stale while the result
              # is serialized/enqueued in handle_output().
+diff --git a/vllm/entrypoints/scale_out/token_in_token_out/mm_features.py b/vllm/entrypoints/scale_out/token_in_token_out/mm_features.py
+index 124d602..bae0dbe 100644
+--- a/vllm/entrypoints/scale_out/token_in_token_out/mm_features.py
++++ b/vllm/entrypoints/scale_out/token_in_token_out/mm_features.py
+@@ -4,9 +4,11 @@
+
+ from __future__ import annotations
+
+-from collections.abc import Callable, Collection, Sequence
++from collections.abc import Callable, Collection, Mapping, Sequence
+ from typing import cast
+
++import torch
++
+ from vllm.entrypoints.generate.base.protocol import MMPayload
+ from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+     decode_mm_kwargs_item,
+@@ -25,6 +27,7 @@ from vllm.inputs import (
+ from vllm.multimodal.inputs import (
+     MultiModalKwargsItem,
+     MultiModalKwargsOptionalItems,
++    PlaceholderRange,
+ )
+
+
+@@ -118,6 +121,31 @@ def mm_kwargs_from_features(
+     return mm_kwargs
+
+
++def rebuild_mm_placeholders(
++    mm_placeholders: Mapping[str, list[PlaceholderRangeInfo]],
++) -> dict[str, list[PlaceholderRange]]:
++    """Convert rendered `PlaceholderRangeInfo` back into `PlaceholderRange`.
++
++    `is_embed` has to survive the round trip: the model runner branches on it
++    to decide how much of the encoder output a span consumes and which
++    positions to overwrite, and it cannot be recomputed from offset and
++    length alone.
++    """
++    return {
++        modality: [
++            PlaceholderRange(
++                offset=p.offset,
++                length=p.length,
++                is_embed=None
++                if p.is_embed is None
++                else torch.tensor(p.is_embed, dtype=torch.bool),
++            )
++            for p in ranges
++        ]
++        for modality, ranges in mm_placeholders.items()
++    }
++
++
+ def placeholder_ranges_from_engine_input(
+     engine_input: EngineInput,
+ ) -> dict[str, list[PlaceholderRangeInfo]] | None:
+@@ -130,7 +158,12 @@ def placeholder_ranges_from_engine_input(
+     ]
+     return {
+         modality: [
+-            PlaceholderRangeInfo(offset=p.offset, length=p.length) for p in ranges
++            PlaceholderRangeInfo(
++                offset=p.offset,
++                length=p.length,
++                is_embed=None if p.is_embed is None else p.is_embed.tolist(),
++            )
++            for p in ranges
+         ]
+         for modality, ranges in raw_placeholders.items()
+     }
+diff --git a/vllm/model_executor/models/nano_nemotron_vl.py b/vllm/model_executor/models/nano_nemotron_vl.py
+index b772062..f317a75 100644
+--- a/vllm/model_executor/models/nano_nemotron_vl.py
++++ b/vllm/model_executor/models/nano_nemotron_vl.py
+@@ -1668,8 +1668,12 @@ class NemotronH_Nano_VL_V2(
+                     assert param_name in vision_norm_params, (
+                         f"Unexpected vision LayerNorm weight: {name}"
+                     )
++                    param = vision_norm_params[param_name]
++                    weight_loader = getattr(
++                        param, "weight_loader", default_weight_loader
++                    )
+                     with torch.no_grad():
+-                        default_weight_loader(vision_norm_params[param_name], w)
++                        weight_loader(param, w)
+
+         # Fully drain the generator so every mm tensor is buffered, even if
+         # the LLM loader stops iterating early.
+@@ -1682,8 +1686,9 @@ class NemotronH_Nano_VL_V2(
+             for trimmed_name, w in adapter_weights:
+                 # Load vision-language adapter weights directly
+                 param = adapter_dict[trimmed_name]
++                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                 with torch.no_grad():
+-                    default_weight_loader(param, w)
++                    weight_loader(param, w)
+             self.vision_model.load_weights(vision_weights)
+             if self.sound_encoder is not None and len(sound_weights) > 0:
+                 self.sound_encoder.load_weights(sound_weights)
+diff --git a/vllm/model_executor/models/nemotron_parse3_5.py b/vllm/model_executor/models/nemotron_parse3_5.py
+index 1ff0f1d..851b03c 100644
+--- a/vllm/model_executor/models/nemotron_parse3_5.py
++++ b/vllm/model_executor/models/nemotron_parse3_5.py
+@@ -875,7 +875,7 @@ class RadioMBartPrefixForCausalLM(nn.Module, SupportsMultiModal, SupportsEagle3)
+         radio_source_names = {name for name, _ in radio_weights}
+         synthetic_layerscales = {
+             name: param
+-            for name, param in self.encoder.model_encoder.named_parameters()
++            for name, param in self.encoder.model_encoder.named_buffers()
+             if name.endswith((".ls1", ".ls2")) and name not in radio_loaded
+         }
+         if synthetic_layerscales:
+diff --git a/vllm/model_executor/models/radio.py b/vllm/model_executor/models/radio.py
+index 355bfb0..226c5ee 100644
+--- a/vllm/model_executor/models/radio.py
++++ b/vllm/model_executor/models/radio.py
+@@ -497,6 +497,10 @@ class RadioParallelAttention(InternParallelAttention):
+ class RadioVisionEncoderLayer(InternVisionEncoderLayer):
+     def __init__(self, *args, **kwargs) -> None:
+         super().__init__(*args, attn_cls=RadioParallelAttention, **kwargs)
++        for name in ("ls1", "ls2"):
++            scale = getattr(self, name).detach()
++            delattr(self, name)
++            self.register_buffer(name, scale)
+
+     def forward(
+         self,
