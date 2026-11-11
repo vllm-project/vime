@@ -257,9 +257,7 @@ class AscendCCausalConv1dFunction(torch.autograd.Function):
         # is not restored here (passed as None).
         qsl_device = None
         if ctx.query_start_loc is not None:
-            qsl_device = (
-                torch.tensor(ctx.query_start_loc, dtype=torch.int32, device=op_x.device).contiguous()
-            )
+            qsl_device = torch.tensor(ctx.query_start_loc, dtype=torch.int32, device=op_x.device).contiguous()
         preactivation = ascendc_causal_conv1d_fn(
             op_x,
             op_weight,
