@@ -69,6 +69,14 @@ def qwen3_5_hf_tensor(name: str, reader: SafetensorReader, hf_config) -> torch.T
 
     if rest.startswith("self_attention.linear_attn."):
         suffix = rest.removeprefix("self_attention.")
+        # Merged in_proj: HF checkpoint stores 4 separate tensors
+        # (in_proj_qkv/z/b/a); concatenate in q/k/v/z/b/a order for TP shard.
+        if suffix == "linear_attn.in_proj.weight":
+            qkv = reader.get_tensor(f"{hf_layer_prefix}.linear_attn.in_proj_qkv.weight")
+            z = reader.get_tensor(f"{hf_layer_prefix}.linear_attn.in_proj_z.weight")
+            b = reader.get_tensor(f"{hf_layer_prefix}.linear_attn.in_proj_b.weight")
+            a = reader.get_tensor(f"{hf_layer_prefix}.linear_attn.in_proj_a.weight")
+            return torch.cat((qkv, z, b, a), dim=0)
         return reader.get_tensor(f"{hf_layer_prefix}.{suffix}")
     if rest == "self_attention.input_layernorm.weight":
         return reader.get_tensor(f"{hf_layer_prefix}.input_layernorm.weight")
@@ -101,20 +109,33 @@ def qwen3_5_hf_tensor(name: str, reader: SafetensorReader, hf_config) -> torch.T
     expert_match = re.fullmatch(r"mlp\.experts\.linear_fc([12])(?:\.weight)?(\d+)?", rest)
     if expert_match:
         projection, expert_idx = expert_match.groups()
-        if is_mtp and expert_idx is not None:
-            prefix = f"{hf_layer_prefix}.mlp.experts.{expert_idx}"
+        # Accept two HF checkpoint layouts for routed experts:
+        #   1. fused 3-D: `experts.gate_up_proj` / `experts.down_proj`
+        #      ([num_experts, ...]) — the layout HuggingFace releases for Qwen3.5.
+        #   2. individual: `experts.{idx}.gate_proj.weight` /
+        #      `.up_proj.weight` / `.down_proj.weight`
+        # The Megatron-side name carries a per-expert suffix
+        # (`linear_fc1.weight{idx}`) whenever TEGroupedMLP is used, regardless
+        # of the HF checkpoint layout. So in the per-expert branch we must
+        # handle BOTH layouts: try individual tensors first, then fall back to
+        # indexing into the fused 3-D tensor.
+        if expert_idx is not None:
+            ind_prefix = f"{hf_layer_prefix}.mlp.experts.{expert_idx}"
             if projection == "1":
-                return torch.cat(
-                    (
-                        reader.get_tensor(f"{prefix}.gate_proj.weight"),
-                        reader.get_tensor(f"{prefix}.up_proj.weight"),
-                    ),
-                    dim=0,
-                )
-            return reader.get_tensor(f"{prefix}.down_proj.weight")
+                if f"{ind_prefix}.gate_proj.weight" in reader:
+                    gate = reader.get_tensor(f"{ind_prefix}.gate_proj.weight")
+                    up = reader.get_tensor(f"{ind_prefix}.up_proj.weight")
+                    return torch.cat((gate, up), dim=0)
+                # Fused layout: experts.gate_up_proj is [num_experts, 2*hidden, ...]
+                fused = reader.get_tensor(f"{hf_layer_prefix}.mlp.experts.gate_up_proj")
+                return fused[int(expert_idx)]
+            if f"{ind_prefix}.down_proj.weight" in reader:
+                return reader.get_tensor(f"{ind_prefix}.down_proj.weight")
+            fused = reader.get_tensor(f"{hf_layer_prefix}.mlp.experts.down_proj")
+            return fused[int(expert_idx)]
         suffix = "gate_up_proj" if projection == "1" else "down_proj"
         tensor = reader.get_tensor(f"{hf_layer_prefix}.mlp.experts.{suffix}")
-        return tensor if expert_idx is None else tensor[int(expert_idx)].contiguous()
+        return tensor
 
     shared_mapping = {
         "mlp.shared_experts.linear_fc1.weight": ("gate_proj.weight", "up_proj.weight"),
