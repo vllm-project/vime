@@ -221,7 +221,7 @@ def _get_megatron_local_param_infos(args: Namespace, model: Sequence[torch.nn.Mo
     # here to recover it for ParamInfo.attrs.
     _in_proj_split_sizes_by_name: dict[str, list[int]] = {}
     _conv1d_split_sizes_by_name: dict[str, list[int]] = {}
-    for vp_stage, model_module in enumerate(model):
+    for _vp_stage, model_module in enumerate(model):
         for module_name, module in model_module.named_modules():
             if hasattr(module, "_in_proj_split_sizes_full") and hasattr(module, "in_proj"):
                 _in_proj_split_sizes_by_name[module_name + ".in_proj.weight"] = module._in_proj_split_sizes_full

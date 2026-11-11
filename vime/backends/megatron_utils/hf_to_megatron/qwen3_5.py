@@ -46,7 +46,6 @@ def qwen3_5_hf_tensor(name: str, reader: SafetensorReader, hf_config) -> torch.T
 
     mtp_match = re.fullmatch(r"mtp\.layers\.(\d+)\.(.+)", name)
     if mtp_match:
-        is_mtp = True
         mtp_layer, rest = mtp_match.groups()
         direct_mtp = {
             "eh_proj.weight": "mtp.fc.weight",
@@ -60,7 +59,6 @@ def qwen3_5_hf_tensor(name: str, reader: SafetensorReader, hf_config) -> torch.T
         name = f"decoder.layers.{mtp_layer}." + rest
         hf_layer_prefix = f"mtp.layers.{mtp_layer}"
     else:
-        is_mtp = False
         layer_match = re.fullmatch(r"decoder\.layers\.(\d+)\.(.+)", name)
         if not layer_match:
             raise KeyError(f"Unsupported Qwen3.5 Megatron parameter {name!r}")

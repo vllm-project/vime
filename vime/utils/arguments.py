@@ -123,9 +123,9 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 choices=["fla", "fla_npu", "flashqla"],
                 default="fla_npu",
                 help="GDN implementation backend for Qwen linear-attention layers. "
-                     "'fla_npu' uses the NPU-native AscendC kernels (default on NPU); "
-                     "'fla' uses the flash-linear-attention package; "
-                     "'flashqla' requires SM90+ (NVIDIA only).",
+                "'fla_npu' uses the NPU-native AscendC kernels (default on NPU); "
+                "'fla' uses the flash-linear-attention package; "
+                "'flashqla' requires SM90+ (NVIDIA only).",
             )
             parser.add_argument(
                 "--train-env-vars",

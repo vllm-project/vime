@@ -103,23 +103,27 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         # conv1d.weight is TP-sharded along dim 0; its q/k/v sub-matrices
         # are each sharded by head independently.
         self._conv1d_split_sizes_full = [
-            self.key_dim, self.key_dim, self.value_dim,  # q, k, v
+            self.key_dim,
+            self.key_dim,
+            self.value_dim,  # q, k, v
         ]
-        setattr(self.conv1d.weight, "tensor_model_parallel", True)
-        setattr(self.conv1d.weight, "partition_dim", 0)
-        setattr(self.conv1d.weight, "partition_stride", 1)
-        setattr(self.conv1d.weight, "_conv1d_split_sizes_full", self._conv1d_split_sizes_full)
+        self.conv1d.weight.tensor_model_parallel = True
+        self.conv1d.weight.partition_dim = 0
+        self.conv1d.weight.partition_stride = 1
+        self.conv1d.weight._conv1d_split_sizes_full = self._conv1d_split_sizes_full
 
         # --- Input projection (merged qkv+z+b+a CPL; the converters cat/split
         # the four HF weights and TP shards each sub-matrix by head) ---
         self._in_proj_split_sizes_full = [
-            self.key_dim, self.key_dim, self.value_dim,  # qkv: q, k, v
-            self.value_dim,                               # z
-            self.num_v_heads,                             # b
-            self.num_v_heads,                             # a
+            self.key_dim,
+            self.key_dim,
+            self.value_dim,  # qkv: q, k, v
+            self.value_dim,  # z
+            self.num_v_heads,  # b
+            self.num_v_heads,  # a
         ]
-        init_method = getattr(megatron_config, 'init_method', init_method_normal(0.02))
-        output_init_method = getattr(megatron_config, 'output_layer_init_method', init_method_normal(0.02))
+        init_method = getattr(megatron_config, "init_method", init_method_normal(0.02))
+        output_init_method = getattr(megatron_config, "output_layer_init_method", init_method_normal(0.02))
 
         self.in_proj = ColumnParallelLinear(
             self.hidden_size,
@@ -133,19 +137,19 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             is_expert=False,
         )
         self.in_proj.sequence_parallel = False
-        setattr(self.in_proj.weight, "_in_proj_split_sizes_full", self._in_proj_split_sizes_full)
+        self.in_proj.weight._in_proj_split_sizes_full = self._in_proj_split_sizes_full
 
         # time step projection (TP-local)
         self.dt_bias = nn.Parameter(torch.ones(self.num_v_heads_local_tp))
-        setattr(self.dt_bias, "tensor_model_parallel", True)
-        setattr(self.dt_bias, "partition_dim", 0)
-        setattr(self.dt_bias, "partition_stride", 1)
+        self.dt_bias.tensor_model_parallel = True
+        self.dt_bias.partition_dim = 0
+        self.dt_bias.partition_stride = 1
 
         A = torch.empty(self.num_v_heads_local_tp).uniform_(0, 16)
         self.A_log = nn.Parameter(torch.log(A))
-        setattr(self.A_log, "tensor_model_parallel", True)
-        setattr(self.A_log, "partition_dim", 0)
-        setattr(self.A_log, "partition_stride", 1)
+        self.A_log.tensor_model_parallel = True
+        self.A_log.partition_dim = 0
+        self.A_log.partition_stride = 1
 
         if self.gdn_backend == "fla_npu":
             self.norm = _FlaNpuRMSNormGated(
@@ -166,7 +170,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
 
         # --- Output projection (RowParallelLinear) ---
         self.out_proj = RowParallelLinear(
-            self.value_dim,           # full input dim; RPL handles the split
+            self.value_dim,  # full input dim; RPL handles the split
             self.hidden_size,
             config=megatron_config,
             init_method=output_init_method,
@@ -205,7 +209,8 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             num_k_heads = self.num_k_heads_local_tp
             num_v_heads = self.num_v_heads_local_tp
             q_heads, k_heads, v_heads = mixed_qkv.split(
-                (num_k_heads, num_k_heads, num_v_heads), dim=1,
+                (num_k_heads, num_k_heads, num_v_heads),
+                dim=1,
             )
             # [B, T, H, D//H] for the downstream [B, T, H, D] contract.
             query = q_heads.transpose(1, 2).contiguous()

@@ -28,8 +28,6 @@ Layout contract (matches the upstream example):
     returns o: [B, T, H, V]
 """
 
-from typing import Optional
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -37,25 +35,17 @@ import torch.nn.functional as F
 import torch_npu  # noqa: F401  # registers the NPU backend; used by QwenStyleRMSNormGated
 
 from fla_npu.ops import ascendc as ascendc_ops
-from fla_npu.ops.ascendc import (
-    causal_conv1d_fn as ascendc_causal_conv1d_fn,
-    causal_conv1d_bwd as ascendc_causal_conv1d_bwd,
-    chunk_bwd_dqkwg as ascendc_chunk_bwd_dqkwg,
-    chunk_bwd_dv_local as ascendc_chunk_bwd_dv_local,
-    chunk_gated_delta_rule_fwd as ascendc_chunk_gated_delta_rule_fwd,
-    chunk_gated_delta_rule_bwd_dhu as ascendc_chunk_gated_delta_rule_bwd_dhu,
-    chunk_gated_delta_rule_fwd_h as ascendc_chunk_gated_delta_rule_fwd_h,
-    prepare_wy_repr_bwd_da as ascendc_prepare_wy_repr_bwd_da,
-    prepare_wy_repr_bwd_full as ascendc_prepare_wy_repr_bwd_full,
-    recompute_w_u_fwd as ascendc_recompute_w_u_fwd,
-)
-from fla_npu.ops.triton import (
-    autocast_custom_bwd,
-    autocast_custom_fwd,
-    input_guard,
-    l2norm_bwd,
-    l2norm_fwd,
-)
+from fla_npu.ops.ascendc import causal_conv1d_bwd as ascendc_causal_conv1d_bwd
+from fla_npu.ops.ascendc import causal_conv1d_fn as ascendc_causal_conv1d_fn
+from fla_npu.ops.ascendc import chunk_bwd_dqkwg as ascendc_chunk_bwd_dqkwg
+from fla_npu.ops.ascendc import chunk_bwd_dv_local as ascendc_chunk_bwd_dv_local
+from fla_npu.ops.ascendc import chunk_gated_delta_rule_bwd_dhu as ascendc_chunk_gated_delta_rule_bwd_dhu
+from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd as ascendc_chunk_gated_delta_rule_fwd
+from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd_h as ascendc_chunk_gated_delta_rule_fwd_h
+from fla_npu.ops.ascendc import prepare_wy_repr_bwd_da as ascendc_prepare_wy_repr_bwd_da
+from fla_npu.ops.ascendc import prepare_wy_repr_bwd_full as ascendc_prepare_wy_repr_bwd_full
+from fla_npu.ops.ascendc import recompute_w_u_fwd as ascendc_recompute_w_u_fwd
+from fla_npu.ops.triton import autocast_custom_bwd, autocast_custom_fwd, input_guard, l2norm_bwd, l2norm_fwd
 
 _disable_compile = getattr(getattr(torch, "compiler", None), "disable", lambda fn: fn)
 _DEFAULT_VARLEN_CHUNK_SIZES = (16, 32, 64, 128, 608 * 2)
@@ -64,6 +54,7 @@ _DEFAULT_VARLEN_CHUNK_SIZES = (16, 32, 64, 128, 608 * 2)
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
+
 
 def cdiv_torch(a, b):
     return (a + b - 1) // b
@@ -74,9 +65,7 @@ def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
 
 
 def prepare_chunk_indices(cu_seqlens: torch.LongTensor, chunk_size: int) -> torch.LongTensor:
-    indices = torch.cat(
-        [torch.arange(n) for n in cdiv_torch(prepare_lens(cu_seqlens), chunk_size).tolist()]
-    )
+    indices = torch.cat([torch.arange(n) for n in cdiv_torch(prepare_lens(cu_seqlens), chunk_size).tolist()])
     return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(cu_seqlens)
 
 
@@ -118,6 +107,7 @@ def _flatten_varlen_x(x: torch.Tensor, cu_seqlens):
 # ---------------------------------------------------------------------------
 # varlen metadata (cu_seqlens / chunk indices for the AscendC kernels)
 # ---------------------------------------------------------------------------
+
 
 def _next_power_of_two(value: int) -> int:
     value = max(int(value), 1)
@@ -166,8 +156,15 @@ def _chunk_list(chunk_indices_list, chunk_size: int):
 
 def recompute_w_u(k, v, beta, A, g, *, chunk_size, cu_seqlens, chunk_indices):
     w, u = ascendc_recompute_w_u_fwd(
-        k, v, beta, A, chunk_size,
-        g=g, gk=None, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices,
+        k,
+        v,
+        beta,
+        A,
+        chunk_size,
+        g=g,
+        gk=None,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     return w, u
 
@@ -198,6 +195,7 @@ def chunk_local_cumsum_bwd(dg, *, cu_seqlens, chunk_indices, chunk_size):
 # Causal conv1d (autograd-wrapped)
 # ---------------------------------------------------------------------------
 
+
 class AscendCCausalConv1dFunction(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -205,7 +203,7 @@ class AscendCCausalConv1dFunction(torch.autograd.Function):
         x: torch.Tensor,
         weight: torch.Tensor,
         H: int,
-        cu_seqlens: Optional[torch.Tensor] = None,
+        cu_seqlens: torch.Tensor | None = None,
     ):
         op_weight = weight.transpose(-1, -2).contiguous()
         width, dim = op_weight.shape
@@ -214,9 +212,7 @@ class AscendCCausalConv1dFunction(torch.autograd.Function):
         # No initial_state support: the conv always starts from a zero state.
         conv_states = torch.zeros(num_sequences, width - 1, dim, dtype=x.dtype, device=x.device)
         query_start_loc_device = (
-            cu_seqlens.to(device=op_x.device, dtype=torch.int32).contiguous()
-            if cu_seqlens is not None
-            else None
+            cu_seqlens.to(device=op_x.device, dtype=torch.int32).contiguous() if cu_seqlens is not None else None
         )
 
         # The AscendC kernel applies SiLU in-kernel when activation != "none",
@@ -262,8 +258,7 @@ class AscendCCausalConv1dFunction(torch.autograd.Function):
         qsl_device = None
         if ctx.query_start_loc is not None:
             qsl_device = (
-                torch.tensor(ctx.query_start_loc, dtype=torch.int32, device=op_x.device)
-                .contiguous()
+                torch.tensor(ctx.query_start_loc, dtype=torch.int32, device=op_x.device).contiguous()
             )
         preactivation = ascendc_causal_conv1d_fn(
             op_x,
@@ -303,7 +298,7 @@ def causal_conv1d_ascendc(
     x: torch.Tensor,
     weight: torch.Tensor,
     H: int,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return AscendCCausalConv1dFunction.apply(x, weight, H, cu_seqlens)
 
@@ -312,16 +307,28 @@ def causal_conv1d_ascendc(
 # GDN forward / backward
 # ---------------------------------------------------------------------------
 
+
 def flash_chunk_gated_delta_rule_fwd(
-    q, k, v, g, beta, scale,
-    cu_seqlens_list=None, chunk_indices_list=None, chunk_size: int = 64,
+    q,
+    k,
+    v,
+    g,
+    beta,
+    scale,
+    cu_seqlens_list=None,
+    chunk_indices_list=None,
+    chunk_size: int = 64,
 ):
     chunk_list = _chunk_list(chunk_indices_list, chunk_size)
     # The composite AscendC kernel runs the whole forward (cumsum, kkt,
     # solve_tri, WY repr, recurrent, output) and returns the cumsum'd g and A
     # needed by the backward pass.
     o, _, g, A, *_ = ascendc_chunk_gated_delta_rule_fwd(
-        q, k, v, g, beta,
+        q,
+        k,
+        v,
+        g,
+        beta,
         initial_state=None,
         output_final_state=False,
         chunk_size=chunk_size,
@@ -336,29 +343,57 @@ def flash_chunk_gated_delta_rule_fwd(
 
 
 def flash_chunk_gated_delta_rule_bwd(
-    q, k, v, g, beta, A, scale, do,
-    cu_seqlens=None, cu_seqlens_list=None, chunk_indices=None, chunk_indices_list=None,
+    q,
+    k,
+    v,
+    g,
+    beta,
+    A,
+    scale,
+    do,
+    cu_seqlens=None,
+    cu_seqlens_list=None,
+    chunk_indices=None,
+    chunk_indices_list=None,
     chunk_size: int = 64,
 ):
     g = g.transpose(1, 2).contiguous()
     beta = beta.transpose(1, 2).contiguous().float()
 
     w, u = recompute_w_u(
-        k, v, beta, A, g, chunk_size=chunk_size,
+        k,
+        v,
+        beta,
+        A,
+        g,
+        chunk_size=chunk_size,
         cu_seqlens=cu_seqlens_list,
         chunk_indices=_chunk_list(chunk_indices_list, chunk_size),
     )
     do = do.transpose(1, 2).contiguous()
 
     h, v_new, _ = ascendc_chunk_gated_delta_rule_fwd_h(
-        k, w, u, g=g, gk=None, initial_state=None,
-        output_final_state=False, chunk_size=chunk_size,
+        k,
+        w,
+        u,
+        g=g,
+        gk=None,
+        initial_state=None,
+        output_final_state=False,
+        chunk_size=chunk_size,
         cu_seqlens=cu_seqlens_list,
         chunk_indices=_chunk_list(chunk_indices_list, chunk_size),
     )
 
     dv = ascendc_chunk_bwd_dv_local(
-        q, k, do, g, scale, chunk_size, g_gamma=None, A=A,
+        q,
+        k,
+        do,
+        g,
+        scale,
+        chunk_size,
+        g_gamma=None,
+        A=A,
         cu_seqlens=cu_seqlens_list,
         chunk_indices=_chunk_list(chunk_indices_list, chunk_size),
     )
@@ -366,27 +401,65 @@ def flash_chunk_gated_delta_rule_bwd(
     # No recurrent-state support: h0 / dht stay None, matching the forward,
     # which never takes an initial_state and never outputs a final_state.
     dh, _, dv = ascendc_chunk_gated_delta_rule_bwd_dhu(
-        q, k, w, do, dv, scale, chunk_size, g=g, gK=None, h0=None, dht=None,
+        q,
+        k,
+        w,
+        do,
+        dv,
+        scale,
+        chunk_size,
+        g=g,
+        gK=None,
+        h0=None,
+        dht=None,
         cu_seqlens=cu_seqlens_list,
         chunk_indices=_chunk_list(chunk_indices_list, chunk_size),
-        use_exp2=False, transpose_state_layout=False,
+        use_exp2=False,
+        transpose_state_layout=False,
     )
 
     dq, dk, dw, dg = ascendc_chunk_bwd_dqkwg(
-        q, k, v_new, g, h, do, dh, dv, chunk_size,
+        q,
+        k,
+        v_new,
+        g,
+        h,
+        do,
+        dh,
+        dv,
+        chunk_size,
         cu_seqlens=cu_seqlens_list,
         chunk_indices=_chunk_list(chunk_indices_list, chunk_size),
-        w=None, g_gamma=None, scale=scale, use_exp2=False, transpose_state_layout=False,
+        w=None,
+        g_gamma=None,
+        scale=scale,
+        use_exp2=False,
+        transpose_state_layout=False,
     )
 
     dA = ascendc_prepare_wy_repr_bwd_da(
-        k, v, beta.float(), A, dw, dv, g.float(),
-        chunk_size=chunk_size, cu_seqlens=cu_seqlens_list,
+        k,
+        v,
+        beta.float(),
+        A,
+        dw,
+        dv,
+        g.float(),
+        chunk_size=chunk_size,
+        cu_seqlens=cu_seqlens_list,
         chunk_indices=_chunk_list(chunk_indices_list, chunk_size),
     )
 
     dk2, dv, db, dg2 = ascendc_prepare_wy_repr_bwd_full(
-        k, v, beta, A, dA, dw, dv, g, chunk_size,
+        k,
+        v,
+        beta,
+        A,
+        dA,
+        dw,
+        dv,
+        g,
+        chunk_size,
         cu_seqlens=cu_seqlens_list,
         chunk_indices=_chunk_list(chunk_indices_list, chunk_size),
     )
@@ -400,7 +473,10 @@ def flash_chunk_gated_delta_rule_bwd(
 
     db = db.transpose(1, 2).contiguous()
     dg = chunk_local_cumsum_bwd(
-        dg, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices, chunk_size=chunk_size,
+        dg,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        chunk_size=chunk_size,
     )
     return dq, dk, dv, db, dg
 
@@ -411,9 +487,18 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
     @autocast_custom_fwd
     def forward(
         ctx,
-        q, k, v, g, beta, scale,
-        cu_seqlens=None, cu_seqlens_list=None, chunk_indices=None, chunk_indices_list=None,
-        use_qk_l2norm_in_kernel: bool = False, chunk_size: int = 64,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        scale,
+        cu_seqlens=None,
+        cu_seqlens_list=None,
+        chunk_indices=None,
+        chunk_indices_list=None,
+        use_qk_l2norm_in_kernel: bool = False,
+        chunk_size: int = 64,
     ):
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
@@ -422,8 +507,14 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             q_rstd, k_rstd = None, None
 
         g, o, A = flash_chunk_gated_delta_rule_fwd(
-            q=q, k=k, v=v, g=g, beta=beta, scale=scale,
-            cu_seqlens_list=cu_seqlens_list, chunk_indices_list=chunk_indices_list,
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            scale=scale,
+            cu_seqlens_list=cu_seqlens_list,
+            chunk_indices_list=chunk_indices_list,
             chunk_size=chunk_size,
         )
 
@@ -445,17 +536,36 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
     def backward(ctx, do):
         q, k, v, g, beta, A = ctx.saved_tensors
         dq, dk, dv, db, dg = flash_chunk_gated_delta_rule_bwd(
-            q=q, k=k, v=v, g=g, beta=beta, A=A, scale=ctx.scale, do=do,
-            cu_seqlens=ctx.cu_seqlens, cu_seqlens_list=ctx.cu_seqlens_list,
-            chunk_indices=ctx.chunk_indices, chunk_indices_list=ctx.chunk_indices_list,
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            A=A,
+            scale=ctx.scale,
+            do=do,
+            cu_seqlens=ctx.cu_seqlens,
+            cu_seqlens_list=ctx.cu_seqlens_list,
+            chunk_indices=ctx.chunk_indices,
+            chunk_indices_list=ctx.chunk_indices_list,
             chunk_size=ctx.chunk_size,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, ctx.q_rstd, dq)
             dk = l2norm_bwd(k, ctx.k_rstd, dk)
         return (
-            dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta),
-            None, None, None, None, None, None, None,
+            dq.to(q),
+            dk.to(k),
+            dv.to(v),
+            dg.to(g),
+            db.to(beta),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
 
 
@@ -466,9 +576,9 @@ def flash_gated_delta_rule(
     v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
-    scale: Optional[float] = None,
+    scale: float | None = None,
     use_qk_l2norm_in_kernel: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
 ):
     r"""
@@ -500,8 +610,7 @@ def flash_gated_delta_rule(
         raise ValueError(f"g and beta shapes must match, got {g.shape} and {beta.shape}.")
     if g.shape[0] != q.shape[0] or g.shape[1] != q.shape[2] or g.shape[2] != q.shape[1]:
         raise ValueError(
-            "Expected q/k/v in [B, H, T, D] and g/beta in [B, T, H]; "
-            f"got q={tuple(q.shape)}, g={tuple(g.shape)}."
+            "Expected q/k/v in [B, H, T, D] and g/beta in [B, T, H]; " f"got q={tuple(q.shape)}, g={tuple(g.shape)}."
         )
 
     if chunk_size != 2 ** (chunk_size.bit_length() - 1):
@@ -509,7 +618,9 @@ def flash_gated_delta_rule(
 
     if cu_seqlens is not None:
         cu_seqlens, cu_seqlens_list, chunk_indices, chunk_indices_list = _ensure_varlen_metadata(
-            g=g, cu_seqlens=cu_seqlens, chunk_size=chunk_size,
+            g=g,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size,
         )
         if q.shape[0] != 1:
             raise ValueError(
@@ -525,9 +636,18 @@ def flash_gated_delta_rule(
         scale = k.shape[-1] ** -0.5
 
     o = ChunkGatedDeltaRuleFunction.apply(
-        q, k, v, g, beta, float(scale),
-        cu_seqlens, cu_seqlens_list, chunk_indices, chunk_indices_list,
-        use_qk_l2norm_in_kernel, chunk_size,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        float(scale),
+        cu_seqlens,
+        cu_seqlens_list,
+        chunk_indices,
+        chunk_indices_list,
+        use_qk_l2norm_in_kernel,
+        chunk_size,
     )
     return o, None
 
@@ -535,6 +655,7 @@ def flash_gated_delta_rule(
 # ---------------------------------------------------------------------------
 # NPU replacements for fla.modules classes
 # ---------------------------------------------------------------------------
+
 
 class ShortConvolution(nn.Module):
     """NPU replacement for ``fla.modules.ShortConvolution``.
@@ -574,13 +695,16 @@ class ShortConvolution(nn.Module):
         self.weight = nn.Parameter(torch.empty(hidden_size, 1, kernel_size))
         nn.init.normal_(self.weight, std=0.02)
 
-    def forward(self, x: torch.Tensor, cu_seqlens: Optional[torch.Tensor] = None):
+    def forward(self, x: torch.Tensor, cu_seqlens: torch.Tensor | None = None):
         # activation="silu" is applied inside the AscendC kernel, matching
         # the rollout (vllm-ascend gdn.py) path; head_num is forwarded
         # verbatim so the kernel picks the same head-first / flat layout as
         # the rollout: head_num>0 -> [H, T, D] head-first, head_num==0 -> flat.
         out = causal_conv1d_ascendc(
-            x, weight=self.weight.squeeze(1), H=self.head_num, cu_seqlens=cu_seqlens,
+            x,
+            weight=self.weight.squeeze(1),
+            H=self.head_num,
+            cu_seqlens=cu_seqlens,
         )
         return out, None
 
@@ -599,7 +723,7 @@ class QwenStyleRMSNormGated(nn.Module):
         self,
         hidden_size: int,
         eps: float = 1e-6,
-        activation: Optional[str] = "silu",
+        activation: str | None = "silu",
         device=None,
         dtype=None,
     ):

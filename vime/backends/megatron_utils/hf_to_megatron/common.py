@@ -107,9 +107,7 @@ def _tensor_parallel_shard(
     # put all of q/k on rank 0 and rest on rank 1.
     if "linear_attn.in_proj.weight" in name and in_proj_split_sizes is not None:
         parts = torch.split(tensor, in_proj_split_sizes, dim=partition_dim)
-        sharded_parts = [
-            torch.chunk(p, parallel_size, dim=partition_dim)[parallel_rank] for p in parts
-        ]
+        sharded_parts = [torch.chunk(p, parallel_size, dim=partition_dim)[parallel_rank] for p in parts]
         return torch.cat(sharded_parts, dim=partition_dim).contiguous()
 
     # GDN conv1d.weight: HF layout is [q(key_dim), k(key_dim), v(value_dim)] —
@@ -118,9 +116,7 @@ def _tensor_parallel_shard(
     # split q/k/v boundaries across ranks.
     if "linear_attn.conv1d.weight" in name and in_proj_split_sizes is not None:
         parts = torch.split(tensor, in_proj_split_sizes, dim=partition_dim)
-        sharded_parts = [
-            torch.chunk(p, parallel_size, dim=partition_dim)[parallel_rank] for p in parts
-        ]
+        sharded_parts = [torch.chunk(p, parallel_size, dim=partition_dim)[parallel_rank] for p in parts]
         return torch.cat(sharded_parts, dim=partition_dim).contiguous()
 
     if "linear_fc2.weight" in name and partition_dim == 0:
