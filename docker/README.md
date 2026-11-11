@@ -41,4 +41,5 @@ Override `GPU_ARCH` with `--build-arg` for another supported architecture.
 
 The build applies shared vLLM patches from `docker/patch/latest/` with strict
 `git apply`, in CUDA's order; ROCm-only patches live in `docker/amd_patch/`.
+Megatron-LM uses CUDA's `MEGATRON_COMMIT` and the shared `megatron.patch`.
 Keep `BASE_IMAGE` compatible with the shared patches.

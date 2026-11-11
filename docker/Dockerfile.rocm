@@ -8,7 +8,8 @@ FROM ${BASE_IMAGE}
 # ======================================== Arguments =============================================
 
 ARG PATCH_VERSION=latest
-ARG MEGATRON_COMMIT=1dcf0dafa884ad52ffb243625717a3471643e087
+# Same Megatron-LM commit as docker/Dockerfile; both images apply docker/patch/latest/megatron.patch.
+ARG MEGATRON_COMMIT=4b4acac9a1d28ea6829c8d4f566d75698a21249d
 ARG GPU_ARCH=gfx950
 
 # ROCm's prebuilt apex, from the wheel index matching the base image's ROCm.
@@ -63,22 +64,20 @@ RUN pip install --no-deps --no-cache-dir \
 
 # ======================================== Megatron-LM =========================
 
-# NVIDIA/Megatron-LM + docker/amd_patch/. The fork-after-HIP-init checkpoint
-# segfault is handled at runtime by vime.utils.rocm_checkpoint_writer.
+# NVIDIA/Megatron-LM + the shared docker/patch/ Megatron patch. The fork-after-HIP-init
+# checkpoint segfault is handled at runtime by vime.utils.rocm_checkpoint_writer.
 RUN git clone https://github.com/NVIDIA/Megatron-LM.git --recursive /root/Megatron-LM && \
     cd /root/Megatron-LM && git checkout ${MEGATRON_COMMIT}
 
-COPY docker/amd_patch/${PATCH_VERSION}/megatron.patch /root/Megatron-LM/
-COPY docker/amd_patch/${PATCH_VERSION}/amd_megatron_fused_kernels_init.patch /root/Megatron-LM/
+COPY docker/patch/${PATCH_VERSION}/megatron.patch /root/Megatron-LM/
 RUN cd /root/Megatron-LM && \
     git update-index --refresh && \
     git apply megatron.patch --3way && \
-    git apply amd_megatron_fused_kernels_init.patch --3way && \
     if grep -R -n '^<<<<<<< ' .; then \
       echo "Patch failed to apply cleanly. Please resolve conflicts." && \
       exit 1; \
     fi && \
-    rm megatron.patch amd_megatron_fused_kernels_init.patch && \
+    rm megatron.patch && \
     pip install -e . --no-deps
 
 # ====================================== Python dependencies ============================================
