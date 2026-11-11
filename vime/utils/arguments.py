@@ -595,6 +595,26 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--update-weight-init-timeout",
+                type=float,
+                default=600.0,
+                help=(
+                    "Timeout in seconds for a rollout engine to join the weight-transfer channel "
+                    "(/init_weight_transfer_engine). The trainer raises instead of waiting forever "
+                    "for an engine that never joins."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-request-timeout",
+                type=float,
+                default=1800.0,
+                help=(
+                    "Timeout in seconds for each weight-update request to a rollout engine "
+                    "(/start_weight_update, /update_weights, /finish_weight_update). With NCCL, "
+                    "/update_weights returns only after the broadcast, so large models need a long timeout."
+                ),
+            )
+            parser.add_argument(
                 "--rollout-data-postprocess-path",
                 type=str,
                 default=None,
