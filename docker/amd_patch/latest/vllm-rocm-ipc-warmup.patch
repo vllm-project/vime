@@ -1,0 +1,81 @@
+diff --git a/vllm/distributed/weight_transfer/rocm_ipc_warmup.py b/vllm/distributed/weight_transfer/rocm_ipc_warmup.py
+new file mode 100644
+index 0000000..2a1b118
+--- /dev/null
++++ b/vllm/distributed/weight_transfer/rocm_ipc_warmup.py
+@@ -0,0 +1,57 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++"""ROCm: open one HIP IPC handle before the first CuMemAllocator allocation.
++
++If the first hipIpcOpenMemHandle of a process that sees more than one GPU comes after
++its VMM allocations, KFD keeps both processes' queues evicted until the importer exits.
++"""
++
++import base64
++import pickle
++import subprocess
++import sys
++
++import torch
++from torch.multiprocessing.reductions import rebuild_cuda_tensor
++
++from vllm.config import VllmConfig
++from vllm.logger import init_logger
++
++logger = init_logger(__name__)
++
++_EXPORTER = r"""
++import base64, pickle, sys
++import torch
++from torch.multiprocessing.reductions import reduce_tensor
++torch.cuda.set_device(int(sys.argv[1]))
++buf = torch.ones(1 << 21, dtype=torch.uint8, device="cuda")
++torch.cuda.synchronize()
++sys.stdout.buffer.write(base64.b64encode(pickle.dumps(reduce_tensor(buf)[1])) + b"\n")
++sys.stdout.flush()
++sys.stdin.readline()
++"""
++
++
++def maybe_warm_up_ipc_import(vllm_config: VllmConfig, device: torch.device) -> None:
++    config = vllm_config.weight_transfer_config
++    if config is None or config.backend != "ipc" or torch.cuda.device_count() < 2:
++        return
++    exporter = subprocess.Popen(
++        [sys.executable, "-c", _EXPORTER, str(device.index)],
++        stdin=subprocess.PIPE,
++        stdout=subprocess.PIPE,
++    )
++    try:
++        args = list(pickle.loads(base64.b64decode(exporter.stdout.readline())))
++        args[6] = device.index
++        imported = rebuild_cuda_tensor(*args)
++        torch.cuda.synchronize(device)
++        del imported
++        torch.cuda.ipc_collect()
++    except Exception:
++        logger.warning(
++            "ROCm IPC warm-up import failed; IPC weight updates may stall.",
++            exc_info=True,
++        )
++    finally:
++        exporter.communicate(b"\n", timeout=60)
+diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
+index f02a4a4..745a662 100644
+--- a/vllm/v1/worker/gpu_worker.py
++++ b/vllm/v1/worker/gpu_worker.py
+@@ -509,6 +509,13 @@ class Worker(WorkerBase):
+                 current_platform.dist_backend,
+             )
+ 
++            if current_platform.is_rocm():
++                from vllm.distributed.weight_transfer.rocm_ipc_warmup import (
++                    maybe_warm_up_ipc_import,
++                )
++
++                maybe_warm_up_ipc_import(self.vllm_config, self.device)
++
+             if self.use_v2_model_runner:
+                 logger.info_once("Using V2 Model Runner")
+             warn_if_flashinfer_kernels_missing()
