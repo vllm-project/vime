@@ -145,6 +145,7 @@ def test_raw_loader_uses_individual_mtp_expert_weights():
         "mtp.layers.0.mlp.experts.7.up_proj.weight": up,
         "mtp.layers.0.mlp.experts.7.down_proj.weight": down,
     }
+
     # Expert loading probes the reader with `in`, which SimpleNamespace cannot support.
     class Reader:
         def __contains__(self, name):
