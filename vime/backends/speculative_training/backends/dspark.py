@@ -132,24 +132,26 @@ def compute_dspark_loss(
     return loss, metrics
 
 
-def sync_dspark_lm_heads(
+def sync_speculator_lm_heads(
     model: torch.nn.Module,
     target_weight: torch.Tensor,
     draft_to_target_rows: torch.Tensor | None,
+    *,
+    heads: tuple[str, ...] = ("lm_head", "verifier_lm_head"),
 ) -> None:
-    """Keep both frozen Speculators heads aligned with the current Target version."""
+    """Keep the frozen Speculators heads aligned with the current Target version."""
 
     selected = target_weight
     if draft_to_target_rows is not None:
         selected = selected.index_select(0, draft_to_target_rows.to(device=selected.device, dtype=torch.long))
-    for name in ("lm_head", "verifier_lm_head"):
+    for name in heads:
         head = getattr(model, name, None)
         weight = getattr(head, "weight", None)
         if not torch.is_tensor(weight):
-            raise RuntimeError(f"Speculators DSpark model does not expose {name}.weight")
+            raise RuntimeError(f"Speculators model does not expose {name}.weight")
         if weight.shape != selected.shape:
             raise ValueError(
-                f"Target LM Head shape {tuple(selected.shape)} does not match DSpark {name} {tuple(weight.shape)}"
+                f"Target LM Head shape {tuple(selected.shape)} does not match Speculators {name} {tuple(weight.shape)}"
             )
         with torch.no_grad():
             weight.copy_(selected.to(device=weight.device, dtype=weight.dtype))

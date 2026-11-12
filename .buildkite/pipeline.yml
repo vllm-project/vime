@@ -134,6 +134,7 @@ steps:
           python tests/speculative_training/test_feature_schema.py
           python tests/speculative_training/test_feature_collector.py
           python tests/speculative_training/test_eagle3_backend.py
+          python tests/speculative_training/test_eagle3_factory.py
           python tests/speculative_training/test_dspark_backend.py
           python tests/speculative_training/test_dspark_factory.py
           python tests/speculative_training/test_draft_trainer_helpers.py

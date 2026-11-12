@@ -54,10 +54,18 @@ def _args(**overrides):
 
 
 @pytest.mark.unit
-def test_default_feature_layers_and_interval_are_deterministic():
-    assert resolve_feature_layer_ids(_args()) == [2, 16, 29]
+def test_eagle3_layers_default_to_checkpoint_declaration(tmp_path):
+    (tmp_path / "config.json").write_text('{"eagle_aux_hidden_state_layer_ids": [1, 17, 32]}', encoding="utf-8")
+    assert resolve_feature_layer_ids(_args(draft_model_path=str(tmp_path), num_layers=36)) == [1, 17, 32]
     assert not should_run_draft_interval(0, 2)
     assert should_run_draft_interval(1, 2)
+
+
+@pytest.mark.unit
+def test_eagle3_layers_without_declaration_are_rejected(tmp_path):
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="eagle_aux_hidden_state_layer_ids"):
+        resolve_feature_layer_ids(_args(draft_model_path=str(tmp_path)))
 
 
 @pytest.mark.unit
@@ -83,10 +91,49 @@ def test_dense_dspark_target_layer_ids_are_converted_to_capture_ids(tmp_path):
 
 
 @pytest.mark.unit
-def test_external_draft_validation_resolves_layers():
-    args = _args(draft_feature_layer_ids="2,10,29")
+def test_external_draft_validation_resolves_layers(tmp_path):
+    (tmp_path / "config.json").write_text('{"eagle_aux_hidden_state_layer_ids": [2, 10, 29]}', encoding="utf-8")
+    args = _args(
+        draft_model_path=str(tmp_path),
+        draft_feature_layer_ids="2,10,29",
+        vllm_speculative_config={"method": "eagle3", "model": str(tmp_path)},
+    )
     validate_external_draft_args(args)
     assert args.draft_feature_layer_ids == [2, 10, 29]
+
+
+@pytest.mark.unit
+def test_eagle3_validation_adopts_declared_layer_ids(tmp_path):
+    (tmp_path / "config.json").write_text('{"eagle_aux_hidden_state_layer_ids": [1, 17, 32]}', encoding="utf-8")
+    args = _args(
+        draft_model_path=str(tmp_path),
+        draft_feature_layer_ids=None,
+        num_layers=36,
+        vllm_speculative_config={"method": "eagle3", "model": str(tmp_path)},
+    )
+    validate_external_draft_args(args)
+    assert args.draft_feature_layer_ids == [1, 17, 32]
+
+
+@pytest.mark.unit
+def test_eagle3_validation_rejects_undeclared_checkpoint_layers(tmp_path):
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    args = _args(draft_model_path=str(tmp_path), vllm_speculative_config={"method": "eagle3", "model": str(tmp_path)})
+    with pytest.raises(ValueError, match="eagle_aux_hidden_state_layer_ids"):
+        validate_external_draft_args(args)
+
+
+@pytest.mark.unit
+def test_eagle3_validation_rejects_conflicting_layer_ids(tmp_path):
+    (tmp_path / "config.json").write_text('{"eagle_aux_hidden_state_layer_ids": [1, 17, 32]}', encoding="utf-8")
+    args = _args(
+        draft_model_path=str(tmp_path),
+        draft_feature_layer_ids="1,17,33",
+        num_layers=36,
+        vllm_speculative_config={"method": "eagle3", "model": str(tmp_path)},
+    )
+    with pytest.raises(ValueError, match="conflicts with the checkpoint's"):
+        validate_external_draft_args(args)
 
 
 @pytest.mark.unit
@@ -124,10 +171,14 @@ def test_dspark_inference_export_request_activates_trainable_draft(tmp_path):
         draft_model_path=None,
         draft_save_hf="/exports/dspark-{rollout_id}",
         vllm_speculative_config={"method": "dspark", "model": str(tmp_path)},
+        # vime_validate_args computes this before validate_external_draft_args
+        # runs; simulate that state so the test covers the real ordering.
+        dspark_enabled=True,
     )
 
     validate_external_draft_args(args)
 
+    assert args.dspark_enabled is False
     assert args.enable_external_draft_training is True
     assert args.draft_algorithm == "dspark"
     assert args.draft_model_path == str(tmp_path)

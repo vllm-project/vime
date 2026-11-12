@@ -19,8 +19,13 @@ from torch.nn.parallel import DistributedDataParallel
 from vime.platforms import current_platform
 from vime.utils.misc import load_function
 
-from .backends.dspark import collate_dspark_samples, compute_dspark_loss, dspark_trainer_kwargs, sync_dspark_lm_heads
-from .backends.eagle3 import collate_eagle3_samples, compute_eagle3_loss
+from .backends.dspark import (
+    collate_dspark_samples,
+    compute_dspark_loss,
+    dspark_trainer_kwargs,
+    sync_speculator_lm_heads,
+)
+from .backends.eagle3 import collate_eagle3_samples, compute_eagle3_loss, eagle3_trainer_kwargs
 from .config import load_draft_checkpoint_config
 from .feature_schema import DraftFeatureSample, VersionedFeatureQueue
 
@@ -60,9 +65,13 @@ def _dspark_training_only_tensor(name: str) -> bool:
 def _load_draft_model(args: Namespace, device: torch.device) -> torch.nn.Module:
     factory_path = getattr(args, "draft_model_factory_path", None)
     algorithm = str(getattr(args, "draft_algorithm", "eagle3")).lower()
-    default_dspark_factory = not factory_path and algorithm == "dspark"
-    if default_dspark_factory:
-        factory_path = "vime.backends.speculative_training.factories.speculators_dspark.build_model"
+    builtin_factory = not factory_path and algorithm in ("eagle3", "dspark")
+    if builtin_factory:
+        factory_path = (
+            "vime.backends.speculative_training.factories.speculators_eagle3.build_model"
+            if algorithm == "eagle3"
+            else "vime.backends.speculative_training.factories.speculators_dspark.build_model"
+        )
     if factory_path:
         model = load_function(factory_path)(args, device)
     else:
@@ -76,15 +85,15 @@ def _load_draft_model(args: Namespace, device: torch.device) -> torch.nn.Module:
     if not isinstance(model, torch.nn.Module):
         raise TypeError("The external Draft model factory must return torch.nn.Module")
     model = model.to(device)
-    if default_dspark_factory:
+    if builtin_factory:
         return model
 
-    # Custom factories keep a small interface check. The built-in DSpark
-    # factory has already validated its concrete model and checkpoint.
+    # Custom factories keep a small interface check. The built-in Speculators
+    # factories have already validated their concrete model and checkpoint.
     signature = inspect.signature(model.forward)
     accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
     required = {"input_ids", "hidden_states", "loss_mask"}
-    if algorithm == "dspark":
+    if algorithm in ("dspark", "eagle3"):
         required.update({"verifier_last_hidden_states", "document_ids"})
     missing = required - set(signature.parameters)
     if missing and not accepts_kwargs:
@@ -267,7 +276,12 @@ class ExternalDraftTrainer:
                     "Draft t2d mapping selects a different number of Target rows than the Draft LM Head: "
                     f"{self.draft_to_target_rows.numel()} != {output_weight.size(0)}"
                 )
-        self.algorithm_train_kwargs = dspark_trainer_kwargs(raw_model, args) if self.algorithm == "dspark" else {}
+        if self.algorithm == "dspark":
+            self.algorithm_train_kwargs = dspark_trainer_kwargs(raw_model, args)
+        elif self.algorithm == "eagle3":
+            self.algorithm_train_kwargs = eagle3_trainer_kwargs(raw_model, args)
+        else:
+            self.algorithm_train_kwargs = {}
         self.trainable_parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
         if not self.trainable_parameters:
             raise RuntimeError("External Draft model has no trainable parameters")
@@ -301,7 +315,6 @@ class ExternalDraftTrainer:
 
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_multiplier)
         self.queue = VersionedFeatureQueue(max_samples=int(args.draft_queue_max_samples))
-        self.target_lm_head_weight: torch.Tensor | None = None
         self.target_weight_version: str | None = None
         self.optimizer_steps = 0
         self.draft_version = 0
@@ -330,15 +343,21 @@ class ExternalDraftTrainer:
                     device=self.device,
                 )
         target_lm_head_weight = weight.detach().to(device=self.device, dtype=torch.bfloat16).contiguous()
-        if self.algorithm == "dspark":
-            sync_dspark_lm_heads(
+        if self.algorithm == "eagle3":
+            # EAGLE3 keeps its trainable draft head; only the frozen verifier
+            # projection is Target-owned and needs the per-version sync.
+            sync_speculator_lm_heads(
+                _unwrap_model(self.model),
+                target_lm_head_weight,
+                self.draft_to_target_rows,
+                heads=("verifier_lm_head",),
+            )
+        else:
+            sync_speculator_lm_heads(
                 _unwrap_model(self.model),
                 target_lm_head_weight,
                 self.draft_to_target_rows,
             )
-            self.target_lm_head_weight = None
-        else:
-            self.target_lm_head_weight = target_lm_head_weight
         self.target_weight_version = str(target_version)
         self.queue.clear_except(self.target_weight_version)
 
@@ -348,7 +367,7 @@ class ExternalDraftTrainer:
         return self.queue.count(self.target_weight_version)
 
     def train(self, rollout_id: int) -> dict[str, float | int | str]:
-        if self.target_weight_version is None or (self.algorithm != "dspark" and self.target_lm_head_weight is None):
+        if self.target_weight_version is None:
             return {"trained": 0, "reason": "missing_target_head"}
         local_available = torch.tensor(self._local_available(), dtype=torch.long, device=self.device)
         if self.world_size > 1:
@@ -386,20 +405,17 @@ class ExternalDraftTrainer:
                     block_size=int(self.args.draft_dspark_block_size),
                 )
             else:
-                batch = collate_eagle3_samples(samples, self.device)
+                batch = collate_eagle3_samples(
+                    samples,
+                    self.device,
+                    ttt_steps=int(self.args.draft_ttt_length),
+                )
             self.optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=self.device_type, dtype=torch.bfloat16):
                 if self.algorithm == "dspark":
                     loss, metrics = compute_dspark_loss(self.model, batch, self.algorithm_train_kwargs)
                 else:
-                    loss, metrics = compute_eagle3_loss(
-                        self.model,
-                        batch,
-                        self.target_lm_head_weight,
-                        draft_to_target_ids=self.draft_to_target_rows,
-                        temporal_decay=float(self.args.draft_temporal_decay),
-                        ttt_length=int(self.args.draft_ttt_length),
-                    )
+                    loss, metrics = compute_eagle3_loss(self.model, batch, self.algorithm_train_kwargs)
 
             local_tokens = metrics["token_count"].detach().float()
             global_tokens = local_tokens.clone()
@@ -504,8 +520,6 @@ class ExternalDraftTrainer:
             "queue_samples": self.queue.count(self.target_weight_version),
             "learning_rate": float(self.optimizer.param_groups[0]["lr"]),
         }
-        if self.algorithm == "eagle3":
-            result["top5_accuracy"] = top5_sum / max(token_sum, 1.0)
         if accept_rate_total > 0:
             result["accept_rate"] = accept_rate_sum / accept_rate_total
         if accept_len_total > 0:
@@ -533,6 +547,10 @@ class ExternalDraftTrainer:
         normalized_tensors = []
         for name, tensor in named_tensors:
             name = str(name)
+            if self.algorithm == "eagle3" and name.startswith("layers.0."):
+                # vLLM's Eagle3LlamaForCausalLM names the draft decoder layer
+                # "midlayer.*"; publish in the checkpoint's own layout.
+                name = "midlayer." + name[len("layers.0.") :]
             if self.algorithm == "dspark" and _dspark_training_only_tensor(name):
                 continue
             parts = name.split(".")

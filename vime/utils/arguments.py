@@ -1817,6 +1817,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
             group.add_argument("--draft-max-grad-norm", type=float, default=1.0)
             group.add_argument("--draft-temporal-decay", type=float, default=0.8)
             group.add_argument("--draft-ttt-length", type=int, default=1)
+            group.add_argument("--draft-eagle3-loss-fn", type=str, default="kl_div")
             group.add_argument(
                 "--draft-dspark-block-size",
                 type=int,

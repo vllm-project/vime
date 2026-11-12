@@ -1,0 +1,226 @@
+"""Qwen3-4B EAGLE-3 external-draft E2E smoke (NPU).
+
+Chain under test: vLLM serves Qwen3-4B with an EAGLE-3 draft, rollout hidden
+states feed the external draft collector, the draft trains and saves
+draft_latest.pt, and publishes back into the live engine (weight-update
+session).
+
+Draft weights come from HF (AngelSlim/Qwen3-4B_eagle3, public). Its
+config.json does not declare eagle_aux_hidden_state_layer_ids, so prepare()
+patches in the layer ids the checkpoint was actually trained on -- vLLM's
+fallback formula picks different layers and silently craters acceptance.
+"""
+
+import json
+import os
+import shlex
+import shutil
+
+import vime.utils.external_utils.command_utils as U
+
+
+TEST_ROOT = os.environ.get("HF_HOME") or "/root"
+MODEL_DIR = f"{TEST_ROOT}/models/Qwen3-4B"
+DRAFT_MODEL_DIR = f"{TEST_ROOT}/models/Qwen3-4B-eagle3-angelslim"
+DATASET_DIR = f"{TEST_ROOT}/datasets/dapo-math-17k"
+DRAFT_CHECKPOINT_DIR = f"{TEST_ROOT}/eagle3-draft-smoke-output/draft"
+
+
+def ensure_speculators():
+    # speculators 0.9.0 declares numpy>=2/transformers>=5 floors that the
+    # pinned NPU stack cannot satisfy; the two pure-python wheels run on
+    # the stack's own versions (E2E-validated), so install them without
+    # dependency resolution when the image lacks them. CI sets
+    # PIP_INDEX_URL because the default mirror is unreachable from the
+    # buildkite agent.
+    try:
+        import speculators  # noqa: F401
+    except ImportError:
+        U.exec_command("pip install --no-deps speculators==0.9.0 hs-connectors==0.9.0")
+
+
+def prepare():
+    ensure_speculators()
+
+    models_dir = shlex.quote(f"{TEST_ROOT}/models")
+    datasets_dir = shlex.quote(f"{TEST_ROOT}/datasets")
+    model_dir = shlex.quote(MODEL_DIR)
+    draft_model_dir = shlex.quote(DRAFT_MODEL_DIR)
+    dataset_dir = shlex.quote(DATASET_DIR)
+
+    U.exec_command(f"mkdir -p {models_dir} {datasets_dir}")
+    U.exec_command(f"hf download Qwen/Qwen3-4B --local-dir {model_dir}")
+    U.exec_command(f"hf download AngelSlim/Qwen3-4B_eagle3 --local-dir {draft_model_dir}")
+    U.exec_command("hf download --repo-type dataset zhuzilin/dapo-math-17k " f"--local-dir {dataset_dir}")
+
+    # AngelSlim ships no eagle_aux_hidden_state_layer_ids; vLLM would fall
+    # back to [2, num_layers // 2, num_layers - 3] and feed the fc layer
+    # hidden states it was never trained on (silent acceptance drop). The
+    # draft was trained with AngelSlim's default formula
+    # [1, total // 2 - 1, total - 4] = [1, 17, 32] on the 36-layer Qwen3-4B.
+    config_path = f"{DRAFT_MODEL_DIR}/config.json"
+    with open(config_path) as f:
+        config = json.load(f)
+    config["eagle_aux_hidden_state_layer_ids"] = [1, 17, 32]
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)
+        f.write("\n")
+
+    # A leftover draft checkpoint remembers its next rollout while a fresh
+    # actor always restarts at 0 -- the draft/actor alignment guard in
+    # create_draft_model rejects the run before training starts.
+    shutil.rmtree(DRAFT_CHECKPOINT_DIR, ignore_errors=True)
+
+
+def execute():
+    model_dir = shlex.quote(MODEL_DIR)
+    draft_model_dir = shlex.quote(DRAFT_MODEL_DIR)
+    draft_checkpoint_dir = shlex.quote(DRAFT_CHECKPOINT_DIR)
+    prompt_data = shlex.quote(f"{DATASET_DIR}/dapo-math-17k.jsonl")
+
+    # No spaces inside: launch_commands forwards train_args as one shell
+    # string, and the speculative config must stay a single shell word.
+    speculative_config = json.dumps(
+        {"method": "eagle3", "model": DRAFT_MODEL_DIR, "num_speculative_tokens": 3},
+        separators=(",", ":"),
+    )
+
+    checkpoint_args = f"--hf-checkpoint {model_dir} --ref-load {model_dir} --load {model_dir} --no-load-optim "
+
+    rollout_args = (
+        f"--prompt-data {prompt_data} "
+        "--input-key prompt "
+        "--label-key label "
+        "--apply-chat-template "
+        "--rollout-shuffle "
+        "--rm-type math "
+        "--num-rollout 3 "
+        "--rollout-batch-size 4 "
+        "--n-samples-per-prompt 4 "
+        "--rollout-max-response-len 2048 "
+        "--rollout-temperature 1 "
+        "--global-batch-size 16 "
+        "--balance-data "
+    )
+
+    parallel_args = (
+        "--tensor-model-parallel-size 4 "
+        "--pipeline-model-parallel-size 1 "
+        "--context-parallel-size 1 "
+        "--expert-model-parallel-size 1 "
+        "--expert-tensor-parallel-size 1 "
+        "--recompute-granularity full "
+        "--recompute-method uniform "
+        "--recompute-num-layers 1 "
+        "--use-dynamic-batch-size "
+        "--max-tokens-per-gpu 8192 "
+    )
+
+    grpo_args = (
+        "--advantage-estimator grpo "
+        "--kl-loss-coef 0.0 "
+        "--kl-loss-type low_var_kl "
+        "--kl-coef 0.00 "
+        "--entropy-coef 0.0 "
+        "--eps-clip 0.2 "
+        "--eps-clip-high 0.28 "
+    )
+
+    optimizer_args = (
+        "--optimizer adam "
+        "--lr 1e-6 "
+        "--lr-decay-style constant "
+        "--weight-decay 0.1 "
+        "--adam-beta1 0.9 "
+        "--adam-beta2 0.98 "
+        "--optimizer-cpu-offload "
+        "--overlap-cpu-optimizer-d2h-h2d "
+        "--use-precision-aware-optimizer "
+    )
+
+    vllm_args = (
+        "--vllm-additional-config '{\"weight_nz_mode\":0}' "
+        "--rollout-num-gpus-per-engine 4 "
+        "--vllm-gpu-memory-utilization 0.6 "
+        "--vllm-max-model-len 4096 "
+        f"--vllm-speculative-config '{speculative_config}' "
+    )
+
+    draft_args = (
+        "--enable-external-draft-training "
+        "--draft-algorithm eagle3 "
+        f"--draft-model-path {draft_model_dir} "
+        "--draft-feature-layer-ids 1,17,32 "
+        "--draft-hidden-window-tokens 64 "
+        "--draft-max-samples-per-rollout-per-dp 2 "
+        "--draft-max-tokens-per-rollout-per-dp 256 "
+        "--draft-collect-interval 1 "
+        "--draft-train-interval 1 "
+        "--draft-publish-interval 1 "
+        "--draft-train-steps-per-trigger 1 "
+        "--draft-batch-size-per-gpu 1 "
+        f"--draft-checkpoint-path {draft_checkpoint_dir} "
+        "--draft-save-interval 1 "
+        "--update-weight-mode full "
+        "--update-weight-transport nccl "
+    )
+
+    model_args = (
+        "--attention-dropout 0.0 "
+        "--hidden-dropout 0.0 "
+        "--accumulate-allreduce-grads-in-fp32 "
+        "--attention-softmax-in-fp32 "
+        "--attention-backend flash "
+        "--micro-batch-size 1 "
+        "--use-flash-attn "
+    )
+
+    runtime_args = (
+        "--train-backend megatron "
+        "--actor-num-nodes 1 "
+        "--actor-num-gpus-per-node 4 "
+        "--rollout-num-gpus 4 "
+        "--ci-test "
+        # EAGLE3 tree verification records engine logprobs on a different
+        # kernel path than the Megatron re-forward, so the bit-exact
+        # first-step ppo_kl==0 checker does not apply with a draft in the
+        # loop (observed logprob_abs_diff 0.013, well under the 0.1
+        # threshold of the abs-diff checker, which stays on).
+        "--ci-disable-kl-checker "
+    )
+
+    train_args = (
+        checkpoint_args
+        + rollout_args
+        + parallel_args
+        + grpo_args
+        + optimizer_args
+        + vllm_args
+        + draft_args
+        + model_args
+        + runtime_args
+    )
+    U.execute_train(
+        train_args=train_args,
+        num_gpus_per_node=8,
+        megatron_model_type="qwen3-4B",
+        # Engine-behavior envs the drafter form relies on (both were present
+        # in every validated eagle3 run): spawn dodges the CANN 9.2 issue
+        # where fork-derived engine workers inherit a device table built
+        # from the wide job env; NZ off matches weight_nz_mode=0 above.
+        extra_env_vars={
+            "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+            "VLLM_ASCEND_ENABLE_NZ": "0",
+        },
+    )
+
+
+def main():
+    prepare()
+    for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+        os.environ.pop(proxy_var, None)
+    execute()
+
+
+if __name__ == "__main__":
+    main()

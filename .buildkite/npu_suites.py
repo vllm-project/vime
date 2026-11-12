@@ -30,6 +30,12 @@ SUITES = {
     "smk": [
         ("test_delta_disk_weight_update.py", "npu-4", "", {}),
         ("test_qwen3_4B_npu.py", "npu-8", "", {}),
+        (
+            "test_qwen3_4B_eagle3_npu.py",
+            "npu-8",
+            "",
+            {"PIP_INDEX_URL": "https://repo.huaweicloud.com/repository/pypi/simple"},
+        ),
         ("test_qwen3_30B_A3B_npu.py", "npu-16", "", {}),
         ("test_qwen3_vl_8B_npu.py", "npu-8", "", {}),
         ("test_glm4.7_30B_A3B_npu.py", "npu-16", "", {}),

@@ -10,7 +10,7 @@ from vime.backends.speculative_training.backends.dspark import (
     collate_dspark_samples,
     compute_dspark_loss,
     dspark_trainer_kwargs,
-    sync_dspark_lm_heads,
+    sync_speculator_lm_heads,
 )
 from vime.backends.speculative_training.feature_schema import DraftFeatureSample
 
@@ -98,11 +98,32 @@ def test_dspark_syncs_restricted_draft_and_verifier_heads():
     model.verifier_lm_head = torch.nn.Linear(2, 3, bias=False)
     target = torch.arange(10, dtype=torch.float32).reshape(5, 2)
 
-    sync_dspark_lm_heads(model, target, torch.tensor([0, 2, 4]))
+    sync_speculator_lm_heads(model, target, torch.tensor([0, 2, 4]))
 
     expected = target[[0, 2, 4]]
     assert torch.equal(model.lm_head.weight, expected)
     assert torch.equal(model.verifier_lm_head.weight, expected)
+
+
+@pytest.mark.unit
+def test_eagle3_sync_touches_only_the_verifier_head():
+    model = torch.nn.Module()
+    model.lm_head = torch.nn.Linear(2, 3, bias=False)
+    model.verifier_lm_head = torch.nn.Linear(2, 2, bias=False)
+    with torch.no_grad():
+        model.lm_head.weight.fill_(7.0)
+        model.verifier_lm_head.weight.fill_(0.0)
+    target = torch.arange(10, dtype=torch.float32).reshape(5, 2)
+
+    sync_speculator_lm_heads(
+        model,
+        target,
+        torch.tensor([1, 3]),
+        heads=("verifier_lm_head",),
+    )
+
+    assert torch.equal(model.verifier_lm_head.weight, target[[1, 3]])
+    assert bool((model.lm_head.weight == 7.0).all())
 
 
 class _TrainerKwargsModel(torch.nn.Module):

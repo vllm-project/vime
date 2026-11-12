@@ -19,6 +19,9 @@ class _Draft(torch.nn.Module):
         self.embed_tokens = torch.nn.Embedding(rows, hidden)
         self.proj = torch.nn.Linear(hidden, hidden, bias=False)
 
+    def get_trainer_kwargs(self, **kwargs):
+        return {"ttt_steps": 1, "ttt_step_loss_decay": 1.0, "loss_config": {}}, {}
+
 
 def _serialized_dspark_config() -> str:
     return json.dumps(
@@ -98,8 +101,12 @@ def test_actor_colocated_trainer_does_not_join_actor_process_group(monkeypatch):
     monkeypatch.setattr(module.dist, "get_rank", lambda: pytest.fail("must not query Actor rank"))
     monkeypatch.setattr(module.dist, "get_world_size", lambda: pytest.fail("must not query Actor world size"))
     args = Namespace(
+        draft_algorithm="eagle3",
         draft_freeze_embeddings=True,
         draft_vocab_mapping_path=None,
+        draft_eagle3_loss_fn="kl_div",
+        draft_ttt_length=1,
+        draft_temporal_decay=1.0,
         draft_learning_rate=1e-5,
         draft_weight_decay=0.0,
         draft_lr_warmup_steps=0,
@@ -127,7 +134,6 @@ def test_dspark_train_reports_compound_loss_metrics(monkeypatch):
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
     trainer = ExternalDraftTrainer.__new__(ExternalDraftTrainer)
     trainer.target_weight_version = "9"
-    trainer.target_lm_head_weight = None
     trainer.algorithm = "dspark"
     trainer.device = torch.device("cpu")
     trainer.device_type = "cpu"
@@ -219,6 +225,51 @@ def test_dspark_publish_includes_synced_frozen_lm_head():
     assert tensors["lm_head.weight"].dtype == torch.bfloat16
     assert tensors["confidence_head.weight"].dtype == torch.float32
     assert tensors["confidence_head.bias"].dtype == torch.float32
+
+
+@pytest.mark.unit
+def test_eagle3_publish_restores_vllm_midlayer_layout():
+    class _WeightNorm(torch.nn.Module):
+        def __init__(self, hidden):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(hidden))
+
+    class _Eagle3Draft(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed_tokens = torch.nn.Embedding(4, 3)
+            self.fc = torch.nn.Linear(9, 3, bias=False)
+            self.layers = torch.nn.ModuleList([torch.nn.ModuleList([torch.nn.Linear(6, 3, bias=False)])])
+            self.norm = _WeightNorm(3)
+            self.lm_head = torch.nn.Linear(3, 4, bias=False)
+            self.verifier_lm_head = torch.nn.Linear(3, 4, bias=False)
+            self.verifier_norm = _WeightNorm(3)
+
+    model = _Eagle3Draft()
+    model.embed_tokens.weight.requires_grad_(False)
+    model.verifier_lm_head.weight.requires_grad_(False)
+    model.verifier_norm.weight.requires_grad_(False)
+    trainer = ExternalDraftTrainer.__new__(ExternalDraftTrainer)
+    trainer.rank = 0
+    trainer.draft_version = 2
+    trainer.target_weight_version = "9"
+    trainer.algorithm = "eagle3"
+    trainer.args = Namespace(draft_publish_dtype="bf16")
+    trainer.model = model
+    trainer.architecture_fingerprint = "fingerprint"
+
+    snapshot = trainer.prepare_publish_snapshot()
+
+    assert snapshot["algorithm"] == "eagle3"
+    names = {name for name, _ in snapshot["named_tensors"]}
+    assert names == {
+        "fc.weight",
+        "midlayer.0.weight",
+        "norm.weight",
+        "lm_head.weight",
+    }
+    tensors = dict(snapshot["named_tensors"])
+    assert tensors["lm_head.weight"].dtype == torch.bfloat16
 
 
 @pytest.mark.unit
