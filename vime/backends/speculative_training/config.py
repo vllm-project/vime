@@ -99,6 +99,35 @@ def _draft_config_value(config: dict, keys: Sequence[str]) -> object | None:
     return None
 
 
+def eagle3_declared_layer_ids(args: Namespace) -> list[int] | None:
+    """Layer ids an EAGLE3 draft checkpoint declares for its fc input features.
+
+    vLLM reads the same field when serving the draft; it is the only source
+    of truth shared between the engine and VIME.
+    """
+    return parse_int_list(
+        _draft_config_value(load_draft_checkpoint_config(args), ("eagle_aux_hidden_state_layer_ids",))
+    )
+
+
+def require_eagle3_declared_layer_ids(args: Namespace) -> list[int]:
+    """Refuse an EAGLE3 draft whose config does not declare its aux layers.
+
+    Without the field vLLM silently serves with its fallback layers
+    [2, num_layers // 2, num_layers - 3], so the engine and Draft training
+    would consume different layers than the fc weight was trained on.
+    """
+    declared = eagle3_declared_layer_ids(args)
+    if not declared:
+        raise ValueError(
+            f"EAGLE3 draft checkpoint {getattr(args, 'draft_model_path', None)!r} must declare "
+            "eagle_aux_hidden_state_layer_ids in config.json: vLLM silently serves with its "
+            "fallback layers [2, num_layers // 2, num_layers - 3] when the field is missing. "
+            'For the AngelSlim Qwen3-4B draft add "eagle_aux_hidden_state_layer_ids": [1, 17, 32].'
+        )
+    return declared
+
+
 def resolve_feature_layer_ids(args: Namespace) -> list[int]:
     explicit = parse_int_list(getattr(args, "draft_feature_layer_ids", None))
     num_layers = int(getattr(args, "num_layers", 0) or 0)
@@ -124,13 +153,14 @@ def resolve_feature_layer_ids(args: Namespace) -> list[int]:
                 # Match Speculators' resolve_target_layer_ids default for
                 # checkpoints created without an explicit target layer list.
                 explicit = [2, num_layers // 2, num_layers - 3]
-        elif num_layers < 5:
-            raise ValueError(
-                "--draft-feature-layer-ids is required when the Target layer count cannot "
-                "safely derive the EAGLE3 default [2, num_layers//2, num_layers-3]."
-            )
         else:
-            explicit = [2, num_layers // 2, num_layers - 3]
+            # vLLM serves the draft with the layers declared in its
+            # config.json and silently falls back to
+            # [2, num_layers // 2, num_layers - 3] when they are missing;
+            # adopting the declaration (rather than guessing the same
+            # formula) keeps collection on the layers the fc weight was
+            # actually trained on.
+            explicit = require_eagle3_declared_layer_ids(args)
     normalized = []
     for layer_id in explicit:
         if layer_id < 0:
@@ -182,6 +212,11 @@ def _activate_dspark_training_for_export(args: Namespace) -> None:
         raise ValueError("--draft-save-hf requires DSpark inference (--vllm-speculative-config method=dspark)")
 
     args.enable_external_draft_training = True
+    # vime_validate_args computes dspark_enabled earlier from the
+    # pre-activation flag value; flip it here so the megatron-side DSpark
+    # submodule path stays off once the export request becomes external
+    # training -- otherwise both training paths activate at once.
+    args.dspark_enabled = False
     args.draft_algorithm = "dspark"
     if not getattr(args, "draft_model_path", None):
         configured_model = spec_config.get("model")
@@ -255,6 +290,17 @@ def validate_external_draft_args(args: Namespace) -> None:
 
     layer_ids = resolve_feature_layer_ids(args)
     args.draft_feature_layer_ids = layer_ids
+    if algorithm == "eagle3":
+        # The engine serves the draft with the layers vLLM resolves from the
+        # same config.json; a checkpoint that does not declare them would let
+        # vLLM fall back silently while VIME collects its own layers.
+        declared = require_eagle3_declared_layer_ids(args)
+        if layer_ids != declared:
+            raise ValueError(
+                f"--draft-feature-layer-ids {layer_ids} conflicts with the checkpoint's "
+                f"eagle_aux_hidden_state_layer_ids {declared} at {args.draft_model_path!r}; "
+                "pass the ids the draft was trained on"
+            )
     if algorithm == "dspark":
         args.draft_dspark_block_size = resolve_dspark_block_size(args)
     draft_save_hf = getattr(args, "draft_save_hf", None)

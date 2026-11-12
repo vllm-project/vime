@@ -24,7 +24,7 @@ export HYDRA_FULL_ERROR=1
 export DISABLE_L2_CACHE=1
 export VLLM_ASCEND_ENABLE_NZ=0
 export VLLM_USE_AOT_COMPILE=0
-export PYTHONPATH="/root/Megatron-LM/:/root/verl-SpeCo:${PYTHONPATH:-}"
+export PYTHONPATH="/root/Megatron-LM/:${PYTHONPATH:-}"
 
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 
@@ -110,7 +110,6 @@ DRAFT_ARGS=(
    --enable-external-draft-training
    --draft-algorithm eagle3
    --draft-model-path "${DRAFT_MODEL}"
-   --draft-model-factory-path vime.backends.speculative_training.factories.verl_speco_eagle3.build_model
    --draft-feature-layer-ids 1,17,32
    --draft-checkpoint-path "${DRAFT_CHECKPOINT_PATH}"
    --draft-save-interval 1
