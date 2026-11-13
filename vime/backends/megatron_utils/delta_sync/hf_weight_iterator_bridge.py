@@ -4,11 +4,35 @@ The sparse exporter keeps a standalone Bridge iterator; ordinary full and
 disk transfers retain the upstream direct iterator and weight source.
 """
 
+import sys
 from contextlib import contextmanager
+from dataclasses import fields, is_dataclass
+from types import SimpleNamespace
 
 from megatron.core.utils import unwrap_model
 
 from .megatron_delta_export import trim_hf_vocab_padding
+
+
+def _bridge_config_view(config):
+    """Detach metadata from Adaptor classes replaced in their defining module.
+
+    Bridge broadcasts a cleaned config across PP ranks. Pickle cannot resolve
+    Adaptor-generated/replaced classes even after runtime leaves are removed.
+    Preserve their stored metadata in an importable attribute container; live
+    training configs are restored when the export context exits.
+    """
+    cls = type(config)
+    resolved = sys.modules.get(cls.__module__)
+    for part in cls.__qualname__.split("."):
+        resolved = getattr(resolved, part, None)
+    if resolved is cls:
+        return config
+    attributes = {}
+    if is_dataclass(config):
+        attributes.update((f.name, getattr(config, f.name)) for f in fields(config) if hasattr(config, f.name))
+    attributes.update(vars(config))
+    return SimpleNamespace(**attributes)
 
 
 def configure_bridge_module_types():
@@ -48,16 +72,29 @@ class HfWeightIteratorBridge:
     def model_context(self):
         models = unwrap_model(self.model)
         added = []
-        for model in models:
-            config = model.config
-            if not hasattr(config, "share_embeddings_and_output_weights"):
-                config.share_embeddings_and_output_weights = model.share_embeddings_and_output_weights
-                added.append(config)
+        replaced, views = [], {}
         try:
+            for model in models:
+                for module in model.modules():
+                    config = getattr(module, "config", None)
+                    if config is None:
+                        continue
+                    if id(config) not in views:
+                        views[id(config)] = _bridge_config_view(config)
+                    view = views[id(config)]
+                    if view is not config:
+                        replaced.append((module, config))
+                        module.config = view
+                config = model.config
+                if not hasattr(config, "share_embeddings_and_output_weights"):
+                    config.share_embeddings_and_output_weights = model.share_embeddings_and_output_weights
+                    added.append(config)
             yield
         finally:
             for config in added:
                 del config.share_embeddings_and_output_weights
+            for module, config in reversed(replaced):
+                module.config = config
 
     def get_hf_weight_chunks(self):
         with self.model_context():

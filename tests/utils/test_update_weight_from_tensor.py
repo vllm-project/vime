@@ -407,6 +407,10 @@ def test_native_dspark_update_uses_draft_source_and_lifecycle(update_module, mon
 
 @pytest.mark.unit
 def test_rank_local_experts_keep_dspark_draft_update(update_module, monkeypatch):
+    from vime.platforms import get_platform
+
+    # The trainer below is a CUDA IPC stub, regardless of the host hardware.
+    monkeypatch.setattr(update_module, "current_platform", lambda: get_platform("cuda"))
     updater = _updater(update_module, dspark_enabled=True)
     engine = RecordingEngine()
     created = []
@@ -457,6 +461,10 @@ def test_native_ipc_buffer_covers_largest_reconstructed_tensor(update_module, mo
 
 @pytest.mark.unit
 def test_build_packed_ipc_update_info_uses_vllm_wire_format(update_module, monkeypatch):
+    from vime.platforms import get_platform
+
+    # This case supplies CUDA UUID/reduction stubs, not native NPU handles.
+    monkeypatch.setattr(update_module, "current_platform", lambda: get_platform("cuda"))
     packed_module = types.ModuleType("vllm.distributed.weight_transfer.packed_tensor")
     packed_tensor = torch.zeros(12, dtype=torch.uint8)
     packed_module.pack_tensors = lambda *args, **kwargs: types.SimpleNamespace(

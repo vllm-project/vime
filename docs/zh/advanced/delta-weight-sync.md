@@ -15,6 +15,11 @@ Sparse HCCL：
 该路径直接复用固定版本 vLLM-Ascend 已包含的原生 sparse HCCL 引擎，
 无需额外的 sparse engine 依赖补丁。VIME 负责 Bridge 导出、分片快照、有序汇聚及更新生命周期。
 
+NPU 镜像固定安装 Megatron-Bridge `afcc7eee4cd916aedcf90562b01f3948ed76d82d`
+用于转换。自定义训练镜像也需要包含该依赖，单独安装 VIME 不会安装训练栈。
+转换依赖的固定版本见 `docker/Dockerfile.npu`，不要在 Ascend 环境中直接解析
+Bridge 的 CUDA 训练 extras，以免替换已固定的训练和推理依赖。
+
 ```bash
 --update-weight-mode delta
 --update-weight-transport sparse_hccl
