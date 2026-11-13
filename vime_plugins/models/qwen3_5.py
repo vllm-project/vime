@@ -76,7 +76,7 @@ def _fused_tp_sharded_factory(
         # matching Megatron's own fused SwiGLU factory.
         sh_tens = []
         start = 0
-        for local_size, part_name in zip(local_part_sizes, part_names):
+        for local_size, part_name in zip(local_part_sizes, part_names, strict=True):
             part = tensor.narrow(0, start, local_size)
             sh_tens.append(
                 ShardedTensor.from_rank_offsets(
@@ -351,10 +351,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         - everything else (``out_proj``, ``norm``): default Megatron handling.
         """
         from megatron.core.dist_checkpointing.mapping import ShardedTensor
-        from megatron.core.transformer.utils import (
-            ensure_metadata_has_dp_cp_group,
-            sharded_state_dict_default,
-        )
+        from megatron.core.transformer.utils import ensure_metadata_has_dp_cp_group, sharded_state_dict_default
         from megatron.core.utils import get_pg_rank
 
         metadata = ensure_metadata_has_dp_cp_group(metadata)
