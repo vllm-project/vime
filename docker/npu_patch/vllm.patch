@@ -2443,3 +2443,98 @@ index a01e5dd5f7a3e28ac474f2f2281213b83c32145d..ae4e0caa62456d70fdf50310cf031505
      def start_weight_update(self) -> None:
          """Start a new weight update session.
 
+diff --git a/vllm/model_executor/models/qwen3_dflash.py b/vllm/model_executor/models/qwen3_dflash.py
+index 44b7865..509ab6e 100644
+--- a/vllm/model_executor/models/qwen3_dflash.py
++++ b/vllm/model_executor/models/qwen3_dflash.py
+@@ -520,12 +520,45 @@ class DFlashQwen3Model(nn.Module):
+             embeds = torch.where(is_mask, self.mask_embedding.to(embeds.dtype), embeds)
+         return embeds
+ 
++    def _rebind_derived_buffer(
++        self, name: str, new: torch.Tensor | None
++    ) -> torch.Tensor | None:
++        # Vime NPU patch: keep derived-buffer storage stable across in-place
++        # layerwise weight updates. The captured DFlash/DSpark decode graph
++        # bakes the storage addresses of these plain attributes; re-allocating
++        # them (torch.cat/stack) in every chunk-final rebuild frees the
++        # graph-baked storages, so graph replay reads freed memory and
++        # proposals turn to garbage (acceptance collapses to ~1.0 with no
++        # crash). Copy the new values into the existing storage instead.
++        existing = getattr(self, name, None)
++        if (
++            existing is not None
++            and new is not None
++            and not existing.is_meta
++            and not new.is_meta
++            and existing.shape == new.shape
++            and existing.dtype == new.dtype
++        ):
++            existing.copy_(new)
++            return existing
++        setattr(self, name, new)
++        return new
++
++    def _rebind_module_alias(self, name: str, candidate: torch.Tensor) -> None:
++        # Vime NPU patch: mid-update rebuilds see module tensors still on the
++        # meta device (never-loaded modules are restored only at finalize).
++        # Never clobber a valid graph-baked alias with a meta tensor.
++        existing = getattr(self, name, None)
++        if existing is not None and not existing.is_meta and candidate.is_meta:
++            return
++        setattr(self, name, candidate)
++
+     def _build_context_kv_buffers(
+         self,
+         layers_attn: list[nn.Module],
+         has_bias: bool,
+     ) -> None:
+-        self._hidden_norm_weight = self.hidden_norm.weight.data
++        self._rebind_module_alias("_hidden_norm_weight", self.hidden_norm.weight.data)
+         self._context_qkv_projs = [a.qkv_proj for a in layers_attn]
+         self._context_q_sizes = [a.q_size for a in layers_attn]
+ 
+@@ -535,10 +568,14 @@ class DFlashQwen3Model(nn.Module):
+         ):
+             # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
+             kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
+-            self._fused_kv_weight: torch.Tensor | None = torch.cat(kv_weights, dim=0)
++            self._fused_kv_weight = self._rebind_derived_buffer(
++                "_fused_kv_weight", torch.cat(kv_weights, dim=0)
++            )
+             if has_bias:
+                 kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
+-                self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
++                self._fused_kv_bias = self._rebind_derived_buffer(
++                    "_fused_kv_bias", torch.cat(kv_biases, dim=0)
++                )
+             else:
+                 self._fused_kv_bias = None
+         else:
+@@ -549,9 +586,12 @@ class DFlashQwen3Model(nn.Module):
+ 
+         # K-norm weights stacked into one contiguous [num_layers, head_dim]
+         # tensor so the per-layer K-norm runs as a single grouped kernel.
+-        self._k_norm_weights = torch.stack(
+-            [a.k_norm.weight.data for a in layers_attn], dim=0
+-        ).contiguous()
++        self._k_norm_weights = self._rebind_derived_buffer(
++            "_k_norm_weights",
++            torch.stack(
++                [a.k_norm.weight.data for a in layers_attn], dim=0
++            ).contiguous(),
++        )
+ 
+     def _build_fused_kv_buffers(self) -> None:
+         """Build fused weight buffers for precompute_and_store_context_kv.
+@@ -569,7 +609,9 @@ class DFlashQwen3Model(nn.Module):
+ 
+         # RoPE parameters
+         self._rope_head_size = attn0.rotary_emb.head_size
+-        self._rope_cos_sin_cache = attn0.rotary_emb.cos_sin_cache
++        self._rebind_module_alias(
++            "_rope_cos_sin_cache", attn0.rotary_emb.cos_sin_cache
++        )
+         self._rope_is_neox = attn0.rotary_emb.is_neox_style
+         # Validation that RoPE params are the same across all layers
+         for attn in layers_attn[1:]:

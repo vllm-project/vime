@@ -563,6 +563,18 @@ class ExternalDraftTrainer:
             normalized_tensors.append((name, tensor.detach().to(device="cpu", dtype=tensor_dtype).contiguous()))
         if not normalized_tensors:
             raise RuntimeError("Draft publication snapshot is empty")
+        if self.algorithm == "dspark":
+            # vllm-ascend's packed broadcast chunks the payload at 1 GiB and
+            # invokes the engine's load_weights once per chunk; the Qwen3DSpark
+            # load_weights rebuilds the fused KV buffers by cat-ing every
+            # layer's qkv weights at the end of each call. Layers whose tensors
+            # have not been broadcast yet are still on the meta device, so a
+            # chunk boundary that materializes only part of the layers makes
+            # that cat fail on mixed npu/meta devices. The self_attn tensors of
+            # all layers (~53 MB per layer) fit in the first chunk, so putting
+            # them first materializes every layer's qkv before the first
+            # rebuild; later chunks contain no self_attn tensors and are safe.
+            normalized_tensors.sort(key=lambda item: 0 if ".self_attn." in item[0] else 1)
         return {
             "named_tensors": normalized_tensors,
             "draft_version": str(self.draft_version),
