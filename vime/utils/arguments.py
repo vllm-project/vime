@@ -125,6 +125,12 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 help="GDN implementation backend for Qwen linear-attention layers.",
             )
             parser.add_argument(
+                "--qwen-gdn-implementation",
+                choices=["replicated", "megatron"],
+                default="replicated",
+                help="Use the existing replicated wrapper or Megatron's TP/CP-sharded Qwen3.5 GDN.",
+            )
+            parser.add_argument(
                 "--train-env-vars",
                 type=json.loads,
                 default="{}",
@@ -148,18 +154,17 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Weight sync strategy. 'full' (default) broadcasts every parameter "
                     "every sync. 'delta' diffs each sync against a pinned-CPU snapshot of the "
-                    "previous one and ships only the changed bytes (disk transport only)."
+                    "previous one and ships only changed bytes (disk) or elements (sparse_hccl)."
                 ),
             )
             parser.add_argument(
                 "--update-weight-transport",
-                choices=["nccl", "disk"],
+                choices=["nccl", "disk", "sparse_hccl"],
                 default="nccl",
                 help=(
                     "Carrier for weight sync. In full mode, 'nccl' broadcasts chunks and "
                     "'disk' writes a complete HF checkpoint under --update-weight-disk-dir "
-                    "before engines reload it. Delta mode is 'disk' only: each host applies the "
-                    "published deltas into its local checkpoint and reloads via update_weights_from_disk."
+                    "before engines reload it. Delta mode supports disk or Ascend sparse_hccl."
                 ),
             )
             parser.add_argument(
@@ -358,6 +363,16 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--fully-async-group-prefetch-factor",
+                type=int,
+                default=1,
+                help=(
+                    "Multiply the fully-async in-flight prompt-group pool without increasing the "
+                    "per-sample generation semaphore. Values above 1 let another group's samples "
+                    "use slots released before a slow group finishes. Completed results remain bounded."
+                ),
+            )
+            parser.add_argument(
                 "--rollout-function-path",
                 type=str,
                 default="vime.rollout.vllm_rollout.generate_rollout",
@@ -494,6 +509,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Whether to use partial rollout. "
                     "If set, the unfinished samples during dynamic sampling will be recycled back to data buffer. "
+                    "Agent adapters also continue interrupted model turns without restarting the sandbox or CLI. "
                     "This is useful for long responses."
                 ),
             )
@@ -575,6 +591,22 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "buffer size for update weight, in bytes. "
                     "This is used for updating weights by chunk and should be useful for MoE models."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-delta-batch-diff",
+                type=int,
+                default=32,
+                help="Number of local shards processed per sparse diff batch.",
+            )
+            parser.add_argument(
+                "--update-weight-delta-batch-gather",
+                type=int,
+                default=32,
+                help=(
+                    "Number of globally ordered Megatron directory rows combined into one "
+                    "sparse gather count matrix. The trigger is row-count-only so all ranks "
+                    "issue collectives in identical order."
                 ),
             )
             parser.add_argument(
@@ -1803,10 +1835,16 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
             help="Path to the YAML config for custom function arguments.",
         )
         reset_arg(parser, "--padded-vocab-size", type=int, default=None)
-        # New Megatron versions default to NVRX, which requires an optional
+        # Megatron 4b4acac9a defaults --async-strategy to NVRX, which requires an optional
         # dependency. Keep native async checkpointing as the default while
         # allowing an explicit --async-strategy choice on versions that support it.
-        if parser.get_default("async_strategy") is not None:
+        # Megatron ae76c60e6 dropped the native strategy and only accepts "nvrx".
+        async_strategy_action = next((a for a in parser._actions if a.dest == "async_strategy"), None)
+        if (
+            parser.get_default("async_strategy") is not None
+            and async_strategy_action is not None
+            and (async_strategy_action.choices is None or "mcore" in async_strategy_action.choices)
+        ):
             parser.set_defaults(async_strategy="mcore")
 
         return parser
@@ -2120,6 +2158,7 @@ def vime_validate_args(args):
         "rollout_queue_lease_seconds",
         "rollout_queue_segment_mib",
         "rollout_io_concurrency",
+        "fully_async_group_prefetch_factor",
     ):
         value = getattr(args, name)
         if name == "rollout_queue_segment_mib" and value is None:
@@ -2360,9 +2399,9 @@ def vime_validate_args(args):
         if args.update_weight_mode != "full" or args.update_weight_transport != "disk":
             raise ValueError("--release-train requires --update-weight-mode=full and --update-weight-transport=disk.")
     if args.update_weight_mode == "delta":
-        if args.update_weight_transport != "disk":
+        if args.update_weight_transport not in {"disk", "sparse_hccl"}:
             raise ValueError(
-                "--update-weight-mode=delta requires --update-weight-transport=disk, "
+                "--update-weight-mode=delta requires --update-weight-transport=disk or sparse_hccl, "
                 f"got {args.update_weight_transport!r}."
             )
         if args.colocate:
@@ -2371,11 +2410,15 @@ def vime_validate_args(args):
                 "weights via CUDA IPC (only a handle crosses processes), so the delta bookkeeping "
                 "(snapshot + diff + encode) is pure overhead."
             )
-        if not args.update_weight_local_checkpoint_dir:
+        if args.update_weight_transport == "disk" and not args.update_weight_local_checkpoint_dir:
             raise ValueError(
                 "--update-weight-mode=delta requires --update-weight-local-checkpoint-dir "
                 "(a rollout-host-local NVMe directory)."
             )
+        if args.update_weight_delta_batch_diff < 1:
+            raise ValueError("--update-weight-delta-batch-diff must be at least 1.")
+        if args.update_weight_delta_batch_gather < 1:
+            raise ValueError("--update-weight-delta-batch-gather must be at least 1.")
 
     if args.flush_cache_interval != 1:
         if args.colocate or args.offload_rollout or args.release_train:

@@ -1,3 +1,39 @@
+diff --git a/megatron_adaptor/features_manager/megatron/megatron_basic.py b/megatron_adaptor/features_manager/megatron/megatron_basic.py
+index e66f74f..5747bbc 100755
+--- a/megatron_adaptor/features_manager/megatron/megatron_basic.py
++++ b/megatron_adaptor/features_manager/megatron/megatron_basic.py
+@@ -1,5 +1,7 @@
+ # Copyright (c) 2026, Huawei Technologies Co., Ltd. All rights reserved.
+
++import inspect
++
+ from megatron_adaptor.features_manager.mindspeed_feature import MindSpeedFeature
+
+ try:
+@@ -11,7 +13,7 @@ except ImportError:
+     HAVE_FLA = False
+
+ try:
+-    import nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async  # noqa: F401
++    from nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async import FileSystemWriterAsync
+
+     HAVE_NVRX_ASYNC = True
+ except ImportError:
+@@ -130,11 +132,9 @@ class MegatronBasicFeature(MindSpeedFeature):
+             'megatron.core.fusions.fused_softmax.FusedScaleMaskSoftmax.forward_fused_softmax', forward_fused_softmax
+         )
+
+-        # Synchronous D2H copy and CPU-tensor snapshot during async checkpoint save,
+-        # so the staged data is not corrupted by subsequent training steps.
+-        # mcore's async checkpoint writer now lives in nvidia_resiliency_ext, so the
+-        # patch follows the writer to its new home.
+-        if HAVE_NVRX_ASYNC:
++        # NVRX 0.7 resolves plans, snapshots CPU tensors and synchronizes D2H itself.
++        # Keep the legacy wrapper only for writers accepting pre-built buckets.
++        if HAVE_NVRX_ASYNC and 'write_buckets' in inspect.signature(FileSystemWriterAsync.preload_tensors).parameters:
+             pm.register_patch(
+                 'nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.preload_tensors',
+                 preload_tensors,
 diff --git a/megatron_adaptor/patches/megatron/transformer_config.py b/megatron_adaptor/patches/megatron/transformer_config.py
 index e0187d9..4b9bb6a 100644
 --- a/megatron_adaptor/patches/megatron/transformer_config.py

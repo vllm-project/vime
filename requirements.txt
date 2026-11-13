@@ -8,6 +8,7 @@ e2b
 httpx[http2]
 mcp[cli]
 memray  # needed for debugging (but is lightweight), we can put it to dev mode when using pyproject.toml
+msgspec==0.22.0
 numba
 omegaconf
 openai
@@ -18,8 +19,8 @@ pyyaml
 qwen_vl_utils # for VLM
 ray[default]
 safetensors
-straw-queue>=0.1.2
-sunabako==0.1.1
+straw-queue>=0.1.5
+sunabako>=0.1.2
 tensorboard
 transformers
 vllm-router>=0.1.15

@@ -5,7 +5,13 @@ that changed between two syncs, instead of a full checkpoint each time. It targe
 training/inference disaggregation across clusters or datacenters, where writing the whole actor
 every sync is the dominant cost.
 
-It is **disk-transport only**. The trainer publishes each sync as a canonical HF checkpoint
+Two transports are available: `disk` for shared-storage and cross-cluster deployments, and
+`sparse_hccl` for online transfer between Ascend trainers and vLLM-Ascend rollout workers.
+The first sync
+sends every checkpoint coordinate through the public sparse protocol; later syncs
+send only changed coordinates. Both seed and deltas are exported through Megatron-Bridge.
+
+For disk transport, The trainer publishes each sync as a canonical HF checkpoint
 directory; the engine's `pull_weights` worker RPC (shipped in vime's vllm patch) fans the
 apply out to **every host the engine spans** and verifies it, then the engine reloads the
 patched local checkpoint through the **ordinary** `update_weights_from_disk` adapter. vime
@@ -13,6 +19,38 @@ only ever talks to one endpoint per engine, so multi-node serving and external r
 need nothing extra on the vime side.
 
 ## Configuration
+
+Sparse HCCL:
+
+This path uses the native sparse HCCL engines already included in the pinned
+vLLM-Ascend dependency. No additional sparse-engine dependency patch is needed.
+VIME owns Bridge export, shard snapshots, ordered gathering and the update lifecycle.
+
+The NPU image installs Megatron-Bridge at `afcc7eee4cd916aedcf90562b01f3948ed76d82d`
+for conversion. Custom training images must include the same Bridge dependency;
+installing VIME alone does not install the training stack. Follow the pinned
+conversion dependencies in `docker/Dockerfile.npu` rather than resolving Bridge's
+CUDA training extras over an Ascend environment.
+
+```bash
+--update-weight-mode delta
+--update-weight-transport sparse_hccl
+--update-weight-delta-batch-gather 32
+```
+
+This path requires non-colocated, unquantized ND rollout weights and inference
+PP=1, with EPLB disabled. Configure `--vllm-pipeline-parallel-size 1`.
+The receiver handles TP/DP/EP loading; inference PP>1 is rejected before
+communication initialization. Training-side PP/TP/EP export remains supported.
+
+The script `scripts/run-qwen3-30B-A3B-sparse-hccl.sh` uses training
+TP2/PP2/EP2 and rollout TP2/PP1/EP2, on four training plus two rollout NPUs.
+Set `DATA_ROOT` to the directory containing `weights/` and `datasets/`, and load
+the NPU environment before running the script.
+VIME normalizes contiguous payloads onto the communicator device and validates
+them before invoking the trainer engine.
+
+Disk transport configuration:
 
 ```bash
 --update-weight-mode delta
@@ -22,6 +60,8 @@ need nothing extra on the vime side.
 --update-weight-delta-encoding xor          # or: overwrite
 --update-weight-delta-checksum xxh3-128     # or: blake3, adler32
 ```
+
+Table 1: Disk delta transport flags and their roles.
 
 | Flag | Role |
 |---|---|
@@ -33,6 +73,35 @@ need nothing extra on the vime side.
 Deltas are always zstd-compressed (level 1); profiling showed it dominates lz4 / gzip / snappy / brotli on both wire size and decompress speed for this data, so it is not a knob.
 
 ## How it works
+
+### Sparse HCCL
+
+Initial and reconnected updates use Seed; subsequent updates use Diff.
+Both paths share Publish and Apply.
+
+1. **Seed.** On the first update or after reconnection, export all current training
+   weights through Bridge and produce complete checkpoint coordinates and target
+   values for Publish/Apply. After successful seeding, capture local shard snapshots
+   as the baseline for later diffs. Reconnection fully overwrites worker weights.
+2. **Diff.** On later updates, compare current training shards with their snapshots
+   bitwise. Bridge mappings and NaN probes convert changed positions and values
+   into HF checkpoint coordinates.
+3. **Publish.** For Diff entries, first gather variable-length payloads to rank zero
+   in a consistent directory order. For either Seed or Diff, rank zero validates
+   bounds, duplicate indices and NaNs, normalizes device and
+   contiguity, and splits payloads by the byte budget. The sender publishes metadata
+   through `send_weight_chunk` and runs receive RPCs and HCCL broadcasts concurrently.
+4. **Apply.** Rollout workers receive the checkpoint coordinates and target values
+   broadcast through HCCL in Publish. The checkpoint loading path uses the model's
+   native loader to map these updates to each worker's TP shards and local experts,
+   then overwrites the corresponding weights in place with the received values,
+   including zeros.
+
+Wire indices are int32; each checkpoint tensor must contain fewer than `2**31`
+elements. The receiver requires full-shape NaN staging. Seed sends both indices
+and values, so it uses more wire bytes than a dense values-only transfer.
+
+### Disk transport
 
 1. **Seed.** The first sync, including after trainer recovery or an engine replacement,
    publishes a full HF checkpoint from the trainer's current weights. It captures the CPU

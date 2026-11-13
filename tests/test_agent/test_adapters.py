@@ -283,7 +283,7 @@ def test_session_sampling_defaults_reach_vllm(protocol):
     }
 
     async def run_case():
-        async with FakeVLLMServer([[(-0.1, 101)]]) as vllm:
+        async with FakeVLLMServer([[(-0.1, 101)]], return_sampling_mask=True) as vllm:
             adapter_cls = anthropic.AnthropicAdapter if protocol == "anthropic" else openai.OpenAIAdapter
             adapter = adapter_cls(tokenizer=FakeTokenizer(outputs={(101,): "done"}), vllm_url=vllm.url)
             adapter.open_session("sampling", sampling_defaults=defaults)

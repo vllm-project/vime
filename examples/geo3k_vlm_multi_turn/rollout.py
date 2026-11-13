@@ -34,18 +34,30 @@ IMAGE_GRID_DIMENSIONS = 3
 
 
 def _load_env_module(env_path: str | None):
+    """Load the interaction environment module from a module path or a file path."""
     target = env_path or DEFAULT_ENV_MODULE
     module_path = Path(target)
-    if module_path.suffix != ".py" or not module_path.exists():
-        return importlib.import_module(target)
+    if module_path.suffix == ".py" and module_path.exists():
+        spec = importlib.util.spec_from_file_location(f"rollout_env_{module_path.stem}", module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Cannot import environment module from {module_path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+    return importlib.import_module(target)
 
-    spec = importlib.util.spec_from_file_location(f"rollout_env_{module_path.stem}", module_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot import environment module from {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+
+def _build_env(env_module, sample: Sample, args: Any):
+    """Instantiate the interaction environment using the provided module."""
+    build_fn = env_module.build_env
+    if not callable(build_fn):
+        raise ValueError("Environment module must expose a callable `build_env(sample, args)`.")
+    try:
+        return build_fn(sample=sample, args=args)
+    except TypeError:
+        # Fallback to positional signature
+        return build_fn(sample, args)
 
 
 def _image_to_render_url(image: Any) -> str:
@@ -171,8 +183,10 @@ def _parse_choice(choice: dict[str, Any]) -> tuple[str, list[int], list[float]]:
     finish = choice.get("finish_reason")
     finish = finish.get("type") if isinstance(finish, dict) else finish
     if finish in {"abort", "cancelled"}:
-        return "abort", [], []
-    if finish not in {"length", "stop"}:
+        finish = "abort"
+        if not choice.get("token_ids"):
+            return finish, [], []
+    if finish not in {"length", "stop", "abort"}:
         raise ValueError(f"Unsupported vLLM finish_reason: {finish!r}")
 
     token_ids = _require_token_ids(choice.get("token_ids"), field="choice.token_ids")
@@ -208,13 +222,24 @@ def _observation_token_ids(
 ) -> list[int]:
     """Encode only the next user-turn boundary without re-rendering generated IDs."""
     kwargs = dict(template_kwargs or {})
-    prefix = tokenizer.apply_chat_template(
-        list(DUMMY_MESSAGES),
-        tools=tools,
-        tokenize=True,
-        add_generation_prompt=False,
-        **kwargs,
-    )
+    prefixes = [
+        _template_token_ids(
+            tokenizer.apply_chat_template(
+                [*DUMMY_MESSAGES, {"role": "user", "content": content}],
+                tools=tools,
+                tokenize=True,
+                add_generation_prompt=False,
+                **kwargs,
+            ),
+            field="dummy observation prefix",
+        )
+        for content in ("", "x")
+    ]
+    prefix_ids = []
+    for left, right in zip(*prefixes, strict=False):
+        if left != right:
+            break
+        prefix_ids.append(left)
     rendered = tokenizer.apply_chat_template(
         [*DUMMY_MESSAGES, message],
         tools=tools,
@@ -222,7 +247,6 @@ def _observation_token_ids(
         add_generation_prompt=True,
         **kwargs,
     )
-    prefix_ids = _template_token_ids(prefix, field="dummy observation prefix")
     rendered_ids = _template_token_ids(rendered, field="observation template")
     if rendered_ids[: len(prefix_ids)] != prefix_ids:
         raise ValueError("Observation template is not prefix-stable")
@@ -254,44 +278,11 @@ def _validate_routing_metadata(args: Any, meta_info: dict[str, Any], *, expected
 
 
 def _response_budget(sampling_params: dict[str, Any], context_limit: int | None, prompt_length: int) -> int | None:
-    budget = sampling_params.get("max_new_tokens")
-    if budget is not None and budget < 0:
-        raise ValueError(f"max_new_tokens must be non-negative, got {budget}")
-    if context_limit is None:
-        return budget
-    if context_limit < 0:
-        raise ValueError(f"rollout_max_context_len must be non-negative, got {context_limit}")
-    context_budget = max(0, context_limit - prompt_length)
-    return context_budget if budget is None else min(budget, context_budget)
-
-
-def _stop_eos_token_id(
-    text: str,
-    token_ids: list[int],
-    *,
-    finish: str,
-    stop: Any,
-    eos_token_id: Any,
-) -> int | None:
-    if finish != "stop" or not stop or not isinstance(eos_token_id, int):
-        return None
-    stop_strings = (stop,) if isinstance(stop, str) else tuple(stop)
-    if not text.endswith(stop_strings):
-        return None
-    if token_ids and token_ids[-1] == eos_token_id:
-        return None
-    return eos_token_id
-
-
-def _validate_rollout_request(args: Any, sample: Sample) -> None:
-    if args.partial_rollout:
-        raise ValueError("Partial rollout is not supported for interaction rollouts.")
-    if not isinstance(args.max_turns, int) or args.max_turns <= 0:
-        raise ValueError("max_turns must be a positive integer in the custom config file.")
-    if sample.status != Sample.Status.PENDING:
-        raise ValueError(f"Geo3K rollout requires a pending sample, got {sample.status.value}")
-    if sample.response or sample.response_length or sample.loss_mask or sample.rollout_log_probs:
-        raise ValueError("Geo3K rollout does not accept pre-existing response state")
+    if context_limit is not None:
+        return context_limit - prompt_length
+    if sampling_params.get("max_new_tokens") is not None:
+        return sampling_params["max_new_tokens"] - prompt_length
+    return None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -305,7 +296,9 @@ class _Turn:
 
 class _Geo3kRollout:
     def __init__(self, args: Any, sample: Sample, sampling_params: dict[str, Any]) -> None:
-        _validate_rollout_request(args, sample)
+        assert not args.partial_rollout, "Partial rollout is not supported for interaction rollouts."
+        if args.max_turns is None:
+            raise ValueError("max_turns must be set via --custom-config-path in the custom config file.")
         self.args = args
         self.sample = sample
         self.sample.metadata = dict(sample.metadata or {})
@@ -348,13 +341,15 @@ class _Geo3kRollout:
         prompt_ids = _coerce_flat_int_token_ids(body.get("token_ids"))
         if not prompt_ids:
             raise ValueError("vLLM render returned empty token_ids")
-        if self.sample.tokens and self.sample.tokens != prompt_ids:
-            raise ValueError("Initial render token_ids differ from sample.tokens")
+        if self.sample.tokens and self.sample.tokens[: len(prompt_ids)] != prompt_ids:
+            raise ValueError("Initial render token_ids differ from sample.tokens prefix")
 
-        self.sample.tokens = list(prompt_ids)
-        self.sample.loss_mask = []
-        self.sample.rollout_log_probs = []
-        self.sample.response_length = 0
+        if not self.sample.tokens:
+            self.sample.tokens = list(prompt_ids)
+        self.response_tokens = self.sample.tokens[len(prompt_ids) :]
+        self.sample.loss_mask = self.sample.loss_mask or []
+        self.sample.rollout_log_probs = self.sample.rollout_log_probs or []
+        self.sample.response_length = len(self.response_tokens)
         self.render_body = body
         self.max_response_budget = _response_budget(
             self.sampling_params,
@@ -387,7 +382,7 @@ class _Geo3kRollout:
             finish=finish,
         )
 
-    def _append_generated(self, turn: _Turn) -> bool:
+    def _append_generated(self, turn: _Turn) -> None:
         remaining = self._remaining_budget
         if remaining is not None and len(turn.tokens) > remaining:
             raise ValueError(
@@ -399,18 +394,6 @@ class _Geo3kRollout:
             turn.meta_info,
             expected_transitions=len(self.sample.tokens) + len(turn.tokens) - 1,
         )
-        eos_token_id = None
-        if getattr(self.args, "append_eos_token_after_stop_str_in_multi_turn", True):
-            eos_token_id = _stop_eos_token_id(
-                turn.text,
-                turn.tokens,
-                finish=turn.finish,
-                stop=self.inference_params.get("stop"),
-                eos_token_id=getattr(self.state.tokenizer, "eos_token_id", None),
-            )
-        if eos_token_id is not None and getattr(self.args, "use_rollout_routing_replay", False):
-            raise RuntimeError("Routing replay cannot append an artificial EOS after a stop string")
-
         self.sample.append_response_tokens(
             self.args,
             tokens=turn.tokens,
@@ -419,28 +402,12 @@ class _Geo3kRollout:
             meta_info=turn.meta_info,
         )
         self.response_tokens.extend(turn.tokens)
-        if eos_token_id is None:
-            return False
-        remaining = self._remaining_budget
-        if remaining is not None and remaining <= 0:
-            self.sample.status = Sample.Status.TRUNCATED
-            self.sample.metadata["multiturn_truncation"] = {
-                "reason": "insufficient_budget_for_stop_eos",
-                "remaining_budget": remaining,
-            }
-            return True
-        self.sample.append_response_tokens(tokens=[eos_token_id], trainable=False)
-        return False
 
     def _advance_environment(self, env: Any, turn: _Turn, turn_index: int) -> bool:
         observation, done, _ = env.step(turn.text)
         if done:
             self.sample.status = Sample.Status.COMPLETED
             return True
-        if turn_index + 1 >= self.args.max_turns:
-            self.sample.status = Sample.Status.TRUNCATED
-            return True
-
         message = env.format_observation(observation)
         _validate_text_observation(message)
         token_ids = _observation_token_ids(
@@ -450,17 +417,16 @@ class _Geo3kRollout:
             tools=self.sample.metadata.get("tools"),
             template_kwargs=getattr(self.args, "apply_chat_template_kwargs", None),
         )
+        self.sample.append_response_tokens(tokens=token_ids, trainable=False)
+        self.response_tokens.extend(token_ids)
         remaining = self._remaining_budget
-        if remaining is None or len(token_ids) < remaining:
-            self.sample.append_response_tokens(tokens=token_ids, trainable=False)
-            return False
-        self.sample.status = Sample.Status.TRUNCATED
-        self.sample.metadata["multiturn_truncation"] = {
-            "reason": "insufficient_budget_for_next_turn",
-            "observation_tokens": len(token_ids),
-            "remaining_budget": remaining,
-        }
-        return True
+        if remaining is not None and remaining <= 0:
+            self.sample.status = Sample.Status.TRUNCATED
+            return True
+        if turn_index + 1 >= self.args.max_turns:
+            self.sample.status = Sample.Status.COMPLETED
+            return True
+        return False
 
     def _finalize(self) -> Sample:
         mm_inputs = _multimodal_train_inputs_from_features(self.render_body.get("features"))
@@ -472,6 +438,9 @@ class _Geo3kRollout:
         )
         self.sample.multimodal_train_inputs = mm_inputs
         self.sample.response = self.state.tokenizer.decode(self.response_tokens, skip_special_tokens=False)
+        self.sample.response_length = len(self.response_tokens)
+        if self.sample.status is None:
+            self.sample.status = Sample.Status.COMPLETED
         return self.sample
 
     async def _run_turns(self, env: Any) -> None:
@@ -485,12 +454,15 @@ class _Geo3kRollout:
                 sampling_params["max_tokens"] = remaining
 
             turn = await self._generate_turn(sampling_params)
+            self._append_generated(turn)
             if turn.finish == "abort":
                 self.sample.status = Sample.Status.ABORTED
                 break
-            if self._append_generated(turn):
-                break
             if turn.finish == "length":
+                self.sample.status = Sample.Status.TRUNCATED
+                break
+            remaining = self._remaining_budget
+            if remaining is not None and remaining <= 0:
                 self.sample.status = Sample.Status.TRUNCATED
                 break
             if self._advance_environment(env, turn, turn_index):
@@ -498,26 +470,21 @@ class _Geo3kRollout:
 
     async def run(self) -> Sample:
         env_module = _load_env_module(self.args.rollout_interaction_env_path)
-        build_env = getattr(env_module, "build_env", None)
-        if not callable(build_env):
-            raise ValueError("Environment module must expose a callable build_env(sample, args).")
-        env = build_env(sample=self.sample, args=self.args)
-        active_error: BaseException | None = None
+        env = _build_env(env_module, self.sample, self.args)
         try:
             env.reset()
             await self._initialize_prompt()
+            remaining = self._remaining_budget
+            if remaining is not None and remaining <= 0:
+                self.sample.status = Sample.Status.TRUNCATED
+                return self.sample
             await self._run_turns(env)
             return self._finalize()
-        except BaseException as error:
-            active_error = error
-            raise
         finally:
             try:
                 env.close()
-            except BaseException as close_error:
-                if active_error is None:
-                    raise
-                raise active_error from close_error
+            except Exception:
+                pass
 
 
 async def generate(args: Any, sample: Sample, sampling_params: dict[str, Any]) -> Sample:

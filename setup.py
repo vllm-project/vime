@@ -21,7 +21,7 @@ class bdist_wheel(_bdist_wheel):
         abi_tag = f"{python_version}"
 
         if platform.system() == "Linux":
-            platform_tag = "manylinux1_x86_64"
+            platform_tag = "manylinux1_x86_64" if platform.machine() == "x86_64" else _bdist_wheel.get_tag(self)[2]
         else:
             platform_tag = platform.system().lower()
 
@@ -30,7 +30,7 @@ class bdist_wheel(_bdist_wheel):
 
 # Setup configuration
 setup(
-    author="vime Team",
+    author="slime Team",
     name="vime",
     version="0.4.0",
     packages=find_packages(include=["vime*", "vime_plugins*"]),
