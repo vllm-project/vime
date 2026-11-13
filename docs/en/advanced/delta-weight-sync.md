@@ -26,6 +26,12 @@ This path uses the native sparse HCCL engines already included in the pinned
 vLLM-Ascend dependency. No additional sparse-engine dependency patch is needed.
 VIME owns Bridge export, shard snapshots, ordered gathering and the update lifecycle.
 
+The NPU image installs Megatron-Bridge at `afcc7eee4cd916aedcf90562b01f3948ed76d82d`
+for conversion. Custom training images must include the same Bridge dependency;
+installing VIME alone does not install the training stack. Follow the pinned
+conversion dependencies in `docker/Dockerfile.npu` rather than resolving Bridge's
+CUDA training extras over an Ascend environment.
+
 ```bash
 --update-weight-mode delta
 --update-weight-transport sparse_hccl
