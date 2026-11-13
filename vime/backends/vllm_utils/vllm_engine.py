@@ -810,7 +810,13 @@ def _compute_server_args(
     ):
         kwargs["max_model_len"] = args.rollout_max_context_len
 
-    kwargs["weight_transfer_config"] = {"backend": "ipc" if args.colocate else "nccl"}
+    if (
+        getattr(args, "update_weight_mode", "full") == "delta"
+        and getattr(args, "update_weight_transport", "nccl") == "sparse_hccl"
+    ):
+        kwargs["weight_transfer_config"] = {"backend": "sparse_hccl"}
+    else:
+        kwargs["weight_transfer_config"] = {"backend": "ipc" if args.colocate else "nccl"}
     kwargs["weight_transfer_config"]["backend"] = current_platform().weight_transfer.backend(
         kwargs["weight_transfer_config"]["backend"]
     )
