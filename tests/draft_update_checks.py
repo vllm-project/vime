@@ -86,7 +86,7 @@ def check_draft_update_evidence(
        and train metrics green, so this floor is the actual detector;
     4. last round >= first round * last_round_ratio (slow-drift guard).
     """
-    with open(log_path, "r", errors="replace") as handle:
+    with open(log_path, errors="replace") as handle:
         lines = handle.read().splitlines()
     errors = []
 
@@ -103,13 +103,11 @@ def check_draft_update_evidence(
     broken = [
         session
         for session in sessions
-        if [endpoint for endpoint, _ in session] != list(_DRAFT_CHAIN)
-        or any(status != 200 for _, status in session)
+        if [endpoint for endpoint, _ in session] != list(_DRAFT_CHAIN) or any(status != 200 for _, status in session)
     ]
     if len(sessions) != num_rollouts or broken:
         described = " ".join(
-            "[" + " ".join(f"{endpoint}:{status}" for endpoint, status in session) + "]"
-            for session in sessions
+            "[" + " ".join(f"{endpoint}:{status}" for endpoint, status in session) + "]" for session in sessions
         )
         errors.append(
             f"condition 2 (draft publish session all-200): expected"

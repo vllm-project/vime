@@ -7,30 +7,13 @@ from vime.platforms import current_platform
 if current_platform().is_npu:
     import vime.backends.megatron_utils  # noqa: F401
 
-from vime.backends.speculative_training.config import should_run_draft_interval
+from vime.backends.speculative_training.draft_group import DraftTrainingLoop
 from vime.data.checkpoint import save_checkpoint
-from vime.observability.logging_utils import configure_logger, finish_tracking, init_tracking, log
-from vime.observability.metric_utils import compute_rollout_step
+from vime.observability.logging_utils import configure_logger, finish_tracking, init_tracking
 from vime.ray.placement_group import create_draft_model, create_rollout_manager, create_training_models
 from vime.utils.arguments import parse_args
 from vime.utils.cleanup import Cleanup
 from vime.utils.misc import should_run_periodic_action
-
-logger = logging.getLogger(__name__)
-
-
-def _log_draft_result(args, rollout_id, prefix, result):
-    if not isinstance(result, dict):
-        return
-    metrics = {
-        f"draft/{prefix}_{key}": value
-        for key, value in result.items()
-        if isinstance(value, (int, float)) and not isinstance(value, bool)
-    }
-    if not metrics:
-        return
-    metrics["rollout/step"] = compute_rollout_step(args, rollout_id)
-    log(args, metrics, step_key="rollout/step")
 
 
 def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
@@ -38,13 +21,7 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
 
     actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
     draft_model = create_draft_model(args, actor_model)
-    if draft_model is not None and args.draft_save_hf:
-        logger.info(
-            "External DSpark export enabled: template=%s, interval=%s. Artifacts are written on "
-            "Actor rank zero; use a shared path when Ray workers run on multiple hosts.",
-            args.draft_save_hf,
-            args.draft_save_interval,
-        )
+    draft_loop = DraftTrainingLoop(args, draft_model) if draft_model is not None else None
 
     if args.offload_rollout and not release_train:
         ray.get(rollout_manager.onload_weights.remote())
@@ -104,22 +81,16 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
         # model/optimizer or this data progress have a durable joint checkpoint.
         ray.get(rollout_manager.training_completed.remote(rollout_id))
 
-        draft_snapshot_ref = None
-        draft_snapshot_version = None
-        if draft_model is not None and actor_trains and actor_train_results is not None:
-            collect_result = draft_model.collect_actor_results(actor_train_results)
-            collected_this_rollout = int(collect_result.get("accepted", 0)) > 0
-            if collected_this_rollout:
-                logger.info("External Draft feature collection: %s", collect_result)
-                _log_draft_result(args, rollout_id, "collect", collect_result)
-            if collected_this_rollout and should_run_draft_interval(rollout_id, args.draft_train_interval):
-                draft_train_result = draft_model.train_draft(rollout_id)
-                logger.info("External Draft training: %s", draft_train_result)
-                _log_draft_result(args, rollout_id, "train", draft_train_result)
-            if should_run_draft_interval(rollout_id, args.draft_publish_interval):
-                prepared_snapshot = draft_model.prepare_publish_snapshot()
-                if prepared_snapshot is not None:
-                    draft_snapshot_ref, draft_snapshot_version = prepared_snapshot
+        # Draft stages: train.py only sequences them; interval decisions and
+        # snapshot bookkeeping live in DraftTrainingLoop.
+        draft_snapshot = None
+        if draft_loop is not None and actor_trains and actor_train_results is not None:
+            draft_loop.collect(rollout_id, actor_train_results)
+            if draft_loop.should_train(rollout_id):
+                draft_loop.train(rollout_id)
+            if draft_loop.should_publish(rollout_id):
+                draft_loop.prepare_snapshot()
+            draft_snapshot = draft_loop.pending_snapshot
 
         actor_save_due = should_run_periodic_action(
             rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout
@@ -135,36 +106,18 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
                 restore_plan=restore_plan,
             )
 
-        draft_checkpoint_due = draft_model is not None and (
-            (args.draft_save_interval is None and actor_save_due)
-            or should_run_draft_interval(rollout_id, args.draft_save_interval)
-            or rollout_id == args.num_rollout - 1
-        )
-        if draft_checkpoint_due:
-            draft_save_results = draft_model.save_draft(
-                rollout_id,
-                export_hf=bool(args.draft_save_hf),
-            )
-            logger.info("External Draft save completed: %s", draft_save_results)
+        if draft_loop is not None and draft_loop.should_save(rollout_id, actor_save_due):
+            draft_loop.save(rollout_id)
 
         offload_train(actor_trains)
         if args.offload_rollout and not release_train:
             ray.get(rollout_manager.onload_weights.remote())
-        if draft_snapshot_ref is not None:
-            actor_model.set_external_draft_weights(
-                draft_snapshot_ref,
-                draft_snapshot_version,
-            )
+        if draft_snapshot is not None:
+            actor_model.set_external_draft_weights(*draft_snapshot)
         was_paused = ray.get(rollout_manager.pause_rollout_admission.remote())
         actor_model.update_weights()
-        if draft_snapshot_version is not None:
-            draft_model.mark_published(draft_snapshot_version)
-            _log_draft_result(
-                args,
-                rollout_id,
-                "publish",
-                {"published": 1, "draft_version": int(draft_snapshot_version)},
-            )
+        if draft_snapshot is not None:
+            draft_loop.commit_publish(rollout_id)
         # Final evaluation uses the synchronized engines directly. Keep training
         # producers paused when no later rollout will consume their new work.
         if rollout_id + 1 < args.num_rollout:
@@ -176,8 +129,8 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
             ray.get(rollout_manager.eval.remote(rollout_id))
 
-    if draft_model is not None:
-        draft_model.release()
+    if draft_loop is not None:
+        draft_loop.release()
 
 
 def main(args, restore_plan):

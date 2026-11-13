@@ -33,7 +33,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 
 TARGET_MODEL="${TARGET_MODEL:-/data/weights/Qwen3-4B}"
-DRAFT_MODEL="${DRAFT_MODEL:-/data/dspark-synth/flat}"
+DRAFT_MODEL="${DRAFT_MODEL:-/data/weights/dspark_qwen3_4b_block7}"
 PROMPT_DATA="${PROMPT_DATA:-/data/datasets/dapo-math-17k/dapo-math-17k.jsonl}"
 DRAFT_CHECKPOINT_PATH="${DRAFT_CHECKPOINT_PATH:-/data/dspark-output/draft}"
 RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8865}"
@@ -104,14 +104,13 @@ VLLM_ARGS=(
    --rollout-num-gpus-per-engine 4
    --vllm-gpu-memory-utilization 0.6
    --vllm-max-model-len 4096
-   --vllm-speculative-config "{\"method\":\"dspark\",\"model\":\"${DRAFT_MODEL}\",\"num_speculative_tokens\":8}"
+   --vllm-speculative-config "{\"method\":\"dspark\",\"model\":\"${DRAFT_MODEL}\",\"num_speculative_tokens\":7}"
 )
 
 DRAFT_ARGS=(
    --enable-external-draft-training
    --draft-algorithm dspark
    --draft-model-path "${DRAFT_MODEL}"
-   --draft-feature-layer-ids 1,9,17,25,33
    --draft-dspark-loss-fn '{"ce":0.1,"tv":0.9}'
    --draft-checkpoint-path "${DRAFT_CHECKPOINT_PATH}"
    --draft-save-interval 1
