@@ -18,12 +18,21 @@ import shutil
 
 import vime.utils.external_utils.command_utils as U
 
+import draft_update_checks
+
 
 TEST_ROOT = os.environ.get("HF_HOME") or "/root"
 MODEL_DIR = f"{TEST_ROOT}/models/Qwen3-4B"
 DRAFT_MODEL_DIR = f"{TEST_ROOT}/models/Qwen3-4B-eagle3-angelslim"
 DATASET_DIR = f"{TEST_ROOT}/datasets/dapo-math-17k"
 DRAFT_CHECKPOINT_DIR = f"{TEST_ROOT}/eagle3-draft-smoke-output/draft"
+JOB_LOG_PATH = f"{TEST_ROOT}/eagle3-draft-smoke-output/job.log"
+
+# Post-run evidence-check thresholds (tests/draft_update_checks.py):
+# healthy rounds measured 1.46-1.99 (single-rollout E2E acceptance ~1.7),
+# the acceptance-collapse failure mode sits at ~1.0. 1.3 splits the two.
+NUM_ROLLOUT = 3
+MIN_ACCEPT_LENGTH = 1.3
 
 
 def ensure_speculators():
@@ -94,7 +103,7 @@ def execute():
         "--apply-chat-template "
         "--rollout-shuffle "
         "--rm-type math "
-        "--num-rollout 3 "
+        f"--num-rollout {NUM_ROLLOUT} "
         "--rollout-batch-size 4 "
         "--n-samples-per-prompt 4 "
         "--rollout-max-response-len 2048 "
@@ -219,7 +228,15 @@ def main():
     prepare()
     for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         os.environ.pop(proxy_var, None)
-    execute()
+    # exec_command lets the ray job write straight to this process's fd 1,
+    # so the job log is captured at the descriptor level (tee_output).
+    with draft_update_checks.tee_output(JOB_LOG_PATH):
+        execute()
+    draft_update_checks.check_draft_update_evidence(
+        JOB_LOG_PATH,
+        num_rollouts=NUM_ROLLOUT,
+        min_accept_length=MIN_ACCEPT_LENGTH,
+    )
 
 
 if __name__ == "__main__":
