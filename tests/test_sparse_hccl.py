@@ -28,6 +28,7 @@ import sys
 import time
 from datetime import timedelta
 from types import SimpleNamespace
+from unittest.mock import patch as mock_patch
 
 import pytest
 import torch
@@ -41,7 +42,17 @@ from vllm.model_executor.model_loader.checkpoint_weight_patch import (
     load_checkpoint_weight_patches,
 )
 
-import vime.backends.megatron_utils  # noqa: F401 - Bootstrap NPU before importing Megatron.
+# Adaptor parses sys.argv during bootstrap and config subclass creation. Pytest
+# options are not training arguments (short options even produce empty names).
+# Spawned workers import this module too, so initialize their argument context
+# explicitly rather than letting them inherit the pytest command line.
+with mock_patch.object(sys, "argv", [sys.argv[0]]):
+    import vime.backends.megatron_utils  # noqa: F401 - Bootstrap before Megatron.
+
+    if "megatron_adaptor" in sys.modules:
+        from megatron_adaptor.utils.args_utils import get_mindspeed_args, set_full_args
+
+        set_full_args(get_mindspeed_args(get_defaults=True))
 from vime.backends.megatron_utils.delta_sync import megatron_delta_export
 from vime.backends.megatron_utils.delta_sync import sparse_gather as gather_module
 from vime.backends.megatron_utils.delta_sync.megatron_delta_export import (
@@ -55,6 +66,25 @@ from vime.backends.megatron_utils.update_weight import update_weight_from_sparse
 TP = 2
 PP = 2
 EP = 2
+
+
+def _unpack_hf_experts(weights):
+    """Keep the regression checkpoint in Bridge's per-expert HF coordinates."""
+    result = {}
+    for name, weight in weights.items():
+        if name.endswith(".experts.gate_up_proj"):
+            prefix = name.removesuffix(".gate_up_proj")
+            for expert, fused in enumerate(weight):
+                gate, up = fused.chunk(2, dim=0)
+                result[f"{prefix}.{expert}.gate_proj.weight"] = gate.clone()
+                result[f"{prefix}.{expert}.up_proj.weight"] = up.clone()
+        elif name.endswith(".experts.down_proj"):
+            prefix = name.removesuffix(".down_proj")
+            for expert, down in enumerate(weight):
+                result[f"{prefix}.{expert}.down_proj.weight"] = down.clone()
+        else:
+            result[name] = weight
+    return result
 
 
 def _build_tiny_qwen3_moe_checkpoint(rank: int, cfg_dir: str) -> str:
@@ -81,7 +111,7 @@ def _build_tiny_qwen3_moe_checkpoint(rank: int, cfg_dir: str) -> str:
         from transformers import AutoModelForCausalLM
 
         model = AutoModelForCausalLM.from_config(hf_config).to(torch.bfloat16)
-        model.save_pretrained(cfg_dir, safe_serialization=True)
+        model.save_pretrained(cfg_dir, state_dict=_unpack_hf_experts(model.state_dict()), safe_serialization=True)
         del model
     dist.barrier()
     return cfg_dir
@@ -119,6 +149,10 @@ def _compare_sparse_with_full_weights(model, cfg_dir, rank):
         }
 
     accumulated = export()
+    from safetensors.torch import load_file
+
+    checkpoint_weights = load_file(str(pathlib.Path(cfg_dir, "model.safetensors")))
+    assert accumulated.keys() == checkpoint_weights.keys(), "Full Bridge export must cover every checkpoint parameter"
     snapshots = {}
     prime_delta_snapshots(index, snapshots, pin=False)
     torch.npu.synchronize()
@@ -194,6 +228,15 @@ def _run_sparse_full_comparison(rank, cfg_dir):
     # differential would flag test artifacts instead of probe bugs.
     bridge.load_hf_weights(model)
 
+    # Match Adaptor's runtime config classes: the defining module cannot resolve
+    # them by name, so real PP configuration broadcasts must use detached views.
+    seen = set()
+    for part in model:
+        for module in part.modules():
+            config = getattr(module, "config", None)
+            if config is not None and id(config) not in seen:
+                seen.add(id(config))
+                config.__class__ = type("AdaptorTransformerConfig", (type(config),), {"__module__": "types"})
     _compare_sparse_with_full_weights(model, cfg_dir, rank)
     mpu.destroy_model_parallel()
 
@@ -782,6 +825,76 @@ def test_update_failure_preserves_safe_state(updater, phase):
     if phase != "prepare":
         with pytest.raises(RuntimeError, match="cannot be reused"):
             updater.update_weights()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("fail", [False, True])
+def test_bridge_config_context_restores_training_configs(fail):
+    import pickle
+    from dataclasses import field, make_dataclass
+
+    from vime.backends.megatron_utils.delta_sync.hf_weight_iterator_bridge import HfWeightIteratorBridge
+
+    cls = make_dataclass(
+        "AdaptorTransformerConfig", [("hidden_size", int, 64), ("tp_size", int, field(default=2, init=False))]
+    )
+    config = cls()
+    config.extra = {"head_dim": 16}
+    model = torch.nn.Module()
+    model.config = config
+    model.share_embeddings_and_output_weights = False
+    child = torch.nn.Linear(2, 2)
+    child.config = config
+    model.add_module("child", child)
+    iterator = HfWeightIteratorBridge.__new__(HfWeightIteratorBridge)
+    iterator.model = [model]
+    with pytest.raises(pickle.PicklingError):
+        pickle.dumps(config)
+    try:
+        with iterator.model_context():
+            assert model.config is child.config
+            assert model.config is not config
+            restored = pickle.loads(pickle.dumps(model.config))
+            assert restored.hidden_size == 64
+            assert restored.tp_size == 2
+            assert restored.extra == {"head_dim": 16}
+            assert restored.share_embeddings_and_output_weights is False
+            if fail:
+                raise RuntimeError("conversion failed")
+    except RuntimeError as error:
+        assert fail and str(error) == "conversion failed"
+    assert model.config is child.config is config
+    assert not hasattr(config, "share_embeddings_and_output_weights")
+
+
+@pytest.mark.unit
+def test_tiny_checkpoint_unpacks_every_expert():
+    prefix = "model.layers.0.mlp.experts"
+    fused = torch.arange(48, dtype=torch.float32).reshape(2, 6, 4)
+    down = torch.arange(24, dtype=torch.float32).reshape(2, 4, 3)
+    other = torch.ones(4)
+    expected_gate, expected_up = fused.chunk(2, dim=1)
+    unpacked = _unpack_hf_experts(
+        {f"{prefix}.gate_up_proj": fused, f"{prefix}.down_proj": down, "model.norm.weight": other}
+    )
+    assert set(unpacked) == {
+        "model.norm.weight",
+        *(
+            f"{prefix}.{expert}.{projection}.weight"
+            for expert in range(2)
+            for projection in ("gate_proj", "up_proj", "down_proj")
+        ),
+    }
+    for expert in range(2):
+        assert torch.equal(unpacked[f"{prefix}.{expert}.gate_proj.weight"], expected_gate[expert])
+        assert torch.equal(unpacked[f"{prefix}.{expert}.up_proj.weight"], expected_up[expert])
+        assert torch.equal(unpacked[f"{prefix}.{expert}.down_proj.weight"], down[expert])
+    assert unpacked["model.norm.weight"] is other
+    assert _unpack_hf_experts(unpacked).keys() == unpacked.keys()
+    fused.zero_()
+    down.zero_()
+    assert unpacked[f"{prefix}.1.gate_proj.weight"].sum() > 0
+    assert unpacked[f"{prefix}.1.down_proj.weight"].sum() > 0
 
 
 @pytest.mark.integration
