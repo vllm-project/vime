@@ -828,7 +828,8 @@ class MegatronTrainRayActor(TrainRayActor):
                 logger.info("No updatable vLLM engines are running; skip weight update.")
             return
 
-        if reconnect_rollout_engines:
+        sparse_live_weights = self.args.offload_train and self.args.update_weight_transport == "sparse_hccl"
+        if reconnect_rollout_engines or sparse_live_weights:
             self.wake_up()
         elif self.args.offload_train:
             reload_process_groups()
@@ -867,7 +868,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 self._pending_external_draft_version = None
             print_memory("after update_weights")
 
-        if reconnect_rollout_engines:
+        if reconnect_rollout_engines or sparse_live_weights:
             self.sleep()
         elif self.args.offload_train:
             destroy_process_groups()
