@@ -125,6 +125,16 @@ def save_hf_model_to_path(
             pending_write = _write_pending_chunk(writer, pending_write)
 
     pending_write = _write_pending_chunk(writer, pending_write)
+
+    # Copy source HF weights the spec does not build (e.g. visual.*, mtp.*)
+    # so the saved checkpoint is complete and reloadable.
+    _copy_passthrough_source_weights(
+        source_hf_dir=args.hf_checkpoint,
+        writer=writer,
+        is_save_rank=is_save_rank,
+        is_writer_rank=is_writer_rank,
+    )
+
     _finalize_distributed_shards(path, writer.state())
 
     if is_save_rank:
@@ -331,6 +341,78 @@ def _copy_hf_assets(origin_hf_dir: str, output_dir: Path) -> None:
 def _is_hf_weight_file(path: Path) -> bool:
     name = path.name
     return name in _HF_WEIGHT_FILE_NAMES or name.endswith(_HF_WEIGHT_FILE_SUFFIXES)
+
+
+def _copy_passthrough_source_weights(
+    source_hf_dir: str,
+    writer: "_SafetensorShardWriter",
+    *,
+    is_save_rank: bool,
+    is_writer_rank: bool,
+) -> None:
+    """Copy source HF weights the spec does not build, verbatim into extra shards.
+
+    Uses the per-model-type _PASSTHROUGH_PREFIXES declaration to decide which
+    source keys to copy. Only global rank 0 (a writer rank) does the copy.
+    """
+    if not (is_save_rank and is_writer_rank):
+        return
+
+    from transformers import AutoConfig
+
+    from .hf_to_megatron import _get_passthrough_prefixes
+    from .hf_to_megatron.common import SafetensorReader
+
+    hf_config = AutoConfig.from_pretrained(source_hf_dir, trust_remote_code=True)
+    passthrough_prefixes = _get_passthrough_prefixes(hf_config)
+    if not passthrough_prefixes:
+        return
+
+    reader = SafetensorReader(source_hf_dir)
+    already_written = set(writer.weight_map)
+
+    # 4 GiB: under HF's 5GB default shard size and bounds host RAM held in `pending`.
+    max_shard_bytes = 4 * 1024 * 1024 * 1024
+    # Above any main-loop chunk_idx (chunks ~ model_bytes / buffer size, far below 1e6) so filenames never collide.
+    shard_offset = 1_000_000
+    next_shard_idx = shard_offset
+    pending: list[tuple[str, torch.Tensor]] = []
+    pending_bytes = 0
+
+    def flush(shard_idx: int) -> None:
+        nonlocal pending, pending_bytes
+        if not pending:
+            return
+        writer.write(pending, shard_idx=shard_idx)
+        pending = []
+        pending_bytes = 0
+
+    num_copied = 0
+    num_skipped = 0
+    for name in reader.weight_map:
+        if not name.startswith(passthrough_prefixes):
+            continue
+        if name in already_written:
+            num_skipped += 1
+            continue
+        tensor = reader.get_tensor(name)
+        pending.append((name, _tensor_for_safetensors(tensor)))
+        pending_bytes += tensor.numel() * tensor.element_size()
+        num_copied += 1
+        if pending_bytes >= max_shard_bytes:
+            flush(next_shard_idx)
+            next_shard_idx += 1
+
+    flush(next_shard_idx)
+
+    logger.warning(
+        "Copied %d passthrough source HF weight(s) through to the saved "
+        "checkpoint (prefixes=%s, skipped %d exact-duplicate); source=%s",
+        num_copied,
+        passthrough_prefixes,
+        num_skipped,
+        source_hf_dir,
+    )
 
 
 def _is_global_rank_zero() -> bool:

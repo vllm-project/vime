@@ -30,8 +30,20 @@ def get_chunk_gated_delta_rule(backend: str):
         try:
             from fla.ops.gated_delta_rule import chunk_gated_delta_rule
         except ImportError as exc:
-            raise ImportError("Qwen GDN backend 'fla' requires flash-linear-attention.") from exc
+            raise ImportError(
+                "Qwen GDN backend 'fla' requires flash-linear-attention. "
+                "Install it with: pip install --no-deps einops 'fla-core==0.5.2' 'flash-linear-attention==0.5.2'"
+            ) from exc
         return chunk_gated_delta_rule
+
+    if backend == "fla_npu":
+        try:
+            from .fla_npu_gdn import flash_gated_delta_rule
+        except ImportError as exc:
+            raise ImportError(
+                "Qwen GDN backend 'fla_npu' requires the fla_npu package (flash-linear-attention-npu)."
+            ) from exc
+        return flash_gated_delta_rule
 
     if backend == "flashqla":
         try:

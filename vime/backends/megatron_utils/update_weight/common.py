@@ -49,6 +49,28 @@ def all_gather_param(name: str, param: torch.nn.Parameter) -> torch.Tensor:
     if "linear_fc1.weight" in name or "linear_fc1.bias" in name:
         param_partitions = [p.chunk(2, dim=0) for p in param_partitions]
         param_partitions = [p[0] for p in param_partitions] + [p[1] for p in param_partitions]
+    # Merged GDN in_proj.weight: gather each sub-matrix (q,k,v,z,b,a) across
+    # ranks independently, then cat in original order (same pattern as linear_fc1).
+    elif "linear_attn.in_proj.weight" in name and getattr(param, "_in_proj_split_sizes_full", None):
+        split_sizes = param._in_proj_split_sizes_full
+        local_sizes = [s // tp_size for s in split_sizes]
+        sub_parts_per_rank = [p.split(local_sizes, dim=partition_dim) for p in param_partitions]
+        ordered = []
+        for sub_idx in range(len(local_sizes)):
+            for rank_parts in sub_parts_per_rank:
+                ordered.append(rank_parts[sub_idx])
+        param_partitions = ordered
+    # GDN conv1d.weight: gather each sub-matrix (q,k,v) across ranks
+    # independently, then cat in original order (same pattern as in_proj above).
+    elif "linear_attn.conv1d.weight" in name and getattr(param, "_conv1d_split_sizes_full", None):
+        split_sizes = param._conv1d_split_sizes_full
+        local_sizes = [s // tp_size for s in split_sizes]
+        sub_parts_per_rank = [p.split(local_sizes, dim=partition_dim) for p in param_partitions]
+        ordered = []
+        for sub_idx in range(len(local_sizes)):
+            for rank_parts in sub_parts_per_rank:
+                ordered.append(rank_parts[sub_idx])
+        param_partitions = ordered
     # this is bug in megatron's grouped moe.
     if "linear_fc2.weight" in name:
         if partition_dim == 0:
@@ -72,6 +94,17 @@ def all_gather_params_async(
 
     for info, param in param_infos_and_params:
         # Prepare async all_gather
+        # Re-read _in_proj_split_sizes_full from the live parameter in case
+        # DDP wrapping dropped it before ParamInfo.attrs was built.
+        if "linear_attn.in_proj.weight" in info.name and not info.attrs.get("_in_proj_split_sizes_full"):
+            split_sizes = getattr(param, "_in_proj_split_sizes_full", None)
+            if split_sizes is not None:
+                info.attrs["_in_proj_split_sizes_full"] = split_sizes
+        # Same for conv1d.weight, which uses _conv1d_split_sizes_full ([q,k,v]).
+        if "linear_attn.conv1d.weight" in info.name and not info.attrs.get("_conv1d_split_sizes_full"):
+            split_sizes = getattr(param, "_conv1d_split_sizes_full", None)
+            if split_sizes is not None:
+                info.attrs["_conv1d_split_sizes_full"] = split_sizes
         if "expert_bias" in info.name:
             gather_tasks.append((info, param, None, None, None))
         elif not param.tensor_model_parallel or getattr(param, "parallel_mode", None) == "duplicated":
@@ -116,6 +149,34 @@ def all_gather_params_async(
             if "linear_fc1.weight" in info.name or "linear_fc1.bias" in info.name:
                 param_partitions = [p.chunk(2, dim=0) for p in param_partitions]
                 param_partitions = [p[0] for p in param_partitions] + [p[1] for p in param_partitions]
+            # Merged GDN in_proj.weight: gather each sub-matrix (q,k,v,z,b,a)
+            # across ranks independently, then cat in original order.
+            # Per-sub-matrix sizes come from info.attrs["_in_proj_split_sizes_full"].
+            elif "linear_attn.in_proj.weight" in info.name and info.attrs.get("_in_proj_split_sizes_full"):
+                split_sizes = info.attrs["_in_proj_split_sizes_full"]
+                tp = len(param_partitions)
+                local_sizes = [s // tp for s in split_sizes]
+                sub_parts_per_rank = [p.split(local_sizes, dim=partition_dim) for p in param_partitions]
+                num_sub = len(local_sizes)
+                ordered = []
+                for sub_idx in range(num_sub):
+                    for rank_parts in sub_parts_per_rank:
+                        ordered.append(rank_parts[sub_idx])
+                param_partitions = ordered
+            # GDN conv1d.weight: gather each sub-matrix (q,k,v) across ranks
+            # independently, then cat in original order (same pattern as in_proj).
+            # Per-sub-matrix sizes come from info.attrs["_conv1d_split_sizes_full"].
+            elif "linear_attn.conv1d.weight" in info.name and info.attrs.get("_conv1d_split_sizes_full"):
+                split_sizes = info.attrs["_conv1d_split_sizes_full"]
+                tp = len(param_partitions)
+                local_sizes = [s // tp for s in split_sizes]
+                sub_parts_per_rank = [p.split(local_sizes, dim=partition_dim) for p in param_partitions]
+                num_sub = len(local_sizes)
+                ordered = []
+                for sub_idx in range(num_sub):
+                    for rank_parts in sub_parts_per_rank:
+                        ordered.append(rank_parts[sub_idx])
+                param_partitions = ordered
             # this is bug in megatron's grouped moe.
             if "linear_fc2.weight" in info.name:
                 if partition_dim == 0:

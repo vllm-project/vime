@@ -19,14 +19,6 @@ def prepare(checkpoint_root, torch_dist_ref_load=True):
     model_dir = shlex.quote(MODEL_DIR)
     dataset_dir = shlex.quote(DATASET_DIR)
 
-    # The published NPU image does not install flash-linear-attention. Qwen3.5
-    # GDN layers instantiate fla.ShortConvolution while the checkpoint is built.
-    # Pin the version used by the verified NPU run, and skip extras so pip does
-    # not replace the image's torch / torch_npu.
-    U.exec_command(
-        f"{shlex.quote(sys.executable)} -m pip install --disable-pip-version-check --no-deps "
-        "einops 'fla-core==0.5.2' 'flash-linear-attention==0.5.2'"
-    )
     U.exec_command(f"mkdir -p {models_dir} {datasets_dir}")
     U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir {model_dir}")
     U.exec_command("hf download --repo-type dataset zhuzilin/dapo-math-17k " f"--local-dir {dataset_dir}")

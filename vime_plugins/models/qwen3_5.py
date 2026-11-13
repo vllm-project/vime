@@ -3,18 +3,30 @@ import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from megatron.core import parallel_state
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
+from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_block import get_num_layers_to_build
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
+from megatron.core.utils import divide, init_method_normal
 from transformers.activations import ACT2FN
 
 from vime.utils import accelerator
 
+# Optional GDN conv/norm modules, selected by --qwen-gdn-backend ('fla_npu' or 'fla').
+try:
+    from .fla_npu_gdn import QwenStyleRMSNormGated as _FlaNpuRMSNormGated
+    from .fla_npu_gdn import ShortConvolution as _FlaNpuShortConvolution
+except ImportError:
+    _FlaNpuRMSNormGated = None
+    _FlaNpuShortConvolution = None
+
 try:
     from fla.modules import FusedRMSNormGated, ShortConvolution
 except ImportError:
-    pass
+    FusedRMSNormGated = None
+    ShortConvolution = None
 
 from .hf_attention import HuggingfaceAttention, _load_hf_config
 from .qwen_gdn_backend import get_chunk_gated_delta_rule
@@ -27,6 +39,71 @@ def _get_text_config(hf_config):
     return hf_config
 
 
+def _fused_tp_sharded_factory(
+    param,
+    key,
+    part_names,
+    local_part_sizes,
+    *,
+    tp_rank,
+    tp_size,
+    dp_cp_rank,
+    sharded_offsets=(),
+):
+    """Build a ShardedTensorFactory for a fused GDN weight.
+
+    The fused ``in_proj.weight`` (q/k/v/z/b/a rows) and ``conv1d.weight``
+    (q/k/v rows) are stored physically as one local tensor whose
+    sub-matrices are each TP-sharded by head, so no uniform contiguous
+    sharding (what Megatron derives from param attributes or
+    ColumnParallelLinear defaults) can describe them. Following Megatron's
+    fused SwiGLU ``linear_fc1`` pattern
+    (megatron/core/transformer/mlp.py:apply_swiglu_sharded_factory), the
+    factory splits the fused weight into one independently TP-sharded
+    checkpoint entry per sub-matrix on save, and cats the loaded chunks back
+    into the fused layout on load. ``data`` stays the original parameter, so
+    the optimizer's id-based model-state mapping keeps working.
+    """
+    from megatron.core.dist_checkpointing.mapping import ShardedTensor, ShardedTensorFactory
+    from megatron.core.transformer.utils import cat_with_oom_fallback
+
+    prepend_axis_num = len(sharded_offsets)
+    tp_axis = prepend_axis_num  # fused rows live on the first tensor axis
+
+    @torch.no_grad()
+    def build_fn(key, tensor, replica_id, flattened_range):
+        # ``flattened_range`` (flat distributed-optimizer buffers) is ignored,
+        # matching Megatron's own fused SwiGLU factory.
+        sh_tens = []
+        start = 0
+        for local_size, part_name in zip(local_part_sizes, part_names, strict=True):
+            part = tensor.narrow(0, start, local_size)
+            sh_tens.append(
+                ShardedTensor.from_rank_offsets(
+                    f"{key}.{part_name}",
+                    part,
+                    *sharded_offsets,
+                    (tp_axis, tp_rank, tp_size),
+                    replica_id=replica_id,
+                    prepend_axis_num=prepend_axis_num,
+                )
+            )
+            start += local_size
+        assert start == tensor.shape[0], (
+            f"{key}: fused GDN parts {part_names} with local sizes {local_part_sizes} "
+            f"do not cover the local rows {tensor.shape[0]}"
+        )
+        return sh_tens
+
+    return ShardedTensorFactory(
+        key,
+        param,
+        build_fn,
+        cat_with_oom_fallback,
+        replica_id=(0, 0, dp_cp_rank),
+    )
+
+
 # Adapted from Qwen3NextGatedDeltaNet but with separate in_proj_qkv and in_proj_z
 class Qwen3_5GatedDeltaNet(nn.Module):
     """
@@ -35,9 +112,9 @@ class Qwen3_5GatedDeltaNet(nn.Module):
     separate in_proj_qkv (for Q,K,V) and in_proj_z (for Z).
     """
 
-    def __init__(self, config, layer_idx: int, args=None):
+    def __init__(self, config, layer_idx: int, args=None, megatron_config=None):
         super().__init__()
-        self.gdn_backend = getattr(args, "qwen_gdn_backend", "fla")
+        self.gdn_backend = getattr(args, "qwen_gdn_backend", "fla_npu")
         self.chunk_gated_delta_rule = get_chunk_gated_delta_rule(self.gdn_backend)
         self.hidden_size = config.hidden_size
         self.num_v_heads = config.linear_num_value_heads
@@ -53,37 +130,121 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         self.act = ACT2FN[config.hidden_act]
         self.layer_norm_epsilon = config.rms_norm_eps
 
-        # QKV
+        # --- TP-sharding (tensor parallel) ---
+        self.tp_size = parallel_state.get_tensor_model_parallel_world_size()
+        self.num_v_heads_local_tp = divide(self.num_v_heads, self.tp_size)
+        self.num_k_heads_local_tp = divide(self.num_k_heads, self.tp_size)
+        self.key_dim_local_tp = self.head_k_dim * self.num_k_heads_local_tp
+        self.value_dim_local_tp = self.head_v_dim * self.num_v_heads_local_tp
+
+        # QKV conv dimension (TP-local)
         self.conv_dim = self.key_dim * 2 + self.value_dim
-        self.conv1d = ShortConvolution(
-            hidden_size=self.conv_dim,
+        self.conv_dim_local_tp = self.key_dim_local_tp * 2 + self.value_dim_local_tp
+
+        # Head-first conv path for fla_npu; conv_head_num is the TP-local head count.
+        conv_head_num = 0
+        if self.gdn_backend == "fla_npu" and self.head_k_dim == self.head_v_dim and self.head_k_dim % 16 == 0:
+            conv_head_num = 2 * self.num_k_heads_local_tp + self.num_v_heads_local_tp
+        self.conv_head_num = conv_head_num
+        if self.gdn_backend == "fla_npu":
+            self.conv1d = _FlaNpuShortConvolution(
+                hidden_size=self.conv_dim_local_tp,
+                bias=False,
+                kernel_size=self.conv_kernel_size,
+                head_num=self.conv_head_num,
+            )
+        else:
+            if ShortConvolution is None:
+                raise ImportError(
+                    "The 'fla'/'flashqla' GDN backends require flash-linear-attention "
+                    "for the conv/norm modules. Install it with: "
+                    "pip install --no-deps einops 'fla-core==0.5.2' 'flash-linear-attention==0.5.2'"
+                )
+            self.conv1d = ShortConvolution(
+                hidden_size=self.conv_dim_local_tp,
+                bias=False,
+                kernel_size=self.conv_kernel_size,
+            )
+        # conv1d.weight is TP-sharded along dim 0; its q/k/v sub-matrices
+        # are each sharded by head independently.
+        self._conv1d_split_sizes_full = [
+            self.key_dim,
+            self.key_dim,
+            self.value_dim,  # q, k, v
+        ]
+        self.conv1d.weight.tensor_model_parallel = True
+        self.conv1d.weight.partition_dim = 0
+        self.conv1d.weight.partition_stride = 1
+        self.conv1d.weight._conv1d_split_sizes_full = self._conv1d_split_sizes_full
+
+        # --- Input projection (merged qkv+z+b+a CPL; the converters cat/split
+        # the four HF weights and TP shards each sub-matrix by head) ---
+        self._in_proj_split_sizes_full = [
+            self.key_dim,
+            self.key_dim,
+            self.value_dim,  # qkv: q, k, v
+            self.value_dim,  # z
+            self.num_v_heads,  # b
+            self.num_v_heads,  # a
+        ]
+        init_method = getattr(megatron_config, "init_method", init_method_normal(0.02))
+        output_init_method = getattr(megatron_config, "output_layer_init_method", init_method_normal(0.02))
+
+        self.in_proj = ColumnParallelLinear(
+            self.hidden_size,
+            sum(self._in_proj_split_sizes_full),
+            config=megatron_config,
+            init_method=init_method,
             bias=False,
-            kernel_size=self.conv_kernel_size,
+            gather_output=False,
+            skip_bias_add=False,
+            skip_weight_param_allocation=False,
+            is_expert=False,
         )
+        self.in_proj.sequence_parallel = False
+        self.in_proj.weight._in_proj_split_sizes_full = self._in_proj_split_sizes_full
 
-        # Separate projections for QKV and Z (unlike Qwen3Next which combines QKVZ)
-        projection_size_qkv = self.key_dim * 2 + self.value_dim
-        projection_size_z = self.value_dim
-        self.in_proj_qkv = nn.Linear(self.hidden_size, projection_size_qkv, bias=False)
-        self.in_proj_z = nn.Linear(self.hidden_size, projection_size_z, bias=False)
-        self.in_proj_b = nn.Linear(self.hidden_size, self.num_v_heads, bias=False)
-        self.in_proj_a = nn.Linear(self.hidden_size, self.num_v_heads, bias=False)
+        # time step projection (TP-local)
+        self.dt_bias = nn.Parameter(torch.ones(self.num_v_heads_local_tp))
+        self.dt_bias.tensor_model_parallel = True
+        self.dt_bias.partition_dim = 0
+        self.dt_bias.partition_stride = 1
 
-        # time step projection
-        self.dt_bias = nn.Parameter(torch.ones(self.num_v_heads))
-
-        A = torch.empty(self.num_v_heads).uniform_(0, 16)
+        A = torch.empty(self.num_v_heads_local_tp).uniform_(0, 16)
         self.A_log = nn.Parameter(torch.log(A))
+        self.A_log.tensor_model_parallel = True
+        self.A_log.partition_dim = 0
+        self.A_log.partition_stride = 1
 
-        self.norm = FusedRMSNormGated(
-            self.head_v_dim,
-            eps=self.layer_norm_epsilon,
-            activation=self.activation,
-            device=accelerator.current_device(),
-            dtype=config.dtype if config.dtype is not None else torch.get_default_dtype(),
+        if self.gdn_backend == "fla_npu":
+            self.norm = _FlaNpuRMSNormGated(
+                self.head_v_dim,
+                eps=self.layer_norm_epsilon,
+                activation=self.activation,
+                device=accelerator.current_device(),
+                dtype=config.dtype if config.dtype is not None else torch.get_default_dtype(),
+            )
+        else:
+            self.norm = FusedRMSNormGated(
+                self.head_v_dim,
+                eps=self.layer_norm_epsilon,
+                activation=self.activation,
+                device=accelerator.current_device(),
+                dtype=config.dtype if config.dtype is not None else torch.get_default_dtype(),
+            )
+
+        # --- Output projection (RowParallelLinear) ---
+        self.out_proj = RowParallelLinear(
+            self.value_dim,  # full input dim; RPL handles the split
+            self.hidden_size,
+            config=megatron_config,
+            init_method=output_init_method,
+            bias=False,
+            input_is_parallel=True,
+            skip_bias_add=True,
+            is_expert=False,
         )
-
-        self.out_proj = nn.Linear(self.value_dim, self.hidden_size, bias=False)
+        self.out_proj.sequence_parallel = False
 
     def forward(
         self,
@@ -92,32 +253,49 @@ class Qwen3_5GatedDeltaNet(nn.Module):
     ):
         batch_size, seq_len, _ = hidden_states.shape
 
-        # Projections (flat layout: [Q_all, K_all, V_all])
-        mixed_qkv = self.in_proj_qkv(hidden_states)
-        z = self.in_proj_z(hidden_states)
-        z = z.reshape(batch_size, seq_len, -1, self.head_v_dim)
-        b = self.in_proj_b(hidden_states)
-        a = self.in_proj_a(hidden_states)
+        # Single merged projection: split TP-local output back into qkv,z,b,a.
+        merged, _ = self.in_proj(hidden_states)
+        qkv_dim = self.key_dim_local_tp * 2 + self.value_dim_local_tp
+        z_dim = self.value_dim_local_tp
+        ba_dim = self.num_v_heads_local_tp * 2
+        mixed_qkv, z, ba = merged.split([qkv_dim, z_dim, ba_dim], dim=-1)
+        b, a = ba.chunk(2, dim=-1)
 
-        # Convolution on the flat QKV
+        z = z.reshape(batch_size, seq_len, -1, self.head_v_dim)
+
+        # Convolution on the TP-local QKV; head-first output when conv_head_num > 0.
         mixed_qkv, _ = self.conv1d(
             x=mixed_qkv,
             cu_seqlens=cu_seqlens,
         )
 
-        # Split into Q, K, V (flat split, matching HF layout)
-        query, key, value = torch.split(
-            mixed_qkv,
-            [self.key_dim, self.key_dim, self.value_dim],
-            dim=-1,
-        )
-        query = query.reshape(batch_size, seq_len, -1, self.head_k_dim)
-        key = key.reshape(batch_size, seq_len, -1, self.head_k_dim)
-        value = value.reshape(batch_size, seq_len, -1, self.head_v_dim)
+        if self.conv_head_num > 0:
+            # Head-first output: leading 2*nk heads are Q+K, trailing nv are V.
+            num_k_heads = self.num_k_heads_local_tp
+            num_v_heads = self.num_v_heads_local_tp
+            q_heads, k_heads, v_heads = mixed_qkv.split(
+                (num_k_heads, num_k_heads, num_v_heads),
+                dim=1,
+            )
+            # [B, T, H, D//H] for the downstream [B, T, H, D] contract.
+            query = q_heads.transpose(1, 2).contiguous()
+            key = k_heads.transpose(1, 2).contiguous()
+            value = v_heads.transpose(1, 2).contiguous()
+        else:
+            # Flat output: split along the last dim, matching HF layout.
+            query, key, value = torch.split(
+                mixed_qkv,
+                [self.key_dim_local_tp, self.key_dim_local_tp, self.value_dim_local_tp],
+                dim=-1,
+            )
+            query = query.reshape(batch_size, seq_len, -1, self.head_k_dim)
+            key = key.reshape(batch_size, seq_len, -1, self.head_k_dim)
+            value = value.reshape(batch_size, seq_len, -1, self.head_v_dim)
 
         beta = b.sigmoid()
         # If the model is loaded in fp16, without the .float() here, A might be -inf
         g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+        # GQA: repeat_interleave query/key to match value head count
         if self.num_v_heads // self.num_k_heads > 1:
             query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
             key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
@@ -129,14 +307,18 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             g = g.contiguous()
             beta = beta.contiguous()
 
+        if self.gdn_backend == "fla_npu":
+            # fla_npu expects head-first q/k/v: [B, H, T, D].
+            query = query.transpose(1, 2).contiguous()
+            key = key.transpose(1, 2).contiguous()
+            value = value.transpose(1, 2).contiguous()
+
         core_attn_out, last_recurrent_state = self.chunk_gated_delta_rule(
             query,
             key,
             value,
             g=g,
             beta=beta,
-            initial_state=None,
-            output_final_state=False,
             use_qk_l2norm_in_kernel=True,
             cu_seqlens=cu_seqlens,
         )
@@ -149,8 +331,111 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.reshape(batch_size, seq_len, -1)
 
-        output = self.out_proj(core_attn_out)
+        output, _ = self.out_proj(core_attn_out)
         return output
+
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        """Describe the true TP layout of the GDN weights for torch_dist.
+
+        Megatron's default handling for a plain ``nn.Module`` reports every
+        parameter as replicated across TP, and the fused in_proj/conv1d
+        weights match no uniform contiguous sharding either. A checkpoint
+        converted at TP=1 would then fail the global shape check (or load
+        wrong bytes) when training loads it at TP>1: the converted
+        torch_dist path breaks while the direct HF load works. Report the
+        real layout instead:
+        - ``dt_bias``/``A_log``: uniform TP sharding along dim 0;
+        - ``in_proj.weight``/``conv1d.weight``: one independently TP-sharded
+          checkpoint entry per fused sub-matrix (see
+          ``_fused_tp_sharded_factory``);
+        - everything else (``out_proj``, ``norm``): default Megatron handling.
+        """
+        from megatron.core.dist_checkpointing.mapping import ShardedTensor
+        from megatron.core.transformer.utils import ensure_metadata_has_dp_cp_group, sharded_state_dict_default
+        from megatron.core.utils import get_pg_rank
+
+        metadata = ensure_metadata_has_dp_cp_group(metadata)
+        tp_rank = parallel_state.get_tensor_model_parallel_rank()
+        tp_size = parallel_state.get_tensor_model_parallel_world_size()
+        dp_cp_rank = get_pg_rank(metadata["dp_cp_group"])
+        prepend_axis_num = len(sharded_offsets)
+
+        sharded_state_dict = {}
+
+        # Per-head parameters: uniform TP sharding along dim 0.
+        for param_name in ("dt_bias", "A_log"):
+            param = getattr(self, param_name)
+            key = f"{prefix}{param_name}"
+            sharded_state_dict[key] = ShardedTensor.from_rank_offsets(
+                key,
+                param,
+                *sharded_offsets,
+                (prepend_axis_num, tp_rank, tp_size),
+                replica_id=(0, 0, dp_cp_rank),
+                prepend_axis_num=prepend_axis_num,
+            )
+
+        # Fused projections: one independently TP-sharded entry per sub-matrix.
+        fused = (
+            (
+                "in_proj",
+                ("q", "k", "v", "z", "b", "a"),
+                (
+                    self.key_dim_local_tp,
+                    self.key_dim_local_tp,
+                    self.value_dim_local_tp,
+                    self.value_dim_local_tp,
+                    self.num_v_heads_local_tp,
+                    self.num_v_heads_local_tp,
+                ),
+            ),
+            (
+                "conv1d",
+                ("q", "k", "v"),
+                (
+                    self.key_dim_local_tp,
+                    self.key_dim_local_tp,
+                    self.value_dim_local_tp,
+                ),
+            ),
+        )
+        for module_name, part_names, local_part_sizes in fused:
+            # The fused modules hold exactly one tensor each (no bias); assert
+            # so a future change cannot silently drop state from checkpoints.
+            extra = [
+                name
+                for name in getattr(self, module_name).state_dict()
+                if name != "weight" and not name.endswith("_extra_state")
+            ]
+            assert not extra, f"Unexpected state on fused GDN module {module_name}: {extra}"
+            weight = getattr(self, module_name).weight
+            key = f"{prefix}{module_name}.weight"
+            sharded_state_dict[key] = _fused_tp_sharded_factory(
+                weight,
+                key,
+                part_names,
+                local_part_sizes,
+                tp_rank=tp_rank,
+                tp_size=tp_size,
+                dp_cp_rank=dp_cp_rank,
+                sharded_offsets=sharded_offsets,
+            )
+
+        # Everything else (out_proj, norm) keeps the default Megatron handling.
+        fused_module_names = {module_name for module_name, _, _ in fused}
+        for name, child in self.named_children():
+            if child is None or name in fused_module_names:
+                continue
+            sharded_state_dict.update(
+                sharded_state_dict_default(
+                    child,
+                    f"{prefix}{name}.",
+                    sharded_offsets,
+                    metadata,
+                    tp_group=parallel_state.get_tensor_model_parallel_group(),
+                )
+            )
+        return sharded_state_dict
 
 
 class Attention(HuggingfaceAttention):
@@ -174,7 +459,11 @@ class Attention(HuggingfaceAttention):
         self.hf_config = _get_text_config(self.hf_config)
         self.hf_config._attn_implementation = "flash_attention_2"
 
-        self.linear_attn = Qwen3_5GatedDeltaNet(self.hf_config, self.hf_layer_idx, args=args)
+        self.linear_attn = Qwen3_5GatedDeltaNet(self.hf_config, self.hf_layer_idx, args=args, megatron_config=config)
+
+        # CPL backward already all-reduces grad_input, so every rank holds the
+        # same grad_input and the sequence-parallel split can be skipped.
+        self._linear_attn_tp_sharded = False
 
         # Use a simple RMSNorm
         try:

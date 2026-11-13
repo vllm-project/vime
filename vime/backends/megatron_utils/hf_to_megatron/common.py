@@ -91,6 +91,7 @@ def _tensor_parallel_shard(
     parallel_rank: int,
     partition_dim: int,
     partition_stride: int,
+    in_proj_split_sizes: list = None,
 ) -> torch.Tensor:
     if parallel_size == 1:
         return tensor
@@ -100,6 +101,23 @@ def _tensor_parallel_shard(
         gate = torch.chunk(gate, parallel_size, dim=partition_dim)[parallel_rank]
         up = torch.chunk(up, parallel_size, dim=partition_dim)[parallel_rank]
         return torch.cat((gate, up), dim=partition_dim).contiguous()
+
+    # Merged GDN in_proj.weight: each sub-matrix (q,k/v/z/b/a) must be
+    # sharded independently by head — a naive whole-tensor chunk would
+    # put all of q/k on rank 0 and rest on rank 1.
+    if "linear_attn.in_proj.weight" in name and in_proj_split_sizes is not None:
+        parts = torch.split(tensor, in_proj_split_sizes, dim=partition_dim)
+        sharded_parts = [torch.chunk(p, parallel_size, dim=partition_dim)[parallel_rank] for p in parts]
+        return torch.cat(sharded_parts, dim=partition_dim).contiguous()
+
+    # GDN conv1d.weight: HF layout is [q(key_dim), k(key_dim), v(value_dim)] —
+    # 3 sub-matrices that must each be sharded by head independently, for the
+    # same reason as in_proj.weight above.  A naive whole-tensor chunk would
+    # split q/k/v boundaries across ranks.
+    if "linear_attn.conv1d.weight" in name and in_proj_split_sizes is not None:
+        parts = torch.split(tensor, in_proj_split_sizes, dim=partition_dim)
+        sharded_parts = [torch.chunk(p, parallel_size, dim=partition_dim)[parallel_rank] for p in parts]
+        return torch.cat(sharded_parts, dim=partition_dim).contiguous()
 
     if "linear_fc2.weight" in name and partition_dim == 0:
         partition_dim = 1
@@ -124,6 +142,14 @@ def shard_mcore_tensor(name: str, tensor: torch.Tensor, parameter: torch.Tensor)
         parallel_size = mpu.get_tensor_model_parallel_world_size()
         parallel_rank = mpu.get_tensor_model_parallel_rank()
 
+    # Pick the per-sub-matrix split sizes for merged GDN projections.
+    # in_proj.weight uses _in_proj_split_sizes_full ([q,k,v,z,b,a]),
+    # conv1d.weight uses _conv1d_split_sizes_full ([q,k,v]).
+    if "linear_attn.conv1d.weight" in name:
+        split_sizes = getattr(parameter, "_conv1d_split_sizes_full", None)
+    else:
+        split_sizes = getattr(parameter, "_in_proj_split_sizes_full", None)
+
     return _tensor_parallel_shard(
         name,
         tensor,
@@ -131,6 +157,7 @@ def shard_mcore_tensor(name: str, tensor: torch.Tensor, parameter: torch.Tensor)
         parallel_rank=parallel_rank,
         partition_dim=parameter.partition_dim,
         partition_stride=parameter.partition_stride,
+        in_proj_split_sizes=split_sizes,
     )
 
 

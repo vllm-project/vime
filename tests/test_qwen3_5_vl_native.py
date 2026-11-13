@@ -145,7 +145,16 @@ def test_raw_loader_uses_individual_mtp_expert_weights():
         "mtp.layers.0.mlp.experts.7.up_proj.weight": up,
         "mtp.layers.0.mlp.experts.7.down_proj.weight": down,
     }
-    reader = types.SimpleNamespace(get_tensor=tensors.__getitem__)
+
+    # Expert loading probes the reader with `in`, which SimpleNamespace cannot support.
+    class Reader:
+        def __contains__(self, name):
+            return name in tensors
+
+        def get_tensor(self, name):
+            return tensors[name]
+
+    reader = Reader()
     config = types.SimpleNamespace(
         text_config=types.SimpleNamespace(tie_word_embeddings=False),
         tie_word_embeddings=False,
