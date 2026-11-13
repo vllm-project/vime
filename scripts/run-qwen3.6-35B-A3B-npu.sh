@@ -144,6 +144,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    --actor-num-gpus-per-node 16 \
    --colocate \
    --train-memory-margin-bytes 8589934596 \
+   --clear-memory-per-step \
    ${MODEL_ARGS[@]} \
    ${CKPT_ARGS[@]} \
    ${ROLLOUT_ARGS[@]} \

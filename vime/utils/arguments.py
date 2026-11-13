@@ -175,6 +175,18 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--clear-memory-per-step",
+                action="store_true",
+                default=False,
+                help=(
+                    "Run synchronize + gc.collect + empty_cache after every train step. "
+                    "Needed only for large-model, long-context runs whose train actor cannot use "
+                    "expandable_segments (torch_memory_saver offload keeps the classic caching "
+                    "allocator, which fragments over long runs until OOM). Small models and short "
+                    "contexts do not need it and should keep it off to avoid the per-step cost."
+                ),
+            )
+            parser.add_argument(
                 "--update-weight-disk-dir",
                 type=str,
                 default=None,

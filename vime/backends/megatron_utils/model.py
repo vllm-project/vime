@@ -743,7 +743,11 @@ def train_one_step(
         model_chunk.zero_grad_buffer()
     optimizer.zero_grad()
 
-    clear_memory()
+    # Optional per-step cache release for configurations whose train actor
+    # cannot use expandable_segments (torch_memory_saver offload); the classic
+    # caching allocator fragments over long-context runs until wake_up OOMs.
+    if getattr(args, "clear_memory_per_step", False):
+        clear_memory()
 
     if mpu.is_pipeline_last_stage(ignore_virtual=True):
         loss_reduced = train_metric_utils.reduce_train_step_metrics(
