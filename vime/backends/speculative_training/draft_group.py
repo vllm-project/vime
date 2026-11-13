@@ -1,6 +1,29 @@
 from __future__ import annotations
 
+import logging
+from argparse import Namespace
+
 import ray
+
+from vime.backends.speculative_training.config import should_run_draft_interval
+from vime.observability.logging_utils import log
+from vime.observability.metric_utils import compute_rollout_step
+
+logger = logging.getLogger(__name__)
+
+
+def _log_draft_result(args, rollout_id, prefix, result):
+    if not isinstance(result, dict):
+        return
+    metrics = {
+        f"draft/{prefix}_{key}": value
+        for key, value in result.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+    if not metrics:
+        return
+    metrics["rollout/step"] = compute_rollout_step(args, rollout_id)
+    log(args, metrics, step_key="rollout/step")
 
 
 class ExternalDraftTrainGroup:
@@ -88,3 +111,84 @@ class ExternalDraftTrainGroup:
         if export_hf:
             saved_paths.append(ray.get(self._draft_actor.export_external_draft.remote(rollout_id)))
         return [result for result in saved_paths if result is not None]
+
+
+class DraftTrainingLoop:
+    """Driver-side schedule policy for the external Draft stages.
+
+    ``train.py`` keeps only the stage sequence -- collect -> train -> prepare ->
+    save -> attach -- and the two interleavings that are training-loop
+    knowledge: the publish snapshot is attached before ``update_weights`` and
+    publication is committed immediately after it.  Interval decisions, the
+    save-cadence fallback to the Actor schedule, and publish-snapshot
+    bookkeeping live here, so Draft saving/publication policy changes do not
+    touch the shared training loop.
+    """
+
+    def __init__(self, args: Namespace, group: ExternalDraftTrainGroup) -> None:
+        self._args = args
+        self._group = group
+        self._collected_this_rollout = False
+        self._pending_snapshot: tuple[object, str] | None = None
+        if args.draft_save_hf:
+            logger.info(
+                "External DSpark export enabled: template=%s, interval=%s. Artifacts are written on "
+                "Actor rank zero; use a shared path when Ray workers run on multiple hosts.",
+                args.draft_save_hf,
+                args.draft_save_interval,
+            )
+
+    def collect(self, rollout_id: int, actor_train_results) -> None:
+        collect_result = self._group.collect_actor_results(actor_train_results)
+        self._collected_this_rollout = int(collect_result.get("accepted", 0)) > 0
+        if self._collected_this_rollout:
+            logger.info("External Draft feature collection: %s", collect_result)
+            _log_draft_result(self._args, rollout_id, "collect", collect_result)
+
+    def should_train(self, rollout_id: int) -> bool:
+        return self._collected_this_rollout and should_run_draft_interval(rollout_id, self._args.draft_train_interval)
+
+    def train(self, rollout_id: int) -> None:
+        draft_train_result = self._group.train_draft(rollout_id)
+        logger.info("External Draft training: %s", draft_train_result)
+        _log_draft_result(self._args, rollout_id, "train", draft_train_result)
+
+    def should_publish(self, rollout_id: int) -> bool:
+        return should_run_draft_interval(rollout_id, self._args.draft_publish_interval)
+
+    def prepare_snapshot(self) -> None:
+        prepared_snapshot = self._group.prepare_publish_snapshot()
+        if prepared_snapshot is not None:
+            self._pending_snapshot = prepared_snapshot
+
+    def should_save(self, rollout_id: int, actor_save_due: bool) -> bool:
+        return (
+            (self._args.draft_save_interval is None and actor_save_due)
+            or should_run_draft_interval(rollout_id, self._args.draft_save_interval)
+            or rollout_id == self._args.num_rollout - 1
+        )
+
+    def save(self, rollout_id: int) -> None:
+        draft_save_results = self._group.save_draft(
+            rollout_id,
+            export_hf=bool(self._args.draft_save_hf),
+        )
+        logger.info("External Draft save completed: %s", draft_save_results)
+
+    @property
+    def pending_snapshot(self) -> tuple[object, str] | None:
+        return self._pending_snapshot
+
+    def commit_publish(self, rollout_id: int) -> None:
+        snapshot_ref, draft_snapshot_version = self._pending_snapshot
+        self._group.mark_published(draft_snapshot_version)
+        _log_draft_result(
+            self._args,
+            rollout_id,
+            "publish",
+            {"published": 1, "draft_version": int(draft_snapshot_version)},
+        )
+        self._pending_snapshot = None
+
+    def release(self) -> None:
+        self._group.release()

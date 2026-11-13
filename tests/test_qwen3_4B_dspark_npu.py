@@ -17,10 +17,9 @@ import os
 import shlex
 import shutil
 
-import vime.utils.external_utils.command_utils as U
-
 import draft_update_checks
 
+import vime.utils.external_utils.command_utils as U
 
 TEST_ROOT = os.environ.get("HF_HOME") or "/root"
 MODEL_DIR = f"{TEST_ROOT}/models/Qwen3-4B"
@@ -37,22 +36,7 @@ NUM_ROLLOUT = 3
 MIN_ACCEPT_LENGTH = 2.0
 
 
-def ensure_speculators():
-    # speculators 0.9.0 declares numpy>=2/transformers>=5 floors that the
-    # pinned NPU stack cannot satisfy; the two pure-python wheels run on
-    # the stack's own versions (E2E-validated), so install them without
-    # dependency resolution when the image lacks them. CI sets
-    # PIP_INDEX_URL because the default mirror is unreachable from the
-    # buildkite agent.
-    try:
-        import speculators  # noqa: F401
-    except ImportError:
-        U.exec_command("pip install --no-deps speculators==0.9.0 hs-connectors==0.9.0")
-
-
 def prepare():
-    ensure_speculators()
-
     models_dir = shlex.quote(f"{TEST_ROOT}/models")
     datasets_dir = shlex.quote(f"{TEST_ROOT}/datasets")
     model_dir = shlex.quote(MODEL_DIR)
@@ -79,9 +63,7 @@ def execute():
     # No spaces inside: launch_commands forwards train_args as one shell
     # string, and the speculative config must stay a single shell word.
     # block 7 matches the checkpoint's declared block_size.
-    speculative_config = (
-        '{"method":"dspark","model":"' + DRAFT_MODEL_DIR + '","num_speculative_tokens":7}'
-    )
+    speculative_config = '{"method":"dspark","model":"' + DRAFT_MODEL_DIR + '","num_speculative_tokens":7}'
 
     checkpoint_args = f"--hf-checkpoint {model_dir} --ref-load {model_dir} --load {model_dir} --no-load-optim "
 
@@ -155,7 +137,7 @@ def execute():
         # [1, 9, 17, 25, 33] declaration drives both the vLLM serving hooks
         # and (translated to the captured hidden states) the training-side
         # collector, keeping the two sides on the same layers by construction.
-        "--draft-dspark-loss-fn '{\"ce\":0.1,\"tv\":0.9}' "
+        '--draft-dspark-loss-fn \'{"ce":0.1,"tv":0.9}\' '
         "--draft-hidden-window-tokens 64 "
         "--draft-max-samples-per-rollout-per-dp 2 "
         "--draft-max-tokens-per-rollout-per-dp 256 "

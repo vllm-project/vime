@@ -16,10 +16,9 @@ import os
 import shlex
 import shutil
 
-import vime.utils.external_utils.command_utils as U
-
 import draft_update_checks
 
+import vime.utils.external_utils.command_utils as U
 
 TEST_ROOT = os.environ.get("HF_HOME") or "/root"
 MODEL_DIR = f"{TEST_ROOT}/models/Qwen3-4B"
@@ -35,22 +34,7 @@ NUM_ROLLOUT = 3
 MIN_ACCEPT_LENGTH = 1.3
 
 
-def ensure_speculators():
-    # speculators 0.9.0 declares numpy>=2/transformers>=5 floors that the
-    # pinned NPU stack cannot satisfy; the two pure-python wheels run on
-    # the stack's own versions (E2E-validated), so install them without
-    # dependency resolution when the image lacks them. CI sets
-    # PIP_INDEX_URL because the default mirror is unreachable from the
-    # buildkite agent.
-    try:
-        import speculators  # noqa: F401
-    except ImportError:
-        U.exec_command("pip install --no-deps speculators==0.9.0 hs-connectors==0.9.0")
-
-
 def prepare():
-    ensure_speculators()
-
     models_dir = shlex.quote(f"{TEST_ROOT}/models")
     datasets_dir = shlex.quote(f"{TEST_ROOT}/datasets")
     model_dir = shlex.quote(MODEL_DIR)
