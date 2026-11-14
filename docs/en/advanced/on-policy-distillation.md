@@ -12,6 +12,7 @@ On-policy distillation (OPD) trains a student on response tokens sampled from th
 | `--opd-teacher-load` | Path to teacher Megatron checkpoint. **Required** when `--opd-type=megatron`, **must not be set** when `--opd-type=vllm`. |
 | `--opd-teacher-ckpt-step` | Optional checkpoint step for teacher model. |
 | `--opd-teacher-model` | Optional served model name sent to the external vLLM teacher when `--opd-type=vllm`. |
+| `--opd-teacher-scoring` | Text scoring path for a vLLM teacher: `prompt-logprobs` (default) or `per-position`. Image samples retain the default path. |
 
 ## How It Works
 
@@ -64,6 +65,21 @@ The teacher runs on an external vLLM server. Teacher log-probs are obtained duri
 --custom-reward-post-process-path vime.rollout.on_policy_distillation.post_process_rewards
 --rm-url http://<TEACHER_IP>:<TEACHER_PORT>/inference/v1/generate
 ```
+
+#### Optional per-position text scoring
+
+Add `--opd-teacher-scoring per-position` to request only the actual response token's score at each position. VIME still sends the full prompt and response; each score keeps its full-vocabulary log-probability meaning. The loss, rollout temperature and learner input format are unchanged. Empty responses skip the teacher request and produce an empty score vector.
+
+The teacher needs vLLM's [per-row candidate scoring](https://github.com/vllm-project/vllm/pull/56984), the V2 model runner, and the non-streaming `/inference/v1/generate` endpoint. For example, start a compatible teacher with:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-0.6B \
+  --enable-scale-out --logprobs-mode raw_logprobs
+```
+
+Do not use a logits output mode or `--kv-sharing-fast-prefill`. Candidate scoring skips prefix-cache reads to compute all requested scores. The existing `max_tokens=1` remains because the teacher interface still requires generation. Missing, malformed or invalid candidate scores raise an error rather than silently switching text scoring modes. Image samples continue to use the existing render, feature alignment and `prompt_logprobs` path, even when this option is enabled.
+
+The default remains `prompt-logprobs` for compatibility with older teachers. Smaller score responses do not guarantee faster training, and short inputs may see no benefit.
 
 ### Megatron Mode (`--opd-type megatron`)
 
