@@ -179,9 +179,13 @@ RUN pip install --no-deps /tmp/sunabako-wheels/*.whl && \
     rm -rf /tmp/sunabako-wheels
 
 # ring_flash_attn is a CUDA extension and is not used on Ascend.
+# speculators 0.9.0 requires numpy>=2/transformers>=5, which the pinned NPU
+# stack cannot satisfy; the library runs on the stack's own versions, so
+# install it without dependency resolution.
 RUN pip install \
       --constraint /tmp/vime-npu-constraints.txt \
       --requirement /root/vime/requirements.txt && \
+    pip install --no-deps speculators==0.9.0 hs-connectors==0.9.0 && \
     pip install --no-deps --no-build-isolation -e /root/vime
 
 # Keep the shared health-check patch in both the Python API and Rust extension.
