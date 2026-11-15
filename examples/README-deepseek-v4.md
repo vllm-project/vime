@@ -23,6 +23,8 @@ Validated on NVIDIA H20-3e:
 - Megatron's Flash attention parity tests: six forward/backward cases covering
   window-only, ratio-4, ratio-128, and packed THD. Two hash-MoE integration
   tests passed.
+- Four hash-router replay bridge tests pass, including record/replay through a
+  real Megatron hash router. Cross-backend route parity is not yet tested.
 - Full-width layer 2 (ratio 4, hash router): 544 checkpoint tensors loaded,
   finite loss and 543 finite gradient tensors. Layer 3 (ratio 128, learned
   router): 538 tensors loaded, finite loss and 537 finite gradient tensors.
@@ -36,6 +38,7 @@ export PYTHONPATH=/home/ljj/vime-dsv4/.test-deps:/home/ljj/vime-dsv4/.deps/Megat
 export DSV4_CHECKPOINT=/home/ljj/models/DeepSeek-V4-Flash-Base
 python -m pytest tests/test_deepseek_v4_weights.py tests/test_hf_to_megatron.py
 python -m pytest tests/test_deepseek_v4_native_mapping.py
+python -m pytest tests/test_deepseek_v4_routing_replay.py
 python tools/dsv4_checkpoint_layer_smoke.py "$DSV4_CHECKPOINT" --layer-index 2
 python tools/dsv4_checkpoint_layer_smoke.py "$DSV4_CHECKPOINT" --layer-index 3
 python tools/dsv4_rollout_smoke.py "$DSV4_CHECKPOINT" --tensor-parallel-size 4
@@ -51,8 +54,8 @@ srun -p h20 --gres=gpu:1 --time=00:20:00 \
 ```
 
 These checks do not constitute full RL support. Roadmap gates still open are
-vLLM indexer top-k capture and training replay, fixed-data router/indexer
-replay parity, full HF-to-Megatron and reverse model parity, FP8 online refit
+vLLM indexer top-k capture and training replay, cross-backend router/indexer
+parity, full HF-to-Megatron and reverse model parity, FP8 online refit
 versus fresh load with cache/version checks, ten-step CP=1 GRPO and resume,
 and the 100-step release recipe. Megatron's native V4 attention currently
 requires TP=1, so full training topology must use PP/EP instead of TP.

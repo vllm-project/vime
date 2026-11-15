@@ -69,7 +69,11 @@ def _compute_topk_for_current_router(
     # non-grouped Megatron path used by GLM-5 (n_group=topk_group=1 in vLLM,
     # represented as no group limit in Megatron).  Other training paths retain
     # Megatron's original semantics.
-    if ORDERED_TOPK_CAPTURE_ROUTER is not None and not group_topk:
+    if (
+        ORDERED_TOPK_CAPTURE_ROUTER is not None
+        and not getattr(ORDERED_TOPK_CAPTURE_ROUTER, "is_hash_layer", False)
+        and not group_topk
+    ):
         return torch.topk(scores, k=topk, dim=1, sorted=False)
 
     return old_compute_topk(
@@ -233,12 +237,13 @@ class _SlimeRouterReplay:
     def __init__(self, original):
         self.original = original
 
-    def get_replay_topk(self, scores, topk, num_groups, group_topk, compute_topk):
+    def get_replay_topk(self, scores, topk, num_groups=None, group_topk=None, default_compute_topk=None):
+        if default_compute_topk is None:
+            raise TypeError("Megatron router replay requires default_compute_topk")
+        compute_topk = default_compute_topk
         if self.original is not None:
-            original_compute_topk = compute_topk
-
             def compute_topk(scores, topk, num_groups=None, group_topk=None):
-                return self.original.get_replay_topk(scores, topk, num_groups, group_topk, original_compute_topk)
+                return self.original.get_replay_topk(scores, topk, num_groups, group_topk, default_compute_topk)
 
         return get_routing_replay_compute_topk(compute_topk)(scores, topk, num_groups, group_topk)
 
