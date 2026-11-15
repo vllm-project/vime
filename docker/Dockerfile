@@ -221,6 +221,10 @@ RUN cd Megatron-LM && \
     rm -f megatron*.patch && \
     pip install -e .
 
+# Native DeepSeek-V4 DSA requires this Megatron dev-extra dependency.
+RUN pip install --no-build-isolation --no-deps \
+    git+https://github.com/Dao-AILab/fast-hadamard-transform.git@f134af63deb2df17e1171a9ec1ea4a7d8604d5ca
+
 # Patch vLLM with vime's local fixes. vLLM is a pip install (not a git checkout),
 # so apply the independently maintained patches in their validated order.
 COPY docker/patch/${PATCH_VERSION}/vllm-pull_weights.patch /tmp/vllm-pull_weights.patch

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from vime.backends.megatron_utils.deepseek_v4_weights import deepseek_v4_hf_tensor
 from vime.utils.model_config import load_hf_config
 
 from .common import load_model_hf_weights
@@ -14,6 +15,7 @@ from .qwen3_next import qwen3_next_hf_tensor
 from .qwen3_omni import qwen3_omni_hf_tensor
 
 _LOADERS = {
+    "deepseek_v4": deepseek_v4_hf_tensor,
     "glm5_next": glm5_next_hf_tensor,
     "deepseek_v3": deepseek_hf_tensor,
     "deepseek_v32": deepseek_hf_tensor,

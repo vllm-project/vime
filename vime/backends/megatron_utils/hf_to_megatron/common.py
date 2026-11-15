@@ -39,21 +39,28 @@ class SafetensorReader:
         if filename not in self._files:
             self._files[filename] = safe_open(self.path / filename, framework="pt", device="cpu")
         tensor = self._files[filename].get_tensor(name)
+        native_v4_scale = name.removesuffix(".weight") + ".scale" if name.endswith(".weight") else None
         scale_name = f"{name}_scale_inv"
+        if scale_name not in self and native_v4_scale in self:
+            scale_name = native_v4_scale
         if tensor.element_size() == 1 and scale_name in self:
             scale_file = self.weight_map[scale_name]
             if scale_file not in self._files:
                 self._files[scale_file] = safe_open(self.path / scale_file, framework="pt", device="cpu")
-            scale = self._files[scale_file].get_tensor(scale_name).to(torch.bfloat16)
+            native_v4 = scale_name == native_v4_scale
+            dtype = torch.float32 if native_v4 else torch.bfloat16
+            scale = self._files[scale_file].get_tensor(scale_name).to(dtype)
             rows, columns = tensor.shape
             block_rows, block_columns = scale.shape
             tensor = F.pad(
-                tensor.to(torch.bfloat16),
+                tensor.to(dtype),
                 (0, block_columns * 128 - columns, 0, block_rows * 128 - rows),
             )
             tensor = tensor.view(block_rows, 128, block_columns, 128)
             tensor.mul_(scale[:, None, :, None])
             tensor = tensor.reshape(block_rows * 128, block_columns * 128)[:rows, :columns]
+            if native_v4:
+                tensor = tensor.to(torch.bfloat16)
         return tensor
 
 

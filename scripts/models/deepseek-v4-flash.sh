@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+
+# DeepSeek-V4-Flash-Base; MTP is intentionally disabled for the first RL path.
+MODEL_ARGS=(
+    --spec vime_plugins.models.deepseek_v4 get_dsv4_spec
+    --model-name deepseek_v4
+    --experimental-attention-variant dsv4_hybrid
+    --num-layers 43
+    --hidden-size 4096
+    --num-attention-heads 64
+    --num-query-groups 1
+    --kv-channels 512
+    --q-lora-rank 1024
+    --qk-pos-emb-head-dim 64
+    --v-head-dim 512
+    --qk-layernorm
+    --output-projection-groups 8
+    --output-projection-lora-rank 1024
+    --vocab-size 129280
+    --make-vocab-size-divisible-by 128
+    --disable-bias-linear
+    --swiglu
+    --activation-func-clamp-value 10
+    --untie-embeddings-and-output-weights
+    --position-embedding-type rope
+    --rotary-base 10000
+    --rotary-scaling-factor 16
+    --original-max-position-embeddings 65536
+    --normalization RMSNorm
+    --norm-epsilon 1e-6
+    --multi-latent-attention
+    --csa-window-size 128
+    --csa-compress-ratios '([0,0,4]+[128,4]*20)'
+    --csa-compress-rotary-base 160000
+    --dsa-indexer-n-heads 64
+    --dsa-indexer-head-dim 128
+    --dsa-indexer-topk 512
+    --num-experts 256
+    --moe-num-hash-layers 3
+    --moe-ffn-hidden-size 2048
+    --moe-shared-expert-intermediate-size 2048
+    --moe-router-topk 6
+    --moe-router-score-function sqrtsoftplus
+    --moe-router-enable-expert-bias
+    --moe-router-topk-scaling-factor 1.5
+    --moe-router-dtype fp32
+    --moe-grouped-gemm
+    --moe-token-dispatcher-type alltoall
+    --enable-hyper-connections
+    --mhc-num-residual-streams 4
+    --mhc-sinkhorn-iterations 20
+    --mtp-num-layers 0
+    --attention-dropout 0
+    --hidden-dropout 0
+    --bf16
+    --enable-experimental
+)

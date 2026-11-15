@@ -1,3 +1,8 @@
+from vime.backends.megatron_utils.deepseek_v4_weights import (
+    convert_deepseek_v4_to_hf,
+    quantize_deepseek_v4_weights,
+)
+
 from .deepseekv3 import convert_deepseekv3_to_hf
 from .glm4 import convert_glm4_to_hf
 from .glm4moe import convert_glm4moe_to_hf
@@ -30,6 +35,9 @@ def convert_to_hf(args, model_name, name, param, quantization_config=None, trans
     param = remove_padding(name, param, args.vocab_size)
     converted_named_tensors = _convert_to_hf_core(args, model_name, name, param)
 
+    if "deepseekv4" in model_name.lower().replace("_", "").replace("-", ""):
+        return quantize_deepseek_v4_weights(converted_named_tensors, quantization_config)
+
     return quantize_params(args, name, converted_named_tensors, quantization_config, transform_ue8m0)
 
 
@@ -47,6 +55,8 @@ def _convert_to_hf_core(args, model_name, name, param):
             converted_named_tensors = convert_nemotron_h_vl_to_hf(args, name, param)
         else:
             converted_named_tensors = convert_nemotron_h_to_hf(args, name, param)
+    elif "deepseekv4" in model_name:
+        converted_named_tensors = convert_deepseek_v4_to_hf(args, name, param)
     elif "glm5next" in model_name or "glm53" in model_name:
         converted_named_tensors = convert_glm5_next_to_hf(args, name, param)
     elif "minimaxm2" in model_name:

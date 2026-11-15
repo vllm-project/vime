@@ -198,10 +198,9 @@ def named_params_and_buffers(args: Namespace, model: Sequence[torch.nn.Module]) 
             else:
                 yield f"{prefix}decoder.layers.{layer_idx}.{rest}", param
 
-        # treat expert bias as normal parameters
+        # Keep persistent routing buffers in HF loads and online weight updates.
         for name, buffer in model_module.named_buffers():
-            # TODO shall we handle (almost) all buffers
-            if "expert_bias" not in name:
+            if not name.endswith((".router.expert_bias", ".router.tid2eid")):
                 continue
             # for model without ddp wrap
             if not name.startswith("module.module."):
