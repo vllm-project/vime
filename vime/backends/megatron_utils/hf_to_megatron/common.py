@@ -44,6 +44,8 @@ class SafetensorReader:
         if scale_name not in self and native_v4_scale in self:
             scale_name = native_v4_scale
         if tensor.element_size() == 1 and scale_name in self:
+            if scale_name == native_v4_scale and tensor.dtype != torch.float8_e4m3fn:
+                raise TypeError(f"Native V4 block scale requires FP8 E4M3 weight, got {tensor.dtype} for {name}")
             scale_file = self.weight_map[scale_name]
             if scale_file not in self._files:
                 self._files[scale_file] = safe_open(self.path / scale_file, framework="pt", device="cpu")

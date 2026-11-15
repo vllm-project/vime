@@ -8,14 +8,16 @@ learned-router `expert_bias` buffers are included in direct loads and weight
 sync. No V4 attention, compressor, indexer, or mHC kernel is vendored here.
 
 The reference checkpoint is `/home/ljj/models/DeepSeek-V4-Flash-Base`. The
-validation dependency pins are Megatron `ae76c60e6`, vLLM `83c078d95`, and
+checkpoint uses FP8 E4M3 weights, including routed experts, with UE8M0 block
+scales. Packed FP4 expert checkpoints are not supported by this converter.
+Validation dependency pins are Megatron `ae76c60e6`, vLLM `83c078d95`, and
 fast-hadamard-transform `f134af63d`. The latter is installed by the Dockerfile;
 without it, Megatron's compressed-layer forward fails.
 
 Validated on NVIDIA H20-3e:
 
 - Checkpoint mapping, parser options, FP8 decoding/quantization, and conversion
-  regressions: 81 passing tests in the pinned vLLM base image. The native
+  regressions: 82 passing tests in the pinned vLLM base image. The native
   four-layer name check passed earlier in a Transformer Engine environment;
   it skips when Transformer Engine is unavailable.
 - Megatron's Flash attention parity tests: six forward/backward cases covering
@@ -39,7 +41,7 @@ python tools/dsv4_checkpoint_layer_smoke.py "$DSV4_CHECKPOINT" --layer-index 3
 python tools/dsv4_rollout_smoke.py "$DSV4_CHECKPOINT" --tensor-parallel-size 4
 ```
 
-The 81-test converter regression also runs on one H20 with the pinned base image:
+The converter regression also runs on one H20 with the pinned base image:
 
 ```bash
 srun -p h20 --gres=gpu:1 --time=00:20:00 \

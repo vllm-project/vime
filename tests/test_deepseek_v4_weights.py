@@ -96,6 +96,17 @@ def test_native_v4_fp8_scale_is_dequantized(tmp_path):
     assert torch.equal(loaded, torch.tensor([[0.5, -1.0]], dtype=torch.bfloat16))
 
 
+def test_native_v4_rejects_packed_non_fp8_weights(tmp_path):
+    weight = torch.tensor([[0x12, 0x34]], dtype=torch.uint8)
+    scale = torch.ones((1, 1), dtype=torch.float32)
+    save_file(
+        {"layers.0.ffn.experts.0.w1.weight": weight, "layers.0.ffn.experts.0.w1.scale": scale},
+        tmp_path / "model.safetensors",
+    )
+    with pytest.raises(TypeError, match="requires FP8 E4M3"):
+        SafetensorReader(tmp_path).get_tensor("layers.0.ffn.experts.0.w1.weight")
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="FP8 refit needs CUDA")
 def test_online_fp8_scale_matches_v4_checkpoint_format():
     pytest.importorskip("vllm")
@@ -218,3 +229,7 @@ def test_local_fp8_weight_decoding():
     expected = raw[:4, :4].float() * scale[0, 0]
     assert loaded.dtype == torch.bfloat16
     assert torch.allclose(loaded[:4, :4].float(), expected, rtol=0.01, atol=1e-4)
+    expert_name = "layers.3.ffn.experts.0.w1.weight"
+    with safe_open(path / index[expert_name], framework="pt", device="cpu") as tensors:
+        assert tensors.get_slice(expert_name).get_dtype() == "F8_E4M3"
+        assert tensors.get_slice(expert_name.removesuffix(".weight") + ".scale").get_dtype() == "F32"
