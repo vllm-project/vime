@@ -2,13 +2,17 @@
 
 import argparse
 
+import numpy as np
 from vllm import LLM, SamplingParams
+
+from vime.backends.megatron_utils.hf_to_megatron.common import SafetensorReader
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint")
     parser.add_argument("--tensor-parallel-size", type=int, default=4)
+    parser.add_argument("--return-routed-experts", action="store_true")
     args = parser.parse_args()
 
     llm = LLM(
@@ -24,12 +28,24 @@ def main():
         kv_cache_dtype="fp8",
         block_size=256,
         enforce_eager=True,
+        enable_return_routed_experts=args.return_routed_experts,
     )
     result = llm.generate(
         ["The capital of France is"],
         SamplingParams(max_tokens=4, temperature=0, logprobs=1, prompt_logprobs=1),
     )[0]
     print(f"tokens={result.outputs[0].token_ids} logprobs={result.outputs[0].logprobs}")
+    if args.return_routed_experts:
+        routes = result.outputs[0].routed_experts
+        token_ids = list(result.prompt_token_ids) + list(result.outputs[0].token_ids[:-1])
+        assert routes is not None and routes.shape == (len(token_ids), 43, 6), (
+            None if routes is None else routes.shape
+        )
+        reader = SafetensorReader(args.checkpoint)
+        for layer_id in range(3):
+            expected = reader.get_tensor(f"layers.{layer_id}.ffn.gate.tid2eid")[token_ids].numpy()
+            np.testing.assert_array_equal(routes[:, layer_id], expected)
+        print(f"routed_experts={routes.shape} hash_layers=matched")
 
 
 if __name__ == "__main__":

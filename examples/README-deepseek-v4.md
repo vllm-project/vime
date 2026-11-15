@@ -31,6 +31,8 @@ Validated on NVIDIA H20-3e:
   router): 538 tensors loaded, finite loss and 537 finite gradient tensors.
 - The full 46-shard, 274 GiB checkpoint loaded into four H20 GPUs with vLLM's
   Triton MoE backend. A short rollout generated four tokens with logprobs.
+- With auxiliary capture enabled, rollout returned an (8, 43, 6) route tensor;
+  all three hash layers matched the checkpoint's token-to-expert tables.
 
 Reproduce the targeted checks inside the pinned training and vLLM environments:
 
@@ -43,6 +45,7 @@ python -m pytest tests/test_deepseek_v4_routing_replay.py
 python tools/dsv4_checkpoint_layer_smoke.py "$DSV4_CHECKPOINT" --layer-index 2
 python tools/dsv4_checkpoint_layer_smoke.py "$DSV4_CHECKPOINT" --layer-index 3
 python tools/dsv4_rollout_smoke.py "$DSV4_CHECKPOINT" --tensor-parallel-size 4
+python tools/dsv4_rollout_smoke.py "$DSV4_CHECKPOINT" --tensor-parallel-size 4 --return-routed-experts
 ```
 
 The converter regression also runs on one H20 with the pinned base image:
