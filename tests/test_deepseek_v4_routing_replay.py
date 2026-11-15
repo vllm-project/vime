@@ -107,3 +107,70 @@ def test_megatron_hash_router_uses_vime_replay(monkeypatch):
     finally:
         Utils.destroy_model_parallel()
         RouterReplay.clear_global_router_replay_instances()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Cross-backend routing needs CUDA")
+def test_v4_router_matches_vllm_on_fixed_inputs():
+    pytest.importorskip("vllm")
+    from megatron.core.transformer.moe.moe_utils import topk_routing_with_score_function
+    from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import fused_topk_bias
+
+    generator = torch.Generator(device="cuda").manual_seed(525)
+    logits = torch.randn(8, 256, device="cuda", generator=generator)
+    bias = torch.randn(256, device="cuda", generator=generator) * 0.01
+    hidden = torch.empty(8, 16, device="cuda")
+    train_probs, train_ids = topk_routing_with_score_function(
+        logits,
+        topk=6,
+        score_function="sqrtsoftplus",
+        expert_bias=bias,
+        scaling_factor=1.5,
+        dense_output=True,
+    )
+    rollout_probs, rollout_ids = fused_topk_bias(
+        hidden,
+        logits,
+        scoring_func="sqrtsoftplus",
+        e_score_correction_bias=bias,
+        topk=6,
+        renormalize=True,
+        routed_scaling_factor=1.5,
+    )
+    train_order = train_ids.argsort(dim=-1)
+    rollout_order = rollout_ids.argsort(dim=-1)
+    assert torch.equal(train_ids.gather(1, train_order), rollout_ids.gather(1, rollout_order))
+    torch.testing.assert_close(
+        train_probs.gather(1, train_order),
+        rollout_probs.gather(1, rollout_order),
+        rtol=1e-4,
+        atol=1e-5,
+    )
+    from megatron.core.transformer.moe.router import TopKRouter
+
+    token_ids = torch.arange(8, device="cuda", dtype=torch.int32).unsqueeze(0)
+    table = (torch.arange(32, device="cuda", dtype=torch.int32)[:, None] + torch.arange(6, device="cuda")) % 256
+    router = SimpleNamespace(
+        score_function="sqrtsoftplus",
+        config=SimpleNamespace(
+            moe_router_force_load_balancing=False,
+            moe_router_force_biased=None,
+            moe_router_topk_scaling_factor=1.5,
+        ),
+        tid2eid=table,
+        topk=6,
+        router_replay=None,
+    )
+    train_probs, train_ids = TopKRouter._hash_routing(router, logits, token_ids, dense_output=True)
+    rollout_probs, rollout_ids = fused_topk_bias(
+        hidden,
+        logits,
+        scoring_func="sqrtsoftplus",
+        e_score_correction_bias=None,
+        topk=6,
+        renormalize=True,
+        input_tokens=token_ids.reshape(-1),
+        hash_indices_table=table,
+        routed_scaling_factor=1.5,
+    )
+    assert torch.equal(train_ids.int(), rollout_ids.int())
+    torch.testing.assert_close(train_probs, rollout_probs, rtol=1e-4, atol=1e-5)

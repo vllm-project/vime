@@ -24,7 +24,8 @@ Validated on NVIDIA H20-3e:
   window-only, ratio-4, ratio-128, and packed THD. Two hash-MoE integration
   tests passed.
 - Four hash-router replay bridge tests pass, including record/replay through a
-  real Megatron hash router. Cross-backend route parity is not yet tested.
+  real Megatron hash router. Fixed-input learned and hash route/probability
+  parity against pinned vLLM passes on H20.
 - Full-width layer 2 (ratio 4, hash router): 544 checkpoint tensors loaded,
   finite loss and 543 finite gradient tensors. Layer 3 (ratio 128, learned
   router): 538 tensors loaded, finite loss and 537 finite gradient tensors.
@@ -54,8 +55,8 @@ srun -p h20 --gres=gpu:1 --time=00:20:00 \
 ```
 
 These checks do not constitute full RL support. Roadmap gates still open are
-vLLM indexer top-k capture and training replay, cross-backend router/indexer
-parity, full HF-to-Megatron and reverse model parity, FP8 online refit
+vLLM indexer top-k capture and training replay, cross-backend indexer parity,
+full HF-to-Megatron and reverse model parity, FP8 online refit
 versus fresh load with cache/version checks, ten-step CP=1 GRPO and resume,
 and the 100-step release recipe. Megatron's native V4 attention currently
 requires TP=1, so full training topology must use PP/EP instead of TP.
