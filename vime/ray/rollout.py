@@ -7,6 +7,7 @@ from typing import Any
 
 import ray
 
+from vime.backends.vllm_utils.weight_checker import validate_checksums
 from vime.data.batch_builder import BatchBuilder
 from vime.data.transport import DiskPayloadRef, accept_raw_rollout, check_rollout_storage, load_rollout_samples
 from vime.observability import logging_utils
@@ -61,6 +62,8 @@ class RolloutManager:
             ).apply(args)
             restore_plan = self.recovery.restore_plan
         self._recovery_admission_was_paused = None
+        self._weight_check_state = "idle"
+        self._weight_check_records = []
         self.pg = pg
         self.args = args
         self.controller = deployment.controller if deployment else None
@@ -201,6 +204,8 @@ class RolloutManager:
         from vime.data.queue_data_source import QueueDataSource
         from vime.ray.training_recovery import TrainingResume
 
+        self._weight_check_state = "idle"
+        self._weight_check_records = []
         was_paused = self.pause_rollout_admission()
         if self._recovery_admission_was_paused is None:
             # Remember the original state across repeated attachments; a
@@ -253,6 +258,8 @@ class RolloutManager:
         return values
 
     def detach_training(self):
+        if getattr(self, "_weight_check_state", "idle") in ("preparing", "baselined", "prepared", "verified"):
+            self._weight_check_state = "failed"
         was_paused = self.pause_rollout_admission()
         if self._recovery_admission_was_paused is None:
             # A second cleanup or a failed attachment must retain the original
@@ -271,11 +278,31 @@ class RolloutManager:
         return None
 
     def training_ready(self):
+        state = getattr(self, "_weight_check_state", "idle")
+        if state not in ("idle", "skipped", "verified", "ready"):
+            raise RuntimeError(f"Cannot resume training with weight checker state {state!r}")
+        if state == "verified":
+            try:
+                self._weight_check_phase(
+                    "resume",
+                    [
+                        (record["label"], record["engine"].continue_generation.remote())
+                        for record in self._weight_check_records
+                    ],
+                )
+            except Exception:
+                self._weight_check_state = "failed"
+                raise
         # train.py calls this only after publishing restored weights. Starting
         # producers earlier could generate with the failed attempt's weights.
         if self._recovery_admission_was_paused is not None:
             self.resume_rollout_admission(self._recovery_admission_was_paused)
             self._recovery_admission_was_paused = None
+        if state == "verified":
+            self.health_monitoring_resume()
+            self._weight_check_state = "ready"
+            self._weight_check_records = []
+            logger.info("Weight checker passed; generation is ready")
 
     def checkpoint_committed(self, rollout_id):
         if self.recovery is not None:
@@ -514,10 +541,140 @@ class RolloutManager:
             self.servers = ray.get(self.serving.health_monitoring_resume.remote())
             return
 
-    def check_weights(self, action: str):
-        return ray.get(
-            [engine.check_weights.remote(action=action) for engine in self.rollout_engines if engine is not None]
+    def _weight_check_engines(self):
+        name, server = next(
+            ((name, server) for name, server in self.servers.items() if server.update_weights), (None, None)
         )
+        engines = server.engines if server is not None else []
+        if not engines or any(engine is None for engine in engines):
+            raise RuntimeError("Weight checking requires all engines of the updatable model to be available")
+        return name, engines
+
+    def _weight_check_phase(self, phase, calls):
+        """Wait for every submitted RPC, including errors on other engines."""
+        start = time.monotonic()
+        timeout = getattr(self.args, "weight_checker_timeout", 300.0)
+        ready, _ = ray.wait([ref for _, ref in calls], num_returns=len(calls), timeout=timeout)
+        ready = set(ready)
+        results, errors = [], []
+        for label, ref in calls:
+            if ref not in ready:
+                errors.append(f"{label}: timed out after {timeout}s; remote result is unknown")
+                continue
+            try:
+                results.append(ray.get(ref, timeout=0))
+            except Exception as error:
+                errors.append(f"{label}: {error}")
+        logger.info("Weight checker phase=%s engines=%d elapsed=%.3fs", phase, len(calls), time.monotonic() - start)
+        if errors:
+            raise RuntimeError(f"Weight checker {phase} failed:\n" + "\n".join(errors))
+        return results
+
+    def prepare_weight_check(self, *, reused=False):
+        if self._weight_check_state == "prepared":
+            return True
+        if self._weight_check_state not in ("idle", "skipped"):
+            raise RuntimeError(
+                f"Weight checker requires a new training attachment after state {self._weight_check_state!r}"
+            )
+        self._weight_check_records = []
+        if reused or self.args.debug_train_only or self.args.debug_rollout_only:
+            self._weight_check_state = "skipped"
+            logger.info("Weight checker skipped: %s", "reused_serving" if reused else "debug_only")
+            return False
+        self._weight_check_state = "preparing"
+        try:
+            was_paused = self.pause_rollout_admission()
+            if self._recovery_admission_was_paused is None:
+                self._recovery_admission_was_paused = was_paused
+            self.health_monitoring_pause()
+            name, engines = self._weight_check_engines()
+            self._weight_check_phase(
+                "pause", [(f"{name} engine {i}", engine.pause_generation.remote()) for i, engine in enumerate(engines)]
+            )
+            infos = self._weight_check_phase(
+                "layout",
+                [(f"{name} engine {i}", engine.get_weight_check_info.remote()) for i, engine in enumerate(engines)],
+            )
+            self._weight_check_records = [
+                {"engine": engine, "actor_id": engine._actor_id.hex(), "info": info, "label": f"{name} {info['url']}"}
+                for engine, info in zip(engines, infos, strict=True)
+            ]
+            records = self._weight_check_records
+            responses = self._weight_check_phase(
+                "checksum",
+                [(record["label"], record["engine"].check_weights.remote(action="checksum")) for record in records],
+            )
+            for record, response in zip(records, responses, strict=True):
+                try:
+                    record["baseline"] = validate_checksums(response, record["info"]["rank_prefixes"])
+                except ValueError as error:
+                    raise RuntimeError(f"{record['label']}: {error}") from error
+            self._weight_check_state = "baselined"
+            responses = self._weight_check_phase(
+                "reset",
+                [(record["label"], record["engine"].check_weights.remote(action="reset")) for record in records],
+            )
+            for record, response in zip(records, responses, strict=True):
+                if not isinstance(response, dict) or response.get("status") != "reset":
+                    raise RuntimeError(f"{record['label']}: invalid weight checker reset response {response!r}")
+            self._weight_check_state = "prepared"
+            logger.info(
+                "Weight checker prepared engines=%d ranks=%d parameters=%d",
+                len(records),
+                sum(len(record["info"]["rank_prefixes"]) for record in records),
+                sum(len(record["baseline"]) for record in records),
+            )
+            return True
+        except Exception:
+            self._weight_check_state = "failed"
+            raise
+
+    def finish_weight_check(self):
+        if self._weight_check_state in ("verified", "ready"):
+            return
+        if self._weight_check_state != "prepared":
+            raise RuntimeError(f"Weight checker compare requires prepared state, got {self._weight_check_state!r}")
+        try:
+            _, engines = self._weight_check_engines()
+            records = self._weight_check_records
+            if {engine._actor_id.hex() for engine in engines} != {record["actor_id"] for record in records}:
+                raise RuntimeError("Weight checker engine actors changed after taking the baseline")
+            infos = self._weight_check_phase(
+                "layout", [(record["label"], record["engine"].get_weight_check_info.remote()) for record in records]
+            )
+            for record, info in zip(records, infos, strict=True):
+                if info != record["info"]:
+                    raise RuntimeError(f"{record['label']}: weight checker engine layout or generation changed")
+            responses = self._weight_check_phase(
+                "compare",
+                [
+                    (
+                        record["label"],
+                        record["engine"].check_weights.remote(action="compare", baseline=record["baseline"]),
+                    )
+                    for record in records
+                ],
+            )
+            errors = []
+            for record, response in zip(records, responses, strict=True):
+                mismatches = response.get("mismatches") if isinstance(response, dict) else None
+                if (
+                    not isinstance(mismatches, list)
+                    or not all(isinstance(key, str) for key in mismatches)
+                    or type(response.get("match")) is not bool
+                    or response["match"] != (not mismatches)
+                ):
+                    errors.append(f"{record['label']}: invalid compare response {response!r}")
+                elif not response["match"]:
+                    errors.append(f"{record['label']}: mismatches={sorted(mismatches)}")
+            if errors:
+                raise RuntimeError("Weight checker compare failed:\n" + "\n".join(errors))
+            self._weight_check_state = "verified"
+            logger.info("Weight checker verified all %d engines", len(records))
+        except Exception:
+            self._weight_check_state = "failed"
+            raise
 
     def _get_rollout_data(self, rollout_id):
         if self.args.load_debug_rollout_data:

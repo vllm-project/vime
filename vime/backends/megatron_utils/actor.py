@@ -622,7 +622,7 @@ class MegatronTrainRayActor(TrainRayActor):
             self.sleep()
 
     @timer
-    def update_weights(self) -> None:
+    def update_weights(self, *, resume_generation: bool = True) -> None:
         if self.args.debug_train_only or self.args.debug_rollout_only:
             return
 
@@ -676,7 +676,10 @@ class MegatronTrainRayActor(TrainRayActor):
                     if ".draft_model." in name:
                         param.data = backup[name].to(param.device)
             print_memory("before update_weights")
-            self.weight_updater.update_weights()
+            if resume_generation:
+                self.weight_updater.update_weights()
+            else:
+                self.weight_updater.update_weights(resume_generation=False)
             print_memory("after update_weights")
 
         if reconnect_rollout_engines:

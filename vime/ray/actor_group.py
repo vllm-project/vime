@@ -175,19 +175,20 @@ class RayTrainGroup:
             self.args.no_load_optim = self.args.no_save_optim
             self.args.no_load_rng = False
 
-    def update_weights(self) -> None:
+    def update_weights(self, *, resume_generation: bool = True) -> None:
         """Publish actor weights; disk reload is coordinated after all ranks save."""
+        kwargs = {} if resume_generation else {"resume_generation": False}
         if not self._full_disk_weight_update_enabled():
-            ray.get([actor.update_weights.remote() for actor in self._actor_handlers])
+            ray.get([actor.update_weights.remote(**kwargs) for actor in self._actor_handlers])
             return
 
         weight_version = self._disk_weight_version + 1
         disk_weight_dir = Path(self.args.update_weight_disk_dir) / f"weight_v{weight_version:06d}"
-        ray.get([actor.update_weights.remote() for actor in self._actor_handlers])
+        ray.get([actor.update_weights.remote(**kwargs) for actor in self._actor_handlers])
         self._disk_weight_version = weight_version
         if self._release_train_enabled():
             self.release()
-        self._reload_rollout_weights_from_disk(disk_weight_dir, str(weight_version))
+        self._reload_rollout_weights_from_disk(disk_weight_dir, str(weight_version), **kwargs)
 
     def onload(self):
         return ray.get([actor.wake_up.remote() for actor in self._actor_handlers])
@@ -245,7 +246,7 @@ class RayTrainGroup:
             and self.args.update_weight_transport == "disk"
         )
 
-    def _reload_rollout_weights_from_disk(self, disk_weight_dir, weight_version):
+    def _reload_rollout_weights_from_disk(self, disk_weight_dir, weight_version, *, resume_generation=True):
         assert self._rollout_manager is not None, "disk weight update requires a rollout manager."
         if self.args.offload_rollout:
             ray.get(self._rollout_manager.onload_weights.remote())
@@ -265,7 +266,12 @@ class RayTrainGroup:
         flush_cache = should_flush_cache(
             self.args.flush_cache_interval, int(weight_version), getattr(self.args, "update_weight_start_version", 0)
         )
-        ray.get([engine.pause_generation.remote(mode="abort" if flush_cache else "in_place") for engine in engines])
+        ray.get(
+            [
+                engine.pause_generation.remote(mode="abort" if flush_cache or not resume_generation else "in_place")
+                for engine in engines
+            ]
+        )
         if flush_cache:
             ray.get([engine.flush_cache.remote() for engine in engines])
         ray.get(
@@ -292,4 +298,5 @@ class RayTrainGroup:
                 )
         if not self.args.update_weight_disk_keep_files:
             shutil.rmtree(disk_weight_dir, ignore_errors=True)
-        ray.get([engine.continue_generation.remote() for engine in engines])
+        if resume_generation:
+            ray.get([engine.continue_generation.remote() for engine in engines])
