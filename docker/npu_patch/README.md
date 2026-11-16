@@ -6,14 +6,15 @@ This guide provides instructions for installing Vime with NPU support, including
 
 | Component | Version/Commit | Source |
 | --- | --- | --- |
-| Base image | `v0.31.0-007abb8-a3` | `quay.io/atlas-ci/vllm-ascend` |
-| vLLM | `a98247ab4db686ee03c66d5feb3c761e52a2f8ab` | [GitHub](https://github.com/vllm-project/vllm) |
-| vLLM-Ascend | `007abb8c89971f589932584a5a6d0a986bfbcdd0` | [GitHub](https://github.com/vllm-project/vllm-ascend) |
-| vLLM Router | `1fbcde7443d75b36befb61bc081f64c2a1f13a4b` + `docker/patch/latest/router-health-check.patch` | [GitHub](https://github.com/vllm-project/router) |
-| Sunabako | `0.1.1` + `docker/patch/latest/sunabako-arm64.patch` | [PyPI](https://pypi.org/project/sunabako/0.1.1/) |
-| FLA (serving, included in base image) | `flash-linear-attention-npu-a3==26.9.1+dev5cc6990` | [v26.9.1-20261020-020004](https://github.com/flashserve/flash-linear-attention-npu/releases/tag/v26.9.1-20261020-020004) |
-| Megatron-LM | `4b4acac9a1d28ea6829c8d4f566d75698a21249d` | [GitHub](https://github.com/NVIDIA/Megatron-LM) |
-| MegatronAdaptor | `c7e52b2c8482105e6ec7fcd8cdef364e7c7b22c5` | [GitCode](https://gitcode.com/Ascend/MegatronAdaptor) |
+| Base image | `v0.32.0-bf07462-a3` | `quay.io/atlas-ci/vllm-ascend` |
+| vLLM | `544f182d9f0c9bfe8bd7645525951d5e3692a542` | [GitHub](https://github.com/vllm-project/vllm) |
+| vLLM-Ascend | `bf074627d11b65dfb41720355ba2c08725c0e0d1` | [GitHub](https://github.com/vllm-project/vllm-ascend) |
+| vLLM Router | `1fbcde7443d75b36befb61bc081f64c2a1f13a4b` + the three shared router patches below | [GitHub](https://github.com/vllm-project/router) |
+| Sunabako | `0.1.2` + `docker/patch/latest/sunabako-arm64.patch` | [PyPI](https://pypi.org/project/sunabako/0.1.2/) |
+| FLA (serving, included in base image) | `flash-linear-attention-npu-a3==26.9.1` | [Ascend image recipe](https://github.com/vllm-project/vllm-ascend/blob/bf074627d11b65dfb41720355ba2c08725c0e0d1/Dockerfile.a3) |
+| Megatron-LM | `ae76c60e6c35d913867d6dd7bad0f30b128b54e7` | [GitHub](https://github.com/NVIDIA/Megatron-LM) |
+| MegatronAdaptor | `7a64c5ac28172317cdaeb68e80e4e02bc8f52233` (`core_r0.20.0`) | [GitCode](https://gitcode.com/Ascend/MegatronAdaptor) |
+| NVIDIA Resiliency Extension (NVRX) | `0.7.0`, source `ebf0352a82ca5699148ea10bec2b8eedd121e382`, built without CUPTI | [GitHub](https://github.com/NVIDIA/nvidia-resiliency-ext) |
 | TransformerEngineNPU | `d405be23773968bf7fdc567854005054550830fc` + `transformer-engine-npu.patch` | [GitCode](https://gitcode.com/Ascend/TransformerEngineNPU) |
 | torch_memory_saver (NPU) | `sgl-kernel-npu` tag `2026.6.0` + `torch-memory-saver.patch` | [GitHub](https://github.com/sgl-project/sgl-kernel-npu) |
 
@@ -34,7 +35,7 @@ export PATCH_DIR="${VIME_INSTALL_ROOT}/vime/docker/npu_patch"
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 ```
 
-Preserve the base image's serving package versions and pin the data dependencies compatible with NumPy 1.26.4:
+Preserve the base image's serving package versions and pin the Vime dependencies:
 
 ```bash
 export PIP_CONSTRAINT="$(mktemp /tmp/vime-npu-constraints.XXXXXX)"
@@ -45,11 +46,13 @@ import os
 names = [
     "numpy", "ray", "torch", "torch-npu", "torchvision",
     "transformers", "triton-ascend", "vllm", "vllm-ascend",
-    "fastapi", "starlette",
+    "fastapi", "starlette", "grpcio", "protobuf",
 ]
 with open(os.environ["PIP_CONSTRAINT"], "w") as constraints:
     constraints.write("\n".join(f"{name}=={metadata.version(name)}" for name in names) + "\n")
     constraints.write("datasets==5.0.1\npyarrow==25.0.1\n")
+    constraints.write("straw-queue==0.1.6\nsunabako==0.1.2\n")
+    constraints.write("wandb==0.31.0\nopentelemetry-exporter-otlp==1.45.1\n")
 PY
 ```
 
@@ -67,11 +70,27 @@ git -C /vllm-workspace/vllm-ascend apply "${PATCH_DIR}/vllm-ascend.patch"
 
 ### 2. Megatron-LM
 
+Build NVRX for checkpoint loading and asynchronous saving. Use an isolated build
+environment and disable the NVIDIA CUPTI extension; the published Linux wheel
+requires glibc 2.39. The Dockerfile provides the `nvrx-wheel` build stage.
+
+```bash
+export NVRX_BUILD_ROOT="$(mktemp -d /tmp/vime-nvrx.XXXXXX)"
+git clone --depth 1 --branch v0.7.0 https://github.com/NVIDIA/nvidia-resiliency-ext.git "${NVRX_BUILD_ROOT}/src"
+git -C "${NVRX_BUILD_ROOT}/src" checkout ebf0352a82ca5699148ea10bec2b8eedd121e382
+python3 -m venv "${NVRX_BUILD_ROOT}/venv"
+env -u PIP_CONSTRAINT "${NVRX_BUILD_ROOT}/venv/bin/python" -m pip install build
+STRAGGLER_DET_SKIP_CUPTI_EXT_BUILD=1 \
+  env -u PIP_CONSTRAINT "${NVRX_BUILD_ROOT}/venv/bin/python" -m build --wheel \
+  --outdir "${NVRX_BUILD_ROOT}/wheels" "${NVRX_BUILD_ROOT}/src"
+python3 -m pip install "${NVRX_BUILD_ROOT}"/wheels/*.whl
+```
+
 Apply `megatron.patch`, copied from the shared `docker/patch/latest/megatron.patch`, to the pinned commit.
 
 ```bash
 git clone https://github.com/NVIDIA/Megatron-LM.git "${VIME_INSTALL_ROOT}/Megatron-LM"
-git -C "${VIME_INSTALL_ROOT}/Megatron-LM" checkout 4b4acac9a1d28ea6829c8d4f566d75698a21249d
+git -C "${VIME_INSTALL_ROOT}/Megatron-LM" checkout ae76c60e6c35d913867d6dd7bad0f30b128b54e7
 
 git -C "${VIME_INSTALL_ROOT}/Megatron-LM" apply --check "${PATCH_DIR}/megatron.patch"
 git -C "${VIME_INSTALL_ROOT}/Megatron-LM" apply "${PATCH_DIR}/megatron.patch"
@@ -95,7 +114,7 @@ git -C "${VIME_INSTALL_ROOT}/TransformerEngineNPU" apply "${PATCH_DIR}/transform
 pip install --no-deps --no-build-isolation -e "${VIME_INSTALL_ROOT}/TransformerEngineNPU"
 
 git clone https://gitcode.com/Ascend/MegatronAdaptor.git "${VIME_INSTALL_ROOT}/MegatronAdaptor"
-git -C "${VIME_INSTALL_ROOT}/MegatronAdaptor" checkout c7e52b2c8482105e6ec7fcd8cdef364e7c7b22c5
+git -C "${VIME_INSTALL_ROOT}/MegatronAdaptor" checkout 7a64c5ac28172317cdaeb68e80e4e02bc8f52233
 git -C "${VIME_INSTALL_ROOT}/MegatronAdaptor" apply --check "${PATCH_DIR}/megatron-adaptor.patch"
 git -C "${VIME_INSTALL_ROOT}/MegatronAdaptor" apply "${PATCH_DIR}/megatron-adaptor.patch"
 pip install --no-deps --no-build-isolation -e "${VIME_INSTALL_ROOT}/MegatronAdaptor"
@@ -115,7 +134,7 @@ provides a separate wheel-build stage; for installation inside the base image:
 export SUNABAKO_BUILD_ROOT="$(mktemp -d /tmp/vime-sunabako.XXXXXX)"
 python3 -m venv "${SUNABAKO_BUILD_ROOT}/venv"
 "${SUNABAKO_BUILD_ROOT}/venv/bin/python" -m pip install 'maturin>=1.8,<2'
-curl -fsSL https://files.pythonhosted.org/packages/cd/16/d9fd84bbf784c19425d9d83d8d98deef6d5f107012e8d50bddeb5c11cf5c/sunabako-0.1.1.tar.gz \
+curl -fsSL https://files.pythonhosted.org/packages/32/04/17067354c37b23f7fe00e70c131c863f85acaac86874baa36e32426fb8b1/sunabako-0.1.2.tar.gz \
   -o "${SUNABAKO_BUILD_ROOT}/sunabako.tar.gz"
 mkdir "${SUNABAKO_BUILD_ROOT}/src"
 tar -xf "${SUNABAKO_BUILD_ROOT}/sunabako.tar.gz" -C "${SUNABAKO_BUILD_ROOT}/src" --strip-components=1
@@ -129,7 +148,7 @@ python3 -m pip install --no-deps "${SUNABAKO_BUILD_ROOT}"/wheels/*.whl
 Then install Vime and the training FLA packages:
 
 ```bash
-pip install -r "${VIME_INSTALL_ROOT}/vime/requirements.txt"
+pip install -r "${VIME_INSTALL_ROOT}/vime/requirements.txt" 'opentelemetry-exporter-otlp==1.45.1'
 pip install --no-deps --no-build-isolation -e "${VIME_INSTALL_ROOT}/vime"
 pip install --no-deps einops 'fla-core==0.5.2' 'flash-linear-attention==0.5.2'
 ```
@@ -154,9 +173,10 @@ cd "${VIME_INSTALL_ROOT}/vime"
 
 ### 6. vLLM Router
 
-Build the pinned router with the shared health-check patch so Vime can own worker
-health checks. This patch changes Rust as well as Python; applying only the Python
-changes is insufficient. Install Rust 1.95, `cmake`, `pkg-config`, and `libssl-dev`
+Build the pinned router with the shared health-check, PD registration and worker
+registration patches, in that order. These patches change Rust as well as Python;
+applying only the Python changes is insufficient. Install Rust 1.95, `cmake`,
+`pkg-config`, and `libssl-dev`
 before building. The Dockerfile supplies these in a separate wheel-build stage.
 
 ```bash
@@ -166,6 +186,10 @@ git -C "${VIME_INSTALL_ROOT}/vllm-router" fetch --depth 1 origin 1fbcde7443d75b3
 git -C "${VIME_INSTALL_ROOT}/vllm-router" checkout --detach FETCH_HEAD
 git -C "${VIME_INSTALL_ROOT}/vllm-router" apply --check "${VIME_INSTALL_ROOT}/vime/docker/patch/latest/router-health-check.patch"
 git -C "${VIME_INSTALL_ROOT}/vllm-router" apply "${VIME_INSTALL_ROOT}/vime/docker/patch/latest/router-health-check.patch"
+git -C "${VIME_INSTALL_ROOT}/vllm-router" apply --check "${VIME_INSTALL_ROOT}/vime/docker/patch/latest/router-pd-registration.patch"
+git -C "${VIME_INSTALL_ROOT}/vllm-router" apply "${VIME_INSTALL_ROOT}/vime/docker/patch/latest/router-pd-registration.patch"
+git -C "${VIME_INSTALL_ROOT}/vllm-router" apply --check "${VIME_INSTALL_ROOT}/vime/docker/patch/latest/router-worker-registration.patch"
+git -C "${VIME_INSTALL_ROOT}/vllm-router" apply "${VIME_INSTALL_ROOT}/vime/docker/patch/latest/router-worker-registration.patch"
 pip install setuptools-rust wheel
 cd "${VIME_INSTALL_ROOT}/vllm-router"
 CARGO_BUILD_JOBS=4 python3 -m pip wheel --no-deps --no-build-isolation --wheel-dir dist .
@@ -185,6 +209,7 @@ export PYTHONPATH="${VIME_INSTALL_ROOT}/Megatron-LM:${VIME_INSTALL_ROOT}/Megatro
 
 python3 -c 'import numpy, pyarrow, datasets, fastapi, starlette; from ray._private.serialization import SerializationContext; from ray._private.worker import global_worker; SerializationContext(global_worker); print(f"Data/Ray check passed: numpy={numpy.__version__}, pyarrow={pyarrow.__version__}, datasets={datasets.__version__}, fastapi={fastapi.__version__}, starlette={starlette.__version__}")'
 python3 -c 'import importlib.util; assert importlib.util.find_spec("mindspeed") is None, "MindSpeed must be absent to avoid automatic MegatronAdaptor patches"; import megatron_adaptor, megatron, transformer_engine, torch_memory_saver, vime, vllm, vllm_ascend'
+python3 -c 'import inspect; import importlib.metadata as m; import megatron_adaptor; from megatron.core.dist_checkpointing.strategies.nvrx import has_nvrx_async_support; from nvidia_resiliency_ext.checkpointing.async_ckpt.cached_metadata_filesystem_reader import CachedMetadataFileSystemReader; from nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async import FileSystemWriterAsync; assert m.version("nvidia-resiliency-ext") == "0.7.0"; assert has_nvrx_async_support(); assert "resolved_plan_data" in inspect.signature(FileSystemWriterAsync.preload_tensors).parameters'
 ```
 
 For a complete container build recipe, see [Dockerfile.npu](../Dockerfile.npu).
