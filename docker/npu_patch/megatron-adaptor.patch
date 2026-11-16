@@ -1,0 +1,59 @@
+diff --git a/megatron_adaptor/features_manager/megatron/megatron_basic.py b/megatron_adaptor/features_manager/megatron/megatron_basic.py
+index e66f74f..5747bbc 100755
+--- a/megatron_adaptor/features_manager/megatron/megatron_basic.py
++++ b/megatron_adaptor/features_manager/megatron/megatron_basic.py
+@@ -1,5 +1,7 @@
+ # Copyright (c) 2026, Huawei Technologies Co., Ltd. All rights reserved.
+
++import inspect
++
+ from megatron_adaptor.features_manager.mindspeed_feature import MindSpeedFeature
+
+ try:
+@@ -11,7 +13,7 @@ except ImportError:
+     HAVE_FLA = False
+
+ try:
+-    import nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async  # noqa: F401
++    from nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async import FileSystemWriterAsync
+
+     HAVE_NVRX_ASYNC = True
+ except ImportError:
+@@ -130,11 +132,9 @@ class MegatronBasicFeature(MindSpeedFeature):
+             'megatron.core.fusions.fused_softmax.FusedScaleMaskSoftmax.forward_fused_softmax', forward_fused_softmax
+         )
+
+-        # Synchronous D2H copy and CPU-tensor snapshot during async checkpoint save,
+-        # so the staged data is not corrupted by subsequent training steps.
+-        # mcore's async checkpoint writer now lives in nvidia_resiliency_ext, so the
+-        # patch follows the writer to its new home.
+-        if HAVE_NVRX_ASYNC:
++        # NVRX 0.7 resolves plans, snapshots CPU tensors and synchronizes D2H itself.
++        # Keep the legacy wrapper only for writers accepting pre-built buckets.
++        if HAVE_NVRX_ASYNC and 'write_buckets' in inspect.signature(FileSystemWriterAsync.preload_tensors).parameters:
+             pm.register_patch(
+                 'nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.preload_tensors',
+                 preload_tensors,
+diff --git a/megatron_adaptor/patches/megatron/transformer_config.py b/megatron_adaptor/patches/megatron/transformer_config.py
+index e0187d9..4b9bb6a 100644
+--- a/megatron_adaptor/patches/megatron/transformer_config.py
++++ b/megatron_adaptor/patches/megatron/transformer_config.py
+@@ -67,7 +67,8 @@ def transformer_config_init_wrapper(fn):
+     def wrapper(self, *args, **kwargs):
+         known_config = {}
+         unknown_config = {}
+-        full_args = vars(get_full_args()).copy()
++        # Serving arguments share the Namespace but are not training config fields.
++        full_args = {key: value for key, value in vars(get_full_args()).items() if not key.startswith('vllm_')}
+         full_args.update(dict(kwargs))
+
+         config_key = inspect.signature(self.__class__).parameters
+@@ -100,7 +101,7 @@ def transformer_config_init_wrapper(fn):
+ def transformer_config_init_subclass(cls, **kwargs):
+     mutable_types = (list, dict, set, bytearray)
+     unknown_config = {}
+-    full_args = vars(get_full_args()).copy()
++    full_args = {key: value for key, value in vars(get_full_args()).items() if not key.startswith('vllm_')}
+     full_args.update(kwargs)
+
+     config_key = inspect.signature(cls).parameters
