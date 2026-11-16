@@ -45,7 +45,7 @@ def selected_npu(monkeypatch):
 
 def test_npu_is_scheduled_under_rays_npu_resource(selected_npu):
     """Ray maps only its own NPU resource to ASCEND_RT_VISIBLE_DEVICES."""
-    assert resources.resource_name() == "NPU"
+    assert accelerator.ray_device_key() == "NPU"
     assert resources.bundle() == {"NPU": 1, "CPU": 1}
     assert resources.actor_options(1) == {"num_gpus": 0, "resources": {"NPU": 1}}
 

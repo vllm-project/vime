@@ -160,6 +160,26 @@ def load_vime_arguments_module(monkeypatch):
     return module
 
 
+@pytest.mark.parametrize(
+    "fields,expected",
+    [
+        ({}, True),
+        ({"enable_gloo_process_groups": False}, False),
+        ({"enable_gloo_process_groups": True}, True),
+        ({"use_gloo_process_groups": False}, False),
+        ({"use_gloo_process_groups": True}, True),
+        ({"use_gloo_process_groups": False, "enable_gloo_process_groups": True}, False),
+        ({"use_gloo_process_groups": True, "enable_gloo_process_groups": False}, True),
+    ],
+)
+def test_gloo_group_selection_prefers_current_validated_argument(monkeypatch, fields, expected):
+    module = load_arguments_module(monkeypatch)
+    args = argparse.Namespace(**fields)
+    assert module.use_gloo_process_groups(args) is expected
+    args.use_gloo_process_groups = not expected
+    assert module.use_gloo_process_groups(args) is not expected
+
+
 @pytest.mark.parametrize("strategy", [None, "mcore", "nvrx"])
 def test_native_async_checkpoint_default_preserves_explicit_strategy(monkeypatch, strategy):
     module = load_vime_arguments_module(monkeypatch)

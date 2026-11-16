@@ -147,7 +147,8 @@ def test_checkpoint_cpu_tensors_serialize_after_weight_sync():
 
 
 @pytest.mark.parametrize("empty", [False, True])
-def test_async_writer_payload_is_cpu_only_and_hook_is_restored(monkeypatch, empty):
+@pytest.mark.parametrize("async_strategy", ["mcore", "nvrx"])
+def test_async_writer_payload_is_cpu_only_and_hook_is_restored(monkeypatch, empty, async_strategy):
     class CudaAllocation:
         def __reduce__(self):
             raise RuntimeError("CUDA IPC is unavailable for this allocation")
@@ -163,7 +164,11 @@ def test_async_writer_payload_is_cpu_only_and_hook_is_restored(monkeypatch, empt
     modules = {
         "megatron.training.checkpointing": {"load_checkpoint": None, "save_checkpoint": None},
         "megatron.training.global_vars": {"get_args": None},
-        "megatron.core.dist_checkpointing.strategies.filesystem_async": {"FileSystemWriterAsync": Writer},
+        (
+            "nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async"
+            if async_strategy == "nvrx"
+            else "megatron.core.dist_checkpointing.strategies.filesystem_async"
+        ): {"FileSystemWriterAsync": Writer},
     }
     for name, attributes in modules.items():
         module = types.ModuleType(name)
@@ -174,7 +179,7 @@ def test_async_writer_payload_is_cpu_only_and_hook_is_restored(monkeypatch, empt
     checkpoint = load_module("checkpoint_cpu_staging", "checkpoint.py")
     original = Writer.get_save_function_and_args
     with pytest.raises(ValueError, match="save failed"):
-        with checkpoint._stage_async_save_on_cpu():
+        with checkpoint._stage_async_save_on_cpu(async_strategy):
             fn, preload, args = Writer().get_save_function_and_args()
             assert preload is None
             if empty:
@@ -184,6 +189,51 @@ def test_async_writer_payload_is_cpu_only_and_hook_is_restored(monkeypatch, empt
                 torch.testing.assert_close(restored[1][0], expected, rtol=0, atol=0)
             raise ValueError("save failed")
     assert Writer.get_save_function_and_args is original
+
+
+@pytest.mark.parametrize("supports_restore", [False, True])
+@pytest.mark.parametrize("with_optimizer", [False, True])
+@pytest.mark.parametrize("step", [None, 0, 7])
+def test_checkpoint_load_requests_training_state_only_for_optimizer(
+    monkeypatch, tmp_path, supports_restore, with_optimizer, step
+):
+    (tmp_path / "latest_checkpointed_iteration.txt").write_text("release" if step is None else str(step))
+    args = types.SimpleNamespace(load=str(tmp_path), ckpt_step=step, finetune=False)
+    calls = []
+    result = (step or 0, 123)
+
+    def legacy_loader(ddp_model, optimizer, opt_param_scheduler, checkpointing_context, skip_load_to_model_and_opt):
+        calls.append((ddp_model, optimizer, opt_param_scheduler, checkpointing_context, skip_load_to_model_and_opt))
+        return result
+
+    restore_requests = []
+
+    def current_loader(*, restore_training_state=False, **kwargs):
+        restore_requests.append(restore_training_state)
+        return legacy_loader(**kwargs)
+
+    for name, attributes in {
+        "megatron.training.checkpointing": {
+            "load_checkpoint": current_loader if supports_restore else legacy_loader,
+            "save_checkpoint": None,
+        },
+        "megatron.training.global_vars": {"get_args": lambda: args},
+    }.items():
+        module = types.ModuleType(name)
+        module.__dict__.update(attributes)
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setitem(sys.modules, "torch.distributed._shard.sharding_spec", None)
+    checkpoint = load_module("checkpoint_restore_state", "checkpoint.py")
+    model, context = object(), object()
+    optimizer = object() if with_optimizer else None
+    scheduler = object() if with_optimizer else None
+    assert checkpoint.load_checkpoint(model, optimizer, scheduler, context) == result
+    assert calls == [(model, optimizer, scheduler, context, False)]
+    assert restore_requests == ([with_optimizer] if supports_restore else [])
+    if step is not None:
+        args.ckpt_step = step + 1
+        with pytest.raises(ValueError, match="checkpoint restoration requires step"):
+            checkpoint.load_checkpoint(model, optimizer, scheduler, context)
 
 
 if __name__ == "__main__":
