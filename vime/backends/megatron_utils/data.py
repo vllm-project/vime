@@ -158,7 +158,7 @@ def get_batch(
         #   pass 2  decide per key, looking at the whole group
         #
         # Concatenate along dim 0 only when the pieces agree on every other dim
-        # (shape[1:]); otherwise keep a list with exactly one tensor per sample,
+        # (shape[1:]); otherwise keep the individual tensors in a list,
         # in sample order (the order of the <image> tokens in the packed sequence):
         #
         #   Qwen VL, flattened patches (one row per patch):
@@ -169,17 +169,18 @@ def get_batch(
         #       (1,3,448,512) (1,3,320,640) (1,3,448,512)
         #                                             -> list of 3, forward iterates it
         #   pass 1  collect per key, in sample order
-        grouped = {}  # key -> per-sample tensors, in sample order
+        grouped = {}  # key -> tensors, in sample and item order
         for mm_input_dict in multimodal_train_inputs:
             if mm_input_dict is not None:
                 for key, mm_tensor in mm_input_dict.items():
-                    if not (
+                    if (
                         isinstance(mm_tensor, (list, tuple))
                         and mm_tensor
                         and all(torch.is_tensor(item) for item in mm_tensor)
                     ):
-                        mm_tensor = torch.atleast_1d(torch.as_tensor(mm_tensor))
-                    grouped.setdefault(key, []).append(mm_tensor)
+                        grouped.setdefault(key, []).extend(torch.atleast_1d(item) for item in mm_tensor)
+                    else:
+                        grouped.setdefault(key, []).append(torch.atleast_1d(torch.as_tensor(mm_tensor)))
         #   pass 2  decide per key, looking at the whole group
         multimodal_data = {}  # key -> concatenated tensor, or list of tensors
         for key, tensors in grouped.items():
