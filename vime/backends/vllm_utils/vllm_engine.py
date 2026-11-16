@@ -445,7 +445,22 @@ class VLLMEngine(RayActor):
         return response.json()
 
     def check_weights(self, action: str):
-        raise NotImplementedError("vLLM weight checking is not implemented")
+        if self.node_rank != 0:
+            return
+        if action == "snapshot":
+            self._weight_baseline = self._make_request("weight_checker", {"action": "checksum"})[
+                "checksums"
+            ]
+        elif action == "reset_tensors":
+            self._make_request("weight_checker", {"action": "reset"})
+        elif action == "compare":
+            result = self._make_request(
+                "weight_checker", {"action": "compare", "baseline": self._weight_baseline}
+            )
+            if not result["match"]:
+                raise AssertionError(f"vLLM weight mismatch: {result['mismatches'][:16]}")
+        else:
+            raise ValueError(f"Unknown weight check action: {action}")
 
     def init_weight_transfer_engine(self, payload: dict) -> dict:
         return self._make_request("init_weight_transfer_engine", payload)
