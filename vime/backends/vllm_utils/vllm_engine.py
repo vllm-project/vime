@@ -8,7 +8,7 @@ import os
 import sys
 import time
 from threading import Thread
-from typing import Any
+from typing import Any, Literal
 
 import cloudpickle
 import requests
@@ -22,6 +22,7 @@ from vime.backends.vllm_utils.runtime import (
     terminate_server_process,
 )
 from vime.backends.vllm_utils.server_control import register_worker, unregister_worker
+from vime.backends.vllm_utils.weight_checker import expected_rank_prefixes
 from vime.ray.ray_actor import RayActor
 from vime.utils.http_utils import _wrap_ipv6, get_host_info
 from vime.utils.model_config import vllm_model_config_overrides
@@ -188,6 +189,7 @@ class VLLMEngine(RayActor):
         self.base_gpu_id = base_gpu_id
         self.vllm_overrides = vllm_overrides or {}
         self.num_gpus_per_engine = num_gpus_per_engine
+        self._server_generation = 0
 
     def init(
         self,
@@ -232,6 +234,7 @@ class VLLMEngine(RayActor):
             self._init_external(server_args_dict, external_engine_need_check_fields=external_engine_need_check_fields)
         else:
             self._init_normal(server_args_dict)
+        self._server_generation += 1
 
     def _init_external(self, expect_server_args, external_engine_need_check_fields):
         logger.info(f"Use external vLLM engine (rank={self.rank}, expect_server_args={expect_server_args})")
@@ -444,8 +447,40 @@ class VLLMEngine(RayActor):
             return {"ok": True}
         return response.json()
 
-    def check_weights(self, action: str):
-        raise NotImplementedError("vLLM weight checking is not implemented")
+    def check_weights(
+        self,
+        action: Literal["checksum", "reset", "compare"],
+        baseline: dict[str, str] | None = None,
+    ) -> dict | None:
+        if self.node_rank != 0:
+            return None
+        if action not in ("checksum", "reset", "compare"):
+            raise ValueError(f"Unsupported weight checker action {action!r}")
+        if action == "compare" and baseline is None:
+            raise ValueError("Weight checker compare requires a baseline")
+        payload = {"action": action}
+        if baseline is not None:
+            payload["baseline"] = baseline
+        return self._make_request(
+            "weight_checker", payload, timeout=getattr(self.args, "weight_checker_timeout", 300.0)
+        )
+
+    def get_weight_check_info(self) -> dict | None:
+        if self.node_rank != 0:
+            return None
+        timeout = getattr(self.args, "weight_checker_timeout", 300.0)
+        url = self.get_url()
+        response = requests.get(f"{url}/is_paused", timeout=timeout)
+        response.raise_for_status()
+        if response.json().get("is_paused") is not True:
+            self.pause_generation()
+            raise RuntimeError(f"Weight checker requires paused generation at {url}")
+        config = get_server_info(url, timeout=timeout)
+        return {
+            "url": url,
+            "generation": self._server_generation,
+            "rank_prefixes": sorted(expected_rank_prefixes(config)),
+        }
 
     def init_weight_transfer_engine(self, payload: dict) -> dict:
         return self._make_request("init_weight_transfer_engine", payload)

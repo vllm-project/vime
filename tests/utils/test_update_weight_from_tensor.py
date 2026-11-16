@@ -275,6 +275,19 @@ def test_native_update_runs_main_and_draft_lifecycles(update_module, monkeypatch
 
 
 @pytest.mark.unit
+def test_initial_weight_check_retains_pause_after_colocated_transfer(update_module, monkeypatch):
+    updater = _updater(update_module)
+    engine = RecordingEngine()
+    updater._all_rollout_engines = [engine]
+    client = update_module.VimeRayWeightSyncClient([engine], lambda: updater.weight_version)
+    updater._native_trainers = [RecordingTrainer(client)]
+    monkeypatch.setattr(update_module.dist, "barrier", lambda *args, **kwargs: None)
+    updater.update_weights(resume_generation=False)
+    assert len(engine.finish_weight_update.calls) == 1
+    assert engine.continue_generation.calls == []
+
+
+@pytest.mark.unit
 def test_native_dspark_update_uses_draft_source_and_lifecycle(update_module, monkeypatch):
     updater = _updater(
         update_module,

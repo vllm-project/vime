@@ -96,6 +96,20 @@ vime 支持将训练部分和推理部分分开进行调试，从而实现：
    - 使用 `--check-weight-update-equal` 验证 Megatron → vLLM 权重同步后的值是否正确。如果某个参数在 vLLM 侧全为零，说明它可能被错误量化或在 checkpoint 中缺失。
    - 使用 `--debug-rollout-only` 配合少量 GPU，快速测试 vLLM 能否从量化 checkpoint 正常生成文本。
 
+## 检查首次权重同步
+
+在训练启动参数中加入 `--check-weight-update-equal`，检查新建 serving 引擎的首次权重同步。训练与推理初始化应对应同一份逻辑 checkpoint。检查会暂停接收更新的引擎，保存 target model 参数的 SHA-256 摘要，并通过 vLLM 的 `/weight_checker` 将参数清零。首次完整权重同步结束后，每个引擎分别与自己的基线比较，全部通过后恢复 rollout。
+
+调用方保留 checksum 字典，参数摘要与精确字节摘要比较由 vLLM 执行。错误包含引擎 endpoint，以及形如 `dp0:pp0:pcp0:tp0:<tensor_name>` 的参数 key。检查覆盖实际接收权重更新的第一个模型，包括其 prefill 与 decode 引擎。冻结的 reference 和 reward 模型保留原有权重。
+
+大模型可使用 `--weight-checker-timeout 1800` 延长单个检查阶段及 HTTP 请求的超时，默认值为 300 秒。比较不一致、响应异常、rank 缺失、引擎变化或超时会使启动失败，并保持 rollout admission 暂停。超时后远端操作可能仍在执行，恢复流程需要先建立稳定的 serving 状态，再完整安装权重并恢复生成。
+
+复用已有 serving 和 debug-only 模式会明确记录 skipped。已有引擎可能持有与恢复后的 trainer 不同训练时刻的权重。新建 serving 时，训练与推理加载不同 checkpoint 会报告实际参数差异。
+
+开启 rollout offload 时，先恢复权重内存并完成比较，再恢复 KV 内存。如果 weights-only 唤醒意外恢复了生成，检查会再次暂停该引擎并报告调度状态变化。目标部署的集成测试需要覆盖对应后端的 sleep/wake 行为。
+
+检查对象、量化布局和 offload 支持范围遵循配套 vLLM 版本，具体参数范围和限制见 [vLLM Weight Checker 文档](https://docs.vllm.ai/en/latest/training/weight_checker/)。
+
 ## Debug vllm illegal memory access (IMA)
 
 在进行大规模 RL 时，不时会遇到 vLLM IMA 的问题，以下是我们的一些 debug 建议：
