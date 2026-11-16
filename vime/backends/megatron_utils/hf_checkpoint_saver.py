@@ -127,12 +127,14 @@ def save_hf_model_to_path(
     pending_write = _write_pending_chunk(writer, pending_write)
 
     # Copy source HF weights the spec does not build (e.g. visual.*, mtp.*)
-    # so the saved checkpoint is complete and reloadable.
+    # so the saved checkpoint is complete and reloadable.  Skip names another
+    # writer rank has already written to avoid duplicate tensors.
     _copy_passthrough_source_weights(
         source_hf_dir=args.hf_checkpoint,
         writer=writer,
         is_save_rank=is_save_rank,
         is_writer_rank=is_writer_rank,
+        already_written=_gather_written_weight_names(writer.state()),
     )
 
     _finalize_distributed_shards(path, writer.state())
@@ -343,17 +345,35 @@ def _is_hf_weight_file(path: Path) -> bool:
     return name in _HF_WEIGHT_FILE_NAMES or name.endswith(_HF_WEIGHT_FILE_SUFFIXES)
 
 
+def _gather_written_weight_names(local_state: dict[str, Any]) -> set[str]:
+    """Collect the tensor names written so far across all writer ranks.
+
+    In multi-node saves another node's writer may have written a
+    passthrough-prefixed weight, so only the union of names is a safe skip set.
+    """
+    import torch.distributed as dist
+
+    names = sorted(local_state.get("weight_map", {}))
+    if dist.is_available() and dist.is_initialized():
+        gathered = [None] * dist.get_world_size()
+        dist.all_gather_object(gathered, names)
+        return {name for rank_names in gathered for name in (rank_names or [])}
+    return set(names)
+
+
 def _copy_passthrough_source_weights(
     source_hf_dir: str,
     writer: "_SafetensorShardWriter",
     *,
     is_save_rank: bool,
     is_writer_rank: bool,
+    already_written: set[str],
 ) -> None:
     """Copy source HF weights the spec does not build, verbatim into extra shards.
 
     Uses the per-model-type _PASSTHROUGH_PREFIXES declaration to decide which
-    source keys to copy. Only global rank 0 (a writer rank) does the copy.
+    source keys to copy. Only global rank 0 (a writer rank) does the copy,
+    skipping names already written by any writer rank.
     """
     if not (is_save_rank and is_writer_rank):
         return
@@ -369,7 +389,6 @@ def _copy_passthrough_source_weights(
         return
 
     reader = SafetensorReader(source_hf_dir)
-    already_written = set(writer.weight_map)
 
     # 4 GiB: under HF's 5GB default shard size and bounds host RAM held in `pending`.
     max_shard_bytes = 4 * 1024 * 1024 * 1024
