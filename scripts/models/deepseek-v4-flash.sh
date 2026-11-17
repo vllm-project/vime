@@ -53,5 +53,6 @@ MODEL_ARGS=(
     --attention-dropout 0
     --hidden-dropout 0
     --bf16
+    --grad-reduce-in-bf16
     --enable-experimental
 )
