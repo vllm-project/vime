@@ -33,11 +33,32 @@ Validated on NVIDIA H20-3e:
   Triton MoE backend. A short rollout generated four tokens with logprobs.
 - With auxiliary capture enabled, rollout returned an (8, 43, 6) route tensor;
   all three hash layers matched the checkpoint's token-to-expert tables.
+- In the pinned CUDA 13.0 vLLM base image, Transformer Engine 2.18.0,
+  fast-hadamard-transform `f134af63d`, Apex `10417ac`, and FlashAttention
+  2.8.3 were rebuilt for its PyTorch 2.14 ABI and import successfully.
+  With these wheels, the four-layer native mapping and 88 V4 converter/replay
+  regressions pass. Full-width layers 2 and 3 again complete forward/backward
+  with 543/537 finite gradient tensors, respectively.
+
+The H20-local wheels are in `.deps/te-wheels/`, and their unpacked modules are
+in `.deps/te-runtime-clean/`, `.deps/hadamard-runtime/`, `.deps/apex-runtime/`,
+and `.deps/flash-attn-runtime/`. The base image is
+`vllm/vllm-openai@sha256:cb12c3016938a4ee98ed176ac833984089460689a0982cff4b5a60bb45b3cded`.
+For the local checks, use:
+
+```bash
+export PYTHONPATH=/home/ljj/vime-dsv4/.deps/flash-attn-runtime:/home/ljj/vime-dsv4/.deps/apex-runtime:/home/ljj/vime-dsv4/.deps/hadamard-runtime:/home/ljj/vime-dsv4/.deps/te-runtime-clean:/home/ljj/vime-dsv4/.test-deps:/home/ljj/vime-dsv4/.deps/Megatron-LM:/home/ljj/vime-dsv4
+export DSV4_CHECKPOINT=/home/ljj/models/DeepSeek-V4-Flash-Base
+```
+
+Other Python training packages are installed in `.deps/train-runtime/`. This
+base image is still missing parts of the full vime training image, so the
+above checks are layer and converter validation, not a GRPO run.
 
 Reproduce the targeted checks inside the pinned training and vLLM environments:
 
 ```bash
-export PYTHONPATH=/home/ljj/vime-dsv4/.test-deps:/home/ljj/vime-dsv4/.deps/Megatron-LM:/home/ljj/vime-dsv4
+export PYTHONPATH=/home/ljj/vime-dsv4/.deps/flash-attn-runtime:/home/ljj/vime-dsv4/.deps/apex-runtime:/home/ljj/vime-dsv4/.deps/hadamard-runtime:/home/ljj/vime-dsv4/.deps/te-runtime-clean:/home/ljj/vime-dsv4/.test-deps:/home/ljj/vime-dsv4/.deps/Megatron-LM:/home/ljj/vime-dsv4
 export DSV4_CHECKPOINT=/home/ljj/models/DeepSeek-V4-Flash-Base
 python -m pytest tests/test_deepseek_v4_weights.py tests/test_hf_to_megatron.py
 python -m pytest tests/test_deepseek_v4_native_mapping.py
@@ -54,7 +75,7 @@ The converter regression also runs on one H20 with the pinned base image:
 srun -p h20 --gres=gpu:1 --time=00:20:00 \
   --container-image=vllm/vllm-openai@sha256:cb12c3016938a4ee98ed176ac833984089460689a0982cff4b5a60bb45b3cded \
   --container-mounts=/home/ljj:/home/ljj --container-workdir=/home/ljj/vime-dsv4 \
-  bash -lc 'export PYTHONPATH=/home/ljj/vime-dsv4/.test-deps:/home/ljj/vime-dsv4/.deps/Megatron-LM:/home/ljj/vime-dsv4; export DSV4_CHECKPOINT=/home/ljj/models/DeepSeek-V4-Flash-Base; python3 -m pytest -q tests/test_deepseek_v4_weights.py tests/test_hf_to_megatron.py tests/test_deepseek_v4_native_mapping.py'
+  bash -lc 'export PYTHONPATH=/home/ljj/vime-dsv4/.deps/flash-attn-runtime:/home/ljj/vime-dsv4/.deps/apex-runtime:/home/ljj/vime-dsv4/.deps/hadamard-runtime:/home/ljj/vime-dsv4/.deps/te-runtime-clean:/home/ljj/vime-dsv4/.test-deps:/home/ljj/vime-dsv4/.deps/Megatron-LM:/home/ljj/vime-dsv4; export DSV4_CHECKPOINT=/home/ljj/models/DeepSeek-V4-Flash-Base; python3 -m pytest -q tests/test_deepseek_v4_weights.py tests/test_hf_to_megatron.py tests/test_deepseek_v4_native_mapping.py'
 ```
 
 These checks do not constitute full RL support. Roadmap gates still open are
