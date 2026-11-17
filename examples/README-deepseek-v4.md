@@ -39,6 +39,9 @@ Validated on NVIDIA H20-3e:
   With these wheels, the four-layer native mapping and 88 V4 converter/replay
   regressions pass. Full-width layers 2 and 3 again complete forward/backward
   with 543/537 finite gradient tensors, respectively.
+- FlashMLA was also built and imported on H20-06 against the same CUDA 13.0
+  image. Its build needs the CUDA 13 CCCL headers from the image and the
+  cuSPARSE/cuSOLVER development headers staged under `.deps/cuda-headers/`.
 
 The H20-local wheels are in `.deps/te-wheels/`, and their unpacked modules are
 in `.deps/te-runtime-clean/`, `.deps/hadamard-runtime/`, `.deps/apex-runtime/`,
@@ -54,6 +57,9 @@ export DSV4_CHECKPOINT=/home/ljj/models/DeepSeek-V4-Flash-Base
 Other Python training packages are installed in `.deps/train-runtime/`. This
 base image is still missing parts of the full vime training image, so the
 above checks are layer and converter validation, not a GRPO run.
+The DeepSeek-V4 recipe enables `--grad-reduce-in-bf16`; keeping BF16 gradients
+in FP32 needs an extra 66 GiB buffer for the 18.1B-parameter pipeline stage and
+does not fit on a 140 GiB H20 during actor initialization.
 
 Reproduce the targeted checks inside the pinned training and vLLM environments:
 
