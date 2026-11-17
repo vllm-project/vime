@@ -38,7 +38,7 @@ def get_chunk_gated_delta_rule(backend: str):
 
     if backend == "fla_npu":
         try:
-            from .fla_npu_gdn import flash_gated_delta_rule
+            from .gdn.fla_npu import flash_gated_delta_rule
         except ImportError as exc:
             raise ImportError(
                 "Qwen GDN backend 'fla_npu' requires the fla_npu package (flash-linear-attention-npu)."

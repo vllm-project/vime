@@ -132,6 +132,8 @@ MISC_ARGS=(
 
    --use-flash-attn
    --no-gradient-accumulation-fusion
+   --qwen-gdn-backend fla_npu
+   --qwen-gdn-implementation fused_tp
 )
 
 ray start --head --num-gpus 0 --resources '{"NPU": 16}' --node-ip-address 127.0.0.1 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265

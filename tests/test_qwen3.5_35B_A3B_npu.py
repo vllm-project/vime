@@ -36,6 +36,8 @@ def prepare(checkpoint_root, torch_dist_ref_load=True):
         f"{shlex.quote(sys.executable)} -m torch.distributed.run --nproc-per-node 8 "
         "tools/convert_hf_to_torch_dist.py "
         "${MODEL_ARGS[@]} "
+        "--qwen-gdn-backend fla_npu "
+        "--qwen-gdn-implementation fused_tp "
         f"--hf-checkpoint {model_dir} --save {checkpoint_dir}"
     )
 
@@ -136,6 +138,8 @@ def execute(torch_dist_checkpoint=None):
         "--loss-mask-type qwen3_5 "
         "--use-flash-attn "
         "--no-gradient-accumulation-fusion "
+        "--qwen-gdn-backend fla_npu "
+        "--qwen-gdn-implementation fused_tp "
     )
 
     runtime_args = (

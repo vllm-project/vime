@@ -176,7 +176,13 @@ def convert_qwen3_5_to_hf(args, name, param):
             "linear_attn.A_log",
             "linear_attn.conv1d.weight",
             "linear_attn.dt_bias",
+            # fused in_proj (fused_tp GDN): split back to 4 HF tensors below
             "linear_attn.in_proj.weight",
+            # separate in_proj (replicated GDN): pass through unchanged, HF stores them as-is
+            "linear_attn.in_proj_a.weight",
+            "linear_attn.in_proj_b.weight",
+            "linear_attn.in_proj_qkv.weight",
+            "linear_attn.in_proj_z.weight",
             "linear_attn.norm.weight",
             "linear_attn.out_proj.weight",
             # gated attn (full attention layers)
@@ -190,14 +196,14 @@ def convert_qwen3_5_to_hf(args, name, param):
             rest = rest[len("self_attention.") :]
             # Merged in_proj.weight: split back into 4 HF tensors (qkv|z|b|a).
             if rest == "linear_attn.in_proj.weight":
-                split_sizes = getattr(param, "_in_proj_split_sizes_full", None)
-                if split_sizes is None:
+                sections = getattr(param, "partition_sections", None)
+                if sections is None or len(sections) != 6:
                     raise ValueError(
-                        "Merged in_proj.weight is missing _in_proj_split_sizes_full; "
+                        "Merged in_proj.weight is missing its six partition sections; "
                         "cannot split back into in_proj_qkv/in_proj_z/in_proj_b/in_proj_a."
                     )
-                # split_sizes = [key_dim, key_dim, value_dim, value_dim, num_v_heads, num_v_heads]
-                q, k, v, z, b, a = torch.split(param, split_sizes, dim=0)
+                # sections = (key_dim, key_dim, value_dim, value_dim, num_v_heads, num_v_heads)
+                q, k, v, z, b, a = torch.split(param, sections, dim=0)
                 qkv = torch.cat((q, k, v), dim=0).contiguous()
                 return [
                     (f"{prefix}.linear_attn.in_proj_qkv.weight", qkv),

@@ -119,6 +119,13 @@ class FakeFusedRMSNormGated(nn.Module):
         return x
 
 
+def make_fla_npu_stub() -> types.ModuleType:
+    fla_npu_mod = types.ModuleType("vime_plugins.models.gdn.fla_npu")
+    fla_npu_mod.QwenStyleRMSNormGated = FakeFusedRMSNormGated
+    fla_npu_mod.ShortConvolution = FakeShortConvolution
+    return fla_npu_mod
+
+
 def make_config() -> SimpleNamespace:
     return SimpleNamespace(
         hidden_size=32,
@@ -144,12 +151,19 @@ def load_module(module_name: str):
 @pytest.mark.parametrize(
     ("module_name", "class_name", "args", "expected_backend"),
     [
-        ("vime_plugins.models.qwen3_5", "Qwen3_5GatedDeltaNet", None, "fla_npu"),
+        ("vime_plugins.models.qwen3_5", "Qwen3_5GatedDeltaNet", None, "fla"),
         (
             "vime_plugins.models.qwen3_5",
             "Qwen3_5GatedDeltaNet",
             SimpleNamespace(qwen_gdn_backend="flashqla"),
             "flashqla",
+        ),
+        ("vime_plugins.models.gdn.qwen3_5_tp", "Qwen3_5GatedDeltaNetTP", None, "fla"),
+        (
+            "vime_plugins.models.gdn.qwen3_5_tp",
+            "Qwen3_5GatedDeltaNetTP",
+            SimpleNamespace(qwen_gdn_backend="fla_npu"),
+            "fla_npu",
         ),
         ("vime_plugins.models.qwen3_next", "Qwen3NextGatedDeltaNet", None, "fla"),
         (
@@ -172,8 +186,7 @@ def test_linear_attention_forwards_cu_seqlens_to_chunk_kernel(
     monkeypatch.setattr(module.accelerator, "current_device", lambda: "cpu")
     monkeypatch.setattr(module, "ShortConvolution", FakeShortConvolution, raising=False)
     monkeypatch.setattr(module, "FusedRMSNormGated", FakeFusedRMSNormGated, raising=False)
-    monkeypatch.setattr(module, "_FlaNpuShortConvolution", FakeShortConvolution, raising=False)
-    monkeypatch.setattr(module, "_FlaNpuRMSNormGated", FakeFusedRMSNormGated, raising=False)
+    monkeypatch.setitem(sys.modules, "vime_plugins.models.gdn.fla_npu", make_fla_npu_stub())
 
     chunk_calls = []
     selected_backends = []

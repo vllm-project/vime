@@ -121,11 +121,20 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 "--qwen-gdn-backend",
                 type=str,
                 choices=["fla", "fla_npu", "flashqla"],
-                default="fla_npu",
+                default="fla",
                 help="GDN implementation backend for Qwen linear-attention layers. "
-                "'fla_npu' uses the NPU-native AscendC kernels (default on NPU); "
-                "'fla' uses the flash-linear-attention package; "
+                "'fla' uses the flash-linear-attention package (default); "
+                "'fla_npu' uses the NPU-native AscendC kernels (Ascend only); "
                 "'flashqla' requires SM90+ (NVIDIA only).",
+            )
+            parser.add_argument(
+                "--qwen-gdn-implementation",
+                choices=["replicated", "fused_tp"],
+                default="replicated",
+                help="GDN module structure for Qwen linear-attention layers: the replicated "
+                "HF-style wrapper (default) or the fused TP-sharded module whose in_proj/conv1d "
+                "sub-matrices are each sharded by head (opt-in, typically with "
+                "--qwen-gdn-backend fla_npu on Ascend).",
             )
             parser.add_argument(
                 "--train-env-vars",
