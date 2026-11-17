@@ -69,7 +69,7 @@ def _build_packed_ipc_update_info(
     )
     assert chunk is not None
     _, ipc_args = reduce_tensor(chunk.packed_tensor)
-    gpu_uuid = str(torch.cuda.get_device_properties(torch.cuda.current_device()).uuid)
+    gpu_uuid = accelerator.device_uuid()
     return (
         {
             "names": chunk.names,
@@ -171,7 +171,7 @@ class UpdateWeightFromTensor:
         self.rollout_engines = list(rollout_engines[:colocate_engine_nums])
         distributed_rollout_engines = list(rollout_engines[colocate_engine_nums:])
         for trainer in self._native_trainers:
-            if trainer.init_info_cls.backend == "nccl":
+            if trainer.init_info_cls.backend == accelerator.weight_transfer_backend("distributed"):
                 disconnect_rollout_engines_from_distributed(trainer, distributed_rollout_engines)
             else:
                 trainer.shutdown()
@@ -196,11 +196,11 @@ class UpdateWeightFromTensor:
         if not self._expert_transfer_plan or self.args.dspark_enabled:
             if self.rollout_engines:
                 from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
-                from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 
                 client = VimeRayWeightSyncClient(self.rollout_engines, lambda: self.weight_version)
                 trainer = WeightTransferTrainerFactory.trainer_init(
-                    IPCTrainerInitInfo(
+                    accelerator.weight_transfer_init_info(
+                        "ipc",
                         rank=dist.get_rank(),
                         packed=True,
                         packed_buffer_size_bytes=_native_ipc_buffer_size(

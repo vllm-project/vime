@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 from ray.actor import ActorHandle
 
+from vime.utils import accelerator
 from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.weight_sync import should_flush_cache
 
@@ -139,7 +140,6 @@ def connect_rollout_engines_from_distributed(
     engine_gpu_counts: Sequence[int],
 ):
     from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
-    from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
 
     rendezvous = [None]
     if dist.get_rank() == 0:
@@ -149,7 +149,8 @@ def connect_rollout_engines_from_distributed(
     dist.broadcast_object_list(rendezvous, src=0, group=get_gloo_group())
     master_address, master_port = rendezvous[0]
     return WeightTransferTrainerFactory.trainer_init(
-        NCCLTrainerInitInfo(
+        accelerator.weight_transfer_init_info(
+            "distributed",
             master_address=master_address,
             master_port=master_port,
             world_size=sum(engine_gpu_counts) + 1,

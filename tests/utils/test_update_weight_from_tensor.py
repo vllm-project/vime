@@ -359,12 +359,8 @@ def test_build_packed_ipc_update_info_uses_vllm_wire_format(update_module, monke
     )
     monkeypatch.setitem(sys.modules, packed_module.__name__, packed_module)
     monkeypatch.setattr(torch.multiprocessing.reductions, "reduce_tensor", lambda tensor: (None, ("ipc",)))
-    monkeypatch.setattr(update_module.torch.cuda, "current_device", lambda: 0)
-    monkeypatch.setattr(
-        update_module.torch.cuda,
-        "get_device_properties",
-        lambda device: types.SimpleNamespace(uuid="GPU-0"),
-    )
+    # The handshake asks the accelerator to name the local device.
+    monkeypatch.setattr(update_module.accelerator, "device_uuid", lambda: "GPU-0")
 
     update_info, weight_ref = update_module._build_packed_ipc_update_info(
         [("a", torch.zeros(2, dtype=torch.float16)), ("b", torch.zeros(2))]
