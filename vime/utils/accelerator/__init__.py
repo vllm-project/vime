@@ -313,6 +313,58 @@ def _backend() -> Accelerator:
     return get_accelerator()
 
 
+def _describing_backend() -> type[Accelerator]:
+    """The backend class whose description applies, without requiring a device.
+
+    A process that only builds scheduling requests needs the description of
+    the accelerator the job runs on, not a working local device, and may
+    legitimately have none of its own. Resolution order is the already
+    selected backend, the explicitly requested one, whatever this host can
+    actually offer, and finally the neutral defaults on :class:`Accelerator`,
+    which are what the GPU path already assumes.
+
+    Side effects by branch, because they are not uniform:
+
+    * An already selected backend, and the neutral default: none.
+    * An explicit request: the registered class is returned as a class. A
+      registration whose factory is not itself a class is called once to
+      learn the type, so such a factory must stay cheap.
+    * Falling through to auto-detection: this runs the ordinary selection,
+      which probes for devices, may import a vendor runtime, and installs
+      the process-wide backend. A caller that must not reach a runtime names
+      the backend it wants through VIME_ACCELERATOR.
+    """
+    if _ACCELERATOR is not None:
+        return type(_ACCELERATOR)
+    _register_builtin_backends()
+    requested = _requested_name()
+    if requested is not None:
+        entry = _REGISTRY.get(requested)
+        if entry is None:
+            registered = ", ".join(sorted(_REGISTRY))
+            raise ValueError(f"Unknown accelerator {requested!r}; registered backends: {registered}")
+        factory = entry.factory
+        return factory if isinstance(factory, type) else type(factory())
+    selected = initialize_accelerator()
+    if selected is not None:
+        return type(selected)
+    return Accelerator
+
+
+def ray_device_key() -> str:
+    """The Ray resource name for the accelerator this job runs on."""
+    return _describing_backend().ray_device_key
+
+
+def ray_uses_native_gpu_resource() -> bool:
+    """Whether this job's accelerator is Ray's own GPU resource.
+
+    Derived rather than declared: a second attribute could disagree with the
+    name, and nothing would catch it.
+    """
+    return _describing_backend().ray_device_key == "GPU"
+
+
 def device_type() -> str:
     return _backend().device_type
 
@@ -397,6 +449,29 @@ def memory_reserved(device_arg: int | str | torch.device | None = None) -> int:
 
 def get_device_properties(device_arg: int | str | torch.device | None = None) -> Any:
     return _backend().get_device_properties(device_arg)
+
+
+def device_uuid() -> str:
+    return _backend().device_uuid()
+
+
+def device_env_qualname() -> str | None:
+    return _describing_backend().device_env_qualname()
+
+
+def megatron_lifecycle_qualname() -> str | None:
+    return _describing_backend().megatron_lifecycle_qualname()
+
+
+def weight_transfer_backend(transport: str) -> str:
+    return _describing_backend().weight_transfer_backend(transport)
+
+
+def weight_transfer_init_info(transport: str, **kwargs: Any) -> Any:
+    """Build the trainer init info for ``transport`` on this job's backend."""
+    from vime.utils.misc import load_function
+
+    return load_function(_describing_backend().weight_transfer_init_info_qualname(transport))(**kwargs)
 
 
 def memory_module() -> Any:
