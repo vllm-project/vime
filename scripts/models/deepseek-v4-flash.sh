@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 
 # DeepSeek-V4-Flash-Base; MTP is intentionally disabled for the first RL path.
+DSV4_NUM_LAYERS=${DSV4_NUM_LAYERS:-43}
+DSV4_COMPRESS_RATIOS=${DSV4_COMPRESS_RATIOS:-'([0,0,4]+[128,4]*20)'}
 MODEL_ARGS=(
     --spec vime_plugins.models.deepseek_v4 get_dsv4_spec
     --model-name deepseek_v4
     --experimental-attention-variant dsv4_hybrid
-    --num-layers 43
+    --num-layers "$DSV4_NUM_LAYERS"
     --hidden-size 4096
     --num-attention-heads 64
     --num-query-groups 1
@@ -30,7 +32,7 @@ MODEL_ARGS=(
     --norm-epsilon 1e-6
     --multi-latent-attention
     --csa-window-size 128
-    --csa-compress-ratios '([0,0,4]+[128,4]*20)'
+    --csa-compress-ratios "$DSV4_COMPRESS_RATIOS"
     --csa-compress-rotary-base 160000
     --dsa-indexer-n-heads 64
     --dsa-indexer-head-dim 128
