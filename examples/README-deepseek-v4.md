@@ -42,6 +42,10 @@ Validated on NVIDIA H20-3e:
 - FlashMLA was also built and imported on H20-06 against the same CUDA 13.0
   image. Its build needs the CUDA 13 CCCL headers from the image and the
   cuSPARSE/cuSOLVER development headers staged under `.deps/cuda-headers/`.
+- A four-layer single-node actor smoke completed on H20-04 with PP=2 and the
+  explicit `Et*3|t*1L` layout. The first three hash-MoE layers stayed with the
+  embedding stage, the reduced HF view loaded successfully, and the run used
+  no cross-node placement or vLLM rollout.
 
 The H20-local wheels are in `.deps/te-wheels/`, and their unpacked modules are
 in `.deps/te-runtime-clean/`, `.deps/hadamard-runtime/`, `.deps/apex-runtime/`,
@@ -60,6 +64,9 @@ above checks are layer and converter validation, not a GRPO run.
 The DeepSeek-V4 recipe enables `--grad-reduce-in-bf16`; keeping BF16 gradients
 in FP32 needs an extra 66 GiB buffer for the 18.1B-parameter pipeline stage and
 does not fit on a 140 GiB H20 during actor initialization.
+For a reduced-layer initialization smoke, set `DSV4_NUM_LAYERS=4` and
+`DSV4_COMPRESS_RATIOS='([0,0,4,128])'`, use a reduced HF config with the first
+four layers, and select `Et*3|t*1L` when using PP=2.
 
 Reproduce the targeted checks inside the pinned training and vLLM environments:
 
