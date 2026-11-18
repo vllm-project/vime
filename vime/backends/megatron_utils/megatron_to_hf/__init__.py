@@ -9,11 +9,27 @@ from .nemotron_h import convert_nemotron_h_to_hf
 from .nemotron_h_vl import convert_nemotron_h_vl_to_hf
 from .processors import quantize_params, remove_padding
 from .qwen2 import convert_qwen2_to_hf
-from .qwen3_5 import convert_qwen3_5_to_hf
+from .qwen3_5 import convert_qwen3_5_to_hf, group_qwen3_5_checkpoint_keys, merge_gdn_checkpoint_parts
 from .qwen3_next import convert_qwen3_next_to_hf
 from .qwen3_omni import convert_qwen3_omni_to_hf
 from .qwen3_vl import convert_qwen3vl_to_hf
 from .qwen3moe import convert_qwen3moe_to_hf
+
+
+def group_checkpoint_keys(model_name, keys):
+    """Return multi-key dependencies; all other keys use the tool's existing grouping."""
+    model_name = model_name.lower().replace("_", "").replace("-", "")
+    if "qwen35" in model_name:
+        return list(group_qwen3_5_checkpoint_keys(keys))
+    return []
+
+
+def prepare_checkpoint_params(model_name, named_params):
+    """Prepare offline checkpoint tensors for the existing per-parameter HF converters."""
+    model_name = model_name.lower().replace("_", "").replace("-", "")
+    if "qwen35" in model_name:
+        return merge_gdn_checkpoint_parts(named_params)
+    return named_params
 
 
 # TODO optimize code details

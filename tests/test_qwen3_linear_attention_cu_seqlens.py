@@ -121,6 +121,7 @@ class FakeShortConvolution(nn.Module):
 class FakeFusedRMSNormGated(nn.Module):
     def __init__(self, *args, **kwargs):
         super().__init__()
+        self.weight = nn.Parameter(torch.ones(args[0]))
 
     def forward(self, x, z):
         return x
@@ -152,6 +153,35 @@ def load_module(module_name: str):
     sys.modules.pop("vime_plugins.models.hf_attention", None)
     sys.modules.pop(module_name, None)
     return importlib.import_module(module_name)
+
+
+@pytest.mark.parametrize("backend", ["fla", "fla_npu"])
+@pytest.mark.parametrize("tp_size,sequence_parallel", [(1, False), (2, True), (2, False)])
+def test_fused_tp_shared_norm_uses_megatron_sum(monkeypatch, backend, tp_size, sequence_parallel):
+    module = load_module("vime_plugins.models.gdn.qwen3_5_tp")
+    monkeypatch.setattr(module.parallel_state, "get_tensor_model_parallel_world_size", lambda: tp_size)
+    monkeypatch.setattr(module.accelerator, "current_device", lambda: "cpu")
+    monkeypatch.setattr(module, "ShortConvolution", FakeShortConvolution)
+    monkeypatch.setattr(module, "FusedRMSNormGated", FakeFusedRMSNormGated)
+    monkeypatch.setattr(module, "get_chunk_gated_delta_rule", lambda backend: None)
+    monkeypatch.setitem(sys.modules, "vime_plugins.models.gdn.fla_npu", make_fla_npu_stub())
+    kwargs = dict(
+        config=make_config(),
+        layer_idx=0,
+        args=SimpleNamespace(qwen_gdn_backend=backend),
+        megatron_config=SimpleNamespace(sequence_parallel=sequence_parallel),
+    )
+    if tp_size > 1 and not sequence_parallel:
+        with pytest.raises(ValueError, match="requires --sequence-parallel"):
+            module.Qwen3_5GatedDeltaNetTP(**kwargs)
+        return
+    layer = module.Qwen3_5GatedDeltaNetTP(**kwargs)
+    assert layer.norm.weight.sequence_parallel == sequence_parallel
+    assert not getattr(layer.norm.weight, "average_gradients_across_tp_domain", False)
+    assert layer.norm.weight.shape == (make_config().linear_value_head_dim,)
+    # The wrapper gathers the input sequence before these projections.
+    assert layer.in_proj.sequence_parallel is False
+    assert layer.out_proj.sequence_parallel is False
 
 
 @pytest.mark.unit

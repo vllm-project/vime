@@ -2,6 +2,9 @@
 
 import ast
 import importlib.util
+import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,6 +44,141 @@ def converter_modules():
         "vime/backends/megatron_utils/hf_to_megatron/common.py", {"_tensor_parallel_shard"}, torch=torch
     )
     return namespace["qwen3_5_hf_tensor"], exported["convert_qwen3_5_to_hf"], shard["_tensor_parallel_shard"]
+
+
+def checkpoint_conversion_functions():
+    namespace = load_functions(
+        "vime/backends/megatron_utils/megatron_to_hf/qwen3_5.py",
+        {"group_qwen3_5_checkpoint_keys", "merge_gdn_checkpoint_parts"},
+        torch=torch,
+    )
+    return load_functions(
+        "vime/backends/megatron_utils/megatron_to_hf/__init__.py",
+        {"group_checkpoint_keys", "prepare_checkpoint_params"},
+        **namespace,
+    )
+
+
+@pytest.mark.parametrize("model_name", ["qwen3_5_moe", "Qwen3_5MoeConfig", "qwen3-5"])
+def test_offline_qwen_checkpoint_groups_preserve_section_order(model_name):
+    functions = checkpoint_conversion_functions()
+    base = "decoder.layers.self_attention.linear_attn.conv1d.weight"
+    # Deliberately use a different input order from the persisted q/k/v layout.
+    params = {base + "." + part: torch.full((i + 1, 1, 4), i) for i, part in enumerate(("v", "q", "k"))}
+    groups = functions["group_checkpoint_keys"](model_name, params)
+    assert groups == [(base + ".q", base + ".k", base + ".v")]
+    [(name, tensor)] = functions["prepare_checkpoint_params"](model_name, params.items())
+    assert name == base
+    assert tensor.partition_sections == (2, 3, 1)
+    assert torch.equal(tensor, torch.cat([params[key] for key in groups[0]]))
+
+
+@pytest.mark.parametrize("model_name", ["qwen3", "DeepseekV3Config", "glm4_moe_lite"])
+def test_offline_other_models_keep_independent_keys_and_original_tensors(model_name):
+    functions = checkpoint_conversion_functions()
+    keys = [
+        "decoder.layers.0.self_attention.linear_attn.conv1d.weight.q",
+        "decoder.layers.0.self_attention.linear_q_down_proj.weight",
+        "decoder.layers.0.self_attention.linear_kv_down_proj.weight",
+    ]
+    assert functions["group_checkpoint_keys"](model_name, keys) == []
+    named_params = iter([(key, torch.ones(1)) for key in keys])
+    assert functions["prepare_checkpoint_params"](model_name, named_params) is named_params
+
+
+@pytest.mark.parametrize("parallel", [False, True])
+def test_fused_tp_checkpoint_offline_export(tmp_path, parallel):
+    import safetensors.torch
+    import torch.distributed.checkpoint as dist_cp
+
+    checkpoint_core = pytest.importorskip("megatron.core.dist_checkpointing.core")
+    prefix = "decoder.layers.self_attention.linear_attn."
+    checkpoint = {}
+    expected = {}
+    for weight, parts, sizes, tail in (
+        ("in_proj.weight", ("q", "k", "v", "z", "b", "a"), (4, 4, 12, 12, 4, 4), (8,)),
+        ("conv1d.weight", ("q", "k", "v"), (4, 4, 12), (1, 4)),
+    ):
+        segments = []
+        for idx, (part, size) in enumerate(zip(parts, sizes, strict=True)):
+            tensor = torch.arange(2 * size * torch.tensor(tail).prod()).reshape(2, size, *tail).float() + idx * 100
+            checkpoint[prefix + weight + "." + part] = tensor
+            segments.append(tensor)
+        for layer in range(2):
+            hf_prefix = f"model.language_model.layers.{layer}.linear_attn."
+            if weight == "conv1d.weight":
+                expected[hf_prefix + weight] = torch.cat([part[layer] for part in segments])
+            else:
+                expected[hf_prefix + "in_proj_qkv.weight"] = torch.cat([part[layer] for part in segments[:3]])
+                for suffix, part in zip(("z", "b", "a"), segments[3:], strict=True):
+                    expected[hf_prefix + f"in_proj_{suffix}.weight"] = part[layer]
+
+    # An old replicated weight and an untrained source-only visual weight.
+    checkpoint["decoder.layers.2.self_attention.linear_attn.in_proj_qkv.weight"] = torch.ones(20, 8)
+    expected["model.language_model.layers.2.linear_attn.in_proj_qkv.weight"] = torch.ones(20, 8)
+    ckpt_dir = tmp_path / "checkpoint"
+    dist_cp.save(checkpoint, checkpoint_id=ckpt_dir)
+    checkpoint_core.save_config(checkpoint_core.CheckpointingConfig("torch_dist"), str(ckpt_dir))
+    args = SimpleNamespace(num_layers=2, hidden_size=8, num_attention_heads=4, num_query_groups=2, vocab_size=8)
+    torch.save({"args": args}, ckpt_dir / "common.pt")
+    output = tmp_path / "hf"
+    tool = "convert_torch_dist_to_hf_parallel.py" if parallel else "convert_torch_dist_to_hf.py"
+    command = [
+        sys.executable,
+        str(ROOT / "tools" / tool),
+        "--input-dir",
+        str(ckpt_dir),
+        "--output-dir",
+        str(output),
+        "--model-name",
+        "qwen3_5_moe",
+    ]
+    if parallel:
+        command += ["--load-max-workers", "2", "--save-max-workers", "2"]
+    else:
+        source = tmp_path / "source"
+        source.mkdir()
+        visual = torch.arange(4, dtype=torch.int8)
+        safetensors.torch.save_file(
+            {
+                "model.visual.weight": visual,
+                "model.language_model.layers.2.linear_attn.in_proj_qkv.weight": torch.zeros(20, 8),
+            },
+            source / "model.safetensors",
+        )
+        expected["model.visual.weight"] = visual
+        command += ["--origin-hf-dir", str(source), "--add-missing-from-origin-hf"]
+    result = subprocess.run(
+        command,
+        cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": str(ROOT), "OMP_NUM_THREADS": "1"},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    index = json.loads((output / "model.safetensors.index.json").read_text())
+    actual = {}
+    for filename in set(index["weight_map"].values()):
+        actual.update(safetensors.torch.load_file(output / filename))
+    assert actual.keys() == expected.keys() == index["weight_map"].keys()
+    for name, tensor in expected.items():
+        assert torch.equal(actual[name], tensor), name
+
+
+@pytest.mark.parametrize("invalid", ["missing", "mixed"])
+def test_fused_tp_checkpoint_rejects_incomplete_or_mixed_sections(invalid):
+    functions = checkpoint_conversion_functions()
+    base = "module.module.decoder.layers.0.self_attention.linear_attn.conv1d.weight"
+    params = {base + "." + part: torch.ones(4, 1, 4) for part in ("q", "k", "v")}
+    if invalid == "missing":
+        del params[base + ".v"]
+    else:
+        params[base] = torch.ones(12, 1, 4)
+    with pytest.raises(ValueError, match="GDN checkpoint"):
+        functions["group_checkpoint_keys"]("qwen3_5_moe", params)
+    with pytest.raises(ValueError, match="GDN checkpoint"):
+        list(functions["prepare_checkpoint_params"]("qwen3_5_moe", params.items()))
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4])

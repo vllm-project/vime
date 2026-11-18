@@ -3,6 +3,39 @@ import re
 import torch
 
 
+def group_qwen3_5_checkpoint_keys(keys):
+    """Return the fused_tp weights that need multiple checkpoint keys."""
+    keys = dict.fromkeys(keys)
+    groups = {}
+    for name in keys:
+        base, _, part = name.rpartition(".")
+        for suffix, parts in (
+            ("self_attention.linear_attn.in_proj.weight", ("q", "k", "v", "z", "b", "a")),
+            ("self_attention.linear_attn.conv1d.weight", ("q", "k", "v")),
+        ):
+            if base.endswith("." + suffix) and part in parts:
+                groups[base] = tuple(f"{base}.{section}" for section in parts)
+    for base, group in groups.items():
+        missing = [key for key in group if key not in keys]
+        if missing:
+            raise ValueError(f"Incomplete GDN checkpoint weight {base}: missing {missing}")
+        if base in keys:
+            raise ValueError(f"GDN checkpoint contains both fused and split weights: {base}")
+        yield group
+
+
+def merge_gdn_checkpoint_parts(named_params):
+    """Restore fused_tp weights and section sizes after offline layer/TP reconstruction."""
+    params = dict(named_params)
+    for keys in group_qwen3_5_checkpoint_keys(params):
+        base = keys[0].rsplit(".", 1)[0]
+        parts = [params.pop(key) for key in keys]
+        merged = torch.cat(parts, dim=0)
+        merged.partition_sections = tuple(part.shape[0] for part in parts)
+        yield base, merged
+    yield from params.items()
+
+
 def _convert_mtp_layer(args, name, param, layer_idx):
     """Convert MTP layer parameters from Megatron to HuggingFace format."""
     if "enorm.weight" in name:

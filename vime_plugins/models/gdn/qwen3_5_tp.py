@@ -151,6 +151,8 @@ class Qwen3_5GatedDeltaNetTP(nn.Module):
 
         # --- TP-sharding (tensor parallel) ---
         self.tp_size = parallel_state.get_tensor_model_parallel_world_size()
+        if self.tp_size > 1 and not getattr(megatron_config, "sequence_parallel", False):
+            raise ValueError("Qwen fused_tp GDN requires --sequence-parallel when tensor parallel size > 1")
         self.num_v_heads_local_tp = divide(self.num_v_heads, self.tp_size)
         self.num_k_heads_local_tp = divide(self.num_k_heads, self.tp_size)
         self.key_dim_local_tp = self.head_k_dim * self.num_k_heads_local_tp
@@ -235,6 +237,8 @@ class Qwen3_5GatedDeltaNetTP(nn.Module):
             device=accelerator.current_device(),
             dtype=config.dtype if config.dtype is not None else torch.get_default_dtype(),
         )
+        # Each TP rank sees different heads; Megatron must SUM their shared norm gradients.
+        self.norm.weight.sequence_parallel = getattr(megatron_config, "sequence_parallel", False)
 
         # --- Output projection (RowParallelLinear) ---
         self.out_proj = RowParallelLinear(

@@ -13,7 +13,7 @@ import torch.distributed.checkpoint as dist_cp
 from transformers import AutoConfig
 from typing_extensions import override
 
-from vime.backends.megatron_utils.megatron_to_hf import convert_to_hf, remove_padding
+from vime.backends.megatron_utils.megatron_to_hf import convert_to_hf, prepare_checkpoint_params, remove_padding
 
 
 class UnpicklerWrapper(pickle.Unpickler):
@@ -111,7 +111,7 @@ def save_tensors(args, model_name, state_dict, output_dir, chunk_size, vocab_siz
     total_size = 0
     modeltensors = [{}]
     converted_names = set()
-    for name, param in get_named_params(args, state_dict):
+    for name, param in prepare_checkpoint_params(model_name, get_named_params(args, state_dict)):
         if vocab_size:
             param = remove_padding(name, param, vocab_size)
         converted_named_tensors = convert_to_hf(args, model_name, name, param)
@@ -221,7 +221,9 @@ if __name__ == "__main__":
     state_dict = {}
     print(f"loading model from {args.input_dir}")
     t = time.time()
-    megatron_args = torch.load(os.path.join(args.input_dir, "common.pt"), weights_only=False)["args"]
+    from megatron.core.dist_checkpointing import load_common_state_dict
+
+    megatron_args = load_common_state_dict(args.input_dir)["args"]
     dist_cp.state_dict_loader._load_state_dict(
         state_dict,
         storage_reader=WrappedStorageReader(args.input_dir),
