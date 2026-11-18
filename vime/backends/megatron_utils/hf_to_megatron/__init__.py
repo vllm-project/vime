@@ -33,6 +33,20 @@ _LOADERS = {
     "qwen3_vl": qwen3_vl_hf_tensor,
 }
 
+# Source HF weight key prefixes that the model's Megatron spec does NOT build,
+# and which must therefore be copied verbatim from the source checkpoint into
+# the saved checkpoint. Matched with str.startswith. Mirrors Megatron-Bridge's
+# per-bridge _HF_PASSTHROUGH_PREFIXES.
+_PASSTHROUGH_PREFIXES: dict[str, tuple[str, ...]] = {
+    "qwen3_5": ("model.visual.", "mtp."),
+    "qwen3_5_moe": ("model.visual.", "mtp."),
+}
+
+
+def _get_passthrough_prefixes(config) -> tuple[str, ...]:
+    """Return the source HF weight key prefixes the spec does not build."""
+    return _PASSTHROUGH_PREFIXES.get(config.model_type, ())
+
 
 def supports_hf_weight_loading(path: str | Path) -> bool:
     config = AutoConfig.from_pretrained(path, trust_remote_code=True)

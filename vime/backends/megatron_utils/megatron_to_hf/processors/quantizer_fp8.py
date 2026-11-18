@@ -94,6 +94,8 @@ def quantize_params_fp8(args, megatron_name, converted_named_params, quantizatio
         "self_attention.wq_b.weight",
         "self_attention.wk.weight",
         # linear attention
+        "self_attention.linear_attn.in_proj.weight",
+        # separate in_proj (replicated GDN)
         "self_attention.linear_attn.in_proj_qkv.weight",
         "self_attention.linear_attn.in_proj_z.weight",
         "self_attention.linear_attn.out_proj.weight",

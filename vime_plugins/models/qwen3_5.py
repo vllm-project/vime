@@ -174,7 +174,22 @@ class Attention(HuggingfaceAttention):
         self.hf_config = _get_text_config(self.hf_config)
         self.hf_config._attn_implementation = "flash_attention_2"
 
-        self.linear_attn = Qwen3_5GatedDeltaNet(self.hf_config, self.hf_layer_idx, args=args)
+        if getattr(args, "qwen_gdn_implementation", "replicated") == "fused_tp":
+            # Opt-in fused TP-sharded GDN (--qwen-gdn-implementation fused_tp,
+            # typically together with --qwen-gdn-backend fla_npu on Ascend):
+            # a merged in_proj/conv1d whose sub-matrices are TP-sharded by
+            # head. Imported lazily so other setups never need this path's
+            # optional dependencies.
+            from .gdn.qwen3_5_tp import Qwen3_5GatedDeltaNetTP
+
+            self.linear_attn = Qwen3_5GatedDeltaNetTP(
+                self.hf_config, self.hf_layer_idx, args=args, megatron_config=config
+            )
+            # CPL backward already all-reduces grad_input, so every rank holds the
+            # same grad_input and the sequence-parallel split can be skipped.
+            self._linear_attn_tp_sharded = False
+        else:
+            self.linear_attn = Qwen3_5GatedDeltaNet(self.hf_config, self.hf_layer_idx, args=args)
 
         # Use a simple RMSNorm
         try:

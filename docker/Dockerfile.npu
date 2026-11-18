@@ -189,10 +189,6 @@ COPY --from=vllm-router-wheel /wheels/ /tmp/router-wheels/
 RUN pip install --no-deps --force-reinstall /tmp/router-wheels/*.whl && \
     rm -rf /tmp/router-wheels
 
-# Qwen3.5 GDN layers import fla.ShortConvolution at init. Do not use the npu
-# extra: it pins a different torch / torch_npu than this image.
-RUN pip install --no-deps einops 'fla-core==0.5.2' 'flash-linear-attention==0.5.2'
-
 # Build Python and both allocator libraries together from the patched source.
 RUN git clone --depth 1 --branch 2026.6.0 \
       https://github.com/sgl-project/sgl-kernel-npu.git /root/sgl-kernel-npu && \

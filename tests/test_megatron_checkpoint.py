@@ -50,6 +50,7 @@ def test_optimizer_step_returns_scalar_norm_and_skips_invalid_gradients(norm_typ
         "get_args": lambda: args,
         "torch": torch,
         "math": math,
+        "clear_memory": lambda *args, **kwargs: None,
         "get_forward_backward_func": lambda: lambda **kwargs: [],
         "_wrap_forward_step_with_microbatch_pbar": lambda forward, progress: forward,
         "mpu": types.SimpleNamespace(

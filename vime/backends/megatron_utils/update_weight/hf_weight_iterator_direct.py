@@ -65,6 +65,12 @@ class HfWeightIteratorDirect:
     ):
         hf_named_tensors = []
         for info, param in zip(param_infos, megatron_full_params, strict=False):
+            # Re-apply attrs from ParamInfo onto fresh tensors returned by
+            # all_gather_params_async (e.g. partition_sections, needed
+            # by convert_to_hf to split merged in_proj.weight back to 4 keys).
+            for key, value in info.attrs.items():
+                if value is not None and not hasattr(param, key):
+                    setattr(param, key, value)
             hf_named_tensors.extend(
                 convert_to_hf(
                     self.args,
@@ -209,10 +215,32 @@ def _get_megatron_local_param_infos(args: Namespace, model: Sequence[torch.nn.Mo
 
     param_infos = {}
     rank = dist.get_rank()
+    # Pre-scan model modules for fused-weight partition sections (declared as
+    # module-level `_partition_sections` maps, e.g. on the fused TP GDN module).
+    # DDP wrapping can drop them from the parameter objects that
+    # named_params_and_buffers yields, so build a name→sections map here to
+    # recover them for ParamInfo.attrs.
+    partition_sections_by_name: dict[str, tuple[int, ...]] = {}
+    for _vp_stage, model_module in enumerate(model):
+        for module_name, module in model_module.named_modules():
+            module_sections = getattr(module, "_partition_sections", None)
+            if module_sections:
+                for weight_suffix, sections in module_sections.items():
+                    partition_sections_by_name[f"{module_name}.{weight_suffix}"] = sections
     for name, param in named_params_and_buffers(args, model):
         # DSpark draft params are sent through the draft weight source.
         if ".draft_model." in name:
             continue
+        # Restore partition_sections from the pre-scan if the parameter lost
+        # the attribute during DDP wrapping. Fused projections (e.g. the
+        # merged GDN in_proj/conv1d) carry their per-sub-matrix sections so
+        # all_gather_params_async can gather each sub-matrix independently
+        # (each is TP-sharded by head) and convert_to_hf can split them back.
+        if getattr(param, "partition_sections", None) is None:
+            for key, sections in partition_sections_by_name.items():
+                if name.endswith(key):
+                    param.partition_sections = sections
+                    break
         param_infos[name] = ParamInfo(
             name=name,
             dtype=param.dtype,
@@ -221,6 +249,7 @@ def _get_megatron_local_param_infos(args: Namespace, model: Sequence[torch.nn.Mo
                 "tensor_model_parallel": getattr(param, "tensor_model_parallel", False),
                 "partition_dim": getattr(param, "partition_dim", -1),
                 "partition_stride": getattr(param, "partition_stride", 1),
+                "partition_sections": getattr(param, "partition_sections", None),
                 "parallel_mode": getattr(param, "parallel_mode", None),
             },
             size=param.numel() * param.element_size(),
