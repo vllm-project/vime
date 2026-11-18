@@ -172,7 +172,7 @@ def execute(torch_dist_checkpoint=None, gdn_args=""):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--qwen-gdn-implementation", choices=["replicated", "fused_tp"], default="replicated")
+    parser.add_argument("--qwen-gdn-implementation", choices=["replicated", "fused_tp"], default="fused_tp")
     gdn_args = ""
     if parser.parse_args().qwen_gdn_implementation == "fused_tp":
         gdn_args = "--qwen-gdn-implementation fused_tp --qwen-gdn-backend fla_npu "

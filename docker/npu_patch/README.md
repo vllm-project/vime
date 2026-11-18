@@ -11,7 +11,7 @@ This guide provides instructions for installing Vime with NPU support, including
 | vLLM-Ascend | `bf074627d11b65dfb41720355ba2c08725c0e0d1` | [GitHub](https://github.com/vllm-project/vllm-ascend) |
 | vLLM Router | `1fbcde7443d75b36befb61bc081f64c2a1f13a4b` + the three shared router patches below | [GitHub](https://github.com/vllm-project/router) |
 | Sunabako | `0.1.2` + `docker/patch/latest/sunabako-arm64.patch` | [PyPI](https://pypi.org/project/sunabako/0.1.2/) |
-| FLA (serving, included in base image) | `flash-linear-attention-npu-a3==26.9.1` | [Ascend image recipe](https://github.com/vllm-project/vllm-ascend/blob/bf074627d11b65dfb41720355ba2c08725c0e0d1/Dockerfile.a3) |
+| FLA NPU (training and serving, included in base image) | `flash-linear-attention-npu-a3==26.9.1` | [Ascend image recipe](https://github.com/vllm-project/vllm-ascend/blob/bf074627d11b65dfb41720355ba2c08725c0e0d1/Dockerfile.a3) |
 | Megatron-LM | `ae76c60e6c35d913867d6dd7bad0f30b128b54e7` | [GitHub](https://github.com/NVIDIA/Megatron-LM) |
 | MegatronAdaptor | `7a64c5ac28172317cdaeb68e80e4e02bc8f52233` (`core_r0.20.0`) | [GitCode](https://gitcode.com/Ascend/MegatronAdaptor) |
 | NVIDIA Resiliency Extension (NVRX) | `0.7.0`, source `ebf0352a82ca5699148ea10bec2b8eedd121e382`, built without CUPTI | [GitHub](https://github.com/NVIDIA/nvidia-resiliency-ext) |
@@ -20,7 +20,7 @@ This guide provides instructions for installing Vime with NPU support, including
 
 ## Preparing the Running Environment
 
-Run the following steps inside the base image listed above, with the Ascend devices and host driver mounted. The base image provides Python, CANN, PyTorch, torch-npu, vLLM, vLLM-Ascend and serving FLA.
+Run the following steps inside the base image listed above, with the Ascend devices and host driver mounted. The base image provides Python, CANN, PyTorch, torch-npu, vLLM, vLLM-Ascend and FLA NPU.
 
 Use a checkout of this Vime revision at `/root/vime`. Start with unpatched dependency source trees; do not repeat these steps in an already-patched Vime image.
 
@@ -145,17 +145,16 @@ git -C "${SUNABAKO_BUILD_ROOT}/src" apply "${VIME_INSTALL_ROOT}/vime/docker/patc
 python3 -m pip install --no-deps "${SUNABAKO_BUILD_ROOT}"/wheels/*.whl
 ```
 
-Then install Vime and the training FLA packages:
+Then install Vime:
 
 ```bash
 pip install -r "${VIME_INSTALL_ROOT}/vime/requirements.txt" 'opentelemetry-exporter-otlp==1.45.1'
 pip install --no-deps --no-build-isolation -e "${VIME_INSTALL_ROOT}/vime"
-pip install --no-deps einops 'fla-core==0.5.2' 'flash-linear-attention==0.5.2'
 ```
 
-Training FLA 0.5.2 does not replace the serving FLA package required by vLLM-Ascend;
-keep the latter as provided by the base image. Do not install the training package's
-`npu` extra, which pins a different torch / torch-npu pair.
+Qwen3.5/3.6 NPU training uses the base image's `fla_npu` package with
+`--qwen-gdn-implementation fused_tp --qwen-gdn-backend fla_npu`.
+Use the same options for HF-to-torch_dist conversion.
 
 ### 5. torch_memory_saver
 
