@@ -767,20 +767,15 @@ def _compute_server_args(
         if node_rank != 0:
             kwargs["headless"] = True
 
-    if worker_type == "prefill":
-        assert (
-            disaggregation_bootstrap_port is not None
-        ), "disaggregation_bootstrap_port must be set for prefill worker"
+    if worker_type in ("prefill", "decode"):
+        if worker_type == "prefill":
+            assert (
+                disaggregation_bootstrap_port is not None
+            ), "disaggregation_bootstrap_port must be set for prefill worker"
         if not args.rollout_external:
-            kwargs["kv_transfer_config"] = {
-                "kv_connector": "MooncakeConnector",
-                "kv_role": "kv_producer",
-            }
-    elif worker_type == "decode" and not args.rollout_external:
-        kwargs["kv_transfer_config"] = {
-            "kv_connector": "MooncakeConnector",
-            "kv_role": "kv_consumer",
-        }
+            kwargs["kv_transfer_config"], disaggregation_bootstrap_port = current_platform().vllm.pd_config(
+                worker_type, disaggregation_bootstrap_port, kwargs
+            )
 
     if ec_transfer_override is not None and worker_type in ("encoder", "regular", "prefill"):
         kwargs["ec_transfer_config"] = {

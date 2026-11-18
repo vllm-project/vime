@@ -459,3 +459,27 @@ index b210c51358a316595bfa33749f0dfbb9c777f48f..f87bf5c37396f66b2549e3df99bef48f
      def check_health(self) -> None:
          import subprocess
  
+diff --git a/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/base_worker.py b/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/base_worker.py
+--- a/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/base_worker.py
++++ b/vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake/base_worker.py
+@@ -445,10 +445,17 @@ class MooncakeBaseConnectorWorker:
+         """Return local block IDs whose KV load failed."""
+         raise NotImplementedError
+ 
+     def get_kv_connector_stats(self) -> KVConnectorStats | None:
+-        """Return and reset transfer statistics for the current interval."""
+-        if self.xfer_stats.is_empty():
+-            return None
++        """Return and reset transfer statistics for the current interval.
++
++        Always return a stats object, even when no transfer completed in this
++        step. Returning None makes ``KVConnectorOutput.is_empty()`` true, and
++        vLLM then collapses the output to ``EMPTY_MODEL_RUNNER_OUTPUT``. The
++        scheduler skips ``connector.update_connector_output()`` on those
++        no-forward steps, scheduler-side Mooncake ACKs stay unconsumed, the
++        engine never reports idle, and the colocated weight update blocks in
++        ``/sleep`` between steps.
++        """
+         return self.xfer_stats.clone_and_reset()
+ 
+     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
