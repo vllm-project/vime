@@ -44,6 +44,7 @@ def save_hf_model_to_path(
     import torch.distributed as dist
     from transformers import AutoConfig
 
+    from .hf_to_megatron import _get_passthrough_prefixes
     from .update_weight.common import named_params_and_buffers
     from .update_weight.hf_weight_iterator_direct import HfWeightIteratorDirect
 
@@ -62,17 +63,27 @@ def save_hf_model_to_path(
     _raise_if_rank_zero_failed("prepare raw HuggingFace save directory", setup_error)
 
     metadata_error = None
+    passthrough_prefixes: tuple[str, ...] = ()
     payload: list[Any] = [None]
     if model_name is not None:
-        payload = [(model_name, quantization_config)]
+        if is_save_rank:
+            try:
+                hf_config = AutoConfig.from_pretrained(args.hf_checkpoint, trust_remote_code=True)
+                passthrough_prefixes = _get_passthrough_prefixes(hf_config)
+            except Exception as e:
+                metadata_error = repr(e)
+        _raise_if_rank_zero_failed("load HuggingFace conversion metadata", metadata_error)
+        payload = [(model_name, quantization_config, passthrough_prefixes)]
     else:
         if is_save_rank:
             try:
                 hf_config = AutoConfig.from_pretrained(args.hf_checkpoint, trust_remote_code=True)
+                passthrough_prefixes = _get_passthrough_prefixes(hf_config)
                 payload = [
                     (
                         type(hf_config).__name__.lower() if args.model_name is None else args.model_name,
                         getattr(hf_config, "quantization_config", None),
+                        passthrough_prefixes,
                     )
                 ]
             except Exception as e:
@@ -81,7 +92,7 @@ def save_hf_model_to_path(
 
     if dist.is_available() and dist.is_initialized():
         dist.broadcast_object_list(payload, src=0)
-    model_name, quantization_config = payload[0]
+    model_name, quantization_config, passthrough_prefixes = payload[0]
 
     hf_weight_iterator = HfWeightIteratorDirect(
         args=args,
@@ -129,13 +140,15 @@ def save_hf_model_to_path(
     # Copy source HF weights the spec does not build (e.g. visual.*, mtp.*)
     # so the saved checkpoint is complete and reloadable.  Skip names another
     # writer rank has already written to avoid duplicate tensors.
-    _copy_passthrough_source_weights(
-        source_hf_dir=args.hf_checkpoint,
-        writer=writer,
-        is_save_rank=is_save_rank,
-        is_writer_rank=is_writer_rank,
-        already_written=_gather_written_weight_names(writer.state()),
-    )
+    if passthrough_prefixes:
+        _copy_passthrough_source_weights(
+            source_hf_dir=args.hf_checkpoint,
+            writer=writer,
+            is_save_rank=is_save_rank,
+            is_writer_rank=is_writer_rank,
+            passthrough_prefixes=passthrough_prefixes,
+            already_written=_gather_written_weight_names(writer.state()),
+        )
 
     _finalize_distributed_shards(path, writer.state())
 
@@ -367,26 +380,19 @@ def _copy_passthrough_source_weights(
     *,
     is_save_rank: bool,
     is_writer_rank: bool,
+    passthrough_prefixes: tuple[str, ...],
     already_written: set[str],
 ) -> None:
     """Copy source HF weights the spec does not build, verbatim into extra shards.
 
-    Uses the per-model-type _PASSTHROUGH_PREFIXES declaration to decide which
-    source keys to copy. Only global rank 0 (a writer rank) does the copy,
-    skipping names already written by any writer rank.
+    `passthrough_prefixes` selects the source keys to copy. Only global rank 0
+    (a writer rank) does the copy, skipping names already written by any
+    writer rank.
     """
     if not (is_save_rank and is_writer_rank):
         return
 
-    from transformers import AutoConfig
-
-    from .hf_to_megatron import _get_passthrough_prefixes
     from .hf_to_megatron.common import SafetensorReader
-
-    hf_config = AutoConfig.from_pretrained(source_hf_dir, trust_remote_code=True)
-    passthrough_prefixes = _get_passthrough_prefixes(hf_config)
-    if not passthrough_prefixes:
-        return
 
     reader = SafetensorReader(source_hf_dir)
 
