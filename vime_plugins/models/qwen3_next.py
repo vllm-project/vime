@@ -32,6 +32,8 @@ class Qwen3NextGatedDeltaNet(nn.Module):
     def __init__(self, config, layer_idx: int, args=None):
         super().__init__()
         self.gdn_backend = getattr(args, "qwen_gdn_backend", "fla")
+        if self.gdn_backend == "fla_npu":
+            raise ValueError("Qwen3-Next GDN does not support the fla_npu backend.")
         self.chunk_gated_delta_rule = get_chunk_gated_delta_rule(self.gdn_backend)
         self.hidden_size = config.hidden_size
         self.num_v_heads = config.linear_num_value_heads

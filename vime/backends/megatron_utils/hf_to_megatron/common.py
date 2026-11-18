@@ -31,7 +31,7 @@ class SafetensorReader:
         return name in self.weight_map
 
     @functools.lru_cache(maxsize=1)  # noqa: B019 - cache belongs to this reader instance
-    def get_tensor(self, name: str) -> torch.Tensor:
+    def get_tensor(self, name: str, *, dequantize: bool = True) -> torch.Tensor:
         try:
             filename = self.weight_map[name]
         except KeyError as exc:
@@ -40,7 +40,7 @@ class SafetensorReader:
             self._files[filename] = safe_open(self.path / filename, framework="pt", device="cpu")
         tensor = self._files[filename].get_tensor(name)
         scale_name = f"{name}_scale_inv"
-        if tensor.element_size() == 1 and scale_name in self:
+        if dequantize and tensor.element_size() == 1 and scale_name in self:
             scale_file = self.weight_map[scale_name]
             if scale_file not in self._files:
                 self._files[scale_file] = safe_open(self.path / scale_file, framework="pt", device="cpu")

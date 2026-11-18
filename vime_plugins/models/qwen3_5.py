@@ -38,6 +38,8 @@ class Qwen3_5GatedDeltaNet(nn.Module):
     def __init__(self, config, layer_idx: int, args=None):
         super().__init__()
         self.gdn_backend = getattr(args, "qwen_gdn_backend", "fla")
+        if self.gdn_backend == "fla_npu":
+            raise ValueError("fla_npu requires --qwen-gdn-implementation fused_tp.")
         self.chunk_gated_delta_rule = get_chunk_gated_delta_rule(self.gdn_backend)
         self.hidden_size = config.hidden_size
         self.num_v_heads = config.linear_num_value_heads
@@ -176,7 +178,14 @@ class Attention(HuggingfaceAttention):
         self.hf_config = _get_text_config(self.hf_config)
         self.hf_config._attn_implementation = "flash_attention_2"
 
-        self.linear_attn = Qwen3_5GatedDeltaNet(self.hf_config, self.hf_layer_idx, args=args)
+        if getattr(args, "qwen_gdn_implementation", "replicated") == "fused_tp":
+            from .gdn.qwen3_5_tp import Qwen3_5GatedDeltaNetTP
+
+            self.linear_attn = Qwen3_5GatedDeltaNetTP(
+                self.hf_config, self.hf_layer_idx, args=args, megatron_config=config
+            )
+        else:
+            self.linear_attn = Qwen3_5GatedDeltaNet(self.hf_config, self.hf_layer_idx, args=args)
 
         # Use a simple RMSNorm
         try:

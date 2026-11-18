@@ -72,7 +72,7 @@ def convert_qwen3_5_to_hf(args, name, param):
         layer_idx, rest = match.groups()
         prefix = f"model.language_model.layers.{layer_idx}"
 
-        if rest == "self_attention.in_proj.weight":
+        if rest in ("self_attention.in_proj.weight", "self_attention.linear_attn.in_proj.weight"):
             sections = getattr(param, "partition_sections", None)
             if sections is None or len(sections) != 6:
                 raise ValueError("Native Qwen GDN projection is missing its six partition sections")

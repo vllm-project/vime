@@ -46,7 +46,6 @@ def qwen3_5_hf_tensor(name: str, reader: SafetensorReader, hf_config) -> torch.T
 
     mtp_match = re.fullmatch(r"mtp\.layers\.(\d+)\.(.+)", name)
     if mtp_match:
-        is_mtp = True
         mtp_layer, rest = mtp_match.groups()
         direct_mtp = {
             "eh_proj.weight": "mtp.fc.weight",
@@ -60,17 +59,13 @@ def qwen3_5_hf_tensor(name: str, reader: SafetensorReader, hf_config) -> torch.T
         name = f"decoder.layers.{mtp_layer}." + rest
         hf_layer_prefix = f"mtp.layers.{mtp_layer}"
     else:
-        is_mtp = False
         layer_match = re.fullmatch(r"decoder\.layers\.(\d+)\.(.+)", name)
         if not layer_match:
             raise KeyError(f"Unsupported Qwen3.5 Megatron parameter {name!r}")
         layer_idx, rest = layer_match.groups()
         hf_layer_prefix = f"model.language_model.layers.{layer_idx}"
 
-    if rest.startswith("self_attention.linear_attn."):
-        suffix = rest.removeprefix("self_attention.")
-        return reader.get_tensor(f"{hf_layer_prefix}.{suffix}")
-    if rest == "self_attention.in_proj.weight":
+    if rest in ("self_attention.in_proj.weight", "self_attention.linear_attn.in_proj.weight"):
         return torch.cat(
             [
                 reader.get_tensor(f"{hf_layer_prefix}.linear_attn.{name}.weight")
@@ -78,6 +73,9 @@ def qwen3_5_hf_tensor(name: str, reader: SafetensorReader, hf_config) -> torch.T
             ],
             dim=0,
         )
+    if rest.startswith("self_attention.linear_attn."):
+        suffix = rest.removeprefix("self_attention.")
+        return reader.get_tensor(f"{hf_layer_prefix}.{suffix}")
     if rest == "self_attention.in_proj.layer_norm_weight":
         return reader.get_tensor(f"{hf_layer_prefix}.input_layernorm.weight")
     native_mapping = {
@@ -120,20 +118,24 @@ def qwen3_5_hf_tensor(name: str, reader: SafetensorReader, hf_config) -> torch.T
     expert_match = re.fullmatch(r"mlp\.experts\.linear_fc([12])(?:\.weight)?(\d+)?", rest)
     if expert_match:
         projection, expert_idx = expert_match.groups()
-        if is_mtp and expert_idx is not None:
-            prefix = f"{hf_layer_prefix}.mlp.experts.{expert_idx}"
+        # A per-expert Megatron weight can come from either an individual or a stacked HF tensor.
+        if expert_idx is not None:
+            ind_prefix = f"{hf_layer_prefix}.mlp.experts.{expert_idx}"
             if projection == "1":
-                return torch.cat(
-                    (
-                        reader.get_tensor(f"{prefix}.gate_proj.weight"),
-                        reader.get_tensor(f"{prefix}.up_proj.weight"),
-                    ),
-                    dim=0,
-                )
-            return reader.get_tensor(f"{prefix}.down_proj.weight")
+                if f"{ind_prefix}.gate_proj.weight" in reader:
+                    gate = reader.get_tensor(f"{ind_prefix}.gate_proj.weight")
+                    up = reader.get_tensor(f"{ind_prefix}.up_proj.weight")
+                    return torch.cat((gate, up), dim=0)
+                # Fused layout: experts.gate_up_proj is [num_experts, 2*hidden, ...]
+                fused = reader.get_tensor(f"{hf_layer_prefix}.mlp.experts.gate_up_proj")
+                return fused[int(expert_idx)].contiguous()
+            if f"{ind_prefix}.down_proj.weight" in reader:
+                return reader.get_tensor(f"{ind_prefix}.down_proj.weight")
+            fused = reader.get_tensor(f"{hf_layer_prefix}.mlp.experts.down_proj")
+            return fused[int(expert_idx)].contiguous()
         suffix = "gate_up_proj" if projection == "1" else "down_proj"
         tensor = reader.get_tensor(f"{hf_layer_prefix}.mlp.experts.{suffix}")
-        return tensor if expert_idx is None else tensor[int(expert_idx)].contiguous()
+        return tensor
 
     shared_mapping = {
         "mlp.shared_experts.linear_fc1.weight": ("gate_proj.weight", "up_proj.weight"),

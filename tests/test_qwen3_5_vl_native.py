@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 import torch
-from safetensors.torch import save_file
+
+try:
+    from safetensors.torch import save_file
+except ModuleNotFoundError:  # optional CPU-only dependency, same spirit as megatron guard below
+    save_file = None
 
 # Keep this CPU test independent of the Megatron runtime package. The tested
 # mapping and packed-sequence helpers themselves only depend on torch.
@@ -172,34 +176,52 @@ def test_raw_loader_uses_hf_vision_name_directly():
 
 
 @pytest.mark.unit
-def test_raw_loader_uses_individual_mtp_expert_weights():
+@pytest.mark.parametrize("stacked", [False, True])
+def test_raw_loader_reads_mtp_expert_weights(stacked):
     gate = torch.randn(4, 3)
     up = torch.randn(4, 3)
     down = torch.randn(3, 4)
     tensors = {
-        "mtp.layers.0.mlp.experts.7.gate_proj.weight": gate,
-        "mtp.layers.0.mlp.experts.7.up_proj.weight": up,
-        "mtp.layers.0.mlp.experts.7.down_proj.weight": down,
+        "mtp.layers.0.mlp.experts.1.gate_proj.weight": gate,
+        "mtp.layers.0.mlp.experts.1.up_proj.weight": up,
+        "mtp.layers.0.mlp.experts.1.down_proj.weight": down,
     }
-    reader = types.SimpleNamespace(get_tensor=tensors.__getitem__)
+
+    if stacked:
+        tensors = {
+            "mtp.layers.0.mlp.experts.gate_up_proj": torch.stack(
+                [torch.zeros_like(torch.cat((gate, up))), torch.cat((gate, up))]
+            ),
+            "mtp.layers.0.mlp.experts.down_proj": torch.stack([torch.zeros_like(down), down]),
+        }
+
+    # Expert loading probes the reader with `in`, which SimpleNamespace cannot support.
+    class Reader:
+        def __contains__(self, name):
+            return name in tensors
+
+        def get_tensor(self, name):
+            return tensors[name]
+
+    reader = Reader()
     config = types.SimpleNamespace(
         text_config=types.SimpleNamespace(tie_word_embeddings=False),
         tie_word_embeddings=False,
     )
 
     fc1 = qwen3_5_hf_tensor(
-        "module.module.language_model.mtp.layers.0.transformer_layer.mlp.experts.linear_fc1.weight7",
+        "module.module.language_model.mtp.layers.0.transformer_layer.mlp.experts.linear_fc1.weight1",
         reader,
         config,
     )
     fc2 = qwen3_5_hf_tensor(
-        "module.module.language_model.mtp.layers.0.transformer_layer.mlp.experts.linear_fc2.weight7",
+        "module.module.language_model.mtp.layers.0.transformer_layer.mlp.experts.linear_fc2.weight1",
         reader,
         config,
     )
 
     assert torch.equal(fc1, torch.cat((gate, up)))
-    assert fc2 is down
+    torch.testing.assert_close(fc2, down)
 
 
 @pytest.mark.unit
@@ -227,6 +249,89 @@ def test_raw_loader_shards_swiglu_and_grouped_moe_fc2():
     assert torch.equal(fc2_shard, fc2[:, 3:])
 
 
+@pytest.mark.unit
+def test_replicated_gdn_in_proj_params_pass_through():
+    """Regression: the four replicated GDN in_proj entries must pass through
+    Megatron->HF conversion (they previously raised ValueError("Unknown
+    parameter name") when dropped from the passthrough list)."""
+    args = types.SimpleNamespace(
+        kv_channels=None,
+        hidden_size=8,
+        num_attention_heads=4,
+        num_query_groups=2,
+    )
+
+    for suffix in ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"):
+        name = "module.module.language_model.decoder.layers.3.self_attention." f"linear_attn.{suffix}.weight"
+        tensor = torch.arange(12 * 8, dtype=torch.float32).reshape(12, 8)
+
+        converted = dict(convert_qwen3_5_to_hf(args, name, tensor))
+
+        expected_key = f"model.language_model.layers.3.linear_attn.{suffix}.weight"
+        assert list(converted) == [expected_key]
+        # Passthrough must yield the exact same tensor object, not a copy.
+        assert converted[expected_key] is tensor
+
+
+@pytest.mark.unit
+def test_fused_tp_gdn_in_proj_splits_into_four_hf_tensors():
+    """Regression guard for the merged (fused_tp) GDN path: in_proj.weight with
+    six partition sections splits back into the four HF tensors
+    in_proj_qkv (q|k|v concatenated), in_proj_z, in_proj_b, in_proj_a."""
+    args = types.SimpleNamespace(
+        kv_channels=None,
+        hidden_size=8,
+        num_attention_heads=4,
+        num_query_groups=2,
+    )
+    tensor = torch.arange(12 * 8, dtype=torch.float32).reshape(12, 8)
+    tensor.partition_sections = (2, 2, 2, 2, 2, 2)
+
+    converted = dict(
+        convert_qwen3_5_to_hf(
+            args,
+            "module.module.language_model.decoder.layers.3.self_attention.linear_attn.in_proj.weight",
+            tensor,
+        )
+    )
+
+    prefix = "model.language_model.layers.3.linear_attn"
+    assert sorted(converted) == [
+        f"{prefix}.in_proj_a.weight",
+        f"{prefix}.in_proj_b.weight",
+        f"{prefix}.in_proj_qkv.weight",
+        f"{prefix}.in_proj_z.weight",
+    ]
+    assert torch.equal(
+        converted[f"{prefix}.in_proj_qkv.weight"],
+        torch.cat((tensor[0:2], tensor[2:4], tensor[4:6]), dim=0),
+    )
+    assert torch.equal(converted[f"{prefix}.in_proj_z.weight"], tensor[6:8])
+    assert torch.equal(converted[f"{prefix}.in_proj_b.weight"], tensor[8:10])
+    assert torch.equal(converted[f"{prefix}.in_proj_a.weight"], tensor[10:12])
+
+
+@pytest.mark.unit
+def test_fused_tp_gdn_in_proj_without_sections_raises():
+    """Merged (fused_tp) in_proj.weight lacking a six-entry partition_sections
+    attribute cannot be split and must raise instead of silently mis-shaping."""
+    args = types.SimpleNamespace(
+        kv_channels=None,
+        hidden_size=8,
+        num_attention_heads=4,
+        num_query_groups=2,
+    )
+    tensor = torch.arange(12 * 8, dtype=torch.float32).reshape(12, 8)
+
+    with pytest.raises(ValueError, match="six partition sections"):
+        convert_qwen3_5_to_hf(
+            args,
+            "module.module.language_model.decoder.layers.3.self_attention.linear_attn.in_proj.weight",
+            tensor,
+        )
+
+
+@pytest.mark.skipif(save_file is None, reason="safetensors is not installed")
 @pytest.mark.unit
 def test_safetensor_reader_caches_only_the_last_tensor(tmp_path):
     save_file({"first": torch.ones(2), "second": torch.zeros(2)}, tmp_path / "model.safetensors")

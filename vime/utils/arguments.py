@@ -120,15 +120,18 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--qwen-gdn-backend",
                 type=str,
-                choices=["fla", "flashqla"],
+                choices=["fla", "fla_npu", "flashqla"],
                 default="fla",
-                help="GDN implementation backend for Qwen linear-attention layers.",
+                help="GDN implementation backend for Qwen linear-attention layers. "
+                "'fla' uses the flash-linear-attention package (default); "
+                "'fla_npu' uses the NPU-native AscendC kernels (Ascend only); "
+                "'flashqla' requires SM90+ (NVIDIA only).",
             )
             parser.add_argument(
                 "--qwen-gdn-implementation",
-                choices=["replicated", "megatron"],
+                choices=["replicated", "megatron", "fused_tp"],
                 default="replicated",
-                help="Use the existing replicated wrapper or Megatron's TP/CP-sharded Qwen3.5 GDN.",
+                help="Use the replicated wrapper, Megatron's TP/CP-sharded GDN, or the fused TP wrapper.",
             )
             parser.add_argument(
                 "--train-env-vars",
@@ -175,6 +178,18 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Release Megatron training actors during rollout and recreate them before each train step. "
                     "Requires disk weight sync and --save for Megatron reload."
+                ),
+            )
+            parser.add_argument(
+                "--clear-memory-per-step",
+                action="store_true",
+                default=False,
+                help=(
+                    "Run synchronize + gc.collect + empty_cache after every train step. "
+                    "Needed only for large-model, long-context runs whose train actor cannot use "
+                    "expandable_segments (torch_memory_saver offload keeps the classic caching "
+                    "allocator, which fragments over long runs until OOM). Small models and short "
+                    "contexts do not need it and should keep it off to avoid the per-step cost."
                 ),
             )
             parser.add_argument(

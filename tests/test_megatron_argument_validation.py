@@ -13,7 +13,7 @@ NUM_GPUS = 0
 
 
 @pytest.mark.parametrize("legacy_parser", [False, True])
-def test_checkpoint_conversion_accepts_legacy_model_flags(legacy_parser):
+def test_checkpoint_conversion_accepts_legacy_model_flags(legacy_parser, monkeypatch):
     path = Path(__file__).resolve().parents[1] / "tools/convert_hf_to_torch_dist.py"
     function = next(
         node
@@ -33,6 +33,13 @@ def test_checkpoint_conversion_accepts_legacy_model_flags(legacy_parser):
     args = parser.parse_args(["--hf-checkpoint", "model", *flags])
     assert args.use_gated_attention and args.post_self_attn_layernorm and args.post_mlp_layernorm
     assert args.hf_checkpoint == "model"
+    train_parser = load_vime_arguments_module(monkeypatch).get_vime_extra_args_provider()(argparse.ArgumentParser())
+    for cli, required in ((parser, ["--hf-checkpoint", "model"]), (train_parser, ["--rollout-batch-size", "1"])):
+        defaults = cli.parse_args(required)
+        assert (defaults.qwen_gdn_implementation, defaults.qwen_gdn_backend) == ("replicated", "fla")
+        for impl, backend in (("megatron", "fla"), ("fused_tp", "fla_npu")):
+            opts = cli.parse_args([*required, "--qwen-gdn-implementation", impl, "--qwen-gdn-backend", backend])
+            assert (opts.qwen_gdn_implementation, opts.qwen_gdn_backend) == (impl, backend)
 
 
 def test_parallel_check_replays_the_same_rollout_for_all_gradient_comparisons(monkeypatch):

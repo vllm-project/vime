@@ -18,7 +18,8 @@ NUM_GPUS = 0
 
 @pytest.mark.parametrize("norm_type", ["float", "scalar_tensor", "vector_tensor"])
 @pytest.mark.parametrize("finite", [False, True])
-def test_optimizer_step_returns_scalar_norm_and_skips_invalid_gradients(norm_type, finite):
+@pytest.mark.parametrize("clear_memory_per_step", [False, True])
+def test_optimizer_step_returns_scalar_norm_and_skips_invalid_gradients(norm_type, finite, clear_memory_per_step):
     path = Path(__file__).resolve().parents[1] / "vime/backends/megatron_utils/model.py"
     function = next(
         node
@@ -31,13 +32,14 @@ def test_optimizer_step_returns_scalar_norm_and_skips_invalid_gradients(norm_typ
         custom_megatron_before_train_step_hook_path=None,
         check_for_nan_in_loss_and_grad=False,
         ci_test=False,
+        clear_memory_per_step=clear_memory_per_step,
         enable_mtp_training=False,
         seq_length=64,
         micro_batch_size=1,
         decoder_seq_length=None,
         calculate_per_token_loss=False,
     )
-    updates, samples = [], []
+    updates, samples, cache_clears = [], [], []
 
     def step():
         updates.append(True)
@@ -50,6 +52,7 @@ def test_optimizer_step_returns_scalar_norm_and_skips_invalid_gradients(norm_typ
         "get_args": lambda: args,
         "torch": torch,
         "math": math,
+        "clear_memory": lambda: cache_clears.append(True),
         "get_forward_backward_func": lambda: lambda **kwargs: [],
         "_wrap_forward_step_with_microbatch_pbar": lambda forward, progress: forward,
         "mpu": types.SimpleNamespace(
@@ -75,6 +78,7 @@ def test_optimizer_step_returns_scalar_norm_and_skips_invalid_gradients(norm_typ
         1,
         16,
     )
+    assert len(cache_clears) == int(clear_memory_per_step)
     assert losses == {"loss": 1.0} and isinstance(grad_norm, float)
     assert grad_norm == value if finite else math.isnan(grad_norm)
     assert updates == ([True] if finite else [])
