@@ -167,6 +167,84 @@ def patch_generate_state(monkeypatch):
     return mod
 
 
+@pytest.mark.parametrize(
+    ("fault", "message"),
+    [
+        (None, None),
+        ("wrong_token", "output token IDs"),
+        ("missing_score", "one logprob per output token"),
+        ("wrong_score_token", "logprob token ID mismatch"),
+        ("clamped_score", "invalid or clamped logprob"),
+        ("abort", "did not complete"),
+    ],
+)
+def test_generate_replays_trace_and_checks_output(patch_generate_state, monkeypatch, fault, message):
+    prompt_ids = [10, 20, 30]
+    trace_ids = list(range(65, 85))
+    sample = Sample(
+        index=0,
+        prompt="abc",
+        metadata={"trace_replay": {"prompt_token_ids": prompt_ids, "decode_token_ids": trace_ids}},
+    )
+    response = _generate_response(trace_ids.copy())
+    choice = response["choices"][0]
+    choice["finish_reason"] = "length"
+    rows = choice["logprobs"]["content"]
+    for token_id, row in zip(trace_ids, rows, strict=True):
+        row["token_id"] = token_id
+    if fault == "wrong_token":
+        choice["token_ids"][-1] = 99
+    elif fault == "missing_score":
+        rows.pop()
+    elif fault == "wrong_score_token":
+        rows[-1]["token_id"] = 99
+    elif fault == "clamped_score":
+        rows[-1]["logprob"] = -9999.0
+    elif fault == "abort":
+        choice["finish_reason"] = "abort"
+    post_mock = AsyncMock(return_value=response)
+    monkeypatch.setattr(mod, "post", post_mock)
+    sampling_params = _default_sampling_params(max_new_tokens=32)
+
+    if message is None:
+        result = asyncio.run(mod.generate(_rollout_args(), sample, sampling_params))
+        assert result.tokens == prompt_ids + trace_ids
+        assert result.response_length == len(trace_ids)
+        assert result.rollout_log_probs == [row["logprob"] for row in rows]
+        assert result.status == Sample.Status.TRUNCATED
+    else:
+        with pytest.raises(ValueError, match=message):
+            asyncio.run(mod.generate(_rollout_args(), sample, sampling_params))
+        assert sample.tokens == [] and sample.response_length == 0
+        assert sample.rollout_log_probs is None
+        assert sample.status == Sample.Status.PENDING
+
+    url, payload = post_mock.await_args.args
+    assert url.endswith("/inference/v1/generate")
+    assert payload["token_ids"] == prompt_ids
+    assert payload["sampling_params"]["trace_decode_token_ids"] == trace_ids
+    assert payload["sampling_params"]["max_tokens"] == len(trace_ids)
+    assert payload["sampling_params"]["logprobs"] == 1
+    assert sampling_params["max_new_tokens"] == 32
+
+
+def test_generate_rejects_trace_over_budget_before_post(patch_generate_state, monkeypatch):
+    sample = Sample(prompt="abc", metadata={"trace_replay": {"prompt_token_ids": [10], "decode_token_ids": [20, 21]}})
+    post_mock = AsyncMock()
+    monkeypatch.setattr(mod, "post", post_mock)
+    with pytest.raises(ValueError, match="exceeds rollout response budget"):
+        asyncio.run(mod.generate(_rollout_args(), sample, _default_sampling_params(max_new_tokens=1)))
+    post_mock.assert_not_awaited()
+
+
+def test_generate_streaming_rejects_trace_replay():
+    from vime.rollout.vllm_streaming_rollout import generate_streaming
+
+    sample = Sample(prompt="abc", metadata={"trace_replay": {"prompt_token_ids": [10], "decode_token_ids": [20]}})
+    with pytest.raises(ValueError, match="non-streaming"):
+        asyncio.run(generate_streaming(_rollout_args(), sample, _default_sampling_params()))
+
+
 def _encode_routed(arr: np.ndarray) -> str:
     buf = io.BytesIO()
     np.save(buf, arr)

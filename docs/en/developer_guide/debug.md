@@ -56,6 +56,20 @@ Specifically, vime currently provides the following parameters for separate debu
 
     The version-2 payload mirrors the rollout debug dump: a top-level `samples` list holds one dict per training sample (`sample_index`, `data_parallel_rank`, and its per-sample fields such as `tokens`, `log_probs`, `advantages`), sorted by `sample_index` so it lines up one-to-one with the rollout dump's `samples` (join on `sample_index` ↔ the rollout side's `index`). A parallel `dp_shards` key preserves the DP/micro-batch layout — each entry records `rank`, `data_parallel_rank`, that shard's `sample_indices`, and the DP-local schedule (`micro_batch_indices`, `num_microbatches`, `global_batch_sizes`) — without duplicating any per-sample tensor. Whole-batch fields such as `raw_reward` are stored once at the top level. If any sample lacks a `sample_index` (custom rollouts that build fresh `Sample` objects leave it `None`), the samples stay in DP-gather order and a warning is logged. With or without CP, response-token fields use the same full-response format. In configs that skip the separate actor log-prob recompute (`can_reuse_log_probs_in_loss` or `--use-rollout-logprobs`), the actor `log_probs` are snapshotted from the training forward itself (keyed by rollout position, at no extra forward), so the dump still carries them.
 
+## Replay a fixed decode sequence
+
+Add `metadata.trace_replay` to a text row in the rollout JSONL file. Use the exact input and output token IDs recorded with the model and tokenizer. The default rollout sends the recorded input IDs directly to vLLM.
+
+```json
+{"prompt":"Original prompt","metadata":{"trace_replay":{"prompt_token_ids":[151644,8948,198],"decode_token_ids":[444,2210,13]}}}
+```
+
+Start Vime with `--vllm-enable-trace-replay`, `--prompt-data /path/to/replay.jsonl` and `--input-key prompt`. The default metadata key is `metadata`. The rollout response budget must cover the complete output sequence and the engine context must fit the input and output together. When using an external engine, start it with `--enable-trace-replay` and Model Runner V2.
+
+The default non-streaming rollout checks the returned token IDs and logprobs before appending them to the sample. A completed replay may have `finish_reason="length"`, which Vime records as `TRUNCATED`. Rows without replay metadata use ordinary generation.
+
+Use complete text requests with partial rollout, score centering and speculative decoding disabled. To compare raw model probabilities, set `logprobs_mode: raw_logprobs` in the engine group's `overrides` in [vLLM Config](../advanced/vllm-config.md). For a run focused on inference diagnostics, use `--debug-rollout-only` with `--save-debug-rollout-data` to inspect the resulting tokens and scores.
+
 ## INT4 / Compressed-Tensors Quantization Checkpoint Issues
 
 When using INT4-quantized models (e.g., `compressed-tensors` with `W4A16`), the checkpoint's `config.json` contains a `quantization_config.ignore` list that specifies which parameters should **not** be quantized. During online weight updates (Megatron → vLLM), vime also reads this ignore list to decide which parameters to INT4-quantize. An incorrect ignore list can cause silent errors:

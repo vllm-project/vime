@@ -54,6 +54,20 @@ vime 支持将训练部分和推理部分分开进行调试，从而实现：
 
    version 2 payload 对标 rollout debug dump：顶层 `samples` 列表每项是一个训练样本的 dict（含 `sample_index`、`data_parallel_rank` 以及 `tokens`、`log_probs`、`advantages` 等 per-sample 字段），并按 `sample_index` 排序，从而和 rollout dump 的 `samples` 一一对齐（用 `sample_index` ↔ rollout 侧的 `index` 来 join）。并列的 `dp_shards` key 保留 DP/micro-batch 排布——每项记录 `rank`、`data_parallel_rank`、该分片的 `sample_indices`，以及 DP-local 调度（`micro_batch_indices`、`num_microbatches`、`global_batch_sizes`）——且不重复存储任何 per-sample tensor。`raw_reward` 等整批字段在顶层只存一份。若某些样本没有 `sample_index`（自定义 rollout 新建 `Sample` 时会是 `None`），则 samples 保持 DP-gather 顺序并打印一条 warning。开启或关闭 CP 时，response-token 字段都是相同的完整 response 格式。在跳过 actor log-prob 单独重算的配置下（`can_reuse_log_probs_in_loss` 或 `--use-rollout-logprobs`），actor 的 `log_probs` 会直接从训练前向里快照下来（按 rollout position 归位，无额外前向），所以 dump 里依然会带上它。
 
+## 回放固定的 decode 序列
+
+在 rollout JSONL 的文本样本中加入 `metadata.trace_replay`。保留原始模型和 tokenizer 实际使用的输入、输出 token IDs。默认 rollout 会把记录的输入 IDs 直接发给 vLLM。
+
+```json
+{"prompt":"原始提示词","metadata":{"trace_replay":{"prompt_token_ids":[151644,8948,198],"decode_token_ids":[444,2210,13]}}}
+```
+
+启动 Vime 时设置 `--vllm-enable-trace-replay`、`--prompt-data /path/to/replay.jsonl` 和 `--input-key prompt`。元数据的默认字段名是 `metadata`。rollout 的输出预算需要容纳完整的目标序列，引擎的上下文需要容纳输入和输出之和。使用外部引擎时，在启动该引擎时启用 Model Runner V2 和 `--enable-trace-replay`。
+
+默认非流式 rollout 会校验引擎返回的 token IDs 和逐 token logprobs，再写回样本。完整回放可能以 `finish_reason="length"` 结束，Vime 会将其记为 `TRUNCATED`。没有回放元数据的样本继续使用普通生成。
+
+回放使用完整的文本请求，并关闭 partial rollout、score centering 和 speculative decoding。比较模型原始概率时，在 [vLLM Config](../advanced/vllm-config.md) 的对应引擎组 `overrides` 中设置 `logprobs_mode: raw_logprobs`。仅调试推理时，可用 `--debug-rollout-only` 和 `--save-debug-rollout-data` 保存输出 token 和分数。
+
 ## INT4 / Compressed-Tensors 量化 Checkpoint 问题
 
 使用 INT4 量化模型（如 `compressed-tensors` 的 `W4A16`）时，checkpoint 的 `config.json` 中有一个 `quantization_config.ignore` 列表，指定哪些参数**不**做量化。在线权重更新（Megatron → vLLM）时，vime 也会读取这个 ignore list 来决定哪些参数需要 INT4 量化。ignore list 不正确会导致静默错误：
