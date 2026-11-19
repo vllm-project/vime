@@ -70,6 +70,12 @@ The default non-streaming rollout checks the returned token IDs and logprobs bef
 
 Use complete text requests with partial rollout, score centering and speculative decoding disabled. To compare raw model probabilities, set `logprobs_mode: raw_logprobs` in the engine group's `overrides` in [vLLM Config](../advanced/vllm-config.md). For a run focused on inference diagnostics, use `--debug-rollout-only` with `--save-debug-rollout-data` to inspect the resulting tokens and scores.
 
+### Send prompt tokens in chunks
+
+Add `"prompt_token_chunks":[[151644],[8948,198]]` to `metadata.trace_replay`. The chunks must concatenate to the recorded `prompt_token_ids`. Vime sends them as NDJSON to one regular vLLM worker. The engine processes the prompt chunks as they arrive and uses the complete decode trace on the last chunk. Vime returns the final token IDs and scores in one response and discards the provisional tokens from earlier chunks.
+
+Install the Vime package so vLLM can discover the `vime_trace_replay` endpoint plugin. Add `vime_trace_replay` to `VLLM_PLUGINS` and include the platform and general plugins your deployment already uses. Enable trace replay and Model Runner V2 as for a full prompt. This mode requires a regular worker and does not support prefill/decode disaggregation or recording MoE routing data.
+
 ## INT4 / Compressed-Tensors Quantization Checkpoint Issues
 
 When using INT4-quantized models (e.g., `compressed-tensors` with `W4A16`), the checkpoint's `config.json` contains a `quantization_config.ignore` list that specifies which parameters should **not** be quantized. During online weight updates (Megatron → vLLM), vime also reads this ignore list to decide which parameters to INT4-quantize. An incorrect ignore list can cause silent errors:

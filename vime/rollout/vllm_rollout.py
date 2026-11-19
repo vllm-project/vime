@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import math
+import random
 import uuid
 from argparse import Namespace
 from collections.abc import Awaitable, Callable
@@ -25,7 +26,7 @@ from vime.rollout.sample_hooks import apply_rollout_sample_hooks
 from vime.utils.async_utils import AsyncPacer, run
 from vime.utils.data import Dataset
 from vime.utils.eval_config import EvalDatasetConfig
-from vime.utils.http_utils import get, get_rollout_num_engines, is_generation_paused_error, post
+from vime.utils.http_utils import get, get_rollout_num_engines, is_generation_paused_error, post, post_ndjson
 from vime.utils.misc import SingletonMeta, load_function
 from vime.utils.processing_utils import (
     build_multimodal_messages,
@@ -376,6 +377,39 @@ def _validate_trace_replay_output(choice: dict[str, Any], trace_ids: list[int]) 
             raise ValueError(f"Trace replay returned an invalid or clamped logprob at output position {position}")
 
 
+def _trace_replay_prompt_chunks(sample: Sample, prompt_ids: list[int]) -> list[list[int]] | None:
+    replay = sample.metadata["trace_replay"]
+    if "prompt_token_chunks" not in replay:
+        return None
+    chunks = replay["prompt_token_chunks"]
+    if (
+        not isinstance(chunks, list)
+        or not chunks
+        or any(not isinstance(chunk, list) or not chunk for chunk in chunks)
+        or any(type(token) is not int for chunk in chunks for token in chunk)
+        or [token for chunk in chunks for token in chunk] != prompt_ids
+    ):
+        raise ValueError("trace_replay.prompt_token_chunks must be non-empty lists that reconstruct prompt_token_ids")
+    return chunks
+
+
+async def _post_trace_replay_chunks(args, base, chunks, sampling_params, headers):
+    if args.use_rollout_routing_replay:
+        raise ValueError("Streaming trace replay does not return MoE routing data")
+    timeout = args.vllm_router_request_timeout_secs
+    workers = (await get(f"{base}/workers", timeout=timeout))["workers"]
+    regular = [worker["url"] for worker in workers if str(worker.get("worker_type", "")).lower() == "regular"]
+    if not regular:
+        raise ValueError("Streaming trace replay requires a regular vLLM worker")
+    worker = random.choice(regular)
+    return await post_ndjson(
+        f"{worker}/inference/v1/trace-replay-input",
+        [{"chunk_count": len(chunks), "sampling_params": sampling_params}, *chunks],
+        timeout=timeout,
+        headers=headers,
+    )
+
+
 async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, Any]) -> Sample:
     """Generate using traditional vLLM router with token-based workflow"""
     if args.ci_test:
@@ -389,8 +423,10 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     ), f"Sample status is {sample.status}"
 
     trace_ids = None
+    prompt_chunks = None
     if "trace_replay" in (sample.metadata or {}):
         prompt_ids, trace_ids = _prepare_trace_replay(args, sample, sampling_params["max_new_tokens"])
+        prompt_chunks = _trace_replay_prompt_chunks(sample, prompt_ids)
         sampling_params = {**sampling_params, "max_new_tokens": len(trace_ids)}
     else:
         prompt_ids = _prepare_prompt_ids(sample, state.tokenizer, state.processor)
@@ -433,7 +469,10 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         if getattr(args, "router_policy", None) == "consistent_hash":
             headers = {"x-session-id": sample.session_id}
 
-    if messages:
+    if prompt_chunks is not None:
+        with trace_span(sample, "vllm_trace_replay_input", attrs={"chunks": len(prompt_chunks)}):
+            output = await _post_trace_replay_chunks(args, base, prompt_chunks, inference_sampling_params, headers)
+    elif messages:
         render_payload = {
             "model": args.hf_checkpoint,
             "messages": messages,

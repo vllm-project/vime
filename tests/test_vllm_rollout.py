@@ -237,6 +237,42 @@ def test_generate_rejects_trace_over_budget_before_post(patch_generate_state, mo
     post_mock.assert_not_awaited()
 
 
+def test_generate_replays_prompt_chunks(patch_generate_state, monkeypatch):
+    args = _rollout_args(vllm_router_request_timeout_secs=30)
+    replay = {"prompt_token_ids": [10, 20, 30], "prompt_token_chunks": [[10], [20, 30]], "decode_token_ids": [65, 66]}
+    sample = Sample(prompt="abc", metadata={"trace_replay": replay})
+    response = _generate_response([65, 66])
+    for token_id, row in zip([65, 66], response["choices"][0]["logprobs"]["content"], strict=True):
+        row["token_id"] = token_id
+    workers = [
+        {"worker_type": "prefill", "url": "http://prefill"},
+        {"worker_type": "regular", "url": "http://worker"},
+    ]
+    monkeypatch.setattr(mod, "get", AsyncMock(return_value={"workers": workers}))
+    post = AsyncMock(return_value=response)
+    monkeypatch.setattr(mod, "post_ndjson", post)
+
+    result = asyncio.run(mod.generate(args, sample, _default_sampling_params()))
+
+    url, (header, *chunks) = post.await_args.args
+    assert url == "http://worker/inference/v1/trace-replay-input"
+    assert header["chunk_count"] == 2
+    assert header["sampling_params"]["trace_decode_token_ids"] == [65, 66]
+    assert chunks == [[10], [20, 30]]
+    assert result.tokens == [10, 20, 30, 65, 66]
+    assert result.response_length == 2
+
+
+def test_generate_rejects_prompt_chunks_that_change_the_recorded_prompt(patch_generate_state, monkeypatch):
+    replay = {"prompt_token_ids": [10, 20], "prompt_token_chunks": [[10], [30]], "decode_token_ids": [65]}
+    sample = Sample(prompt="abc", metadata={"trace_replay": replay})
+    post = AsyncMock()
+    monkeypatch.setattr(mod, "post_ndjson", post)
+    with pytest.raises(ValueError, match="reconstruct prompt_token_ids"):
+        asyncio.run(mod.generate(_rollout_args(), sample, _default_sampling_params()))
+    post.assert_not_awaited()
+
+
 def test_generate_streaming_rejects_trace_replay():
     from vime.rollout.vllm_streaming_rollout import generate_streaming
 

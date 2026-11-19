@@ -37,6 +37,11 @@ setup(
     include_package_data=True,
     install_requires=_fetch_requirements("requirements.txt"),
     extras_require={},
+    entry_points={
+        "vllm.endpoint_plugins": [
+            "vime_trace_replay = vime.backends.vllm_utils.trace_replay_input:TraceReplayInputPlugin",
+        ],
+    },
     python_requires=">=3.10",
     classifiers=[
         "Programming Language :: Python :: 3.10",
