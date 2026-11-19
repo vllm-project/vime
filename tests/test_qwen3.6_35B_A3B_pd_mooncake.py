@@ -2,6 +2,8 @@ import os
 import tempfile
 from shlex import quote
 
+import yaml
+
 import vime.utils.external_utils.command_utils as U
 
 
@@ -96,10 +98,9 @@ def execute():
         "--vllm-gpu-memory-utilization 0.75 "
         "--vllm-data-parallel-size 4 "
         "--vllm-enable-expert-parallel "
-        "--vllm-max-num-seqs 512 "
-        "--vllm-cudagraph-capture-sizes 5 10 20 40 80 "
-        '--vllm-speculative-config \'{"method":"mtp","num_speculative_tokens":4}\' '
-        "--prefill-num-servers 1 "
+        "--vllm-max-num-seqs 128 "
+        "--vllm-cudagraph-capture-sizes 4 8 16 32 64 "
+        '--vllm-speculative-config \'{"method":"mtp","num_speculative_tokens":3}\' '
     )
 
     misc_args = (
@@ -131,6 +132,36 @@ def execute():
     )
 
     with tempfile.TemporaryDirectory(prefix="vime_straw_") as rollout_dir:
+        config_path = os.path.join(rollout_dir, "vllm.yaml")
+        with open(config_path, "w") as config_file:
+            yaml.safe_dump(
+                {
+                    "vllm": [
+                        {
+                            "name": "default",
+                            "server_groups": [
+                                {
+                                    "worker_type": worker_type,
+                                    "num_gpus": 4,
+                                    "num_gpus_per_engine": 4,
+                                    "overrides": {
+                                        "kv_transfer_config": {
+                                            "kv_connector": "MooncakeConnector",
+                                            "kv_role": role,
+                                        }
+                                    },
+                                }
+                                for worker_type, role in (
+                                    ("prefill", "kv_producer"),
+                                    ("decode", "kv_consumer"),
+                                )
+                            ],
+                        }
+                    ]
+                },
+                config_file,
+            )
+        train_args += f"--vllm-config {quote(config_path)} --router-kv-connector mooncake "
         train_args += f"--rollout-data-dir {quote(rollout_dir)} "
         U.execute_train(
             train_args=train_args,

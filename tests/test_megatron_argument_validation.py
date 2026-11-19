@@ -13,7 +13,7 @@ NUM_GPUS = 0
 
 
 @pytest.mark.parametrize("legacy_parser", [False, True])
-def test_checkpoint_conversion_accepts_legacy_model_flags(legacy_parser):
+def test_checkpoint_conversion_accepts_legacy_model_flags(legacy_parser, monkeypatch):
     path = Path(__file__).resolve().parents[1] / "tools/convert_hf_to_torch_dist.py"
     function = next(
         node
@@ -33,6 +33,13 @@ def test_checkpoint_conversion_accepts_legacy_model_flags(legacy_parser):
     args = parser.parse_args(["--hf-checkpoint", "model", *flags])
     assert args.use_gated_attention and args.post_self_attn_layernorm and args.post_mlp_layernorm
     assert args.hf_checkpoint == "model"
+    train_parser = load_vime_arguments_module(monkeypatch).get_vime_extra_args_provider()(argparse.ArgumentParser())
+    for cli, required in ((parser, ["--hf-checkpoint", "model"]), (train_parser, ["--rollout-batch-size", "1"])):
+        defaults = cli.parse_args(required)
+        assert (defaults.qwen_gdn_implementation, defaults.qwen_gdn_backend) == ("replicated", "fla")
+        for impl, backend in (("megatron", "fla"), ("fused_tp", "fla_npu")):
+            opts = cli.parse_args([*required, "--qwen-gdn-implementation", impl, "--qwen-gdn-backend", backend])
+            assert (opts.qwen_gdn_implementation, opts.qwen_gdn_backend) == (impl, backend)
 
 
 def test_parallel_check_replays_the_same_rollout_for_all_gradient_comparisons(monkeypatch):
@@ -107,19 +114,19 @@ def load_arguments_module(monkeypatch):
     arguments_mod = types.ModuleType("megatron.training.arguments")
     tokenizer_pkg_mod = types.ModuleType("megatron.training.tokenizer")
     tokenizer_mod = types.ModuleType("megatron.training.tokenizer.tokenizer")
-    transformers_mod = types.ModuleType("transformers")
+    model_config_mod = types.ModuleType("vime.utils.model_config")
 
     arguments_mod.parse_args = lambda *args, **kwargs: None
     arguments_mod.validate_args = lambda args: args
     tokenizer_mod._vocab_size_with_padding = lambda vocab_size, _args: vocab_size
-    transformers_mod.AutoConfig = types.SimpleNamespace(from_pretrained=lambda *args, **kwargs: None)
+    model_config_mod.load_hf_config = lambda *args, **kwargs: None
 
     monkeypatch.setitem(sys.modules, "megatron", megatron_mod)
     monkeypatch.setitem(sys.modules, "megatron.training", training_mod)
     monkeypatch.setitem(sys.modules, "megatron.training.arguments", arguments_mod)
     monkeypatch.setitem(sys.modules, "megatron.training.tokenizer", tokenizer_pkg_mod)
     monkeypatch.setitem(sys.modules, "megatron.training.tokenizer.tokenizer", tokenizer_mod)
-    monkeypatch.setitem(sys.modules, "transformers", transformers_mod)
+    monkeypatch.setitem(sys.modules, "vime.utils.model_config", model_config_mod)
 
     module_path = Path(__file__).resolve().parents[1] / "vime" / "backends" / "megatron_utils" / "arguments.py"
     module_name = "test_megatron_argument_validation_module"
@@ -160,6 +167,26 @@ def load_vime_arguments_module(monkeypatch):
     return module
 
 
+@pytest.mark.parametrize(
+    "fields,expected",
+    [
+        ({}, True),
+        ({"enable_gloo_process_groups": False}, False),
+        ({"enable_gloo_process_groups": True}, True),
+        ({"use_gloo_process_groups": False}, False),
+        ({"use_gloo_process_groups": True}, True),
+        ({"use_gloo_process_groups": False, "enable_gloo_process_groups": True}, False),
+        ({"use_gloo_process_groups": True, "enable_gloo_process_groups": False}, True),
+    ],
+)
+def test_gloo_group_selection_prefers_current_validated_argument(monkeypatch, fields, expected):
+    module = load_arguments_module(monkeypatch)
+    args = argparse.Namespace(**fields)
+    assert module.use_gloo_process_groups(args) is expected
+    args.use_gloo_process_groups = not expected
+    assert module.use_gloo_process_groups(args) is not expected
+
+
 @pytest.mark.parametrize("strategy", [None, "mcore", "nvrx"])
 def test_native_async_checkpoint_default_preserves_explicit_strategy(monkeypatch, strategy):
     module = load_vime_arguments_module(monkeypatch)
@@ -170,6 +197,14 @@ def test_native_async_checkpoint_default_preserves_explicit_strategy(monkeypatch
     if strategy is not None:
         command += ["--async-strategy", strategy]
     assert parser.parse_args(command).async_strategy == (strategy or "mcore")
+
+
+def test_nvrx_only_megatron_parser_keeps_nvrx_default(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--async-strategy", choices=["nvrx"], default="nvrx")
+    module.get_vime_extra_args_provider()(parser)
+    assert parser.parse_args(["--rollout-batch-size", "1"]).async_strategy == "nvrx"
 
 
 def test_legacy_megatron_parser_does_not_gain_async_strategy(monkeypatch):
@@ -322,6 +357,8 @@ def test_allgather_cp_rejects_non_dsa_cp_models(monkeypatch):
     [
         types.SimpleNamespace(architectures=["DeepseekV32ForCausalLM"], model_type="deepseek_v3"),
         types.SimpleNamespace(architectures=["GlmMoeDsaForCausalLM"], model_type="glm"),
+        types.SimpleNamespace(architectures=["Glm5NextForCausalLM"], model_type="glm5_next"),
+        types.SimpleNamespace(architectures=["Glm5NextForConditionalGeneration"], model_type="glm5_next"),
     ],
 )
 def test_allgather_cp_allows_dsa_architectures(monkeypatch, hf_config):
@@ -356,6 +393,7 @@ def make_vime_validate_args(**overrides):
         rollout_queue_lease_seconds=300,
         rollout_queue_segment_mib=None,
         rollout_io_concurrency=4,
+        fully_async_group_prefetch_factor=1,
         use_distributed_post=False,
         data_source_path=None,
         eval_config=None,
@@ -628,10 +666,7 @@ def test_removed_queue_flags_are_rejected(monkeypatch, flag):
 
 @pytest.mark.unit
 def test_vime_validate_args_preserves_explicit_start_rollout_id(monkeypatch):
-    """``--start-rollout-id`` is only a fallback when the user did not set it.
-
-    An explicit value is needed when there is no resumable Megatron checkpoint.
-    """
+    """``--start-rollout-id`` is only a fallback when the user did not set it."""
     module = load_vime_arguments_module(monkeypatch)
     args = make_vime_validate_args(start_rollout_id=100)
 
@@ -790,6 +825,18 @@ def test_force_fp8_ue8m0_scale_argument(monkeypatch):
 
     assert defaults.force_fp8_ue8m0_scale is False
     assert configured.force_fp8_ue8m0_scale is True
+
+
+@pytest.mark.unit
+def test_update_weight_broadcast_mode_argument_removed(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    parser = argparse.ArgumentParser()
+    module.get_vime_extra_args_provider()(parser)
+
+    defaults = parser.parse_args(["--rollout-batch-size", "1"])
+    assert not hasattr(defaults, "update_weight_broadcast_mode")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--rollout-batch-size", "1", "--update-weight-broadcast-mode", "flattened-bucket"])
 
 
 if __name__ == "__main__":

@@ -4,12 +4,14 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 
 from vime.backends.megatron_utils.hf_checkpoint_saver import (
     _clear_existing_hf_weights,
     _copy_hf_assets,
+    _copy_passthrough_source_weights,
     _finalize_local_shards,
+    _gather_written_weight_names,
     _SafetensorShardWriter,
     _write_pending_chunk,
     save_hf_model_to_path,
@@ -38,6 +40,42 @@ def test_copy_hf_assets_keeps_quantized_config_and_skips_weights(tmp_path: Path)
     assert not (dst / "model.safetensors.index.json").exists()
     assert not (dst / "model-00001-of-00001.safetensors").exists()
     assert not (dst / "pytorch_model.bin").exists()
+
+
+def test_passthrough_keeps_raw_tensors_and_other_writers_trained_weights(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    visual, mtp = "model.visual.proj.weight", "mtp.fc.weight"
+    raw = torch.tensor([[2]], dtype=torch.int8)
+    scale = torch.tensor([[4.0]])
+    save_file(
+        {visual: raw, f"{visual}_scale_inv": scale, mtp: torch.tensor([1.0]), "lm_head.weight": raw.clone()},
+        source / "model.safetensors",
+    )
+    writers = [_SafetensorShardWriter(tmp_path, enabled=True) for _ in range(2)]
+    writers[1].write([(mtp, torch.tensor([19.0]))], shard_idx=1)
+    dist = torch.distributed
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 2)
+
+    def gather(result, local_names):
+        result[:] = [local_names, list(writers[1].weight_map)]
+
+    monkeypatch.setattr(dist, "all_gather_object", gather)
+    _copy_passthrough_source_weights(
+        str(source),
+        writers[0],
+        passthrough_prefixes=("model.visual.", "mtp."),
+        already_written=_gather_written_weight_names(writers[0].state()),
+    )
+    states = [writer.state() for writer in writers]
+    for rank, state in enumerate(states):
+        _finalize_local_shards(tmp_path, state, states, write_index=rank == 0)
+    index = json.loads((tmp_path / "model.safetensors.index.json").read_text())["weight_map"]
+    assert set(index) == {visual, f"{visual}_scale_inv", mtp}
+    torch.testing.assert_close(load_file(tmp_path / index[visual])[visual], raw)
+    torch.testing.assert_close(load_file(tmp_path / index[f"{visual}_scale_inv"])[f"{visual}_scale_inv"], scale)
+    torch.testing.assert_close(load_file(tmp_path / index[mtp])[mtp], torch.tensor([19.0]))
 
 
 def test_clear_existing_hf_weights_removes_old_weight_files_only(tmp_path: Path):

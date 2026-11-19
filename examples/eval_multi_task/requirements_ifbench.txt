@@ -1,6 +1,7 @@
+absl-py
 emoji
 immutabledict
+langdetect
 nltk
-numpy==1.26.4
-spacy==3.7.4
-syllapy
+spacy>=3.8,<4
+syllapy>=0.8.0

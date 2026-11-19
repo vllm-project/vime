@@ -75,6 +75,7 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
         # model/optimizer or this data progress have a durable joint checkpoint.
         ray.get(rollout_manager.training_completed.remote(rollout_id))
 
+        was_paused = ray.get(rollout_manager.pause_rollout_admission.remote())
         if release_train or should_run_periodic_action(
             rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout
         ):
@@ -85,13 +86,11 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
                 critic_model,
                 rollout_manager,
                 actor_trains=actor_trains,
-                restore_plan=restore_plan,
             )
 
         offload_train(actor_trains)
         if args.offload_rollout and not release_train:
             ray.get(rollout_manager.onload_weights.remote())
-        was_paused = ray.get(rollout_manager.pause_rollout_admission.remote())
         actor_model.update_weights()
         # Final evaluation uses the synchronized engines directly. Keep training
         # producers paused when no later rollout will consume their new work.

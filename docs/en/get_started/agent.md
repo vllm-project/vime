@@ -33,7 +33,7 @@ vime includes protocol adapters for existing agent runtimes:
 - `vime.agent.adapters.AnthropicAdapter`: Anthropic Messages API, used by Claude Code style agents.
 - `vime.agent.adapters.OpenAIAdapter`: OpenAI Chat Completions and Responses APIs, used by OpenAI SDK / OpenAI Agents SDK style clients.
 
-Adapters are a convenience layer, not a separate agent framework. Their contract is message history in, sampled tokens out: they render the chat template, call vLLM with `input_ids` and `return_logprob=True`, and export the returned token ids/logprobs as trainable trajectory segments. They avoid re-tokenizing response text to recover the training target.
+Adapters are a convenience layer, not a separate agent framework. Their contract is message history in, sampled tokens out: they render the chat template, call vLLM with `token_ids` and `sampling_params.logprobs=1`, and export the returned token ids/logprobs as trainable trajectory segments. They avoid re-tokenizing response text to recover the training target.
 
 Instantiate the protocol-specific adapter in your custom generate function, run its `app` with aiohttp, then manage each rollout through the adapter instance:
 
@@ -52,11 +52,7 @@ adapter.open_session(session_id, sampling_defaults=sampling_params)
 segments = await adapter.finish_session(session_id)
 ```
 
-For multi-turn agents, use a stable `session_id`. The adapters pass it as `X-SMG-Routing-Key` so vLLM can route one session to the same worker and reuse prefix cache.
-
-## Sandbox Backends
-
-The coding-agent example ships `vime.agent.sandbox.E2BSandbox` for E2B-compatible services. The rest of the agent lifecycle depends only on the provider-neutral `vime.agent.sandbox.Sandbox` protocol, so Docker, Modal, or local VM backends can implement the same contract without changing rollout logic. See [Porting to a New Sandbox Backend](../_examples_synced/coding_agent_rl/README.md#porting-to-a-new-sandbox-backend).
+For multi-turn agents, use a stable `session_id`. The adapters pass it as `x-session-id` so vLLM can route one session to the same worker and reuse prefix cache.
 
 ## Agent Serving And Performance
 

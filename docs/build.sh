@@ -16,7 +16,7 @@ if [ -z "$SPHINX_BUILD" ] && [ -x "$SCRIPT_DIR/../.venv-docs/bin/sphinx-build" ]
 fi
 if [ -z "$SPHINX_BUILD" ]; then
     cat >&2 <<'EOF'
-[slime-docs] sphinx-build was not found. From the repository root, run:
+[vime-docs] sphinx-build was not found. From the repository root, run:
   python3 -m venv .venv-docs
   .venv-docs/bin/python -m pip install -r docs/requirements.txt
 Then retry: bash docs/build_all.sh

@@ -76,15 +76,22 @@ def external_engine_init_kwargs(info: ExternalEngineInfo) -> dict:
 
 
 def get_server_info(url: str, timeout: float = 30.0) -> dict:
-    errors = []
-    for endpoint in ("/server_info?config_format=json", "/server_info", "/get_server_info"):
-        try:
-            response = requests.get(f"{url}{endpoint}", timeout=timeout)
-            response.raise_for_status()
-            return _normalize_server_info(response.json())
-        except Exception as exc:
-            errors.append(f"{endpoint}: {exc}")
-    raise RuntimeError(f"Failed to fetch vLLM server info from {url}: {'; '.join(errors)}")
+    response = requests.get(f"{url}/server_info?config_format=json", timeout=timeout)
+    response.raise_for_status()
+    return _normalize_server_info(response.json())
+
+
+def get_disaggregation_bootstrap_port(kv_transfer_config, *, nixl_port=None, mooncake_port=None):
+    if not isinstance(kv_transfer_config, dict):
+        return nixl_port
+    connectors = [kv_transfer_config]
+    if kv_transfer_config.get("kv_connector") == "MultiConnector":
+        connectors = kv_transfer_config.get("kv_connector_extra_config", {}).get("connectors", [])
+    for connector in connectors:
+        if connector.get("kv_connector") == "MooncakeConnector":
+            address = connector.get("kv_connector_extra_config", {}).get("bootstrap_server_address")
+            return urlparse(f"//{address}").port if address is not None else mooncake_port
+    return nixl_port
 
 
 def _normalize_server_info(server_info: dict) -> dict:
@@ -99,24 +106,13 @@ def _normalize_server_info(server_info: dict) -> dict:
         for key, value in section.items():
             normalized.setdefault(key, value)
 
-    def find_config_value(config, name):
-        if not isinstance(config, dict):
-            return None
-        if name in config:
-            return config[name]
-        for value in config.values():
-            found = find_config_value(value, name)
-            if found is not None:
-                return found
-        return None
-
-    kv_transfer_config = find_config_value(vllm_config, "kv_transfer_config")
+    kv_transfer_config = vllm_config.get("kv_transfer_config")
     if kv_transfer_config is not None:
         normalized["kv_transfer_config"] = kv_transfer_config
-    weight_transfer_config = find_config_value(vllm_config, "weight_transfer_config")
+    weight_transfer_config = vllm_config.get("weight_transfer_config")
     if weight_transfer_config is not None:
         normalized["weight_transfer_config"] = weight_transfer_config
-    ec_transfer_config = find_config_value(vllm_config, "ec_transfer_config")
+    ec_transfer_config = vllm_config.get("ec_transfer_config")
     if ec_transfer_config is not None:
         normalized["ec_transfer_config"] = ec_transfer_config
     if (
@@ -125,18 +121,32 @@ def _normalize_server_info(server_info: dict) -> dict:
         and ec_transfer_config.get("ec_role") == "ec_producer"
     ):
         normalized["encoder_only"] = True
-    if isinstance(kv_transfer_config, dict):
-        role = kv_transfer_config.get("kv_role")
-        if role == "kv_producer":
-            normalized["disaggregation_mode"] = "prefill"
-        elif role == "kv_consumer":
-            normalized["disaggregation_mode"] = "decode"
+    if isinstance(kv_transfer_config, dict) and normalized.get("disaggregation_mode") not in ("prefill", "decode"):
+        connectors = [kv_transfer_config]
+        if kv_transfer_config.get("kv_connector") == "MultiConnector":
+            connectors = kv_transfer_config.get("kv_connector_extra_config", {}).get("connectors", [])
+        pd_connectors = [
+            connector
+            for connector in connectors
+            if connector.get("kv_connector") in ("NixlConnector", "MooncakeConnector")
+        ]
+        if len(pd_connectors) == 1:
+            role = pd_connectors[0].get("kv_role")
+            if role == "kv_producer":
+                normalized["disaggregation_mode"] = "prefill"
+            elif role == "kv_consumer":
+                normalized["disaggregation_mode"] = "decode"
 
     vllm_env = server_info.get("vllm_env")
-    if isinstance(vllm_env, dict):
-        bootstrap_port = vllm_env.get("VLLM_NIXL_SIDE_CHANNEL_PORT")
-        if bootstrap_port is not None:
-            normalized["disaggregation_bootstrap_port"] = bootstrap_port
+    if not isinstance(vllm_env, dict):
+        vllm_env = {}
+    bootstrap_port = get_disaggregation_bootstrap_port(
+        kv_transfer_config,
+        nixl_port=vllm_env.get("VLLM_NIXL_SIDE_CHANNEL_PORT"),
+        mooncake_port=vllm_env.get("VLLM_MOONCAKE_BOOTSTRAP_PORT"),
+    )
+    if bootstrap_port is not None:
+        normalized["disaggregation_bootstrap_port"] = bootstrap_port
 
     return normalized
 
@@ -221,6 +231,7 @@ class ExternalRolloutServer:
     engine_parallel_configs: list[dict[str, int]]
     router_ip: str | None = None
     router_port: int | None = None
+    prometheus_port: int | None = None
     model_name: str = "default"
     update_weights: bool = True
     num_new_engines: int = 0
@@ -264,13 +275,9 @@ def start_external_rollout_servers(args, *, start_router) -> tuple[dict[str, Ext
 
     infos = external_engine_infos_from_args(args)
     has_pd_disaggregation = any(info.is_pd_worker for info in infos)
-    prefill_urls = [(info.url, info.disaggregation_bootstrap_port) for info in infos if info.worker_type == "prefill"]
-    decode_urls = [info.url for info in infos if info.worker_type == "decode"]
-    router_ip, router_port, _ = start_router(
+    router_ip, router_port, prometheus_port = start_router(
         args,
         has_pd_disaggregation=has_pd_disaggregation,
-        prefill_urls=prefill_urls if has_pd_disaggregation else None,
-        decode_urls=decode_urls if has_pd_disaggregation else None,
     )
     args.vllm_router_ip = router_ip
     args.vllm_router_port = router_port
@@ -300,8 +307,8 @@ def start_external_rollout_servers(args, *, start_router) -> tuple[dict[str, Ext
         init_handles.append(
             rollout_engine.init.remote(
                 **external_engine_init_kwargs(info),
-                router_ip=None if has_pd_disaggregation else router_ip,
-                router_port=None if has_pd_disaggregation else router_port,
+                router_ip=router_ip,
+                router_port=router_port,
             )
         )
 
@@ -315,6 +322,7 @@ def start_external_rollout_servers(args, *, start_router) -> tuple[dict[str, Ext
             router_ip=router_ip,
             router_port=router_port,
             model_name="default",
+            prometheus_port=prometheus_port,
             update_weights=True,
             num_new_engines=len(engines),
         )

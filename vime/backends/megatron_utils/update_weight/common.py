@@ -22,12 +22,10 @@ def _merge_param_partitions(name, partitions, partition_dim, partition_sections=
         result = torch.cat([part for section in zip(*split, strict=True) for part in section], dim=partition_dim)
         result.partition_sections = partition_sections
         return result
-    # TODO: here we did an extra copy during concat, maybe merge this with convert_to_hf is better?
-    # TODO: check only GLU is used.
     if "linear_fc1.weight" in name or "linear_fc1.bias" in name:
         split = [part.chunk(2, dim=0) for part in partitions]
         partitions = [part[0] for part in split] + [part[1] for part in split]
-    # this is bug in megatron's grouped moe.
+    # Megatron grouped MoE exposes its FC2 partition dimension as zero.
     if "linear_fc2.weight" in name and partition_dim == 0:
         partition_dim = 1
     return torch.cat(partitions, dim=partition_dim)
@@ -86,12 +84,6 @@ def all_gather_params_async(
 
     for info, param in param_infos_and_params:
         # Prepare async all_gather
-        # Re-read partition_sections from the live parameter in case
-        # DDP wrapping dropped it before ParamInfo.attrs was built.
-        if not info.attrs.get("partition_sections"):
-            sections = getattr(param, "partition_sections", None)
-            if sections is not None:
-                info.attrs["partition_sections"] = sections
         if "expert_bias" in info.name:
             gather_tasks.append((info, param, None, None, None))
         elif not param.tensor_model_parallel or getattr(param, "parallel_mode", None) == "duplicated":
@@ -178,15 +170,19 @@ def named_params_and_buffers(args: Namespace, model: Sequence[torch.nn.Module]) 
 
                 # MTP layer indices start from 0
                 layer_idx, rest = match.groups()
-                expert_pattern = r"(transformer_layer|mtp_model_layer)\.mlp\.experts\.(.+)\.(weight|bias)(\d+)"
-                match = re.match(expert_pattern, rest)
+                # GPT MTP: `transformer_layer.mlp.experts.*`. Hybrid (Nemotron-H) MTP nests a
+                # HybridStack: `mtp_model_layer.layers.{k}.mlp.experts.*`. Both need the EP-local
+                # expert index turned into the global one, or every EP rank publishes the same
+                # names and the weight sync silently overwrites itself.
+                expert_pattern = r"(.*?)mlp\.experts\.(.+)\.(weight|bias)(\d+)"
+                match = re.fullmatch(expert_pattern, rest)
                 if not match:
                     yield name, param
                     continue
 
-                mtp_module, rest, param_type, expert_idx = match.groups()
+                layer_path, rest, param_type, expert_idx = match.groups()
                 expert_idx = int(expert_idx) + expert_offset
-                yield f"{prefix}mtp.layers.{layer_idx}.{mtp_module}.mlp.experts.{rest}.{param_type}{expert_idx}", param
+                yield f"{prefix}mtp.layers.{layer_idx}.{layer_path}mlp.experts.{rest}.{param_type}{expert_idx}", param
                 continue
 
             layer_idx, rest = match.groups()

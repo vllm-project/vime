@@ -24,29 +24,29 @@
      }
 ```
 
-我们提供了一个完全确定性的，用 Qwen2.5 0.5B 训练 GSM8K 的脚本。
+GSM8K 样例使用 Qwen3-4B-Instruct-2507，启用 deterministic、CP=4 和 128K 回复上限。
 
 可以用如下脚本初始化训练数据和 ckpt：
 
 ```bash
 # download
 hf download --repo-type dataset zhuzilin/gsm8k --local-dir /root/gsm8k
-hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir /root/Qwen2.5-0.5B-Instruct
+hf download Qwen/Qwen3-4B-Instruct-2507 --local-dir /root/Qwen3-4B-Instruct-2507
 
 # convert ckpt
 cd vime/
-source scripts/models/qwen2.5-0.5B.sh
+source scripts/models/qwen3-4B-Instruct-2507.sh
 PYTHONPATH=/root/Megatron-LM/ python \
    tools/convert_hf_to_torch_dist.py \
    ${MODEL_ARGS[@]} \
-   --hf-checkpoint /root/Qwen2.5-0.5B-Instruct \
-   --save /root/Qwen2.5-0.5B-Instruct_torch_dist/
+   --hf-checkpoint /root/Qwen3-4B-Instruct-2507 \
+   --save /root/Qwen3-4B-Instruct-2507_torch_dist/
 ```
 
 可以使用如下脚本进行训练：
 
 ```bash
-bash scripts/run-qwen2.5-0.5B-reproducibility.sh
+bash scripts/run-qwen3-4B-reproducibility.sh
 ```
 
 这个 PR 中记录了 wandb 的截图 [pull#370](https://github.com/THUDM/slime/pull/370)。

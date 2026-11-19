@@ -51,7 +51,7 @@ python tools/convert_hf_to_fp8.py \
 
 这是 rollout 侧配置，不会改变 Megatron 的训练精度。它可以提升 vLLM 的有效 KV cache 容量，从而支持更长 context 或更高并发；实际精度和性能表现取决于当前 vLLM 版本与 GPU stack。
 
-对 Qwen3.8-27B、GLM-5.3-Flash 等 hybrid 模型，这个参数只作用于 attention 层 KV。线性注意力的递归状态使用 `--vllm-mamba-ssm-cache-dtype`，vLLM 将 attention KV 和递归状态纳入共享分页缓存预算，不单独配置两个池的比例。FP8 KV 不代表递归状态或卷积状态也用 FP8。向导默认不覆盖这些参数，为 Qwen3.8-27B 另外提供 FP32 / BF16 递归状态选项。见 [hybrid 缓存配置、架构来源与内存推导](rl-systems.md#hybrid-cache)。
+对 Qwen3.8-27B、GLM-5.3-Flash 等 hybrid 模型，这个参数只作用于 attention 层 KV。线性注意力的递归状态使用 `--vllm-mamba-ssm-cache-dtype`。FP8 KV 不代表递归状态或卷积状态也用 FP8。向导默认不覆盖 dtype 参数，为 Qwen3.8-27B 另外提供 FP32 / BF16 递归状态选项。见 [hybrid 缓存配置、架构来源与内存推导](rl-systems.md#hybrid-cache)。
 
 ## FP8 训练 + FP8 Rollout
 
@@ -128,10 +128,9 @@ RUNTIME_ENV_JSON="{
 
 3. 启动 example：
 
-```bash
-# Moonlight-16B-A3B INT4 training
-bash scripts/low_precision/run-moonlight-16B-A3B-int4.sh
+Qwen3 启动脚本使用原生 256K 上下文的 Instruct-2507 checkpoint，默认 128K 回复上限并启用 CP。量化与训练格式转换必须使用同一个 checkpoint；旧版 Qwen3 权重的 RoPE 配置不同。
 
+```bash
 # Qwen3-30B-A3B INT4 training
 bash scripts/low_precision/run-qwen3-30B-A3B-int4.sh
 

@@ -3,6 +3,39 @@ import re
 import torch
 
 
+def group_qwen3_5_checkpoint_keys(keys):
+    """Return the fused_tp weights that need multiple checkpoint keys."""
+    keys = dict.fromkeys(keys)
+    groups = {}
+    for name in keys:
+        base, _, part = name.rpartition(".")
+        for suffix, parts in (
+            ("self_attention.linear_attn.in_proj.weight", ("q", "k", "v", "z", "b", "a")),
+            ("self_attention.linear_attn.conv1d.weight", ("q", "k", "v")),
+        ):
+            if base.endswith("." + suffix) and part in parts:
+                groups[base] = tuple(f"{base}.{section}" for section in parts)
+    for base, group in groups.items():
+        missing = [key for key in group if key not in keys]
+        if missing:
+            raise ValueError(f"Incomplete GDN checkpoint weight {base}: missing {missing}")
+        if base in keys:
+            raise ValueError(f"GDN checkpoint contains both fused and split weights: {base}")
+        yield group
+
+
+def merge_gdn_checkpoint_parts(named_params):
+    """Restore fused_tp weights and section sizes after offline layer/TP reconstruction."""
+    params = dict(named_params)
+    for keys in group_qwen3_5_checkpoint_keys(params):
+        base = keys[0].rsplit(".", 1)[0]
+        parts = [params.pop(key) for key in keys]
+        merged = torch.cat(parts, dim=0)
+        merged.partition_sections = tuple(part.shape[0] for part in parts)
+        yield base, merged
+    yield from params.items()
+
+
 def _convert_mtp_layer(args, name, param, layer_idx):
     """Convert MTP layer parameters from Megatron to HuggingFace format."""
     if "enorm.weight" in name:
@@ -71,6 +104,29 @@ def convert_qwen3_5_to_hf(args, name, param):
     if match:
         layer_idx, rest = match.groups()
         prefix = f"model.language_model.layers.{layer_idx}"
+
+        if rest in ("self_attention.in_proj.weight", "self_attention.linear_attn.in_proj.weight"):
+            sections = getattr(param, "partition_sections", None)
+            if sections is None or len(sections) != 6:
+                raise ValueError("Native Qwen GDN projection is missing its six partition sections")
+            q, k, v, z, beta, alpha = param.split(sections, dim=0)
+            return [
+                (f"{prefix}.linear_attn.in_proj_qkv.weight", torch.cat((q, k, v), dim=0)),
+                (f"{prefix}.linear_attn.in_proj_z.weight", z),
+                (f"{prefix}.linear_attn.in_proj_b.weight", beta),
+                (f"{prefix}.linear_attn.in_proj_a.weight", alpha),
+            ]
+        if rest == "self_attention.in_proj.layer_norm_weight":
+            return [(f"{prefix}.input_layernorm.weight", param)]
+        native_mapping = {
+            "self_attention.A_log": "A_log",
+            "self_attention.dt_bias": "dt_bias",
+            "self_attention.conv1d.weight": "conv1d.weight",
+            "self_attention.out_norm.weight": "norm.weight",
+            "self_attention.out_proj.weight": "out_proj.weight",
+        }
+        if rest in native_mapping:
+            return [(f"{prefix}.linear_attn.{native_mapping[rest]}", param)]
 
         # experts (grouped gemm - fused format)
         if rest == "mlp.experts.linear_fc1":
@@ -176,9 +232,6 @@ def convert_qwen3_5_to_hf(args, name, param):
             "linear_attn.A_log",
             "linear_attn.conv1d.weight",
             "linear_attn.dt_bias",
-            # fused in_proj (fused_tp GDN): split back to 4 HF tensors below
-            "linear_attn.in_proj.weight",
-            # separate in_proj (replicated GDN): pass through unchanged, HF stores them as-is
             "linear_attn.in_proj_a.weight",
             "linear_attn.in_proj_b.weight",
             "linear_attn.in_proj_qkv.weight",
@@ -194,23 +247,6 @@ def convert_qwen3_5_to_hf(args, name, param):
             "self_attn.v_proj.weight",
         ]:
             rest = rest[len("self_attention.") :]
-            # Merged in_proj.weight: split back into 4 HF tensors (qkv|z|b|a).
-            if rest == "linear_attn.in_proj.weight":
-                sections = getattr(param, "partition_sections", None)
-                if sections is None or len(sections) != 6:
-                    raise ValueError(
-                        "Merged in_proj.weight is missing its six partition sections; "
-                        "cannot split back into in_proj_qkv/in_proj_z/in_proj_b/in_proj_a."
-                    )
-                # sections = (key_dim, key_dim, value_dim, value_dim, num_v_heads, num_v_heads)
-                q, k, v, z, b, a = torch.split(param, sections, dim=0)
-                qkv = torch.cat((q, k, v), dim=0).contiguous()
-                return [
-                    (f"{prefix}.linear_attn.in_proj_qkv.weight", qkv),
-                    (f"{prefix}.linear_attn.in_proj_z.weight", z.contiguous()),
-                    (f"{prefix}.linear_attn.in_proj_b.weight", b.contiguous()),
-                    (f"{prefix}.linear_attn.in_proj_a.weight", a.contiguous()),
-                ]
             return [(f"{prefix}.{rest}", param)]
 
     raise ValueError(f"Unknown parameter name: {name}")

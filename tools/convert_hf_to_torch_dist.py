@@ -34,7 +34,9 @@ def add_convertion_args(parser):
     if "--qwen-gdn-backend" not in parser._option_string_actions:
         parser.add_argument("--qwen-gdn-backend", type=str, choices=["fla", "fla_npu", "flashqla"], default="fla")
     if "--qwen-gdn-implementation" not in parser._option_string_actions:
-        parser.add_argument("--qwen-gdn-implementation", choices=["replicated", "fused_tp"], default="replicated")
+        parser.add_argument(
+            "--qwen-gdn-implementation", choices=["replicated", "megatron", "fused_tp"], default="replicated"
+        )
     parser.add_argument("--hf-checkpoint", type=str, required=True, help="HuggingFace model path")
     parser.add_argument(
         "--custom-model-provider-path",

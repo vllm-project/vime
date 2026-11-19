@@ -26,11 +26,8 @@ async def reward_func(args, sample, **kwargs):
     base = _teacher_base_url(args.rm_url)
     mm = sample.multimodal_inputs or {}
     images = mm.get("images")
-    # Only image multimodal is wired here (mirrors vllm_rollout.generate, which renders
-    # images only). Fail loud on other modalities rather than silently scoring text-only
-    # without their context.
     unsupported = [k for k, v in mm.items() if k != "images" and v]
-    if unsupported and not images:
+    if unsupported:
         raise NotImplementedError(
             "OPD teacher scoring over /inference/v1/generate supports only image multimodal; "
             f"got unsupported modalities: {unsupported}"

@@ -31,7 +31,7 @@ class SafetensorReader:
         return name in self.weight_map
 
     @functools.lru_cache(maxsize=1)  # noqa: B019 - cache belongs to this reader instance
-    def get_tensor(self, name: str) -> torch.Tensor:
+    def get_tensor(self, name: str, *, dequantize: bool = True) -> torch.Tensor:
         try:
             filename = self.weight_map[name]
         except KeyError as exc:
@@ -40,7 +40,7 @@ class SafetensorReader:
             self._files[filename] = safe_open(self.path / filename, framework="pt", device="cpu")
         tensor = self._files[filename].get_tensor(name)
         scale_name = f"{name}_scale_inv"
-        if tensor.element_size() == 1 and scale_name in self:
+        if dequantize and tensor.element_size() == 1 and scale_name in self:
             scale_file = self.weight_map[scale_name]
             if scale_file not in self._files:
                 self._files[scale_file] = safe_open(self.path / scale_file, framework="pt", device="cpu")
@@ -168,6 +168,11 @@ def load_model_hf_weights(
     reader = SafetensorReader(path)
     with torch.no_grad():
         for name, parameter in named_params_and_buffers(args, model):
+            # Router._load_from_state_dict normally restores this buffer to
+            # FP32 before copying. Direct HF loading bypasses that hook; a
+            # model-wide BF16 cast must not quantize the routing correction.
+            if name.endswith(".router.expert_bias"):
+                parameter.data = parameter.data.float()
             tensor = get_hf_tensor(name, reader, config)
             if name.endswith("output_layer.weight") and parameter.shape[0] == 1 and tensor.shape[0] != 1:
                 continue

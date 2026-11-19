@@ -1,3 +1,4 @@
+import argparse
 import os
 import shlex
 import sys
@@ -13,7 +14,7 @@ MODEL_DIR = f"{TEST_ROOT}/models/{MODEL_NAME}"
 DATASET_DIR = f"{TEST_ROOT}/datasets/dapo-math-17k"
 
 
-def prepare(checkpoint_root, torch_dist_ref_load=True):
+def prepare(checkpoint_root, torch_dist_ref_load=True, gdn_args=""):
     models_dir = shlex.quote(f"{TEST_ROOT}/models")
     datasets_dir = shlex.quote(f"{TEST_ROOT}/datasets")
     model_dir = shlex.quote(MODEL_DIR)
@@ -36,8 +37,7 @@ def prepare(checkpoint_root, torch_dist_ref_load=True):
         f"{shlex.quote(sys.executable)} -m torch.distributed.run --nproc-per-node 8 "
         "tools/convert_hf_to_torch_dist.py "
         "${MODEL_ARGS[@]} "
-        "--qwen-gdn-backend fla_npu "
-        "--qwen-gdn-implementation fused_tp "
+        f"{gdn_args}"
         f"--hf-checkpoint {model_dir} --save {checkpoint_dir}"
     )
 
@@ -52,7 +52,7 @@ def prepare(checkpoint_root, torch_dist_ref_load=True):
     return str(checkpoint_path)
 
 
-def execute(torch_dist_checkpoint=None):
+def execute(torch_dist_checkpoint=None, gdn_args=""):
     model_dir = shlex.quote(MODEL_DIR)
     prompt_data = shlex.quote(f"{DATASET_DIR}/dapo-math-17k.jsonl")
 
@@ -138,8 +138,7 @@ def execute(torch_dist_checkpoint=None):
         "--loss-mask-type qwen3_5 "
         "--use-flash-attn "
         "--no-gradient-accumulation-fusion "
-        "--qwen-gdn-backend fla_npu "
-        "--qwen-gdn-implementation fused_tp "
+        f"{gdn_args}"
     )
 
     runtime_args = (
@@ -172,16 +171,22 @@ def execute(torch_dist_checkpoint=None):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--qwen-gdn-implementation", choices=["replicated", "fused_tp"], default="fused_tp")
+    gdn_args = ""
+    if parser.parse_args().qwen_gdn_implementation == "fused_tp":
+        gdn_args = "--qwen-gdn-implementation fused_tp --qwen-gdn-backend fla_npu "
     checkpoint_tmp_root = Path(TEST_ROOT) / "tmp"
     checkpoint_tmp_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f"{MODEL_NAME}_torch_dist_", dir=checkpoint_tmp_root) as checkpoint_root:
         checkpoint = prepare(
             checkpoint_root,
+            gdn_args=gdn_args,
             torch_dist_ref_load=os.environ.get("VIME_TEST_TORCH_DIST_REF_LOAD", "1") == "1",
         )
         for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
             os.environ.pop(proxy_var, None)
-        execute(checkpoint)
+        execute(checkpoint, gdn_args=gdn_args)
 
 
 if __name__ == "__main__":

@@ -143,15 +143,22 @@ class FakeVLLMServer:
     Each turn is a list of ``(logprob, token_id)`` pairs that the server emits as
     a vLLM ``choices[0]`` payload (``token_ids`` + ``logprobs.content[i].logprob``
     + a string ``finish_reason``), the shape
-    ``common._tokens_and_logprobs_from_choice`` parses. Records every request body
+    ``vllm_rollout._inference_generate_tokens_and_logprobs`` parses. Records every request body
     + the ``x-session-id`` routing header so tests can assert the adapter posted
     the right ``token_ids`` / sampling params. Use as an async context manager;
     ``.url`` is the base url to hand the adapter.
     """
 
-    def __init__(self, turns: list[list[tuple[float, int]]], *, finish_reason: str = "stop") -> None:
+    def __init__(
+        self,
+        turns: list[list[tuple[float, int]]],
+        *,
+        finish_reason: str = "stop",
+        return_sampling_mask: bool = False,
+    ) -> None:
         self.turns = [list(t) for t in turns]
         self.finish_reason = finish_reason
+        self.return_sampling_mask = return_sampling_mask
         self.requests: list[dict] = []
         self.routing_keys: list[str | None] = []
         self._server: web.Application | None = None
@@ -164,11 +171,7 @@ class FakeVLLMServer:
         pairs = self.turns.pop(0)
         token_ids = [tid for _lp, tid in pairs]
         content = [{"token_id": token_id, "logprob": lp} for lp, token_id in pairs]
-        support = (
-            [[token_id] for token_id in token_ids]
-            if self.requests[-1]["sampling_params"].get("return_sampling_mask")
-            else None
-        )
+        support = [[token_id] for token_id in token_ids] if self.return_sampling_mask else None
         return web.json_response(
             {
                 "choices": [

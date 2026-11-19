@@ -29,6 +29,73 @@ from vime.utils.data import process_rollout_data
 NUM_GPUS = 0
 
 
+@pytest.mark.parametrize("change", [None, "wandb_run_id", "wandb_project", "wandb_team", "disable", "enable"])
+def test_retained_manager_tracks_the_attached_training_run(monkeypatch, change):
+    from types import SimpleNamespace
+
+    from vime.ray import rollout
+
+    previous = SimpleNamespace(
+        use_wandb=change != "enable", wandb_run_id="original", wandb_project="project", wandb_team="team"
+    )
+    attached = SimpleNamespace(**vars(previous))
+    if change in ("disable", "enable"):
+        attached.use_wandb = change == "enable"
+    elif change:
+        setattr(attached, change, "replacement")
+    manager_type = RolloutManager.__ray_metadata__.modified_class
+    manager = manager_type.__new__(manager_type)
+    manager.args = previous
+    manager.data_source = SimpleNamespace(consumers={})
+    manager._recovery_admission_was_paused = None
+    manager.recovery = None
+    manager.batch_builder = SimpleNamespace()
+    calls = []
+    monkeypatch.setattr(rollout.logging_utils, "finish_tracking", lambda args: calls.append(("finish", args)))
+    monkeypatch.setattr(rollout, "init_tracking", lambda args, *, primary: calls.append(("init", args, primary)))
+    deployment = ServingDeployment(
+        placements={"rollout": None},
+        servers={},
+        controller=None,
+        restore_plan=RestorePlan(),
+        routers={},
+        engine_lock=None,
+    )
+    manager.attach_training(attached, deployment)
+    if change is None:
+        assert calls == []
+    else:
+        assert calls[0] == ("finish", previous)
+        assert calls[1:] == ([("init", manager.args, False)] if attached.use_wandb else [])
+    assert manager.batch_builder.args is manager.args
+    assert manager.args.wandb_run_id == attached.wandb_run_id
+
+
+@pytest.mark.parametrize("initially_paused", [False, True])
+def test_repeated_detach_preserves_original_admission_state(initially_paused):
+    from types import SimpleNamespace
+
+    manager_type = RolloutManager.__ray_metadata__.modified_class
+    manager = manager_type.__new__(manager_type)
+    worker = SimpleNamespace(paused=initially_paused)
+
+    def pause(*, drain=False):
+        previous, worker.paused = worker.paused, True
+        return previous
+
+    worker.pause = pause
+    worker.resume = lambda: setattr(worker, "paused", False)
+    manager.data_source = SimpleNamespace(consumers={"fully_async": worker})
+    manager._recovery_admission_was_paused = None
+    manager.detach_training()
+    manager.detach_training()
+    assert worker.paused
+    assert manager._recovery_admission_was_paused is initially_paused
+    manager.training_ready()
+    assert worker.paused is initially_paused
+    assert manager._recovery_admission_was_paused is None
+
+
 @ray.remote(num_cpus=0)
 class _ServingFixture:
     """Keep the production queue alive without starting GPU inference servers."""

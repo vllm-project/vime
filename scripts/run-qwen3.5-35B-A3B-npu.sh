@@ -1,19 +1,11 @@
 #!/bin/bash
-# for rerun the task
-pkill -9 -f '[v]llm serve|VLL[M]::'
-sleep 3
-ray stop --force
-pkill -9 ray
-pkill -9 python
-sleep 3
-pkill -9 ray
-pkill -9 python
-pkill -9 redis
+set -eo pipefail
 
-set -ex
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+DATA_ROOT="${DATA_ROOT:-${HF_HOME:-/root}}"
 
 export PYTHONUNBUFFERED=1
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
@@ -22,7 +14,6 @@ export HYDRA_FULL_ERROR=1
 export DISABLE_L2_CACHE=1
 export VLLM_ASCEND_ENABLE_NZ=0
 export VLLM_USE_AOT_COMPILE=0
-export PYTHONPATH="/root/Megatron-LM/:${PYTHONPATH:-}"
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 export HCCL_CONNECT_TIMEOUT=7200
@@ -31,20 +22,20 @@ export HCCL_BUFFSIZE_EP=512
 
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 
-source /root/vime/scripts/models/qwen3.5-35B-A3B.sh
+source scripts/models/qwen3.5-35B-A3B.sh
 
 CKPT_ARGS=(
-   --hf-checkpoint /path/to/Qwen3.5-35B-A3B
-   --load /path/to/Qwen3.5-35B-A3B
-   --ref-load /path/to/Qwen3.5-35B-A3B
-   --save /path/to/Qwen3.5-35B-A3B_vime_npu/
-   --save-hf /path/to/Qwen3.5-35B-A3B_vime_npu_hf/
+   --hf-checkpoint "${DATA_ROOT}/models/Qwen3.5-35B-A3B"
+   --load "${DATA_ROOT}/models/Qwen3.5-35B-A3B"
+   --ref-load "${DATA_ROOT}/models/Qwen3.5-35B-A3B"
+   --save "${DATA_ROOT}/checkpoints/Qwen3.5-35B-A3B_vime_npu/"
+   --save-hf "${DATA_ROOT}/checkpoints/Qwen3.5-35B-A3B_vime_npu_hf/"
    --no-save-optim
    --save-interval 25
 )
 
 ROLLOUT_ARGS=(
-   --prompt-data /path/to/dapo-math-17k/dapo-math-17k.jsonl
+   --prompt-data "${DATA_ROOT}/datasets/dapo-math-17k/dapo-math-17k.jsonl"
    --input-key prompt
    --label-key label
    --apply-chat-template
@@ -61,7 +52,7 @@ ROLLOUT_ARGS=(
 
 EVAL_ARGS=(
    --eval-interval 25
-   --eval-prompt-data aime /path/to/aime-2024/aime-2024.jsonl@[0:250]
+   --eval-prompt-data aime "${DATA_ROOT}/datasets/aime-2024/aime-2024.jsonl"@[0:250]
    --n-samples-per-eval-prompt 16
    --eval-max-response-len 16384
    --eval-top-p 1
@@ -130,23 +121,23 @@ MISC_ARGS=(
    --qwen-gdn-implementation fused_tp
 )
 
-ray start --head --num-gpus 0 --resources '{"NPU": 16}' --node-ip-address 127.0.0.1 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+# An external head must be started with the device environment above.
+if [[ -z "${RAY_API_SERVER_ADDRESS:-}" ]]; then
+   ray start --head --num-gpus 0 --resources '{"NPU": 16}' --node-ip-address 127.0.0.1 --disable-usage-stats --dashboard-port=8265
+fi
 
-sleep 5
-
-ray job submit --address="http://127.0.0.1:8265" \
-   -- python3 train.py \
+ray job submit --address="${RAY_API_SERVER_ADDRESS:-http://127.0.0.1:8265}" \
+   -- python3 "$PWD/train.py" \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node 8 \
    --rollout-num-gpus 8 \
-   ${MODEL_ARGS[@]} \
-   ${CKPT_ARGS[@]} \
-   ${ROLLOUT_ARGS[@]} \
-   ${OPTIMIZER_ARGS[@]} \
-   ${GRPO_ARGS[@]} \
-   ${PERF_ARGS[@]} \
-   ${EVAL_ARGS[@]} \
-   ${VLLM_ARGS[@]} \
-   ${MISC_ARGS[@]} \
-   ${PROFILE_ARGS[@]} \
-   2>&1 | tee /path/to/vime_qwen35_35b_a3b_npu.log
+   "${MODEL_ARGS[@]}" \
+   "${CKPT_ARGS[@]}" \
+   "${ROLLOUT_ARGS[@]}" \
+   "${OPTIMIZER_ARGS[@]}" \
+   "${GRPO_ARGS[@]}" \
+   "${PERF_ARGS[@]}" \
+   "${EVAL_ARGS[@]}" \
+   "${VLLM_ARGS[@]}" \
+   "${MISC_ARGS[@]}" \
+   2>&1 | tee "${DATA_ROOT}/vime_qwen35_35b_a3b_npu.log"

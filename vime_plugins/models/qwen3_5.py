@@ -38,6 +38,8 @@ class Qwen3_5GatedDeltaNet(nn.Module):
     def __init__(self, config, layer_idx: int, args=None):
         super().__init__()
         self.gdn_backend = getattr(args, "qwen_gdn_backend", "fla")
+        if self.gdn_backend == "fla_npu":
+            raise ValueError("fla_npu requires --qwen-gdn-implementation fused_tp.")
         self.chunk_gated_delta_rule = get_chunk_gated_delta_rule(self.gdn_backend)
         self.hidden_size = config.hidden_size
         self.num_v_heads = config.linear_num_value_heads
@@ -161,6 +163,8 @@ class Attention(HuggingfaceAttention):
         layer_number: int,
         cp_comm_type: str = "p2p",
         pg_collection=None,
+        pp_layer_offset: int | None = None,
+        is_mtp_layer: bool = False,
         name: str | None = None,
     ):
         super().__init__(
@@ -175,19 +179,11 @@ class Attention(HuggingfaceAttention):
         self.hf_config._attn_implementation = "flash_attention_2"
 
         if getattr(args, "qwen_gdn_implementation", "replicated") == "fused_tp":
-            # Opt-in fused TP-sharded GDN (--qwen-gdn-implementation fused_tp,
-            # typically together with --qwen-gdn-backend fla_npu on Ascend):
-            # a merged in_proj/conv1d whose sub-matrices are TP-sharded by
-            # head. Imported lazily so other setups never need this path's
-            # optional dependencies.
             from .gdn.qwen3_5_tp import Qwen3_5GatedDeltaNetTP
 
             self.linear_attn = Qwen3_5GatedDeltaNetTP(
                 self.hf_config, self.hf_layer_idx, args=args, megatron_config=config
             )
-            # CPL backward already all-reduces grad_input, so every rank holds the
-            # same grad_input and the sequence-parallel split can be skipped.
-            self._linear_attn_tp_sharded = False
         else:
             self.linear_attn = Qwen3_5GatedDeltaNet(self.hf_config, self.hf_layer_idx, args=args)
 
@@ -232,6 +228,31 @@ def get_qwen3_5_spec(args, config, vp_stage):
     hf_config = _load_hf_config(args.hf_checkpoint)
     text_config = _get_text_config(hf_config)
 
+    native_spec = None
+    if getattr(args, "qwen_gdn_implementation", "replicated") == "megatron":
+        if getattr(args, "qwen_gdn_backend", "fla") != "fla":
+            raise ValueError("Megatron Qwen GDN requires --qwen-gdn-backend fla")
+        from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
+            get_gated_delta_net_module_spec,
+        )
+
+        from .qwen3_5_native import Qwen3_5NativeAttention
+
+        native_spec = get_gated_delta_net_module_spec(config)
+        native_spec.module = Qwen3_5NativeAttention
+        native_spec.params = {
+            "linear_config": {
+                name: getattr(text_config, name)
+                for name in (
+                    "linear_num_key_heads",
+                    "linear_num_value_heads",
+                    "linear_key_head_dim",
+                    "linear_value_head_dim",
+                    "linear_conv_kernel_dim",
+                )
+            }
+        }
+
     # Compute layer_types if the config class doesn't expose it
     if not hasattr(text_config, "layer_types"):
         interval = getattr(text_config, "full_attention_interval", 4)
@@ -243,9 +264,10 @@ def get_qwen3_5_spec(args, config, vp_stage):
     for layer_id in range(num_layers_to_build):
         if text_config.layer_types[layer_id + offset] == "linear_attention":
             layer_specs = copy.deepcopy(transformer_layer_spec.layer_specs[layer_id])
-            layer_specs.submodules.self_attention = ModuleSpec(
-                module=Attention,
-                params={"args": args},
+            layer_specs.submodules.self_attention = (
+                copy.deepcopy(native_spec)
+                if native_spec is not None
+                else ModuleSpec(module=Attention, params={"args": args})
             )
             transformer_layer_spec.layer_specs[layer_id] = layer_specs
     return transformer_layer_spec

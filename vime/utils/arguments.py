@@ -129,12 +129,9 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
             )
             parser.add_argument(
                 "--qwen-gdn-implementation",
-                choices=["replicated", "fused_tp"],
+                choices=["replicated", "megatron", "fused_tp"],
                 default="replicated",
-                help="GDN module structure for Qwen linear-attention layers: the replicated "
-                "HF-style wrapper (default) or the fused TP-sharded module whose in_proj/conv1d "
-                "sub-matrices are each sharded by head (opt-in, typically with "
-                "--qwen-gdn-backend fla_npu on Ascend).",
+                help="Use the replicated wrapper, Megatron's TP/CP-sharded GDN, or the fused TP wrapper.",
             )
             parser.add_argument(
                 "--train-env-vars",
@@ -382,6 +379,16 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--fully-async-group-prefetch-factor",
+                type=int,
+                default=1,
+                help=(
+                    "Multiply the fully-async in-flight prompt-group pool without increasing the "
+                    "per-sample generation semaphore. Values above 1 let another group's samples "
+                    "use slots released before a slow group finishes. Completed results remain bounded."
+                ),
+            )
+            parser.add_argument(
                 "--rollout-function-path",
                 type=str,
                 default="vime.rollout.vllm_rollout.generate_rollout",
@@ -518,6 +525,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Whether to use partial rollout. "
                     "If set, the unfinished samples during dynamic sampling will be recycled back to data buffer. "
+                    "Agent adapters also continue interrupted model turns without restarting the sandbox or CLI. "
                     "This is useful for long responses."
                 ),
             )
@@ -1827,10 +1835,16 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
             help="Path to the YAML config for custom function arguments.",
         )
         reset_arg(parser, "--padded-vocab-size", type=int, default=None)
-        # New Megatron versions default to NVRX, which requires an optional
+        # Megatron 4b4acac9a defaults --async-strategy to NVRX, which requires an optional
         # dependency. Keep native async checkpointing as the default while
         # allowing an explicit --async-strategy choice on versions that support it.
-        if parser.get_default("async_strategy") is not None:
+        # Megatron ae76c60e6 dropped the native strategy and only accepts "nvrx".
+        async_strategy_action = next((a for a in parser._actions if a.dest == "async_strategy"), None)
+        if (
+            parser.get_default("async_strategy") is not None
+            and async_strategy_action is not None
+            and (async_strategy_action.choices is None or "mcore" in async_strategy_action.choices)
+        ):
             parser.set_defaults(async_strategy="mcore")
 
         return parser
@@ -2144,6 +2158,7 @@ def vime_validate_args(args):
         "rollout_queue_lease_seconds",
         "rollout_queue_segment_mib",
         "rollout_io_concurrency",
+        "fully_async_group_prefetch_factor",
     ):
         value = getattr(args, name)
         if name == "rollout_queue_segment_mib" and value is None:
