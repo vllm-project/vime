@@ -13,6 +13,7 @@ from vime.utils.accelerator.torch_accelerator import TorchAccelerator
 
 from .base import (
     CheckpointCapabilities,
+    PDPortLayout,
     Platform,
     RayResourceSpec,
     TrainingBootstrap,
@@ -182,28 +183,15 @@ class NpuWeightTransferPlatformOps(WeightTransferPlatformOps):
 
 
 class NpuVLLMLaunchPlatformOps(VLLMLaunchPlatformOps):
-    def pd_config(self, worker_type: str, bootstrap_port: int | None, parallel_config):
+    def pd_port_layout(self, gpus_per_engine: int) -> PDPortLayout:
+        return PDPortLayout(kv_offset=0, handshake_offset=gpus_per_engine, count=2 * gpus_per_engine)
+
+    def pd_config(self, worker_type: str, bootstrap_port: int | None, gpus_per_engine: int):
         assert bootstrap_port is not None, "Ascend PD workers require disaggregation_bootstrap_port"
         role = {"prefill": "kv_producer", "decode": "kv_consumer"}[worker_type]
-        slots = 1
-        for key in (
-            "tensor_parallel_size",
-            "data_parallel_size",
-            "pipeline_parallel_size",
-            "prefill_context_parallel_size",
-        ):
-            slots *= int(parallel_config.get(key) or 1)
-        config = {"kv_connector": "MooncakePullConnector", "kv_role": role, "kv_port": bootstrap_port}
-        return config, bootstrap_port + slots
-
-    def pd_bootstrap_port_count(self, gpus_per_engine: int) -> int:
-        # The Mooncake pull connector ports: the kv exchange block is
-        # [kv_port, kv_port + TP*DP*PP*PCP) and the worker handshake block starts
-        # at the side-channel port that pd_config places one slot set above
-        # kv_port, one port per device. Reserve both blocks so neighbouring
-        # engines (e.g. a second prefill server) cannot be handed a port inside
-        # them.
-        return 2 * gpus_per_engine
+        layout = self.pd_port_layout(gpus_per_engine)
+        config = {"kv_connector": "MooncakePullConnector", "kv_role": role, "kv_port": layout.kv_port(bootstrap_port)}
+        return config, layout.registered(bootstrap_port)
 
     def subprocess_env(self, base_env, *, visible_devices: str, colocate: bool) -> dict[str, str]:
         env = dict(base_env)
