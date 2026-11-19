@@ -473,6 +473,8 @@ def make_vime_validate_args(**overrides):
         update_weight_disk_dir=None,
         update_weight_local_checkpoint_dir=None,
         update_weight_mode="full",
+        update_weight_delta_batch_diff=32,
+        update_weight_delta_batch_gather=32,
         rollout_temperature=1.0,
     )
     values.update(overrides)
