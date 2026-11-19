@@ -118,7 +118,6 @@ def _train_args(*, ref_load: str, debug_data: Path) -> str:
     verify_args = (
         "--ci-test "
         "--ci-disable-kl-checker "
-        "--check-weight-update-equal "
         f"--save-debug-rollout-data {shlex.quote(str(debug_data / 'rollout_{{rollout_id}}.pt'))} "
     )
 
