@@ -70,7 +70,9 @@ async def _replay(engine, records, limit):
                 raise ValueError("Received more prompt chunks than declared")
             # Earlier chunks use a one-token budget. vLLM emits that token, then
             # discards it when extending the session with the next input chunk.
-            yield StreamingInput(prompt=TokensPrompt(prompt_token_ids=part), sampling_params=params if last else interim)
+            yield StreamingInput(
+                prompt=TokensPrompt(prompt_token_ids=part), sampling_params=params if last else interim
+            )
 
     request_id = "vime-replay-" + uuid4().hex
     engine.check_admission(request_id=request_id)
@@ -86,8 +88,10 @@ async def _replay(engine, records, limit):
                     content.append({"token_id": token, "logprob": scores[token].logprob})
                 if choice.finish_reason is not None:
                     finish_reason = choice.finish_reason
-    if engine_prompt_ids != prompt_ids or len(content) != chunk_count - 1 + len(trace) or any(
-        row["token_id"] != trace[0] for row in content[: chunk_count - 1]
+    if (
+        engine_prompt_ids != prompt_ids
+        or len(content) != chunk_count - 1 + len(trace)
+        or any(row["token_id"] != trace[0] for row in content[: chunk_count - 1])
     ):
         raise HTTPException(502, "Engine returned an incomplete streaming-input replay")
     content = content[chunk_count - 1 :]

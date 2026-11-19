@@ -341,7 +341,9 @@ def _prepare_trace_replay(args: Namespace, sample: Sample, max_new_tokens: int |
     trace_ids = replay.get("decode_token_ids")
     for field, ids in (("prompt_token_ids", prompt_ids), ("decode_token_ids", trace_ids)):
         if not isinstance(ids, list) or not ids or any(type(token_id) is not int or token_id < 0 for token_id in ids):
-            raise ValueError(f"Sample {sample.index}: trace_replay.{field} must be a non-empty list of non-negative integers")
+            raise ValueError(
+                f"Sample {sample.index}: trace_replay.{field} must be a non-empty list of non-negative integers"
+            )
 
     if any(value is not None for value in (sample.multimodal_inputs or {}).values()):
         raise ValueError("Trace replay supports text-only rollout")
@@ -352,7 +354,9 @@ def _prepare_trace_replay(args: Namespace, sample: Sample, max_new_tokens: int |
     if sample.tokens and sample.tokens != prompt_ids:
         raise ValueError(f"Sample {sample.index}: existing tokens differ from the recorded prompt")
     if max_new_tokens is not None and len(trace_ids) > max_new_tokens:
-        raise ValueError(f"Sample {sample.index}: trace length {len(trace_ids)} exceeds rollout response budget {max_new_tokens}")
+        raise ValueError(
+            f"Sample {sample.index}: trace length {len(trace_ids)} exceeds rollout response budget {max_new_tokens}"
+        )
     context_len = getattr(args, "rollout_max_context_len", None)
     if context_len is not None and len(prompt_ids) + len(trace_ids) > context_len:
         raise ValueError(f"Sample {sample.index}: prompt and trace exceed rollout context budget {context_len}")
