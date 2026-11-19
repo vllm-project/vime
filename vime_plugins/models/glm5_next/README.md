@@ -1,5 +1,10 @@
 # GLM-5.3 Flash / GLM5-next
 
+> **NPU status:** This integration has not been validated on Ascend NPU.
+> The scripts and GPU/context-parallel tests target CUDA; no GLM-5.3 Flash
+> NPU smoke test is currently included. NPU adaptation and validation remain
+> follow-up work.
+
 Native Megatron integration for the `Glm5NextForConditionalGeneration` checkpoint.
 The language model uses the same spec/provider entry point as the GLM5 plugin;
 the CogViT wrapper follows the Qwen3.5 integration.
