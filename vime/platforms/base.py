@@ -63,8 +63,37 @@ class WeightTransferPlatformOps:
         return NCCLTrainerInitInfo(**kwargs)
 
 
+@dataclass(frozen=True)
+class PDPortLayout:
+    """Consecutive ports a PD engine derives from its bootstrap port.
+
+    The kv block occupies ``[base + kv_offset, base + kv_offset + gpus)``
+    and the handshake block ``[base + handshake_offset, ...)``; ``count`` is
+    the total number of ports the engine needs reserved.
+    """
+
+    kv_offset: int
+    handshake_offset: int
+    count: int
+
+    def kv_port(self, base: int) -> int:
+        return base + self.kv_offset
+
+    def registered(self, base: int) -> int:
+        return base + self.handshake_offset
+
+
 class VLLMLaunchPlatformOps:
     """Platform additions to the common vLLM launch command and environment."""
+
+    def pd_port_layout(self, gpus_per_engine: int) -> PDPortLayout:
+        return PDPortLayout(kv_offset=0, handshake_offset=0, count=1)
+
+    def pd_config(self, worker_type: str, bootstrap_port: int | None, gpus_per_engine: int):
+        if worker_type == "prefill":
+            assert bootstrap_port is not None, "Prefill requires disaggregation_bootstrap_port"
+        role = {"prefill": "kv_producer", "decode": "kv_consumer"}[worker_type]
+        return {"kv_connector": "MooncakeConnector", "kv_role": role}, bootstrap_port
 
     def subprocess_env(
         self,
