@@ -72,6 +72,10 @@ class VLLMLaunchPlatformOps:
         role = {"prefill": "kv_producer", "decode": "kv_consumer"}[worker_type]
         return {"kv_connector": "MooncakeConnector", "kv_role": role}, bootstrap_port
 
+    def pd_bootstrap_port_count(self, gpus_per_engine: int) -> int:
+        """Consecutive ports a PD engine needs, starting at its bootstrap port."""
+        return 1
+
     def subprocess_env(
         self,
         base_env: Mapping[str, str],

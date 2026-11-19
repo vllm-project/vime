@@ -196,6 +196,15 @@ class NpuVLLMLaunchPlatformOps(VLLMLaunchPlatformOps):
         config = {"kv_connector": "MooncakePullConnector", "kv_role": role, "kv_port": bootstrap_port}
         return config, bootstrap_port + slots
 
+    def pd_bootstrap_port_count(self, gpus_per_engine: int) -> int:
+        # The Mooncake pull connector ports: the kv exchange block is
+        # [kv_port, kv_port + TP*DP*PP*PCP) and the worker handshake block starts
+        # at the side-channel port that pd_config places one slot set above
+        # kv_port, one port per device. Reserve both blocks so neighbouring
+        # engines (e.g. a second prefill server) cannot be handed a port inside
+        # them.
+        return 2 * gpus_per_engine
+
     def subprocess_env(self, base_env, *, visible_devices: str, colocate: bool) -> dict[str, str]:
         env = dict(base_env)
         env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
