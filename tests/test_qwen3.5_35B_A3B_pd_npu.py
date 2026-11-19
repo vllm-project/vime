@@ -105,6 +105,7 @@ def _train_args(*, ref_load: str, debug_data: Path) -> str:
     )
 
     vllm_args = (
+        "--router-kv-connector nixl "
         "--vllm-additional-config '{\"weight_nz_mode\":0}' "
         "--rollout-num-gpus-per-engine 4 "
         "--vllm-enable-sleep-mode "
