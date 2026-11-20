@@ -13,7 +13,8 @@
 # limitations under the License.
 """Fixed Qwen3-MoE TP2/PP2/EP2 sparse HCCL regression (ETP1).
 
-pytest runs public loader, dtype, NaN and failure-state checks, then launches
+CPU coordinate tests run with `-k test_coordinates_` without serving/NPU packages.
+The remaining tests run public loader, dtype, NaN and failure-state checks, then launch
 four workers for real HCCL gather and one sparse/full weight comparison.
 The distributed test requires four visible NPUs, CANN and Megatron Core;
 without four available NPUs, pytest reports it as skipped.
@@ -22,10 +23,12 @@ Run:
     python -m pytest -q tests/test_sparse_hccl.py
 """
 
+import importlib
 import os
 import pathlib
 import sys
 import time
+import types
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import patch as mock_patch
@@ -37,31 +40,55 @@ import torch.multiprocessing as mp
 
 # Keep spawned workers on the checkout under test, not another editable installation.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from vllm.model_executor.model_loader.checkpoint_weight_patch import (
-    CheckpointWeightPatch,
-    load_checkpoint_weight_patches,
-)
+# Coordinate tests must collect without the serving/NPU packages. Legacy engine
+# tests load them only when executed; spawned workers initialize them explicitly.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import _unit_stubs
 
-# Adaptor parses sys.argv during bootstrap and config subclass creation. Pytest
-# options are not training arguments (short options even produce empty names).
-# Spawned workers import this module too, so initialize their argument context
-# explicitly rather than letting them inherit the pytest command line.
-with mock_patch.object(sys, "argv", [sys.argv[0]]):
-    import vime.backends.megatron_utils  # noqa: F401 - Bootstrap before Megatron.
+CheckpointWeightPatch = load_checkpoint_weight_patches = None
+megatron_delta_export = gather_module = updater_module = None
+_device_shard = compact_shard_masks = shard_delta_mask = None
+GatherWorkspace = gather_slot_entries_to_rank0 = None
 
-    if "megatron_adaptor" in sys.modules:
-        from megatron_adaptor.utils.args_utils import get_mindspeed_args, set_full_args
 
-        set_full_args(get_mindspeed_args(get_defaults=True))
-from vime.backends.megatron_utils.delta_sync import megatron_delta_export
-from vime.backends.megatron_utils.delta_sync import sparse_gather as gather_module
-from vime.backends.megatron_utils.delta_sync.megatron_delta_export import (
-    _device_shard,
-    compact_shard_masks,
-    shard_delta_mask,
-)
-from vime.backends.megatron_utils.delta_sync.sparse_gather import GatherWorkspace, gather_slot_entries_to_rank0
-from vime.backends.megatron_utils.update_weight import update_weight_from_sparse_hccl as updater_module
+def _load_sparse_dependencies():
+    global CheckpointWeightPatch, load_checkpoint_weight_patches
+    global megatron_delta_export, gather_module, updater_module
+    global _device_shard, compact_shard_masks, shard_delta_mask
+    global GatherWorkspace, gather_slot_entries_to_rank0
+    if updater_module is not None:
+        return
+    pytest.importorskip("vllm", reason="Native sparse engine tests require vLLM")
+    pytest.importorskip("vllm_ascend", reason="Native sparse engine tests require vLLM-Ascend")
+    from vllm.model_executor.model_loader.checkpoint_weight_patch import (
+        CheckpointWeightPatch,
+        load_checkpoint_weight_patches,
+    )
+
+    # Adaptor must not parse pytest arguments, including inside spawned workers.
+    with mock_patch.object(sys, "argv", [sys.argv[0]]):
+        import vime.backends.megatron_utils  # noqa: F401
+
+        if "megatron_adaptor" in sys.modules:
+            from megatron_adaptor.utils.args_utils import get_mindspeed_args, set_full_args
+
+            set_full_args(get_mindspeed_args(get_defaults=True))
+    from vime.backends.megatron_utils.delta_sync import megatron_delta_export
+    from vime.backends.megatron_utils.delta_sync import sparse_gather as gather_module
+    from vime.backends.megatron_utils.delta_sync.megatron_delta_export import (
+        _device_shard,
+        compact_shard_masks,
+        shard_delta_mask,
+    )
+    from vime.backends.megatron_utils.delta_sync.sparse_gather import GatherWorkspace, gather_slot_entries_to_rank0
+    from vime.backends.megatron_utils.update_weight import update_weight_from_sparse_hccl as updater_module
+
+
+@pytest.fixture(autouse=True)
+def sparse_dependencies(request):
+    if "coordinate_converter" not in request.fixturenames:
+        _load_sparse_dependencies()
+
 
 TP = 2
 PP = 2
@@ -444,6 +471,7 @@ def _distributed_worker(rank, port, cfg_dir):
     os.environ.update(
         RANK=str(rank), LOCAL_RANK=str(rank), WORLD_SIZE=str(TP * PP), MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port)
     )
+    _load_sparse_dependencies()
     torch.npu.set_device(rank)
     store = dist.TCPStore("127.0.0.1", port, is_master=False, timeout=timedelta(seconds=120))
     dist.init_process_group("hccl", store=store, rank=rank, world_size=TP * PP, timeout=timedelta(seconds=120))
@@ -461,7 +489,7 @@ def _distributed_worker(rank, port, cfg_dir):
 @pytest.fixture
 def distributed_rendezvous(tmp_path):
     """Reserve a unique store and checkpoint directory for the spawned ranks."""
-    if not torch.npu.is_available() or torch.npu.device_count() < TP * PP:
+    if not hasattr(torch, "npu") or not torch.npu.is_available() or torch.npu.device_count() < TP * PP:
         pytest.skip("Sparse HCCL integration requires four visible NPUs")
     store = dist.TCPStore("127.0.0.1", 0, is_master=True, wait_for_workers=False, timeout=timedelta(seconds=120))
     yield store.port, str(tmp_path / "qwen3_moe")
@@ -932,3 +960,221 @@ def test_unordered_sparse_payload_keeps_value_pairing_and_rejects_duplicates(ind
         prepared = updater_module.prepare_sparse_patches([patch], torch.device("cpu"))[0]
         assert torch.equal(prepared.indices, patch.indices)
         assert torch.equal(prepared.values, patch.values)
+
+
+# CPU-only coordinate conversion regressions.
+
+
+@pytest.fixture
+def coordinate_converter():
+    names = (
+        "megatron",
+        "megatron.core",
+        "megatron.core.parallel_state",
+        "megatron.core.transformer",
+        "megatron.core.transformer.transformer_layer",
+        "ray",
+        "ray.actor",
+        "vime.utils.model_config",
+    )
+    saved = _unit_stubs.save_sys_modules(names)
+    _unit_stubs.install_megatron_mpu_stub()
+    _unit_stubs.install_ray_stub()
+    config = types.ModuleType("vime.utils.model_config")
+    config.load_hf_config = lambda *a, **k: pytest.fail("HF config loading is outside coordinate conversion")
+    sys.modules[config.__name__] = config
+    try:
+        probe = importlib.import_module("vime.backends.megatron_utils.delta_sync.sparse_hf_export")
+        common = importlib.import_module("vime.backends.megatron_utils.update_weight.common")
+        converter = importlib.import_module("vime.backends.megatron_utils.megatron_to_hf")
+        yield probe, common, converter
+    finally:
+        _unit_stubs.restore_sys_modules(saved)
+
+
+CASES = [
+    ("embedding.word_embeddings.weight", (8, 4), 0, None),
+    ("output_layer.weight", (8, 4), 0, None),
+    ("decoder.final_layernorm.weight", (4,), None, None),
+    ("decoder.layers.3.self_attention.linear_qkv.weight", (16, 4), 0, None),
+    ("decoder.layers.3.self_attention.linear_qkv.bias", (16,), 0, None),
+    ("decoder.layers.3.self_attention.linear_proj.weight", (4, 8), 1, None),
+    ("decoder.layers.3.mlp.linear_fc1.weight", (16, 4), 0, None),
+    ("decoder.layers.3.mlp.experts.linear_fc1.weight7", (16, 4), 0, None),
+    ("decoder.layers.3.mlp.experts.linear_fc2.weight7", (4, 8), 0, None),
+    ("decoder.layers.3.self_attention.q_layernorm.weight", (2,), None, None),
+    ("decoder.layers.3.mlp.linear_fc1.weight", (16, 4), 0, (8, 8)),
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("tp_size", [1, 2, 4])
+@pytest.mark.parametrize("name,shape,partition_dim,sections", CASES)
+def test_coordinates_match_full_native_conversion(
+    coordinate_converter, dtype, tp_size, name, shape, partition_dim, sections
+):
+    probe_module, common, converter = coordinate_converter
+    args = SimpleNamespace(vocab_size=7, kv_channels=2, hidden_size=4, num_attention_heads=4, num_query_groups=2)
+    name = "module.module." + name
+    # Grouped expert FC2 records dimension zero but is actually column-sharded.
+    dim = 1 if "linear_fc2.weight" in name and partition_dim == 0 else partition_dim
+    if dim is not None:
+        assert shape[dim] % tp_size == 0
+    complete = (torch.arange(torch.tensor(shape).prod().item()).reshape(shape).float() / 8).to(dtype)
+    if dim is None:
+        shards = [complete.clone()]
+        effective_tp = 1
+    elif "linear_fc1.weight" in name:
+        gate, up = complete.chunk(2, dim=0)
+        shards = [torch.cat(pair) for pair in zip(gate.chunk(tp_size), up.chunk(tp_size), strict=True)]
+        effective_tp = tp_size
+    else:
+        shards = [part.clone() for part in complete.chunk(tp_size, dim=dim)]
+        effective_tp = tp_size
+    attrs = {
+        "tensor_model_parallel": dim is not None,
+        "partition_dim": partition_dim,
+        "partition_stride": 1,
+        "partition_sections": sections,
+    }
+    infos = [SimpleNamespace(name=name, attrs=attrs, shape=s.shape) for s in shards]
+    expected_before = dict(converter.convert_to_hf(args, "qwen3moe", name, complete, None))
+    actual = {key: value.clone() for key, value in expected_before.items()}
+    changed_shards = []
+    emitted = 0
+    for rank, (shard, info) in enumerate(zip(shards, infos, strict=True)):
+        # Include boundaries, zero values, negative zero and sparse interior changes.
+        flat = shard.flatten().clone()
+        positions = torch.unique(torch.tensor([0, flat.numel() // 2, flat.numel() - 1]))
+        flat[positions] = -0.0
+        if positions.numel() > 1:
+            flat[positions[-1]] = -3.0
+        changed_shards.append(flat.reshape(shard.shape))
+        sparse = torch.full_like(shard, float("nan"))
+        sparse.flatten()[positions] = flat[positions]
+        before_probe = sparse.clone()
+        probe = probe_module.SparseHFProbe(args, "qwen3moe", info, rank, effective_tp)
+        for key, value in probe.megatron_to_hf(sparse).items():
+            mask = ~torch.isnan(value)
+            actual[key][mask] = value[mask]
+            emitted += mask.sum().item()
+        integer = torch.int16 if dtype == torch.bfloat16 else torch.int32
+        assert torch.equal(sparse.view(integer), before_probe.view(integer))
+    rebuilt = (
+        changed_shards[0]
+        if dim is None
+        else common._merge_param_partitions(name, changed_shards, partition_dim, sections)
+    )
+    expected = dict(converter.convert_to_hf(args, "qwen3moe", name, rebuilt, None))
+    assert actual.keys() == expected.keys()
+    assert emitted > 0
+    integer = torch.int16 if dtype == torch.bfloat16 else torch.int32
+    for key in expected:
+        assert actual[key].shape == expected[key].shape
+        assert torch.equal(actual[key].contiguous().view(integer), expected[key].contiguous().view(integer)), key
+
+
+@pytest.mark.unit
+def test_coordinates_need_no_bridge_or_collective(coordinate_converter, monkeypatch):
+    probe_module, common, converter = coordinate_converter
+    monkeypatch.setitem(sys.modules, "megatron.bridge", None)
+    monkeypatch.setattr(torch.distributed, "all_gather", lambda *a, **k: pytest.fail("dense gather"))
+    monkeypatch.setattr(torch.distributed, "broadcast", lambda *a, **k: pytest.fail("dense broadcast"))
+    args = SimpleNamespace(vocab_size=4)
+    info = SimpleNamespace(
+        name="module.module.embedding.word_embeddings.weight",
+        attrs={"tensor_model_parallel": True, "partition_dim": 0},
+    )
+    result = probe_module.SparseHFProbe(args, "qwen3moe", info, 1, 2).megatron_to_hf(torch.ones(2, 4))
+    value = result["model.embed_tokens.weight"]
+    assert torch.isnan(value[:2]).all() and torch.equal(value[2:], torch.ones(2, 4))
+    empty = probe_module.SparseHFProbe(args, "qwen3moe", info, 1, 2).megatron_to_hf(torch.full((2, 4), float("nan")))
+    assert torch.isnan(empty["model.embed_tokens.weight"]).all()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("invalid", ["duplicate", "dtype"])
+def test_coordinates_reject_ambiguous_or_dtype_changing_output(coordinate_converter, monkeypatch, invalid):
+    probe_module, _, converter = coordinate_converter
+    output = (
+        [("hf", torch.ones(2)), ("hf", torch.zeros(2))] if invalid == "duplicate" else [("hf", torch.ones(2).half())]
+    )
+    monkeypatch.setattr(converter, "convert_to_hf", lambda *a, **k: output)
+    info = SimpleNamespace(name="weight", attrs={})
+    with pytest.raises(ValueError, match="Unsupported sparse conversion output"):
+        probe_module.SparseHFProbe(SimpleNamespace(), "qwen3moe", info, 0, 1).megatron_to_hf(torch.ones(2))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "expert,sharded,tp_rank,tp_size,replica,rank,owner,local,expected",
+    [
+        (False, True, 1, 2, 0, 1, 1, True, True),
+        (False, False, 1, 2, 0, 1, 1, True, False),
+        (False, True, 0, 2, 1, 0, 0, True, False),
+        (False, True, 0, 2, 0, 2, 2, False, False),
+        (True, True, 0, 1, 0, 1, 1, True, True),
+        (True, True, 1, 2, 0, 3, 3, True, True),
+        (True, False, 1, 2, 0, 3, 3, True, False),
+        (False, True, 0, 2, 0, 2, 0, True, False),
+    ],
+)
+def test_coordinates_directory_retains_shards_and_deduplicates_replicas(
+    coordinate_converter,
+    monkeypatch,
+    expert,
+    sharded,
+    tp_rank,
+    tp_size,
+    replica,
+    rank,
+    owner,
+    local,
+    expected,
+):
+    export = importlib.import_module("vime.backends.megatron_utils.delta_sync.megatron_delta_export")
+    mpu = sys.modules["megatron.core.parallel_state"]
+    monkeypatch.setattr(sys.modules["megatron.core"], "parallel_state", mpu)
+    for prefix in ("tensor_model", "expert_tensor"):
+        monkeypatch.setattr(mpu, f"get_{prefix}_parallel_rank", lambda: tp_rank, raising=False)
+        monkeypatch.setattr(mpu, f"get_{prefix}_parallel_world_size", lambda: tp_size, raising=False)
+    monkeypatch.setattr(mpu, "get_data_parallel_rank", lambda **kw: replica, raising=False)
+    monkeypatch.setattr(mpu, "get_expert_data_parallel_rank", lambda: replica, raising=False)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: rank)
+    monkeypatch.setattr(
+        export, "_exchange_slot_tables", lambda rows: [setattr(r, "slots", [("hf", (4,))]) for r in rows]
+    )
+    name = "mlp.experts.linear_fc1.weight7" if expert else "embedding.word_embeddings.weight"
+    info = SimpleNamespace(
+        name=name, dtype=torch.float32, src_rank=owner, attrs={"tensor_model_parallel": sharded, "partition_dim": 0}
+    )
+    iterator = SimpleNamespace(
+        args=SimpleNamespace(),
+        model_name="qwen3moe",
+        hf_vocab_size=4,
+        param_infos=[info],
+        local_weights=lambda: {name: torch.zeros(4)} if local else {},
+    )
+    (record,) = export.build_export_index(iterator, [])
+    assert record.contributes is expected
+    assert (record.param is not None) is local
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"quantization_config": {"quant_method": "fp8"}},
+        {"dspark_enabled": True},
+        {"enable_mtp_training": True},
+    ],
+)
+def test_coordinates_reject_unsupported_conversion_before_initialization(coordinate_converter, options):
+    probe_module, _, _ = coordinate_converter
+    options = options.copy()
+    quantization = options.pop("quantization_config", None)
+    with pytest.raises(ValueError):
+        probe_module.SparseHFExporter(
+            SimpleNamespace(**options), [], model_name="qwen3moe", quantization_config=quantization
+        )
