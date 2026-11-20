@@ -121,7 +121,6 @@ def _compare_sparse_with_full_weights(model, cfg_dir, rank):
     """Require sparse reconstruction to equal full export, including untouched weights."""
     from types import SimpleNamespace
 
-    from vime.backends.megatron_utils.delta_sync.hf_weight_iterator_vime import HfWeightIteratorVime
     from vime.backends.megatron_utils.delta_sync.megatron_delta_export import (
         build_export_index,
         iter_delta_entries,
@@ -129,6 +128,7 @@ def _compare_sparse_with_full_weights(model, cfg_dir, rank):
         validate_export_weights,
     )
     from vime.backends.megatron_utils.delta_sync.sparse_gather import _GatherQueue
+    from vime.backends.megatron_utils.delta_sync.sparse_hf_export import SparseHFExporter
 
     args = SimpleNamespace(
         hf_checkpoint=cfg_dir,
@@ -141,7 +141,7 @@ def _compare_sparse_with_full_weights(model, cfg_dir, rank):
         num_experts=4,
         dspark_enabled=False,
     )
-    iterator = HfWeightIteratorVime(args, model, model_name="qwen3moe", quantization_config=None)
+    iterator = SparseHFExporter(args, model, model_name="qwen3moe", quantization_config=None)
     index = build_export_index(iterator, model)
     assert all(record.param is None or record.param.device.type == "npu" for record in index)
 
@@ -149,7 +149,7 @@ def _compare_sparse_with_full_weights(model, cfg_dir, rank):
     for record in index:
         if record.param is not None and record.param.ndim == 1:
             record.param.data = record.param.data.float()
-    iterator = HfWeightIteratorVime(args, model, model_name="qwen3moe", quantization_config=None)
+    iterator = SparseHFExporter(args, model, model_name="qwen3moe", quantization_config=None)
     index = build_export_index(iterator, model)
     assert {record.dtype for record in index} == {torch.bfloat16, torch.float32}
 

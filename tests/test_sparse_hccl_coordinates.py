@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _unit_stubs
 
 pytestmark = pytest.mark.unit
@@ -34,7 +34,7 @@ def native():
     config.load_hf_config = lambda *a, **k: pytest.fail("HF config loading is outside coordinate conversion")
     sys.modules[config.__name__] = config
     try:
-        probe = importlib.import_module("vime.backends.megatron_utils.delta_sync.hf_weight_iterator_vime")
+        probe = importlib.import_module("vime.backends.megatron_utils.delta_sync.sparse_hf_export")
         common = importlib.import_module("vime.backends.megatron_utils.update_weight.common")
         converter = importlib.import_module("vime.backends.megatron_utils.megatron_to_hf")
         yield probe, common, converter
@@ -101,7 +101,7 @@ def test_sparse_coordinates_equal_full_native_conversion(native, dtype, tp_size,
         sparse = torch.full_like(shard, float("nan"))
         sparse.flatten()[positions] = flat[positions]
         before_probe = sparse.clone()
-        probe = probe_module.VimeHFProbe(args, "qwen3moe", info, rank, effective_tp)
+        probe = probe_module.SparseHFProbe(args, "qwen3moe", info, rank, effective_tp)
         for key, value in probe.megatron_to_hf(sparse).items():
             mask = ~torch.isnan(value)
             actual[key][mask] = value[mask]
@@ -132,10 +132,10 @@ def test_no_bridge_dependency_or_collective_in_probe(native, monkeypatch):
         name="module.module.embedding.word_embeddings.weight",
         attrs={"tensor_model_parallel": True, "partition_dim": 0},
     )
-    result = probe_module.VimeHFProbe(args, "qwen3moe", info, 1, 2).megatron_to_hf(torch.ones(2, 4))
+    result = probe_module.SparseHFProbe(args, "qwen3moe", info, 1, 2).megatron_to_hf(torch.ones(2, 4))
     value = result["model.embed_tokens.weight"]
     assert torch.isnan(value[:2]).all() and torch.equal(value[2:], torch.ones(2, 4))
-    empty = probe_module.VimeHFProbe(args, "qwen3moe", info, 1, 2).megatron_to_hf(torch.full((2, 4), float("nan")))
+    empty = probe_module.SparseHFProbe(args, "qwen3moe", info, 1, 2).megatron_to_hf(torch.full((2, 4), float("nan")))
     assert torch.isnan(empty["model.embed_tokens.weight"]).all()
 
 
@@ -148,7 +148,7 @@ def test_ambiguous_or_dtype_changing_converter_is_rejected(native, monkeypatch, 
     monkeypatch.setattr(converter, "convert_to_hf", lambda *a, **k: output)
     info = SimpleNamespace(name="weight", attrs={})
     with pytest.raises(ValueError, match="Unsupported sparse conversion output"):
-        probe_module.VimeHFProbe(SimpleNamespace(), "qwen3moe", info, 0, 1).megatron_to_hf(torch.ones(2))
+        probe_module.SparseHFProbe(SimpleNamespace(), "qwen3moe", info, 0, 1).megatron_to_hf(torch.ones(2))
 
 
 @pytest.mark.parametrize(
@@ -218,7 +218,7 @@ def test_unsupported_conversion_rejected_before_initializing_iterator(native, op
     options = options.copy()
     quantization = options.pop("quantization_config", None)
     with pytest.raises(ValueError):
-        probe_module.HfWeightIteratorVime(
+        probe_module.SparseHFExporter(
             SimpleNamespace(**options), [], model_name="qwen3moe", quantization_config=quantization
         )
 

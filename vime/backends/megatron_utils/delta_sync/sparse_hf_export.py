@@ -8,7 +8,7 @@ import torch
 
 
 @dataclass
-class VimeHFProbe:
+class SparseHFProbe:
     """Reconstruct only a local placeholder, never a distributed full weight.
 
     Missing TP shards contain NaN. The ordinary merge and model converter
@@ -50,7 +50,7 @@ class VimeHFProbe:
         return result
 
 
-class HfWeightIteratorVime:
+class SparseHFExporter:
     """Share native VIME conversion between full seeds and sparse probes."""
 
     def __init__(self, args, model, *, model_name, quantization_config):

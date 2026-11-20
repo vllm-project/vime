@@ -75,7 +75,7 @@ def build_export_index(iterator, megatron_model) -> list[McoreParamExport]:
     """
     from megatron.core import parallel_state as mpu
 
-    from .hf_weight_iterator_vime import VimeHFProbe
+    from .sparse_hf_export import SparseHFProbe
 
     del megatron_model  # The iterator owns the live model used by full export.
     local_weights = iterator.local_weights()
@@ -101,7 +101,7 @@ def build_export_index(iterator, megatron_model) -> list[McoreParamExport]:
                 megatron_name=info.name,
                 param=param,
                 probe=(
-                    VimeHFProbe(iterator.args, iterator.model_name, info, tp_rank, tp_size)
+                    SparseHFProbe(iterator.args, iterator.model_name, info, tp_rank, tp_size)
                     if param is not None
                     else None
                 ),

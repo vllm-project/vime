@@ -134,7 +134,7 @@ steps:
           python tests/test_reloadable_process_group_memory_check.py
           python tests/test_ppo_logprob_entropy.py
           python tests/utils/test_hf_checkpoint_saver.py
-          python tests/utils/test_vime_sparse_coordinates.py
+          python tests/test_sparse_hccl_coordinates.py
         '
 
   - label: ":robot_face: agent adapter tests"
