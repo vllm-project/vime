@@ -11,21 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Export Megatron shard deltas in HF checkpoint coordinates via Megatron-Bridge.
+"""Export local shard deltas through VIME's ordinary HF conversion rules.
 
-Build an ordered export index, compare local shards with snapshots, and
-convert changed entries using Bridge mappings with NaN sentinels. Probe
-mappings preserve parallel sizes and ranks while replacing collectives
-with local placeholders; unsupported communication raises an error.
-
-Supports TP, EP and PP/VPP; LoRA is excluded. Mappings must preserve
-individual values rather than blend contributions, so NaN sentinels remain
-valid. Bridge upgrades require differential validation against full export.
+NaN placeholder shards preserve coordinate layout without dense inter-rank
+weight gathers. Only floating, unquantized value-preserving layouts are supported.
+Probe buffers and output scans remain dense and can grow with TP size.
 """
 
 from __future__ import annotations
 
-import copy
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -40,131 +34,16 @@ logger = logging.getLogger(__name__)
 _DTYPE_INT = {1: torch.uint8, 2: torch.int16, 4: torch.int32, 8: torch.int64}
 
 
-class _ProbeGroup:
-    """Size/rank-faithful stand-in for a process group on probe copies: value
-    math inside ``megatron_to_hf`` (e.g. Mamba's per-rank de-interleave dims)
-    sees the REAL parallel sizes, while any attempt to actually communicate
-    through the group fails loud (the probe stubs the bridge's comm helpers;
-    anything else reaching a group is an unstubbed communication pattern)."""
-
-    def __init__(self, size: int, rank: int):
-        self._size = int(size)
-        self._rank = int(rank)
-
-    def size(self) -> int:
-        return self._size
-
-    def rank(self) -> int:
-        return self._rank
-
-    def __getattr__(self, name):
-        raise RuntimeError(
-            f"probe process group asked for {name!r}: this mapping communicates outside "
-            "the stubbed helpers (gather_from_tp_ranks / gather_from_ep_ranks[_scale] / "
-            "pp broadcasts) -- extend make_probe's comm stubs before trusting its export"
-        )
-
-
-def _nan_block(shape, dtype, device, pool) -> torch.Tensor:
-    """Read-only all-NaN placeholder for another rank's gather chunk, pooled by
-    (shape, dtype, device): the gather stub hands these out on every probe call
-    for every param, and they are only ever READ (the transforms are functional),
-    so one block per distinct shape serves the whole model for the run's
-    lifetime instead of a fresh cudaMalloc+fill per param per sync."""
-    key = (tuple(shape), dtype, str(device))
-    t = pool.get(key)
-    if t is None:
-        t = torch.full(tuple(shape), float("nan"), dtype=dtype, device=device)
-        pool[key] = t
-    return t
-
-
-def _warm_lazy_mappings(mapping, module) -> None:
-    """Force AutoMapping's lazy concrete delegate into existence: AutoMapping
-    resolves its Column/Row/Replicated delegate on first use, snapshotting
-    whatever process groups exist at that moment -- if that first use happened
-    inside the probe, the delegate would be born with the REAL groups and
-    gather for real (the qkv-bias double-size bug). Self-only on purpose:
-    ``_inject`` warms every child right before copying it, so each node of the
-    mapping tree is warmed exactly once."""
-    if hasattr(mapping, "_detect_parallelism_type") and getattr(mapping, "_mapping", None) is None:
-        try:
-            t = mapping._detect_parallelism_type(module)
-            mapping._mapping = mapping._get_or_create_mapping(t)
-            mapping._detected_type = t
-        except Exception as e:  # pragma: no cover - defensive; probe falls back to real groups
-            logger.warning("could not warm lazy mapping %s: %s", type(mapping).__name__, e)
-
-
-def make_probe(mapping, module, nan_pool=None):
-    """Copy a Megatron-Bridge param mapping tree and turn ``megatron_to_hf``
-    into a communication-free LOCAL transform that still runs the REAL
-    (tp_size > 1) code paths: every copy's groups become size-faithful
-    :class:`_ProbeGroup` stand-ins and the bridge's comm helpers are stubbed
-    with local synthesis. The copy is recursive (composite mappings delegate to
-    inner mappings -- QKVMapping._tp_mapping is an AutoMapping which itself
-    delegates to a lazily-created concrete mapping; none of these receive the
-    outer stubbing on their own)."""
-    from megatron.bridge.models.conversion.param_mapping import MegatronParamMapping
-    from megatron.core.utils import get_pg_rank, get_pg_size
-
-    _warm_lazy_mappings(mapping, module)
-    nan_pool = {} if nan_pool is None else nan_pool
-
-    def _stub(c):
-        # size-faithful groups, sizes/ranks read from the ORIGINAL (real) groups
-        # BEFORE replacement. The probe only ever runs on the stage that OWNS
-        # the param, where a pp broadcast is the identity -- a (1, 0) group
-        # keeps the pp helpers on that fast path regardless of the real pp size.
-        c.pp_group = _ProbeGroup(1, 0)
-        for attr in ("ep_group", "_tp_group", "_etp_group"):
-            g = getattr(c, attr, None)
-            setattr(c, attr, _ProbeGroup(get_pg_size(g), get_pg_rank(g)))
-
-        def _gather_tp(tensor, _c=c):
-            # what a real all_gather over the tp group would produce, minus the
-            # other ranks' data: our shard rides at its true rank index, every
-            # other chunk is a pooled read-only NaN block (those ranks export
-            # their own contributions; transforms never write into their inputs,
-            # which the TP>1 bitwise differential revalidates).
-            nan = _nan_block(tensor.shape, tensor.dtype, tensor.device, nan_pool)
-            out = [nan] * _c.tp_size
-            out[_c.tp_rank] = tensor
-            return out
-
-        c.gather_from_tp_ranks = _gather_tp
-        # each rank's probe emits only its own local experts, under the hf name
-        # bound with the GLOBAL expert id at task construction; the engine
-        # merges entries over the etp x ep group, so the ep fan-out reduces to
-        # the bound name.
-        c.gather_from_ep_ranks = lambda w, mod, name: {str(name): w}
-        # mirrors the real helper's tail (unsqueeze(0) ... squeeze().unsqueeze(-1))
-        c.gather_from_ep_ranks_scale = lambda w, mod, name: {str(name): w.unsqueeze(0).squeeze().unsqueeze(-1)}
-        return c
-
-    def _inject(m):
-        c = _stub(copy.copy(m))
-        for attr, value in list(vars(c).items()):
-            if isinstance(value, MegatronParamMapping):
-                # warm BEFORE copying the child: the lazy delegate must exist so
-                # the child copy's vars() include it and the recursion reaches it.
-                _warm_lazy_mappings(value, module)
-                setattr(c, attr, _inject(value))
-        return c
-
-    return _inject(mapping)
-
-
 @dataclass
 class McoreParamExport:
-    """One mcore parameter's export record: geometry + probe + module handle.
+    """One native VIME parameter row: geometry, local converter and wire slots.
     ``param is None`` marks a parameter owned by another pipeline stage: the
     rank ships a zero-count lockstep row for it (probe/module unused)."""
 
     megatron_name: str
     param: torch.Tensor | None
     probe: Any
-    module: Any  # module handle megatron_to_hf reads config from
+    module: Any  # reserved converter context; native VIME probes use None
     gather_group: ProcessGroup | None = None
     contributes: bool = True
     # GLOBAL slot table for this directory row (set by the index-build
@@ -187,144 +66,64 @@ def trim_hf_vocab_padding(name: str, tensor: torch.Tensor, vocab_size: int | Non
     return tensor
 
 
-def build_export_index(bridge, megatron_model) -> list[McoreParamExport]:
-    """Enumerate every mcore parameter through the bridge's conversion tasks
-    and precompute its probe + wire routing.
+def build_export_index(iterator, megatron_model) -> list[McoreParamExport]:
+    """Use VIME's global parameter directory; all ranks visit the same rows.
 
-    No shard geometry is hand-computed here: the comm-stubbed probe emits final
-    HF coordinates straight from the local shard, so the engine only needs to
-    know WHICH group's entries to merge per parameter (the record's
-    ``gather_group``) and which
-    ranks contribute. The index is built once (parameter sets are static) and
-    reused by both the shard export and the delta entry hook.
-
-    Lockstep: ``get_conversion_tasks`` already enumerates the GLOBAL parameter
-    list in an order identical on every rank (the bridge allgathers and sorts
-    names across pp ranks, dedupes tied embeddings, and leaves
-    ``param_weight=None`` placeholders for parameters owned by other pipeline
-    stages). Under PP>1 those placeholders become zero-count lockstep rows and
-    every param's entries merge over the WORLD group (owner-stage ranks
-    contribute, dp/cp replicas and other stages stay empty); their slot tables
-    are pre-seeded once via :func:`_preseed_slot_tables`. Under PP=1 the
-    routing is unchanged (tp / etp x ep subgroups, replicated rank-0 direct).
+    src_rank chooses the PP owner within each TP lane. It is not a global
+    unique sender: distinct TP shards and EP experts must all contribute.
+    WORLD routing also includes rank zero for every PP/EP combination.
     """
     from megatron.core import parallel_state as mpu
 
-    pp_world = mpu.get_pipeline_model_parallel_world_size()
-    tp_group = mpu.get_tensor_model_parallel_group()
-    tp_world = torch.distributed.get_world_size(group=tp_group)
-    ep_size = mpu.get_expert_model_parallel_world_size()
-    world = torch.distributed.group.WORLD
+    from .hf_weight_iterator_vime import VimeHFProbe
 
-    nan_pool = {}
-    hf_config = bridge.hf_pretrained.config
-    hf_config = getattr(hf_config, "text_config", hf_config)
-    hf_vocab_size = getattr(hf_config, "vocab_size", None)
-    tasks = bridge.get_conversion_tasks(megatron_model)
-    index: list[McoreParamExport] = []
-    for task in tasks:
-        mapping = task.mapping
-        param = task.param_weight
-        name = task.global_param_name
-        if param is None:
-            if pp_world == 1:
-                # not a pp placeholder (e.g. a skipped mapping); nothing to ship
-                continue
-            # owned by another pipeline stage: zero-count lockstep row -- the
-            # rank walks the same global directory and contributes nothing.
-            index.append(
-                McoreParamExport(
-                    megatron_name=name,
-                    param=None,
-                    gather_group=world,
-                    contributes=False,
-                    probe=None,
-                    module=None,
-                )
-            )
-            continue
-        module = task.megatron_module
-
-        is_expert = mapping.is_expert and (ep_size > 1 or tp_world > 1)
-        is_tp_sharded = getattr(param, "tensor_model_parallel", False) and tp_world > 1
-
-        if pp_world > 1:
-            # single WORLD merge group for every param: the wire master (global
-            # rank 0) sits in every gather regardless of which stage owns the
-            # param, so no relay hop is needed. Owner-stage ranks contribute
-            # their shard pieces; dp/cp replicas dedupe via ``contributes``
-            # (identical copies -- exactly one replica set ships).
-            if is_expert:
-                contributes = mpu.get_expert_data_parallel_rank() == 0
-            elif is_tp_sharded:
-                contributes = mpu.get_data_parallel_rank(with_context_parallel=True) == 0
-            else:
-                contributes = (
-                    mpu.get_tensor_model_parallel_rank() == 0
-                    and mpu.get_data_parallel_rank(with_context_parallel=True) == 0
-                )
-            gather_group = world
-        elif is_expert:
-            # every rank holding a piece of this expert set contributes; the
-            # engine merges their probe entries over the joint etp x ep group.
-            gather_group = mpu.get_expert_tensor_and_model_parallel_group()
-            contributes = mpu.get_expert_data_parallel_rank() == 0
-        elif is_tp_sharded:
-            gather_group = tp_group
-            contributes = mpu.get_data_parallel_rank(with_context_parallel=True) == 0
+    del megatron_model  # The iterator owns the live model used by full export.
+    local_weights = iterator.local_weights()
+    rank = torch.distributed.get_rank()
+    index = []
+    for info in iterator.param_infos:
+        if not info.dtype.is_floating_point:
+            raise ValueError(f"Sparse conversion requires floating weights: {info.name}")
+        param = local_weights.get(info.name)
+        expert = ".experts." in info.name
+        if expert:
+            tp_size = mpu.get_expert_tensor_parallel_world_size()
+            tp_rank = mpu.get_expert_tensor_parallel_rank()
+            replica = mpu.get_expert_data_parallel_rank()
         else:
-            # replicated: engine's pg=None path (rank 0 consumes its own entry
-            # directly, replicas stay in lockstep via zero counts).
-            gather_group = None
-            contributes = torch.distributed.get_rank() == 0
-
+            tp_size = mpu.get_tensor_model_parallel_world_size()
+            tp_rank = mpu.get_tensor_model_parallel_rank()
+            replica = mpu.get_data_parallel_rank(with_context_parallel=True)
+        sharded = info.attrs.get("tensor_model_parallel", False) and info.attrs.get("parallel_mode") != "duplicated"
+        contributes = param is not None and info.src_rank == rank and replica == 0 and (sharded or tp_rank == 0)
         index.append(
             McoreParamExport(
-                megatron_name=name,
+                megatron_name=info.name,
                 param=param,
-                gather_group=gather_group,
+                probe=(
+                    VimeHFProbe(iterator.args, iterator.model_name, info, tp_rank, tp_size)
+                    if param is not None
+                    else None
+                ),
+                module=None,
+                gather_group=torch.distributed.group.WORLD,
                 contributes=contributes,
-                probe=make_probe(mapping, module, nan_pool),
-                module=module,
-                hf_vocab_size=hf_vocab_size,
+                hf_vocab_size=iterator.hf_vocab_size,
+                dtype=info.dtype,
             )
         )
-
     _exchange_slot_tables(index)
-    # a row with an empty union has no owner on ANY rank: the bridge skipped
-    # it everywhere (no mapping / missing HF key), so it is outside the
-    # bridge's own export scope -- exactly what PP=1 does by skipping
-    # param_weight=None tasks. Drop it (all ranks agree: the exchange result
-    # is identical) instead of shipping unsized rows.
-    unowned = [rec.megatron_name for rec in index if rec.slots is None]
-    if unowned:
-        logger.warning(
-            "delta export drops %d row(s) the bridge skipped on every rank "
-            "(no mapping or missing HF key; out of export scope): %s",
-            len(unowned),
-            unowned[:8],
-        )
-        index = [rec for rec in index if rec.slots is not None]
+    if any(record.slots is None for record in index):
+        raise ValueError("VIME sparse parameter directory contains an unowned row")
     return index
 
 
 def _exchange_slot_tables(index: list[McoreParamExport]) -> None:
-    """One-time GLOBAL slot-table exchange, run at every world size, keyed by
-    DIRECTORY ROW (not by param name).
+    """Exchange native VIME output slots for the shared global parameter rows.
 
-    The engine's batched gather merges entries BY SLOT POSITION within each
-    directory row and rank 0 names the merged pieces from ITS OWN list, so
-    the per-row list must be identical on every rank of the row's merge
-    group. Name-keyed merging is not enough on mcore: expert param NAMES
-    embed the expert ids (``...experts.linear_fc1.weight0`` on ep rank 0 vs
-    ``weight1`` on ep rank 1), so the same row carries different names per
-    rank while still gathering together. Each rank therefore probes a zero
-    delta through its OWNED rows to reveal its local ``(hf_name, hf_shape)``
-    list, one ``all_gather_object`` over WORLD exchanges the ordered row
-    lists, and every row's table becomes the rank-order first-seen union --
-    identical everywhere by construction. Dense/TP rows (same list on every
-    rank) dedup to themselves; expert rows concatenate the per-ep-rank
-    lists; PP placeholder rows inherit the owners' union and dtype."""
+    PP placeholders inherit owner shapes/dtypes. The ordered union is identical
+    on every rank, including rows with no local changes or only replicated data.
+    """
     local_rows: list = []
     for rec in index:
         if rec.param is None:
@@ -343,7 +142,7 @@ def _exchange_slot_tables(index: list[McoreParamExport]) -> None:
     n_rows = len(local_rows)
     assert all(len(rows) == n_rows for rows in gathered), (
         f"directory row counts diverge across ranks: {[len(r) for r in gathered]} -- "
-        "the bridge's global enumeration is expected to be structurally parallel"
+        "the VIME's global enumeration is expected to be structurally parallel"
     )
     for k, rec in enumerate(index):
         union: dict = {}
@@ -367,11 +166,11 @@ def mcore_hf_delta_entry(
     lidx: torch.Tensor,
     lval: torch.Tensor,
 ):
-    """Probe one mcore param's shard-local delta into its final HF-coordinate
+    """Convert one parameter's shard-local delta into its final HF-coordinate
     entry ``(slots, dtype_str, counts, hf_idx, hf_val)``.
 
     Scatters the delta into a NaN buffer of the LOCAL shard shape (exactly what
-    the real ``megatron_to_hf`` receives), runs the comm-stubbed probe -- real
+    the native VIME converter receives), runs the comm-stubbed probe -- real
     group sizes, gathers synthesized locally, so the mapping executes its real
     TP>1 code paths -- and extracts each output slot's surviving positions.
     The slot list is cached after the first call (the converter's output names

@@ -4,7 +4,7 @@ Delta 权重同步只发送两次同步之间发生变化的字节，而不是�
 
 它支持两条传输路径：`disk` 面向跨集群共享存储，`sparse_hccl` 面向 Ascend
 训练和 vLLM-Ascend rollout 之间的在线传输。首次通过标准 sparse 协议发送全部 checkpoint 坐标，后续只发送变化坐标。
-首次全量导出和后续增量索引都使用 Megatron-Bridge。
+首次全量导出和后续增量坐标转换都复用 VIME 已有的 `convert_to_hf()` 规则。
 
 对于 disk transport，训练端把每次同步发布为一份 canonical HF checkpoint 目录；engine 的 `pull_weights` worker RPC（随 vime 的 vllm patch 提供）把 apply 扇出到 **engine 覆盖的每一个 host** 并校验，随后 engine 通过 `update_weights_from_disk` 适配接口调用原生 reload RPC，加载打过补丁的本地 checkpoint。vime 对每个 engine 只与一个端点通信，所以多节点 serving 和外部 rollout engine 在 vime 侧都不需要任何额外支持。
 
@@ -13,12 +13,18 @@ Delta 权重同步只发送两次同步之间发生变化的字节，而不是�
 Sparse HCCL：
 
 该路径直接复用固定版本 vLLM-Ascend 已包含的原生 sparse HCCL 引擎，
-无需额外的 sparse engine 依赖补丁。VIME 负责 Bridge 导出、分片快照、有序汇聚及更新生命周期。
+无需额外的 sparse engine 依赖补丁。VIME 负责原有 HF 转换、分片快照、有序汇聚及更新生命周期。
 
-NPU 镜像固定安装 Megatron-Bridge `afcc7eee4cd916aedcf90562b01f3948ed76d82d`
-用于转换。自定义训练镜像也需要包含该依赖，单独安装 VIME 不会安装训练栈。
-转换依赖的固定版本见 `docker/Dockerfile.npu`，不要在 Ascend 环境中直接解析
-Bridge 的 CUDA 训练 extras，以免替换已固定的训练和推理依赖。
+该方案不需要安装 NVIDIA Megatron Bridge。seed 使用 `HfWeightIteratorDirect`；
+delta 对本地变化分片补 NaN 占位，在本地复用原有 TP merge 和 `convert_to_hf()`，
+包含 FC1 gate/up 重排与 expert-TP 布局。增量转换不会执行全量权重的分布式广播或
+all-gather；真正的变化条目仍通过原有 sparse 收集流程发送。参数目录及 slot 元数据
+仍需 collective 交换。
+
+该实现使用本地稠密 probe 缓冲和输出扫描，不是仅占 O(delta) 内存的解析坐标公式，
+临时内存会随 TP 大小增长。仅支持未量化、浮点、保持独立元素映射的转换；拒绝
+draft/MTP 权重。Qwen3-MoE 布局有 CPU 差分测试覆盖；新增模型布局仍需验证 sparse
+重建与完整转换逐位一致。此前 Bridge 方案的 NPU 结果和耗时不能算作本方案的验证。
 
 ```bash
 --update-weight-mode delta
@@ -63,10 +69,10 @@ delta 始终用 zstd（level 1）压缩；profiling 显示对这类数据它在 
 
 首轮或重连时执行 Seed，后续更新执行 Diff；两条路径共用 Publish 和 Apply。
 
-1. **Seed。** 首轮或重连后，通过 Bridge 完整导出当前训练权重，生成全部 checkpoint
+1. **Seed。** 首轮或重连后，通过 VIME 原有转换完整导出当前训练权重，生成全部 checkpoint
    坐标与目标值，交给 Publish／Apply 阶段发送和应用。首轮成功后保存本地 shard snapshot，
    作为后续差分基准；重连时重新全量覆盖 worker 权重。
-2. **Diff。** 后续更新对当前训练分片与 snapshot 做 bitwise diff，通过 Bridge 映射及
+2. **Diff。** 后续更新对当前训练分片与 snapshot 做 bitwise diff，通过 VIME 原有转换及本地
    NaN probe 转为 HF checkpoint 坐标和值，只保留发生变化的位置。
 3. **Publish。** 对 Diff 生成的变化项，先按一致目录执行变长 gather，聚合到 rank0。
    rank0 对 Seed 或 Diff 的 payload 检查边界、重复索引和 NaN，转到通信设备并连续化，按字节预算分片。

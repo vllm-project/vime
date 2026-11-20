@@ -15,7 +15,7 @@
 
 pytest runs public loader, dtype, NaN and failure-state checks, then launches
 four workers for real HCCL gather and one sparse/full weight comparison.
-The distributed test requires four visible NPUs, CANN and Megatron-Bridge;
+The distributed test requires four visible NPUs, CANN and Megatron Core;
 without four available NPUs, pytest reports it as skipped.
 
 Run:
@@ -69,7 +69,7 @@ EP = 2
 
 
 def _unpack_hf_experts(weights):
-    """Keep the regression checkpoint in Bridge's per-expert HF coordinates."""
+    """Keep the regression checkpoint in VIME's per-expert HF coordinates."""
     result = {}
     for name, weight in weights.items():
         if name.endswith(".experts.gate_up_proj"):
@@ -121,7 +121,7 @@ def _compare_sparse_with_full_weights(model, cfg_dir, rank):
     """Require sparse reconstruction to equal full export, including untouched weights."""
     from types import SimpleNamespace
 
-    from vime.backends.megatron_utils.delta_sync.hf_weight_iterator_bridge import HfWeightIteratorBridge
+    from vime.backends.megatron_utils.delta_sync.hf_weight_iterator_vime import HfWeightIteratorVime
     from vime.backends.megatron_utils.delta_sync.megatron_delta_export import (
         build_export_index,
         iter_delta_entries,
@@ -130,17 +130,27 @@ def _compare_sparse_with_full_weights(model, cfg_dir, rank):
     )
     from vime.backends.megatron_utils.delta_sync.sparse_gather import _GatherQueue
 
-    iterator = HfWeightIteratorBridge(SimpleNamespace(hf_checkpoint=cfg_dir, update_weight_buffer_size=4096), model)
-    with iterator.model_context():
-        index = build_export_index(iterator.bridge, model)
+    args = SimpleNamespace(
+        hf_checkpoint=cfg_dir,
+        update_weight_buffer_size=4096,
+        vocab_size=512,
+        hidden_size=64,
+        kv_channels=16,
+        num_attention_heads=4,
+        num_query_groups=2,
+        num_experts=4,
+        dspark_enabled=False,
+    )
+    iterator = HfWeightIteratorVime(args, model, model_name="qwen3moe", quantization_config=None)
+    index = build_export_index(iterator, model)
     assert all(record.param is None or record.param.device.type == "npu" for record in index)
 
     # Exercise PP placeholders with FP32 owner rows alongside BF16 matrices.
     for record in index:
         if record.param is not None and record.param.ndim == 1:
             record.param.data = record.param.data.float()
-    with iterator.model_context():
-        index = build_export_index(iterator.bridge, model)
+    iterator = HfWeightIteratorVime(args, model, model_name="qwen3moe", quantization_config=None)
+    index = build_export_index(iterator, model)
     assert {record.dtype for record in index} == {torch.bfloat16, torch.float32}
 
     def export():
@@ -152,7 +162,10 @@ def _compare_sparse_with_full_weights(model, cfg_dir, rank):
     from safetensors.torch import load_file
 
     checkpoint_weights = load_file(str(pathlib.Path(cfg_dir, "model.safetensors")))
-    assert accumulated.keys() == checkpoint_weights.keys(), "Full Bridge export must cover every checkpoint parameter"
+    assert accumulated.keys() == checkpoint_weights.keys(), "Full VIME export must cover every checkpoint parameter"
+    for name, value in checkpoint_weights.items():
+        actual = accumulated[name].to(value.dtype).contiguous()
+        assert torch.equal(actual.view(torch.uint8), value.contiguous().view(torch.uint8)), name
     snapshots = {}
     prime_delta_snapshots(index, snapshots, pin=False)
     torch.npu.synchronize()
@@ -186,8 +199,13 @@ def _compare_sparse_with_full_weights(model, cfg_dir, rank):
 
 
 def _run_sparse_full_comparison(rank, cfg_dir):
-    """Build the fixed parallel model inside an already initialized worker."""
+    """Exercise real process groups using native VIME-loaded local parameter shards."""
     from megatron.core import parallel_state as mpu
+    from megatron.core.transformer.transformer_config import TransformerConfig
+    from transformers import AutoConfig
+
+    from vime.backends.megatron_utils.hf_to_megatron.common import SafetensorReader
+    from vime.backends.megatron_utils.hf_to_megatron.qwen import qwen_moe_hf_tensor
 
     mpu.initialize_model_parallel(
         tensor_model_parallel_size=TP,
@@ -195,50 +213,71 @@ def _run_sparse_full_comparison(rank, cfg_dir):
         expert_model_parallel_size=EP,
         expert_tensor_parallel_size=1,
     )
-    from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
-
-    model_parallel_cuda_manual_seed(1234)
-
     cfg_dir = _build_tiny_qwen3_moe_checkpoint(rank, cfg_dir)
+    hf_config = AutoConfig.from_pretrained(cfg_dir)
+    reader = SafetensorReader(cfg_dir)
+    config = TransformerConfig(
+        num_layers=2,
+        hidden_size=64,
+        num_attention_heads=4,
+        num_query_groups=2,
+        ffn_hidden_size=128,
+        num_moe_experts=4,
+        moe_ffn_hidden_size=64,
+        tensor_model_parallel_size=TP,
+        pipeline_model_parallel_size=PP,
+        expert_model_parallel_size=EP,
+        expert_tensor_parallel_size=1,
+    )
+    root = torch.nn.Module()
+    root.config = config
 
-    from megatron.bridge import AutoBridge
+    def register(name, global_name, partition_dim=None, expert=False):
+        full = qwen_moe_hf_tensor(global_name, reader, hf_config)
+        size = mpu.get_expert_tensor_parallel_world_size() if expert else TP
+        tp_rank = mpu.get_expert_tensor_parallel_rank() if expert else mpu.get_tensor_model_parallel_rank()
+        value = full if partition_dim is None else full.chunk(size, dim=partition_dim)[tp_rank]
+        parameter = torch.nn.Parameter(value.clone().npu().to(torch.bfloat16))
+        parameter.tensor_model_parallel = partition_dim is not None
+        parameter.partition_dim = partition_dim if partition_dim is not None else -1
+        parameter.partition_stride = 1
+        module = root
+        parts = ("module.module." + name).split(".")
+        for part in parts[:-1]:
+            if part not in module._modules:
+                module.add_module(part, torch.nn.Module())
+            module = module._modules[part]
+        module.register_parameter(parts[-1], parameter)
 
-    from vime.backends.megatron_utils.delta_sync.hf_weight_iterator_bridge import configure_bridge_module_types
-
-    configure_bridge_module_types()
-    bridge = AutoBridge.from_hf_pretrained(cfg_dir, trust_remote_code=True)
-    config = bridge.hf_pretrained.config
-    rope = getattr(config, "rope_parameters", None) or {}
-    if "rope_theta" in rope and not hasattr(config, "rope_theta"):
-        config.rope_theta = rope["rope_theta"]
-    provider = bridge.to_megatron_provider(load_weights=False)
-    # Older Bridge providers otherwise use their default instead of HF head_dim.
-    provider.kv_channels = bridge.hf_pretrained.config.head_dim
-    provider.tensor_model_parallel_size = TP
-    provider.pipeline_model_parallel_size = PP
-    provider.expert_model_parallel_size = EP
-    provider.expert_tensor_parallel_size = 1
-    provider.bf16 = True
-    provider.params_dtype = torch.bfloat16
-    provider.finalize()
-    model = provider.provide_distributed_model(wrap_with_ddp=False)
-    model = [m.cuda().to(torch.bfloat16) for m in (model if isinstance(model, list) else [model])]
-    # real HF weights, identically loaded on every rank: replicated params
-    # (layernorms, routers) must be bit-identical across TP ranks or the
-    # differential would flag test artifacts instead of probe bugs.
-    bridge.load_hf_weights(model)
-
-    # Match Adaptor's runtime config classes: the defining module cannot resolve
-    # them by name, so real PP configuration broadcasts must use detached views.
-    seen = set()
-    for part in model:
-        for module in part.modules():
-            config = getattr(module, "config", None)
-            if config is not None and id(config) not in seen:
-                seen.add(id(config))
-                config.__class__ = type("AdaptorTransformerConfig", (type(config),), {"__module__": "types"})
-    _compare_sparse_with_full_weights(model, cfg_dir, rank)
-    mpu.destroy_model_parallel()
+    stage = mpu.get_pipeline_model_parallel_rank()
+    if stage == 0:
+        register("embedding.word_embeddings.weight", "embedding.word_embeddings.weight", 0)
+    else:
+        register("output_layer.weight", "output_layer.weight", 0)
+        register("decoder.final_layernorm.weight", "decoder.final_layernorm.weight")
+    for suffix, dim in [
+        ("self_attention.linear_qkv.weight", 0),
+        ("self_attention.linear_proj.weight", 1),
+        ("self_attention.linear_qkv.layer_norm_weight", None),
+        ("self_attention.q_layernorm.weight", None),
+        ("self_attention.k_layernorm.weight", None),
+        ("pre_mlp_layernorm.weight", None),
+        ("mlp.router.weight", None),
+    ]:
+        register(f"decoder.layers.0.{suffix}", f"decoder.layers.{stage}.{suffix}", dim)
+    for local_expert in range(2):
+        expert = mpu.get_expert_model_parallel_rank() * 2 + local_expert
+        for projection, dim in [(1, 0), (2, 1)]:
+            register(
+                f"decoder.layers.0.mlp.experts.linear_fc{projection}.weight{local_expert}",
+                f"decoder.layers.{stage}.mlp.experts.linear_fc{projection}.weight{expert}",
+                dim,
+                expert=True,
+            )
+    try:
+        _compare_sparse_with_full_weights([root], cfg_dir, rank)
+    finally:
+        mpu.destroy_model_parallel()
 
 
 class _TPShardModel(torch.nn.Module):
@@ -429,23 +468,19 @@ def distributed_rendezvous(tmp_path):
     del store
 
 
-def test_nonempty_delta_always_uses_bridge_converter(monkeypatch):
-    """A cached standard mapping must still execute its Bridge converter."""
-    from megatron.bridge.models.conversion.param_mapping import ReplicatedMapping
-
+def test_nonempty_delta_always_uses_vime_converter(monkeypatch):
+    """Cached slots must not bypass the converter for nonempty deltas."""
     local = torch.tensor([[11.0, 0.0], [0.0, 13.0]])
-    mapping = ReplicatedMapping("weight", "weight")
     calls = []
 
     def convert(probe, module):
         calls.append(probe.clone())
         return {"weight": probe * 2}
 
-    monkeypatch.setattr(mapping, "megatron_to_hf", convert)
     monkeypatch.setattr(megatron_delta_export, "_device_shard", lambda record: local.view(-1))
     record = SimpleNamespace(
         param=local,
-        probe=mapping,
+        probe=SimpleNamespace(megatron_to_hf=convert),
         module=None,
         megatron_name="weight",
         slots=[("weight", (2, 2))],
@@ -828,46 +863,6 @@ def test_update_failure_preserves_safe_state(updater, phase):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("fail", [False, True])
-def test_bridge_config_context_restores_training_configs(fail):
-    import pickle
-    from dataclasses import field, make_dataclass
-
-    from vime.backends.megatron_utils.delta_sync.hf_weight_iterator_bridge import HfWeightIteratorBridge
-
-    cls = make_dataclass(
-        "AdaptorTransformerConfig", [("hidden_size", int, 64), ("tp_size", int, field(default=2, init=False))]
-    )
-    config = cls()
-    config.extra = {"head_dim": 16}
-    model = torch.nn.Module()
-    model.config = config
-    model.share_embeddings_and_output_weights = False
-    child = torch.nn.Linear(2, 2)
-    child.config = config
-    model.add_module("child", child)
-    iterator = HfWeightIteratorBridge.__new__(HfWeightIteratorBridge)
-    iterator.model = [model]
-    with pytest.raises(pickle.PicklingError):
-        pickle.dumps(config)
-    try:
-        with iterator.model_context():
-            assert model.config is child.config
-            assert model.config is not config
-            restored = pickle.loads(pickle.dumps(model.config))
-            assert restored.hidden_size == 64
-            assert restored.tp_size == 2
-            assert restored.extra == {"head_dim": 16}
-            assert restored.share_embeddings_and_output_weights is False
-            if fail:
-                raise RuntimeError("conversion failed")
-    except RuntimeError as error:
-        assert fail and str(error) == "conversion failed"
-    assert model.config is child.config is config
-    assert not hasattr(config, "share_embeddings_and_output_weights")
-
-
-@pytest.mark.unit
 def test_tiny_checkpoint_unpacks_every_expert():
     prefix = "model.layers.0.mlp.experts"
     fused = torch.arange(48, dtype=torch.float32).reshape(2, 6, 4)
@@ -903,7 +898,7 @@ def test_distributed_sparse_hccl_matches_full(distributed_rendezvous):
     # NOTE: Spawn four ranks, check real HCCL gather boundaries, then build a
     # TP2/PP2/EP2 Qwen3-MoE model. Save its full HF baseline, modify sparse
     # positions and apply the gathered delta to that baseline. Compare every
-    # reconstructed tensor byte-for-byte with an independent Bridge full export
+    # reconstructed tensor byte-for-byte with the independent native full export
     # of the updated model, including untouched positions and BF16/FP32 dtypes.
     # This checks trainer-side HF reconstruction, not the live vLLM receiver.
     port, cfg_dir = distributed_rendezvous

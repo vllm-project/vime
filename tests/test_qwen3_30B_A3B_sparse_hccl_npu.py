@@ -273,7 +273,7 @@ def run_e2e(args):
                 raise AssertionError("Expected a nonempty weight update")
 
         def export_checkpoint(self, directory):
-            # Full Bridge export from the frozen training model, independent of
+            # Full native VIME export from the frozen training model, independent of
             # sparse patches and their snapshots. Every trainer rank participates.
             path = Path(directory)
             root = dist.get_rank() == 0
