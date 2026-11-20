@@ -1347,12 +1347,74 @@ def test_profile_worker_rank_skips_http(vllm_engine, monkeypatch):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("node_rank", [0, 1])
-def test_check_weights_explicitly_unsupported(vllm_engine, monkeypatch, node_rank):
-    vllm_engine.node_rank = node_rank
+@pytest.mark.parametrize("action", ["checksum", "reset", "compare"])
+def test_check_weights_worker_rank_skips_http(vllm_engine, monkeypatch, action):
+    vllm_engine.node_rank = 1
     monkeypatch.setattr(mod.requests, "post", lambda *args, **kwargs: pytest.fail("unexpected HTTP request"))
-    with pytest.raises(NotImplementedError, match="vLLM weight checking is not implemented"):
-        vllm_engine.check_weights("compare")
+    assert vllm_engine.check_weights(action) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["checksum", "reset", "compare"])
+def test_check_weights_uses_vllm_protocol(vllm_engine, monkeypatch, action):
+    baseline = {"dp0:pp0:pcp0:tp0:weight": "a" * 64} if action == "compare" else None
+    payload = {"action": action}
+    if baseline is not None:
+        payload["baseline"] = baseline
+    body = {"match": False, "mismatches": list(baseline or {})}
+    post = Mock(return_value=_MockResponse(json_data=body))
+    monkeypatch.setattr(mod.requests, "post", post)
+    vllm_engine.args.weight_checker_timeout = 912.0
+    assert vllm_engine.check_weights(action, baseline) == body
+    post.assert_called_once_with("http://127.0.0.1:8765/weight_checker", json=payload, timeout=912.0)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["snapshot", "reset_tensors", "invalid", "compare"])
+def test_check_weights_rejects_invalid_requests(vllm_engine, monkeypatch, action):
+    monkeypatch.setattr(mod.requests, "post", lambda *args, **kwargs: pytest.fail("unexpected HTTP request"))
+    with pytest.raises(ValueError):
+        vllm_engine.check_weights(action)
+
+
+@pytest.mark.unit
+def test_check_weights_propagates_http_failure(vllm_engine, monkeypatch):
+    monkeypatch.setattr(mod.requests, "post", lambda *args, **kwargs: _MockResponse(status_code=404))
+    with pytest.raises(requests.HTTPError, match="404"):
+        vllm_engine.check_weights("checksum")
+
+
+@pytest.mark.unit
+def test_weight_check_info_uses_actual_endpoint_layout(vllm_engine, monkeypatch):
+    get = Mock(return_value=_MockResponse(json_data={"is_paused": True}))
+    monkeypatch.setattr(mod.requests, "get", get)
+    info = Mock(
+        return_value={
+            "tensor_parallel_size": 2,
+            "data_parallel_size": 8,
+            "data_parallel_size_local": 1,
+            "data_parallel_index": 4,
+            "data_parallel_external_lb": True,
+        }
+    )
+    monkeypatch.setattr(mod, "get_server_info", info)
+    assert vllm_engine.get_weight_check_info() == {
+        "url": "http://127.0.0.1:8765",
+        "generation": 0,
+        "rank_prefixes": ["dp4:pp0:pcp0:tp0", "dp4:pp0:pcp0:tp1"],
+    }
+    get.assert_called_once_with("http://127.0.0.1:8765/is_paused", timeout=300.0)
+    info.assert_called_once_with("http://127.0.0.1:8765", timeout=300.0)
+
+
+@pytest.mark.unit
+def test_weight_check_info_repauses_unexpectedly_resumed_engine(vllm_engine, monkeypatch):
+    monkeypatch.setattr(mod.requests, "get", lambda *args, **kwargs: _MockResponse(json_data={"is_paused": False}))
+    pause = Mock()
+    monkeypatch.setattr(vllm_engine, "pause_generation", pause)
+    with pytest.raises(RuntimeError, match="requires paused generation"):
+        vllm_engine.get_weight_check_info()
+    pause.assert_called_once_with()
 
 
 @pytest.mark.unit

@@ -98,6 +98,20 @@ When using INT4-quantized models (e.g., `compressed-tensors` with `W4A16`), the 
    - Use `--check-weight-update-equal` to verify that weights after a Megatron → vLLM sync match the expected values. If a parameter shows all zeros on the vLLM side, it was likely incorrectly quantized or missing from the checkpoint.
    - Use `--debug-rollout-only` with a small number of GPUs to quickly test whether vLLM can generate coherent text from the quantized checkpoint alone.
 
+## Check the initial weight update
+
+Add `--check-weight-update-equal` to the training launch to check the first weight sync into newly created serving engines. Initialize training and inference from the same logical checkpoint. Each updatable engine is paused, its target-model parameter SHA-256 digests are saved, and its parameters are zeroed through vLLM's `/weight_checker`. After the first complete weight update, every engine is compared against its own baseline before rollout resumes.
+
+The caller retains checksum dictionaries. vLLM performs the parameter hashing and exact byte-digest comparison. Errors include the engine endpoint and keys of the form `dp0:pp0:pcp0:tp0:<tensor_name>`. The checker covers the first model selected for weight updates, including its prefill and decode engines. Frozen reference and reward models retain their weights.
+
+Use `--weight-checker-timeout 1800` for a longer per-phase and HTTP timeout on large models. The default is 300 seconds. A comparison mismatch, invalid response, missing rank, changed engine, or timeout fails startup and keeps rollout admission paused. A timed-out remote operation can still be running, so recovery must establish a stable serving state and install complete weights before generation resumes.
+
+Retained serving attachments and debug-only modes log a skipped check. A retained engine may contain weights from a different training boundary than the restored trainer. A fresh startup that loads different training and inference checkpoints reports their parameter differences.
+
+With rollout offload, weight memory is restored before comparison, and KV memory is restored afterwards. If weights-only wake-up unexpectedly resumes generation, the checker pauses the engine again and reports the scheduling change. Backend sleep/wake behavior therefore needs coverage in the deployment's integration tests.
+
+The checked tensors and supported quantization/offload layouts follow the paired vLLM version. The target-model parameter scope and upstream limitations are described in the [vLLM Weight Checker documentation](https://docs.vllm.ai/en/latest/training/weight_checker/).
+
 ## Debug vllm illegal memory access (IMA)
 
 When running large scale RL, we will occationally meet the IMA in vLLM, there are some debug suggestions based on our experience:

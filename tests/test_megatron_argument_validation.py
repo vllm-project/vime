@@ -139,6 +139,11 @@ def load_arguments_module(monkeypatch):
 
 
 def load_vime_arguments_module(monkeypatch):
+    # Parser tests only need the optional storage package's presence check.
+    if importlib.util.find_spec("straw") is None:
+        straw_mod = types.ModuleType("straw")
+        straw_mod.__spec__ = importlib.util.spec_from_loader("straw", loader=None)
+        monkeypatch.setitem(sys.modules, "straw", straw_mod)
     router_pkg_mod = types.ModuleType("vllm_router")
     router_launch_mod = types.ModuleType("vllm_router.launch_router")
     vllm_arguments_mod = types.ModuleType("vime.backends.vllm_utils.arguments")
@@ -576,9 +581,18 @@ def test_distributed_fully_async_is_opt_in(monkeypatch):
     assert not defaults.rollout_queue_online_gc
     assert defaults.rollout_health_check_timeout == defaults.rollout_health_check_first_wait == 600
     assert defaults.rollout_cleanup_timeout == 60
+    assert defaults.weight_checker_timeout == 300.0
     path = "vime.data.queue_data_source.QueueDataSource"
     enabled = parser.parse_args(["--rollout-batch-size", "1", "--data-source-path", path])
     assert enabled.data_source_path == path
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf")])
+def test_weight_checker_timeout_requires_finite_positive_value(monkeypatch, timeout):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(weight_checker_timeout=timeout)
+    with pytest.raises(ValueError, match="weight-checker-timeout.*finite and positive"):
+        module.vime_validate_args(args)
 
 
 @pytest.mark.parametrize("transport", ["object-store", "nixl", "straw"])

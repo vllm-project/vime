@@ -15,7 +15,7 @@ from vime.utils.cleanup import Cleanup
 from vime.utils.misc import should_run_periodic_action
 
 
-def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
+def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan, *, weight_check_prepared=False):
     release_train = args.release_train
 
     actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
@@ -24,15 +24,18 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
         ray.get(rollout_manager.onload_weights.remote())
 
     # Always push actor weights to rollout once weights are loaded.
-    actor_model.update_weights()
+    if weight_check_prepared:
+        actor_model.update_weights(resume_generation=False)
+        ray.get(rollout_manager.finish_weight_check.remote())
+        if args.offload_rollout:
+            ray.get(rollout_manager.onload_kv.remote())
+    else:
+        actor_model.update_weights()
     # Reattached async producers stay paused until restored weights are installed.
     # This startup notification resumes them once, before entering the train loop.
     ray.get(rollout_manager.training_ready.remote())
 
-    if args.check_weight_update_equal:
-        ray.get(rollout_manager.check_weights.remote(action="compare"))
-
-    if args.offload_rollout:
+    if args.offload_rollout and not weight_check_prepared:
         ray.get(rollout_manager.onload_kv.remote())
 
     # special case for eval-only
@@ -113,7 +116,12 @@ def main(args, restore_plan):
             # Create or reattach rollout resources, then run this training attempt.
             startup = create_rollout_manager(args, restore_plan=restore_plan)
             train(
-                startup.args, startup.placements, startup.manager, startup.num_rollout_per_epoch, startup.restore_plan
+                startup.args,
+                startup.placements,
+                startup.manager,
+                startup.num_rollout_per_epoch,
+                startup.restore_plan,
+                weight_check_prepared=startup.weight_check_prepared,
             )
         except BaseException:
             # Failures and interruptions retain serving and replay data for a manual

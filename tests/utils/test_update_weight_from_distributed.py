@@ -350,6 +350,17 @@ def test_update_uses_native_main_and_draft_lifecycles(update_module, monkeypatch
 
 
 @pytest.mark.unit
+def test_initial_weight_check_retains_pause_after_transfer(update_module, monkeypatch):
+    updater = _updater_for_transfer(update_module, mtp=True)
+    monkeypatch.setattr(update_module.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(update_module.dist, "barrier", lambda *args, **kwargs: None)
+    updater.update_weights(resume_generation=False)
+    engine = updater.rollout_engines[0]
+    assert len(engine.finish_weight_update.calls) == 2
+    assert engine.continue_generation.calls == []
+
+
+@pytest.mark.unit
 def test_dspark_update_uses_nccl_draft_lifecycle(update_module, monkeypatch):
     updater = _updater_for_transfer(update_module, dspark=True)
     monkeypatch.setattr(update_module.dist, "get_rank", lambda: 0)
