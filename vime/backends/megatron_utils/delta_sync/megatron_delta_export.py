@@ -38,32 +38,18 @@ _DTYPE_INT = {1: torch.uint8, 2: torch.int16, 4: torch.int32, 8: torch.int64}
 class McoreParamExport:
     """One native VIME parameter row: geometry, local converter and wire slots.
     ``param is None`` marks a parameter owned by another pipeline stage: the
-    rank ships a zero-count lockstep row for it (probe/module unused)."""
+    rank ships a zero-count lockstep row for it (probe unused)."""
 
     megatron_name: str
     param: torch.Tensor | None
     probe: Any
-    module: Any  # reserved converter context; native VIME probes use None
     gather_group: ProcessGroup | None = None
     contributes: bool = True
     # GLOBAL slot table for this directory row (set by the index-build
     # exchange): identical on every rank of the row's merge group.
     slots: list | None = None
-    hf_vocab_size: int | None = None
     # Owner dtype shared with PP placeholders to preserve gather queue order.
     dtype: torch.dtype | None = None
-
-
-def trim_hf_vocab_padding(name: str, tensor: torch.Tensor, vocab_size: int | None):
-    """Remove Megatron's TP vocabulary padding at the HF wire boundary."""
-    if (
-        vocab_size is not None
-        and tensor.ndim >= 1
-        and tensor.shape[0] > vocab_size
-        and (name.endswith("embed_tokens.weight") or name.endswith("lm_head.weight"))
-    ):
-        return tensor[:vocab_size]
-    return tensor
 
 
 def build_export_index(iterator, megatron_model) -> list[McoreParamExport]:
@@ -105,10 +91,8 @@ def build_export_index(iterator, megatron_model) -> list[McoreParamExport]:
                     if param is not None
                     else None
                 ),
-                module=None,
                 gather_group=torch.distributed.group.WORLD,
                 contributes=contributes,
-                hf_vocab_size=iterator.hf_vocab_size,
                 dtype=info.dtype,
             )
         )
@@ -124,6 +108,8 @@ def _exchange_slot_tables(index: list[McoreParamExport]) -> None:
     PP placeholders inherit owner shapes/dtypes. The ordered union is identical
     on every rank, including rows with no local changes or only replicated data.
     """
+    from vime.utils.distributed_utils import get_gloo_group
+
     local_rows: list = []
     for rec in index:
         if rec.param is None:
@@ -136,14 +122,14 @@ def _exchange_slot_tables(index: list[McoreParamExport]) -> None:
             rec.slots = slots
         local_rows.append((rec.slots, rec.param.dtype))
 
-    world = torch.distributed.get_world_size()
+    group = get_gloo_group()
+    world = torch.distributed.get_world_size(group=group)
     gathered: list = [None] * world
-    torch.distributed.all_gather_object(gathered, local_rows)
+    torch.distributed.all_gather_object(gathered, local_rows, group=group)
     n_rows = len(local_rows)
-    assert all(len(rows) == n_rows for rows in gathered), (
-        f"directory row counts diverge across ranks: {[len(r) for r in gathered]} -- "
-        "the VIME's global enumeration is expected to be structurally parallel"
-    )
+    assert all(
+        len(rows) == n_rows for rows in gathered
+    ), f"directory row counts diverge across ranks: {[len(r) for r in gathered]} -- the VIME's global enumeration is expected to be structurally parallel"
     for k, rec in enumerate(index):
         union: dict = {}
         dtypes = set()
@@ -204,10 +190,7 @@ def mcore_hf_delta_entry(
     if lidx.numel():
         buf.view(-1)[lidx] = lval
 
-    outs = {
-        name: trim_hf_vocab_padding(name, tensor, rec.hf_vocab_size)
-        for name, tensor in rec.probe.megatron_to_hf(buf, rec.module).items()
-    }
+    outs = rec.probe.megatron_to_hf(buf)
 
     key = rec.megatron_name
     slots = rec.slots
@@ -217,10 +200,9 @@ def mcore_hf_delta_entry(
         # are installed on the recs; steady entries always find rec.slots.
         slots = [(n, tuple(int(x) for x in t.shape)) for n, t in outs.items()]
     unknown = set(outs) - {n for n, _ in slots}
-    assert not unknown, (
-        f"{key}: probe emitted slots missing from the global table {sorted(unknown)[:4]} -- "
-        "non-deterministic converter naming would misalign the batched gather"
-    )
+    assert (
+        not unknown
+    ), f"{key}: probe emitted slots missing from the global table {sorted(unknown)[:4]} -- non-deterministic converter naming would misalign the batched gather"
     counts = torch.zeros(len(slots), dtype=torch.int64)
     idx_pieces: list[torch.Tensor] = []
     val_pieces: list[torch.Tensor] = []
@@ -367,9 +349,7 @@ def iter_delta_entries(index, snapshots, *, batch_size=32):
         for record, local, snapshot in pending:
             if snapshot is not None:
                 indices, values = next(deltas)
-                if snapshot.device == local.device:
-                    snapshot.copy_(local, non_blocking=True)
-                elif indices.numel():
+                if indices.numel():
                     refresh.add(snapshot, indices, values)
             else:
                 device = local.device if local is not None else torch.accelerator.current_device_index()

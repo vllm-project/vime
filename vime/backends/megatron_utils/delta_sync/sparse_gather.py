@@ -59,14 +59,49 @@ def gather_slot_entries_to_rank0(
     else:
         counts_cpu = _counts_cpu
 
-    if max_round_bytes is not None and slot_count > 1:
+    if max_round_bytes is not None:
         per_element = idx_concat.element_size() + val_concat.element_size()
         budget = max(int(max_round_bytes) // per_element, 1)
+        # A slot can itself exceed the budget. Visit rank segments in order so
+        # no round receives more than budget elements in total, even at world=1.
+        if any(sum(row) for row in counts_cpu) and any(
+            sum(row[s] for row in counts_cpu) > budget for s in range(slot_count)
+        ):
+            local_offsets = [0]
+            for count in counts_cpu[rank]:
+                local_offsets.append(local_offsets[-1] + count)
+            result = []
+            for s in range(slot_count):
+                pieces = []
+                for owner in range(world):
+                    for start in range(0, counts_cpu[owner][s], budget):
+                        size = min(budget, counts_cpu[owner][s] - start)
+                        rows = [[size if r == owner else 0] for r in range(world)]
+                        lo = local_offsets[s] + start if rank == owner else 0
+                        hi = lo + size if rank == owner else 0
+                        part = gather_slot_entries_to_rank0(
+                            idx_concat[lo:hi],
+                            val_concat[lo:hi],
+                            counts.new_tensor(rows[rank]),
+                            group=group,
+                            workspace=workspace,
+                            _counts_cpu=rows,
+                        )
+                        if rank == 0:
+                            pieces.append(part[0])
+                if rank == 0:
+                    result.append(
+                        (
+                            torch.cat([p[0] for p in pieces]) if pieces else idx_concat.new_empty(0),
+                            torch.cat([p[1] for p in pieces]) if pieces else val_concat.new_empty(0),
+                        )
+                    )
+            return result if rank == 0 else None
         cuts = [0]
         running = [0] * world
         for slot_index in range(slot_count):
             running = [running[r] + counts_cpu[r][slot_index] for r in range(world)]
-            if max(running) > budget and cuts[-1] != slot_index:
+            if sum(running) > budget and cuts[-1] != slot_index:
                 cuts.append(slot_index)
                 running = [counts_cpu[r][slot_index] for r in range(world)]
         cuts.append(slot_count)
@@ -107,12 +142,9 @@ def gather_slot_entries_to_rank0(
     send_values = val_concat.contiguous()
     index_list = value_list = None
     if rank == 0:
-        index_list = list(
-            workspace.tensor("recv_indices", world * max_elements, idx_concat).view(world, max_elements).unbind(0)
-        )
-        value_list = list(
-            workspace.tensor("recv_values", world * max_elements, val_concat).view(world, max_elements).unbind(0)
-        )
+        # P2P receives need only each peer's actual count, not padded rows.
+        index_list = list(workspace.tensor("recv_indices", sum(totals), idx_concat).split(totals))
+        value_list = list(workspace.tensor("recv_values", sum(totals), val_concat).split(totals))
     root = dist.get_global_rank(group, 0) if group is not None else 0
     if rank == 0:
         assert index_list is not None and value_list is not None

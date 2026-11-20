@@ -11,7 +11,7 @@ The first sync
 sends every checkpoint coordinate through the public sparse protocol; later syncs
 send only changed coordinates.
 
-For disk transport, The trainer publishes each sync as a canonical HF checkpoint
+For disk transport, the trainer publishes each sync as a canonical HF checkpoint
 directory; the engine's `pull_weights` worker RPC (shipped in vime's vllm patch) fans the
 apply out to **every host the engine spans** and verifies it, then the engine reloads the
 patched local checkpoint through the **ordinary** `update_weights_from_disk` adapter. vime
@@ -21,6 +21,14 @@ need nothing extra on the vime side.
 ## Configuration
 
 Sparse HCCL:
+
+With `--offload-train --use-critic` and without `--colocate`, training sleep
+releases the weight-transfer connection. Reconnection preserves snapshots only
+when the same rollout actors still report the last completed weight version;
+otherwise it sends a complete seed. Receiver replacement, failed version queries,
+and partial transmission failures require a fresh seed. BF16 seeds carry a four-byte
+index plus a two-byte value per element, approximately three times the dense payload.
+The resident-actor performance measurements do not cover this configuration.
 
 This path uses the sparse HCCL engines included in vLLM-Ascend.
 VIME exports weights into HF checkpoint coordinates, tracks shard snapshots,
@@ -36,6 +44,7 @@ adding a model layout.
 ```bash
 --update-weight-mode delta
 --update-weight-transport sparse_hccl
+--update-weight-delta-batch-diff 32
 --update-weight-delta-batch-gather 32
 ```
 
@@ -77,10 +86,11 @@ Deltas are always zstd-compressed (level 1); profiling showed it dominates lz4 /
 
 ### Sparse HCCL
 
-Initial and reconnected updates use Seed; subsequent updates use Diff.
+Initial updates and unverified reconnections use Seed; subsequent updates use Diff.
+An explicitly suspended connection resumes Diff only after matching receiver identity and version.
 Both paths share Publish and Apply.
 
-1. **Seed.** On the first update or after reconnection, export all current training
+1. **Seed.** On the first update or after an unverified reconnection, export all current training
    weights in HF format and produce complete checkpoint coordinates and target
    values for Publish/Apply. After successful seeding, capture local shard snapshots
    as the baseline for later diffs. Reconnection fully overwrites worker weights.
@@ -101,6 +111,11 @@ Both paths share Publish and Apply.
 Wire indices are int32; each checkpoint tensor must contain fewer than `2**31`
 elements. The receiver requires full-shape NaN staging. Seed sends both indices
 and values, so it uses more wire bytes than a dense values-only transfer.
+
+The gather byte budget bounds aggregate receive scratch across trainer ranks.
+Oversized slots are split into element ranges. Input delta buffers, merged return
+values, local conversion probes and receiver staging are outside this budget;
+it is not a bound on total weight-update peak memory.
 
 ### Disk transport
 

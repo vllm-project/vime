@@ -22,7 +22,7 @@ class SparseHFProbe:
     tp_rank: int
     tp_size: int
 
-    def megatron_to_hf(self, tensor, module=None):
+    def megatron_to_hf(self, tensor):
         from ..megatron_to_hf import convert_to_hf
         from ..update_weight.common import _merge_param_partitions
 
@@ -63,7 +63,6 @@ class SparseHFExporter:
         self.args = args
         self.model = model
         self.model_name = model_name
-        self.hf_vocab_size = args.vocab_size
         self.direct = HfWeightIteratorDirect(args, model, model_name, quantization_config=None)
         self.param_infos = [info for bucket in self.direct.megatron_local_param_info_buckets for info in bucket]
         self.param_infos.sort(key=lambda info: info.name)

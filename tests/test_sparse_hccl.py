@@ -200,6 +200,19 @@ def _compare_sparse_with_full_weights(model, cfg_dir, rank):
         for record in index:
             if record.param is not None:
                 record.param.view(-1)[::97] += 0.25
+    # Simulate the post-wake refresh against live shards while preserving the
+    # pre-update baseline. The comparison below must still match full export.
+    refreshed = _make_updater(offload_train=True)
+    refreshed._iterator = iterator
+    refreshed._index = index
+    refreshed._snapshots = snapshots
+    snapshot_ids = {name: id(value) for name, value in snapshots.items()}
+    for record in index:
+        record.gather_group = object()  # A retired process group must not survive.
+    refreshed._ensure_export_index()
+    assert refreshed._index is index
+    assert all(record.gather_group is dist.group.WORLD for record in index)
+    assert {name: id(value) for name, value in snapshots.items()} == snapshot_ids
     validate_export_weights(index)
     expected = export()
     updates = [0]
@@ -222,6 +235,7 @@ def _compare_sparse_with_full_weights(model, cfg_dir, rank):
             assert actual.dtype == value.dtype and actual.shape == value.shape, name
             assert torch.equal(actual.view(torch.uint8), value.view(torch.uint8)), name
         print(f"SPARSE VS FULL PASS: tensors={len(expected)} updates={updates[0]} bitwise_equal=True", flush=True)
+        print("NPU-SPARSE-OFFLOAD-REFRESH PASS: retained baseline diff matches full export", flush=True)
     dist.barrier()
 
 
@@ -253,6 +267,7 @@ def _run_sparse_full_comparison(rank, cfg_dir):
         moe_ffn_hidden_size=64,
         tensor_model_parallel_size=TP,
         pipeline_model_parallel_size=PP,
+        pipeline_dtype=torch.bfloat16,
         expert_model_parallel_size=EP,
         expert_tensor_parallel_size=1,
     )
@@ -349,6 +364,161 @@ def updater(monkeypatch):
     return instance
 
 
+@pytest.mark.unit
+def test_offload_index_refresh_preserves_layout_and_snapshots(monkeypatch):
+    instance = _make_updater(offload_train=True)
+    instance._sync_update_state = lambda error: (error is not None, False)
+    old = torch.nn.Parameter(torch.ones(2))
+    restored = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    record = SimpleNamespace(megatron_name="weight", param=old, gather_group=object(), slots=[("weight", (2,))])
+    instance._index = [record]
+    instance._gather_workspaces = {("retired-group", "float32"): object()}
+    instance._snapshots = {"weight": old.detach().clone()}
+    snapshot = instance._snapshots["weight"]
+    instance._iterator = SimpleNamespace(local_weights=lambda: {"weight": restored})
+    monkeypatch.setattr(updater_module, "build_export_index", lambda *a: pytest.fail("static layout was rebuilt"))
+    instance._ensure_export_index()
+    assert record.param is restored
+    assert record.gather_group is dist.group.WORLD
+    assert instance._gather_workspaces == {}
+    assert record.slots == [("weight", (2,))]
+    assert instance._snapshots["weight"] is snapshot
+    assert torch.equal(snapshot, torch.ones(2))
+    assert instance._seeded
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "scenario,expected",
+    [
+        ("same", True),
+        ("replacement", False),
+        ("version", False),
+        ("query-failure", False),
+        ("partial-failure", False),
+        ("normal-disconnect", False),
+    ],
+)
+def test_suspended_baseline_requires_same_receiver_version(monkeypatch, scenario, expected):
+    instance = _make_updater()
+    engine = SimpleNamespace(_actor_id="original", get_weight_version=SimpleNamespace(remote=lambda: "1"))
+    instance._suspended_baseline = (("original",), 1)
+    if scenario == "replacement":
+        engine._actor_id = "replacement"
+    elif scenario == "version":
+        engine.get_weight_version.remote = lambda: "0"
+    elif scenario == "partial-failure":
+        instance._failed = True
+    elif scenario == "normal-disconnect":
+        instance._trainer = None
+        instance.disconnect_rollout_engines()
+    monkeypatch.setattr(updater_module.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(updater_module, "get_gloo_group", lambda: None)
+    monkeypatch.setattr(updater_module.dist, "broadcast_object_list", lambda *a, **kw: None)
+
+    def get(refs):
+        if scenario == "query-failure":
+            raise RuntimeError("receiver unavailable")
+        return refs
+
+    monkeypatch.setattr(updater_module.ray, "get", get)
+    assert instance._can_resume_baseline([engine]) is expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("restored", [None, torch.ones(3), torch.ones(2, dtype=torch.float64)])
+def test_offload_layout_changes_cannot_reuse_cached_slots(restored):
+    instance = _make_updater(offload_train=True)
+    instance._sync_update_state = lambda error: (error is not None, False)
+    record = SimpleNamespace(megatron_name="weight", param=torch.ones(2), gather_group=dist.group.WORLD)
+    instance._index = [record]
+    instance._iterator = SimpleNamespace(local_weights=lambda: {} if restored is None else {"weight": restored})
+    with pytest.raises(ValueError, match="layout changed"):
+        instance._ensure_export_index()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("receiver_version,expected_send", [("1", "delta"), ("0", "seed")])
+def test_suspend_connect_update_preserves_only_verified_baseline(
+    updater, monkeypatch, receiver_version, expected_send
+):
+    updater.args = SimpleNamespace(rollout_num_gpus_per_engine=1)
+    engine = SimpleNamespace(
+        _actor_id="same-actor", get_weight_version=SimpleNamespace(remote=lambda: receiver_version)
+    )
+    updater.rollout_engines = [engine]
+    updater._trainer = SimpleNamespace(shutdown=lambda: None)
+    updater._snapshots = {"weight": torch.ones(2)}
+    snapshots = updater._snapshots
+    snapshot = snapshots["weight"]
+    index = updater._index
+    monkeypatch.setattr(updater_module.ray, "get", lambda refs: refs)
+    monkeypatch.setattr(updater_module.ray._private.services, "get_node_ip_address", lambda: "127.0.0.1")
+    monkeypatch.setattr(updater_module.dist, "broadcast_object_list", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        updater_module.SparseHCCLTrainerWeightTransferEngine,
+        "trainer_init",
+        lambda *a, **kw: SimpleNamespace(shutdown=lambda: None),
+    )
+    monkeypatch.setattr(updater_module, "prime_delta_snapshots", lambda *a, **kw: None)
+    updater.suspend_rollout_engines()
+    assert updater._client is None
+    updater.connect_rollout_engines([engine], None)
+    if expected_send == "delta":
+        assert updater._index is index
+        assert updater._snapshots is snapshots and snapshots["weight"] is snapshot
+    else:
+        assert updater._index is None and not updater._snapshots
+    sent = []
+    updater._send_sparse_delta = lambda: sent.append("delta")
+    updater._send_seed = lambda: sent.append("seed")
+    updater._finish_update = lambda: None
+    updater.update_weights()
+    assert sent == [expected_send]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "mode,transport,release", [("delta", "sparse_hccl", "suspend"), ("full", "nccl", "disconnect")]
+)
+def test_actor_offload_sleep_wake_order(monkeypatch, mode, transport, release):
+    module = importlib.import_module("vime.backends.megatron_utils.actor")
+    events = []
+    for name in ("clear_memory", "print_memory", "reset_cuda_stack_size"):
+        monkeypatch.setattr(module, name, lambda *a, **kw: None)
+    monkeypatch.setattr(module, "destroy_process_groups", lambda: events.append("destroy"))
+    monkeypatch.setattr(module, "reload_process_groups", lambda: events.append("reload"))
+    monkeypatch.setattr(
+        module,
+        "torch_memory_saver",
+        SimpleNamespace(
+            pause=lambda: events.append("pause"),
+            resume=lambda: events.append("resume"),
+        ),
+    )
+    monkeypatch.setattr(module.mpu, "get_pipeline_model_parallel_world_size", lambda: 4)
+    monkeypatch.setattr(module.accelerator, "current_device", lambda: 0)
+    monkeypatch.setattr(module.dist, "barrier", lambda **kw: events.append("barrier"))
+    actor = SimpleNamespace(
+        args=SimpleNamespace(
+            offload_train=True,
+            use_critic=True,
+            colocate=False,
+            update_weight_mode=mode,
+            update_weight_transport=transport,
+        ),
+        role="actor",
+        _switch_model=lambda name: events.append(name),
+        weight_updater=SimpleNamespace(
+            suspend_rollout_engines=lambda: events.append("suspend"),
+            disconnect_rollout_engines=lambda: events.append("disconnect"),
+        ),
+    )
+    module.MegatronTrainRayActor.sleep.__wrapped__(actor)
+    module.MegatronTrainRayActor.wake_up.__wrapped__(actor)
+    assert events == [release, "destroy", "pause", "resume", "reload", "barrier", "actor"]
+
+
 def _run_gather_regression():
     """Check actual HCCL length/split/reuse behavior on the existing process group."""
     rank = dist.get_rank()
@@ -360,6 +530,8 @@ def _run_gather_regression():
         [[1, 3, 0], [0, 2, 1], [2, 0, 4], [0, 0, 0]],
         [[0, 0, 0]] * 4,
         [[2, 1, 2], [1, 3, 1], [2, 0, 2], [1, 1, 0]],
+        [[0], [17], [0], [3]],
+        [[2, 0], [0, 0], [31, 1], [0, 0]],
     ]
     for dtype in (torch.float32, torch.bfloat16):
         for counts in cases:
@@ -373,12 +545,19 @@ def _run_gather_regression():
             indices = torch.stack([indices, indices], dim=1)[:, 0]
             values = torch.stack([values, values], dim=1)[:, 0]
             for budget in (None, 12):
+
+                class BoundedWorkspace(GatherWorkspace):
+                    def tensor(self, key, size, reference, budget=budget, indices=indices, values=values):
+                        if budget is not None and key in {"recv_indices", "recv_values"}:
+                            assert size * (indices.element_size() + values.element_size()) <= budget
+                        return super().tensor(key, size, reference)
+
                 result = gather_slot_entries_to_rank0(
                     indices,
                     values,
                     torch.tensor(counts[rank]),
                     max_round_bytes=budget,
-                    workspace=workspace,
+                    workspace=workspace if budget is None else BoundedWorkspace(),
                 )
                 if rank == 0:
                     for slot, (actual_indices, actual_values) in enumerate(result):
@@ -393,7 +572,7 @@ def _run_gather_regression():
         for indices, values, expected, dtype in preserved:
             assert torch.equal(indices.cpu(), expected)
             assert torch.equal(values.cpu(), expected.float().to(dtype))
-        print("NPU-SPARSE-GATHER PASS: 20 cases; empty/unequal/noncontiguous/split/reused; FP32/BF16", flush=True)
+        print("NPU-SPARSE-GATHER PASS: 28 cases; bounded/oversized-slot/unequal/split/reused; FP32/BF16", flush=True)
 
 
 def _run_publish_failure_regression():
@@ -466,6 +645,22 @@ def _run_publish_failure_regression():
         )
 
 
+def _run_offload_refresh_failure_regression():
+    rank = dist.get_rank()
+    instance = _make_updater(offload_train=True)
+    param = torch.ones(2, device="npu")
+    record = SimpleNamespace(megatron_name="weight", param=param, gather_group=dist.group.WORLD)
+    instance._index = [record]
+    instance._iterator = SimpleNamespace(local_weights=lambda: {} if rank == 1 else {"weight": param})
+    with pytest.raises(ValueError if rank == 1 else RuntimeError):
+        instance._ensure_export_index()
+    assert record.param is param
+    # All ranks must reach this collective after only one rank detects a change.
+    dist.barrier()
+    if rank == 0:
+        print("NPU-SPARSE-OFFLOAD-REFRESH-FAILURE PASS: single-rank rejection synchronized", flush=True)
+
+
 def _distributed_worker(rank, port, cfg_dir):
     """Initialize one rank and guarantee cleanup for success or failed assertions."""
     os.environ.update(
@@ -481,6 +676,7 @@ def _distributed_worker(rank, port, cfg_dir):
     try:
         _run_publish_failure_regression()
         _run_gather_regression()
+        _run_offload_refresh_failure_regression()
         _run_sparse_full_comparison(rank, cfg_dir)
     finally:
         dist.destroy_process_group()
@@ -501,7 +697,7 @@ def test_nonempty_delta_always_uses_vime_converter(monkeypatch):
     local = torch.tensor([[11.0, 0.0], [0.0, 13.0]])
     calls = []
 
-    def convert(probe, module):
+    def convert(probe):
         calls.append(probe.clone())
         return {"weight": probe * 2}
 
@@ -509,10 +705,8 @@ def test_nonempty_delta_always_uses_vime_converter(monkeypatch):
     record = SimpleNamespace(
         param=local,
         probe=SimpleNamespace(megatron_to_hf=convert),
-        module=None,
         megatron_name="weight",
         slots=[("weight", (2, 2))],
-        hf_vocab_size=None,
         contributes=True,
         gather_group=None,
     )
@@ -592,7 +786,11 @@ def test_bad_wire_bounds_fail_before_mutation():
 def test_pp_placeholders_share_owner_dtype(monkeypatch):
     """Keep FP32 empty rows aligned; reject conflicting owner dtypes."""
     slots = [("weight", (4,))]
-    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 3)
+    from vime.utils import distributed_utils
+
+    group = object()
+    monkeypatch.setattr(distributed_utils, "get_gloo_group", lambda: group)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda **kw: 3)
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: "cpu")
     for conflicting in (False, True):
         record = SimpleNamespace(param=None, megatron_name="remote", gather_group=None)
@@ -600,7 +798,7 @@ def test_pp_placeholders_share_owner_dtype(monkeypatch):
         monkeypatch.setattr(
             torch.distributed,
             "all_gather_object",
-            lambda output, local, rows=rows: output.__setitem__(slice(None), rows),
+            lambda output, local, rows=rows, **kw: output.__setitem__(slice(None), rows),
         )
         if conflicting:
             with pytest.raises(ValueError, match="inconsistent owner dtypes"):

@@ -19,6 +19,14 @@ def create_weight_updater(
     update_weight_mode = args.update_weight_mode
     update_weight_transport = args.update_weight_transport
 
+    if update_weight_transport == "sparse_hccl":
+        from vime.platforms import current_platform
+
+        if update_weight_mode != "delta" or args.colocate:
+            raise ValueError("sparse_hccl requires delta mode without colocate")
+        if not current_platform().is_npu:
+            raise ValueError("sparse_hccl requires an NPU platform")
+
     if update_weight_mode == "delta":
         assert not args.colocate, "--update-weight-mode=delta is not supported with --colocate"
         if update_weight_transport == "disk":
@@ -32,7 +40,7 @@ def create_weight_updater(
 
             update_weight_cls = UpdateWeightFromSparseHCCL
         else:
-            raise ValueError("--update-weight-mode=delta requires " "--update-weight-transport=disk or sparse_hccl")
+            raise ValueError("--update-weight-mode=delta requires --update-weight-transport=disk or sparse_hccl")
     elif update_weight_transport == "disk":
         from .update_weight_from_disk import UpdateWeightFromDisk
 
