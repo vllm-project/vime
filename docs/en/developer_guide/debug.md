@@ -64,9 +64,9 @@ Add `metadata.trace_replay` to a text row in the rollout JSONL file. Use the exa
 {"prompt":"Original prompt","metadata":{"trace_replay":{"prompt_token_ids":[151644,8948,198],"decode_token_ids":[444,2210,13]}}}
 ```
 
-Start Vime with `--vllm-enable-trace-replay`, `--prompt-data /path/to/replay.jsonl` and `--input-key prompt`. The default metadata key is `metadata`. The rollout response budget must cover the complete output sequence and the engine context must fit the input and output together. When using an external engine, start it with `--enable-trace-replay` and Model Runner V2.
+Start Vime with `--vllm-enable-trace-replay`, `--prompt-data /path/to/replay.jsonl` and `--input-key prompt`. The default metadata key is `metadata`. The rollout response budget must cover the complete output sequence and the engine context must fit the input and output together. For Vime-managed engines, you can also set `enable_trace_replay: true` in the target group’s `overrides` under `--vllm-config`. For an external engine, enable Model Runner V2 and start vLLM with `--enable-trace-replay` and the `/inference/v1/generate` endpoint enabled.
 
-The default non-streaming rollout checks the returned token IDs and logprobs before appending them to the sample. A completed replay may have `finish_reason="length"`, which Vime records as `TRUNCATED`. Rows without replay metadata use ordinary generation.
+The default non-streaming rollout checks the returned token IDs and logprobs before appending them to the sample. A completed replay may have `finish_reason="length"`, which Vime records as `TRUNCATED`. A replay can therefore count toward the truncation ratio even when every recorded token was returned. Prompt-length filtering uses the recorded prompt token IDs for replay samples. Rows without replay metadata use ordinary generation.
 
 Use complete text requests with partial rollout, score centering and speculative decoding disabled. To compare raw model probabilities, set `logprobs_mode: raw_logprobs` in the engine group's `overrides` in [vLLM Config](../advanced/vllm-config.md). For a run focused on inference diagnostics, use `--debug-rollout-only` with `--save-debug-rollout-data` to inspect the resulting tokens and scores.
 

@@ -48,6 +48,7 @@ from vime.rollout.vllm_rollout import (
     _mm_render_response_to_generate_body,
     _prepare_prompt_ids,
     _prepare_trace_replay,
+    _short_trace_message,
     _validate_trace_replay_output,
     prime_encoder,
 )
@@ -252,11 +253,13 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
             span.update(build_vllm_meta_trace_attrs({**trace_metadata, "choices": [last_choice], "usage": last_usage}))
 
     if trace_ids is not None:
-        if finish_reason not in ("stop", "length") or len(call_tokens) != len(trace_ids):
-            if state.aborted:
-                sample.status = Sample.Status.ABORTED
-                return sample
-            raise ValueError(f"Trace replay did not complete: received {len(call_tokens)}/{len(trace_ids)} tokens")
+        if finish_reason in ("abort", "cancelled") or (finish_reason is None and state.aborted):
+            sample.status = Sample.Status.ABORTED
+            return sample
+        if finish_reason not in ("stop", "length"):
+            raise ValueError(f"Trace replay did not complete: finish_reason={finish_reason!r}")
+        if len(call_tokens) != len(trace_ids):
+            raise ValueError(_short_trace_message(len(call_tokens), len(trace_ids)))
         if not sample.tokens:
             sample.tokens = prompt_ids
         meta = _inference_generate_meta_info(

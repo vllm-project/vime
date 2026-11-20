@@ -194,7 +194,24 @@ def is_generation_paused_error(error: Exception) -> bool:
     )
 
 
-async def _post(client, url, payload, max_retries=60, headers=None, timeout=None, score_centering_top_k=None):
+def _is_permanent_client_error(error: Exception) -> bool:
+    if not isinstance(error, httpx.HTTPStatusError):
+        return False
+    status = error.response.status_code
+    return 400 <= status < 500 and status not in (408, 429)
+
+
+async def _post(
+    client,
+    url,
+    payload,
+    max_retries=60,
+    headers=None,
+    timeout=None,
+    score_centering_top_k=None,
+    *,
+    fail_fast_on_client_error=False,
+):
     retry_count = 0
     while retry_count < max_retries:
         response = None
@@ -217,6 +234,8 @@ async def _post(client, url, payload, max_retries=60, headers=None, timeout=None
         except Exception as e:
             if is_generation_paused_error(e):
                 raise
+            if fail_fast_on_client_error and _is_permanent_client_error(e):
+                raise httpx.HTTPStatusError(f"{e}\n{e.response.text}", request=e.request, response=e.response) from e
             retry_count += 1
 
             if isinstance(e, httpx.HTTPStatusError):
@@ -304,7 +323,17 @@ def _init_ray_distributed_post(args):
                 trust_env=False,  # internal vLLM comm only — never route through system proxy
             )
 
-        async def do_post(self, url, payload, max_retries=60, headers=None, timeout=None, score_centering_top_k=None):
+        async def do_post(
+            self,
+            url,
+            payload,
+            max_retries=60,
+            headers=None,
+            timeout=None,
+            score_centering_top_k=None,
+            *,
+            fail_fast_on_client_error=False,
+        ):
             return await _post(
                 self._client,
                 url,
@@ -313,6 +342,7 @@ def _init_ray_distributed_post(args):
                 headers=headers,
                 timeout=timeout,
                 score_centering_top_k=score_centering_top_k,
+                fail_fast_on_client_error=fail_fast_on_client_error,
             )
 
     # Create actors per node
@@ -338,7 +368,16 @@ def _init_ray_distributed_post(args):
     _post_actors = created
 
 
-async def post(url, payload, max_retries=60, headers=None, timeout=None, score_centering_top_k=None):
+async def post(
+    url,
+    payload,
+    max_retries=60,
+    headers=None,
+    timeout=None,
+    score_centering_top_k=None,
+    *,
+    fail_fast_on_client_error=False,
+):
     # If distributed mode is enabled and actors exist, dispatch via Ray.
     if _distributed_post_enabled and _post_actors:
         try:
@@ -357,10 +396,11 @@ async def post(url, payload, max_retries=60, headers=None, timeout=None, score_c
                     headers=headers,
                     timeout=timeout,
                     score_centering_top_k=score_centering_top_k,
+                    fail_fast_on_client_error=fail_fast_on_client_error,
                 )
                 return await obj_ref
         except Exception as e:
-            if is_generation_paused_error(e):
+            if is_generation_paused_error(e) or (fail_fast_on_client_error and _is_permanent_client_error(e)):
                 raise
             logger.info(f"[http_utils] Distributed POST failed, falling back to local: {e} (url={url})")
             # fall through to local
@@ -373,6 +413,7 @@ async def post(url, payload, max_retries=60, headers=None, timeout=None, score_c
         headers=headers,
         timeout=timeout,
         score_centering_top_k=score_centering_top_k,
+        fail_fast_on_client_error=fail_fast_on_client_error,
     )
 
 

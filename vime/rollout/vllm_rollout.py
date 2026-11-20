@@ -341,7 +341,14 @@ def _prepare_trace_replay(args: Namespace, sample: Sample, max_new_tokens: int |
     prompt_ids = replay.get("prompt_token_ids")
     trace_ids = replay.get("decode_token_ids")
     for field, ids in (("prompt_token_ids", prompt_ids), ("decode_token_ids", trace_ids)):
-        if not isinstance(ids, list) or not ids or any(type(token_id) is not int or token_id < 0 for token_id in ids):
+        if (
+            not isinstance(ids, list)
+            or not ids
+            or any(
+                isinstance(token_id, bool) or not isinstance(token_id, (int, np.integer)) or token_id < 0
+                for token_id in ids
+            )
+        ):
             raise ValueError(
                 f"Sample {sample.index}: trace_replay.{field} must be a non-empty list of non-negative integers"
             )
@@ -361,11 +368,13 @@ def _prepare_trace_replay(args: Namespace, sample: Sample, max_new_tokens: int |
     context_len = getattr(args, "rollout_max_context_len", None)
     if context_len is not None and len(prompt_ids) + len(trace_ids) > context_len:
         raise ValueError(f"Sample {sample.index}: prompt and trace exceed rollout context budget {context_len}")
-    return list(prompt_ids), list(trace_ids)
+    return [int(token_id) for token_id in prompt_ids], [int(token_id) for token_id in trace_ids]
 
 
 def _validate_trace_replay_output(choice: dict[str, Any], trace_ids: list[int]) -> None:
     token_ids = choice.get("token_ids")
+    if isinstance(token_ids, list) and len(token_ids) < len(trace_ids):
+        raise ValueError(_short_trace_message(len(token_ids), len(trace_ids)))
     if token_ids != trace_ids or any(type(token_id) is not int for token_id in token_ids):
         raise ValueError("Trace replay output token IDs differ from the requested sequence")
 
@@ -382,6 +391,13 @@ def _validate_trace_replay_output(choice: dict[str, Any], trace_ids: list[int]) 
             raise ValueError(f"Trace replay returned an invalid or clamped logprob at output position {position}")
 
 
+def _short_trace_message(received: int, expected: int) -> str:
+    return (
+        f"Trace replay did not complete: received {received}/{expected} tokens. "
+        "Check that the prompt and full trace fit the engine's max_model_len."
+    )
+
+
 async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, Any]) -> Sample:
     """Generate using traditional vLLM router with token-based workflow"""
     if args.ci_test:
@@ -394,10 +410,11 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         sample.status == Sample.Status.PENDING or sample.status == Sample.Status.ABORTED
     ), f"Sample status is {sample.status}"
 
+    sampling_params = dict(sampling_params)
     trace_ids = None
     if "trace_replay" in (sample.metadata or {}):
         prompt_ids, trace_ids = _prepare_trace_replay(args, sample, sampling_params["max_new_tokens"])
-        sampling_params = {**sampling_params, "max_new_tokens": len(trace_ids)}
+        sampling_params["max_new_tokens"] = len(trace_ids)
     else:
         prompt_ids = _prepare_prompt_ids(sample, state.tokenizer, state.processor)
         sampling_params["max_new_tokens"] -= sample.response_length
@@ -468,7 +485,13 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         }
 
         with trace_span(sample, "vllm_generate", attrs={"max_new_tokens": sampling_params["max_new_tokens"]}) as span:
-            output = await post(url, payload, headers=headers, score_centering_top_k=score_centering_top_k)
+            output = await post(
+                url,
+                payload,
+                headers=headers,
+                score_centering_top_k=score_centering_top_k,
+                fail_fast_on_client_error=trace_ids is not None,
+            )
             if hasattr(span, "update"):
                 span.update(build_vllm_meta_trace_attrs(output))
 
@@ -477,7 +500,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
             raise ValueError("Trace replay requires exactly one output choice")
         finish_reason = choices[0].get("finish_reason")
-        if finish_reason in ("abort", "cancelled") and state.aborted:
+        if finish_reason in ("abort", "cancelled"):
             sample.status = Sample.Status.ABORTED
             return sample
         if finish_reason not in ("stop", "length"):

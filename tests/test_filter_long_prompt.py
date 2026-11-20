@@ -112,5 +112,16 @@ def test_no_processor_path_still_preserves_order():
     assert [s.prompt for s in kept] == ["p0:5", "p2:5"]
 
 
+@pytest.mark.unit
+def test_replay_prompt_length_uses_recorded_ids():
+    short_trace = Sample(prompt="label:500", metadata={"trace_replay": {"prompt_token_ids": [10]}})
+    long_trace = Sample(prompt="label:1", metadata={"trace_replay": {"prompt_token_ids": [10] * 101}})
+    ordinary = Sample(prompt="ordinary:1")
+    assert filter_long_prompt([short_trace, ordinary, long_trace], _Tokenizer(), None, max_length=100) == [
+        short_trace,
+        ordinary,
+    ]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

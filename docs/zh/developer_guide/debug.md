@@ -62,9 +62,9 @@ vime 支持将训练部分和推理部分分开进行调试，从而实现：
 {"prompt":"原始提示词","metadata":{"trace_replay":{"prompt_token_ids":[151644,8948,198],"decode_token_ids":[444,2210,13]}}}
 ```
 
-启动 Vime 时设置 `--vllm-enable-trace-replay`、`--prompt-data /path/to/replay.jsonl` 和 `--input-key prompt`。元数据的默认字段名是 `metadata`。rollout 的输出预算需要容纳完整的目标序列，引擎的上下文需要容纳输入和输出之和。使用外部引擎时，在启动该引擎时启用 Model Runner V2 和 `--enable-trace-replay`。
+启动 Vime 时设置 `--vllm-enable-trace-replay`、`--prompt-data /path/to/replay.jsonl` 和 `--input-key prompt`。元数据的默认字段名是 `metadata`。rollout 的输出预算需要容纳完整的目标序列，引擎的上下文需要容纳输入和输出之和。Vime 自管引擎也可在 `--vllm-config` 对应组的 `overrides` 中设置 `enable_trace_replay: true`。使用外部引擎时，启动 vLLM 时启用 Model Runner V2、`--enable-trace-replay` 和 `/inference/v1/generate` 接口。
 
-默认非流式 rollout 会校验引擎返回的 token IDs 和逐 token logprobs，再写回样本。完整回放可能以 `finish_reason="length"` 结束，Vime 会将其记为 `TRUNCATED`。没有回放元数据的样本继续使用普通生成。
+默认非流式 rollout 会校验引擎返回的 token IDs 和逐 token logprobs，再写回样本。完整回放可能以 `finish_reason="length"` 结束，Vime 会将其记为 `TRUNCATED`。因此，即使所有目标 token 都已返回，该样本也可能计入截断比例。回放样本按记录的 prompt token IDs 做输入长度过滤。没有回放元数据的样本继续使用普通生成。
 
 回放使用完整的文本请求，并关闭 partial rollout、score centering 和 speculative decoding。比较模型原始概率时，在 [vLLM Config](../advanced/vllm-config.md) 的对应引擎组 `overrides` 中设置 `logprobs_mode: raw_logprobs`。仅调试推理时，可用 `--debug-rollout-only` 和 `--save-debug-rollout-data` 保存输出 token 和分数。
 
