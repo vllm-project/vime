@@ -20,7 +20,6 @@ from vllm_ascend.distributed.weight_transfer.sparse_hccl_engine import (
 
 from vime.utils.distributed_utils import get_gloo_group
 
-from ..delta_sync.hf_weight_iterator_vime import HfWeightIteratorVime
 from ..delta_sync.megatron_delta_export import (
     build_export_index,
     iter_delta_entries,
@@ -28,6 +27,7 @@ from ..delta_sync.megatron_delta_export import (
     validate_export_weights,
 )
 from ..delta_sync.sparse_gather import _GatherQueue
+from ..delta_sync.sparse_hf_export import SparseHFExporter
 from .common import VimeRayWeightSyncClient
 
 logger = logging.getLogger(__name__)
@@ -130,7 +130,7 @@ class UpdateWeightFromSparseHCCL:
         self.args = args
         self.model = model
         self.weight_version = 0
-        self._iterator = HfWeightIteratorVime(
+        self._iterator = SparseHFExporter(
             args,
             model,
             model_name=model_name,
