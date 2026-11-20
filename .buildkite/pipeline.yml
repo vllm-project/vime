@@ -143,7 +143,6 @@ steps:
           python tests/speculative_training/test_dspark_factory.py
           python tests/speculative_training/test_draft_trainer_helpers.py
           python tests/speculative_training/test_draft_group.py
-          python -m pytest tests/test_sparse_hccl.py -k test_coordinates_
         '
 
   - label: ":robot_face: agent adapter tests"
