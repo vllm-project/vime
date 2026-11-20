@@ -485,13 +485,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         }
 
         with trace_span(sample, "vllm_generate", attrs={"max_new_tokens": sampling_params["max_new_tokens"]}) as span:
-            output = await post(
-                url,
-                payload,
-                headers=headers,
-                score_centering_top_k=score_centering_top_k,
-                fail_fast_on_client_error=trace_ids is not None,
-            )
+            output = await post(url, payload, headers=headers, score_centering_top_k=score_centering_top_k)
             if hasattr(span, "update"):
                 span.update(build_vllm_meta_trace_attrs(output))
 

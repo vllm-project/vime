@@ -237,7 +237,6 @@ def test_generate_replays_trace_and_checks_output(patch_generate_state, monkeypa
     assert payload["token_ids"] == prompt_ids
     assert payload["sampling_params"]["trace_decode_token_ids"] == trace_ids
     json.dumps(payload)
-    assert post_mock.await_args.kwargs["fail_fast_on_client_error"] is True
     assert payload["sampling_params"]["max_tokens"] == len(trace_ids)
     assert payload["sampling_params"]["logprobs"] == 1
     assert sampling_params["max_new_tokens"] == 32
@@ -262,8 +261,8 @@ def test_generate_keeps_callers_response_budget_for_continuation(patch_generate_
     assert params["max_new_tokens"] == 8
 
 
-@pytest.mark.parametrize("status", [400, 429, 503])
-def test_replay_http_retry_preserves_transient_retries(monkeypatch, status):
+@pytest.mark.parametrize(("status", "replay"), [(400, True), (400, False), (429, True), (503, True)])
+def test_replay_http_retry_preserves_transient_retries(monkeypatch, status, replay):
     from vime.utils import http_utils
 
     calls = []
@@ -273,16 +272,18 @@ def test_replay_http_retry_preserves_transient_retries(monkeypatch, status):
         return httpx.Response(status if len(calls) == 1 else 200, json={"engine_message": "test"})
 
     async def run():
+        sampling_params = {"trace_decode_token_ids": [65]} if replay else {"logprobs": 1}
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             return await http_utils._post(
-                client, "http://vllm/inference/v1/generate", {}, max_retries=2, fail_fast_on_client_error=True
+                client, "http://vllm/inference/v1/generate", {"sampling_params": sampling_params}, max_retries=2
             )
 
     monkeypatch.setattr(http_utils.asyncio, "sleep", AsyncMock())
-    if status == 400:
+    if status == 400 and replay:
         with pytest.raises(httpx.HTTPStatusError) as error:
             asyncio.run(run())
         assert error.value.response.json() == {"engine_message": "test"}
+        assert "engine_message" in str(error.value)
         assert len(calls) == 1
     else:
         assert asyncio.run(run()) == {"engine_message": "test"}
