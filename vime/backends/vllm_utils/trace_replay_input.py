@@ -1,5 +1,6 @@
 """vLLM endpoint plugin for fixed-token replay with incremental prompt input."""
 
+import asyncio
 import json
 from contextlib import aclosing
 from uuid import uuid4
@@ -32,15 +33,26 @@ async def _generate(request: Request):
     if request.headers.get("content-type", "").split(";")[0] != "application/x-ndjson":
         raise HTTPException(415, "Expected application/x-ndjson")
     limit = engine.model_config.max_model_len
+    records = _records(request, limit * 64 + 8192)
+    read_lock = asyncio.Lock()
+
+    async def read_record(default=None):
+        async with read_lock:
+            return await anext(records, default)
+
     try:
-        async with aclosing(_records(request, limit * 64 + 8192)) as records:
-            return await _replay(engine, records, limit)
+        return await _replay(engine, read_record, limit)
     except (ValueError, TypeError, KeyError) as exc:
         raise HTTPException(400, str(exc)) from exc
+    finally:
+        # AsyncLLM cancels its input task when generate() exits. Let an active
+        # body read unwind before closing the generator used by that task.
+        async with read_lock:
+            await records.aclose()
 
 
-async def _replay(engine, records, limit):
-    header = await anext(records, None)
+async def _replay(engine, read_record, limit):
+    header = await read_record()
     if not isinstance(header, dict):
         raise ValueError("Expected a trace replay header")
     chunk_count = header.get("chunk_count")
@@ -59,14 +71,14 @@ async def _replay(engine, records, limit):
 
     async def chunks():
         for i in range(chunk_count):
-            part = await anext(records, None)
+            part = await read_record()
             if not isinstance(part, list) or not part or any(type(t) is not int or t < 0 for t in part):
                 raise ValueError("Each prompt chunk must contain non-negative integer token IDs")
             prompt_ids.extend(part)
             if len(prompt_ids) + len(trace) > limit:
                 raise ValueError("Prompt chunks and decode trace exceed the model context length")
             last = i == chunk_count - 1
-            if last and await anext(records, ()) != ():
+            if last and await read_record(()) != ():
                 raise ValueError("Received more prompt chunks than declared")
             # Earlier chunks use a one-token budget. vLLM emits that token, then
             # discards it when extending the session with the next input chunk.
@@ -88,7 +100,9 @@ async def _replay(engine, records, limit):
                     content.append({"token_id": token, "logprob": scores[token].logprob})
                 if choice.finish_reason is not None:
                     finish_reason = choice.finish_reason
-    if (
+    if finish_reason in ("abort", "cancelled"):
+        content = []
+    elif (
         engine_prompt_ids != prompt_ids
         or len(content) != chunk_count - 1 + len(trace)
         or any(row["token_id"] != trace[0] for row in content[: chunk_count - 1])

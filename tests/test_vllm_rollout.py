@@ -273,6 +273,73 @@ def test_generate_rejects_prompt_chunks_that_change_the_recorded_prompt(patch_ge
     post.assert_not_awaited()
 
 
+@pytest.mark.parametrize("finish_reason", ["abort", "length"])
+def test_trace_replay_endpoint_finishes_while_reading_upload(finish_reason):
+    pytest.importorskip("vllm.engine.protocol")
+    from fastapi import FastAPI
+
+    from vime.backends.vllm_utils.trace_replay_input import TraceReplayInputPlugin
+
+    async def run():
+        waiting_for_body = asyncio.Event()
+        body_closed = asyncio.Event()
+
+        class Engine:
+            model_config = SimpleNamespace(enable_trace_replay=True, max_model_len=32)
+
+            def check_admission(self, *, request_id):
+                pass
+
+            async def generate(self, chunks, params, request_id):
+                async def read():
+                    await anext(chunks)
+                    await anext(chunks)
+
+                task = asyncio.create_task(read())
+                try:
+                    await waiting_for_body.wait()
+                    yield SimpleNamespace(
+                        prompt_token_ids=[10],
+                        outputs=[SimpleNamespace(token_ids=[], logprobs=None, finish_reason=finish_reason)],
+                    )
+                finally:
+                    # AsyncLLM signals cancellation without waiting for the input task.
+                    task.cancel()
+
+        async def body():
+            params = {"max_tokens": 2, "logprobs": 1, "trace_decode_token_ids": [65, 66]}
+            yield (json.dumps({"chunk_count": 2, "sampling_params": params}) + "\n").encode()
+            yield b"[10]\n"
+            waiting_for_body.set()
+            try:
+                await asyncio.Future()
+            finally:
+                body_closed.set()
+
+        app = FastAPI()
+        app.state.trace_replay_engine = Engine()
+        TraceReplayInputPlugin().attach_router(app)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/inference/v1/trace-replay-input",
+                content=body(),
+                headers={"Content-Type": "application/x-ndjson"},
+            )
+        assert body_closed.is_set()
+        return response
+
+    response = asyncio.run(asyncio.wait_for(run(), timeout=5))
+    if finish_reason == "abort":
+        assert response.status_code == 200
+        choice = response.json()["choices"][0]
+        assert choice["finish_reason"] == "abort"
+        assert choice["token_ids"] == []
+        assert choice["logprobs"]["content"] == []
+    else:
+        assert response.status_code == 502
+        assert response.json()["detail"] == "Engine returned an incomplete streaming-input replay"
+
+
 def test_generate_streaming_rejects_trace_replay():
     from vime.rollout.vllm_streaming_rollout import generate_streaming
 
