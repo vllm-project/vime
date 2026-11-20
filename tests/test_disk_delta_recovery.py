@@ -195,5 +195,22 @@ def test_full_snapshot_nonpublisher_consumes_chunks_without_cpu_copies(tmp_path,
     assert updater.total_bytes == updater.changed_bytes == updater.wire_bytes == 0
 
 
+@pytest.mark.parametrize("resume_generation", [False, True])
+def test_delta_reload_can_leave_generation_paused(delta_module, monkeypatch, tmp_path, resume_generation):
+    from unittest.mock import Mock
+
+    updater = object.__new__(delta_module.UpdateWeightFromDiskDelta)
+    updater.args = SimpleNamespace(flush_cache_interval=1, update_weight_local_checkpoint_dir=str(tmp_path))
+    updater._post_write_hook = None
+    updater.weight_version = 1
+    engine = Mock()
+    updater.rollout_engines = [engine]
+    monkeypatch.setattr(delta_module.ray, "get", lambda value: value)
+    updater._reload_engines(resume_generation=resume_generation)
+    engine.pull_weights.remote.assert_called_once_with(1)
+    engine.update_weights_from_disk.remote.assert_called_once()
+    assert engine.continue_generation.remote.call_count == int(resume_generation)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
