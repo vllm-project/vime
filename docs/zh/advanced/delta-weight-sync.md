@@ -11,6 +11,12 @@ Delta 权重同步只发送两次同步之间发生变化的字节，而不是�
 
 Sparse HCCL：
 
+启用 `--offload-train --use-critic` 且未启用 `--colocate` 时，训练休眠会断开
+权重传输连接。重连时仅在 rollout actor 身份相同且报告最后一次完成的权重版本时
+保留快照并继续增量同步；接收端替换、版本查询失败或部分传输失败后重新发送完整
+seed。BF16 seed 的每个元素包含四字节索引和两字节值，载荷约为 dense 全量的
+三倍。常驻 actor 的性能数据不覆盖此配置。
+
 该路径使用 vLLM-Ascend 提供的 sparse HCCL 引擎。VIME 将权重导出为 HF checkpoint
 坐标，维护分片快照，按一致顺序汇聚变化项，并管理更新版本。全量导出和稀疏坐标转换
 使用相同的 `convert_to_hf()` 规则。
@@ -22,6 +28,7 @@ Sparse HCCL：
 ```bash
 --update-weight-mode delta
 --update-weight-transport sparse_hccl
+--update-weight-delta-batch-diff 32
 --update-weight-delta-batch-gather 32
 ```
 
@@ -60,9 +67,10 @@ delta 始终用 zstd（level 1）压缩；profiling 显示对这类数据它在 
 
 ### Sparse HCCL
 
-首轮或重连时执行 Seed，后续更新执行 Diff；两条路径共用 Publish 和 Apply。
+首轮或无法验证基准的重连执行 Seed，后续更新执行 Diff；两条路径共用 Publish 和 Apply。
+显式休眠的连接仅在接收端身份及版本核对一致后恢复 Diff。
 
-1. **Seed。** 首轮或重连后，将当前训练权重完整导出为 HF 格式，生成全部 checkpoint
+1. **Seed。** 首轮或无法验证基准的重连后，将当前训练权重完整导出为 HF 格式，生成全部 checkpoint
    坐标与目标值，交给 Publish／Apply 阶段发送和应用。首轮成功后保存本地 shard snapshot，
    作为后续差分基准；重连时重新全量覆盖 worker 权重。
 2. **Diff。** 后续更新对当前训练分片与 snapshot 做 bitwise diff，使用与全量导出相同的转换规则，
@@ -76,6 +84,10 @@ delta 始终用 zstd（level 1）压缩；profiling 显示对这类数据它在 
 
 wire 索引使用 int32，单个 checkpoint tensor 的元素数必须小于 `2**31`。
 接收端需要完整形状的 NaN staging；首轮 Seed 同时传输索引和值，wire 大于仅发送值的 dense 传输。
+
+gather 字节预算限制所有训练 rank 的接收缓冲区总量，超大 slot 按元素范围分块。
+调用方 delta 缓冲区、返回的合并结果、本地转换探针及接收端 staging 不计入此预算；
+它不是整个权重更新过程的峰值内存上限。
 
 ### 磁盘传输
 

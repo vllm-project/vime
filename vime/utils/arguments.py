@@ -2413,6 +2413,13 @@ def vime_validate_args(args):
             args.save_interval = 1
         if args.update_weight_mode != "full" or args.update_weight_transport != "disk":
             raise ValueError("--release-train requires --update-weight-mode=full and --update-weight-transport=disk.")
+    if args.update_weight_transport == "sparse_hccl":
+        from vime.platforms import current_platform
+
+        if not current_platform().is_npu:
+            raise ValueError("--update-weight-transport=sparse_hccl requires an NPU platform.")
+        if args.update_weight_mode != "delta" or args.colocate:
+            raise ValueError("sparse_hccl requires --update-weight-mode=delta without --colocate.")
     if args.update_weight_mode == "delta":
         if args.update_weight_transport not in {"disk", "sparse_hccl"}:
             raise ValueError(

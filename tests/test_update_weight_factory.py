@@ -47,6 +47,8 @@ class _FakeUpdater:
     ],
 )
 def test_create_weight_updater_selects_implementation(monkeypatch, mode, transport, colocate, module_name, class_name):
+    monkeypatch.setenv("VIME_PLATFORM", "npu" if transport == "sparse_hccl" else "cuda")
+    monkeypatch.delenv("VIME_ACCELERATOR", raising=False)
     full_module_name = f"vime.backends.megatron_utils.update_weight.{module_name}"
     fake_module = types.ModuleType(full_module_name)
     setattr(fake_module, class_name, _FakeUpdater)
@@ -101,7 +103,9 @@ def test_transport_options_are_registered_once(transport):
 
 @pytest.mark.unit
 @pytest.mark.parametrize("quantization,error", [({"quant_method": "test"}, NotImplementedError)])
-def test_sparse_options_rejected_before_import(quantization, error):
+def test_sparse_options_rejected_before_import(monkeypatch, quantization, error):
+    monkeypatch.setenv("VIME_PLATFORM", "npu")
+    monkeypatch.delenv("VIME_ACCELERATOR", raising=False)
     args = Namespace(
         update_weight_mode="delta",
         update_weight_transport="sparse_hccl",
@@ -109,6 +113,24 @@ def test_sparse_options_rejected_before_import(quantization, error):
     )
     with pytest.raises(error):
         create_weight_updater(args, [], lambda: {}, model_name="test", quantization_config=quantization)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "platform,mode,colocate",
+    [
+        ("cuda", "delta", False),
+        ("npu", "full", False),
+        ("npu", "full", True),
+        ("npu", "delta", True),
+    ],
+)
+def test_sparse_invalid_combinations_fail_before_import(monkeypatch, platform, mode, colocate):
+    monkeypatch.setenv("VIME_PLATFORM", platform)
+    monkeypatch.delenv("VIME_ACCELERATOR", raising=False)
+    args = Namespace(update_weight_mode=mode, update_weight_transport="sparse_hccl", colocate=colocate)
+    with pytest.raises(ValueError, match="sparse_hccl requires"):
+        create_weight_updater(args, [], lambda: {}, model_name="test", quantization_config=None)
 
 
 if __name__ == "__main__":

@@ -188,7 +188,10 @@ class MegatronTrainRayActor(TrainRayActor):
             and not self.args.colocate
             and hasattr(self.weight_updater, "disconnect_rollout_engines")
         ):
-            self.weight_updater.disconnect_rollout_engines()
+            if self.args.update_weight_mode == "delta" and self.args.update_weight_transport == "sparse_hccl":
+                self.weight_updater.suspend_rollout_engines()
+            else:
+                self.weight_updater.disconnect_rollout_engines()
         destroy_process_groups()
 
         torch_memory_saver.pause()
@@ -651,7 +654,14 @@ class MegatronTrainRayActor(TrainRayActor):
                 logger.info("No updatable vLLM engines are running; skip weight update.")
             return
 
-        sparse_live_weights = self.args.offload_train and self.args.update_weight_transport == "sparse_hccl"
+        sparse_live_weights = (
+            self.args.offload_train
+            and self.args.update_weight_mode == "delta"
+            and self.args.update_weight_transport == "sparse_hccl"
+        )
+        # Sparse conversion reads live model shards rather than the CPU backup
+        # used by full export. Resume model allocations before probing/diffing,
+        # then restore the offloaded state after the synchronous update.
         if reconnect_rollout_engines or sparse_live_weights:
             self.wake_up()
         elif self.args.offload_train:

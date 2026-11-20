@@ -22,13 +22,13 @@ source "${SCRIPT_DIR}/models/qwen3-30B-A3B.sh"
 DATA_ROOT="${DATA_ROOT:-/root}"
 
 CKPT_ARGS=(
-   --hf-checkpoint ${DATA_ROOT}/weights/Qwen3-30B-A3B/
-   --load ${DATA_ROOT}/weights/Qwen3-30B-A3B/
-   --ref-load ${DATA_ROOT}/weights/Qwen3-30B-A3B/
+   --hf-checkpoint "${DATA_ROOT}/weights/Qwen3-30B-A3B/"
+   --load "${DATA_ROOT}/weights/Qwen3-30B-A3B/"
+   --ref-load "${DATA_ROOT}/weights/Qwen3-30B-A3B/"
 )
 
 ROLLOUT_ARGS=(
-   --prompt-data ${DATA_ROOT}/datasets/dapo-math-17k/dapo-math-17k.jsonl
+   --prompt-data "${DATA_ROOT}/datasets/dapo-math-17k/dapo-math-17k.jsonl"
    --input-key prompt
    --label-key label
    --apply-chat-template
@@ -117,12 +117,12 @@ ray job submit --address="http://127.0.0.1:8265" \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node 4 \
    --rollout-num-gpus 2 \
-   ${MODEL_ARGS[@]} \
-   ${CKPT_ARGS[@]} \
-   ${ROLLOUT_ARGS[@]} \
-   ${OPTIMIZER_ARGS[@]} \
-   ${GRPO_ARGS[@]} \
-   ${PERF_ARGS[@]} \
-   ${VLLM_ARGS[@]} \
-   ${UPDATE_WEIGHT_ARGS[@]} \
-   ${MISC_ARGS[@]}
+   "${MODEL_ARGS[@]}" \
+   "${CKPT_ARGS[@]}" \
+   "${ROLLOUT_ARGS[@]}" \
+   "${OPTIMIZER_ARGS[@]}" \
+   "${GRPO_ARGS[@]}" \
+   "${PERF_ARGS[@]}" \
+   "${VLLM_ARGS[@]}" \
+   "${UPDATE_WEIGHT_ARGS[@]}" \
+   "${MISC_ARGS[@]}"

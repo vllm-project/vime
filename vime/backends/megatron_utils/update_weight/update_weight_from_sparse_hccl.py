@@ -79,7 +79,7 @@ def prepare_sparse_patches(patches: Sequence[SparseWeightPatch], device) -> list
 
 
 class _SparseFlushBucket:
-    """One homogeneous-dtype sparse flush with bounded wire size."""
+    """Sparse patches, potentially of mixed dtype, with bounded wire size."""
 
     def __init__(self, capacity: int, publish):
         self.capacity = int(capacity)
@@ -146,6 +146,7 @@ class UpdateWeightFromSparseHCCL:
         self._engine_gpu_counts = None
         self._gather_workspaces = {}
         self._client = None
+        self._suspended_baseline = None
         self.rollout_engines: list[ActorHandle] = []
 
     def connect_rollout_engines(
@@ -167,11 +168,14 @@ class UpdateWeightFromSparseHCCL:
                 raise ValueError("Sparse HCCL requires inference pipeline_parallel_size=1")
             if int(config.get("prefill_context_parallel_size", config.get("pcp_size", 1)) or 1) != 1:
                 raise ValueError("Sparse HCCL requires inference prefill_context_parallel_size=1")
+        resume = self._can_resume_baseline(rollout_engines)
         self.disconnect_rollout_engines()
-        self._seeded = False
+        self._gather_workspaces.clear()
+        self._seeded = resume
         self._failed = False
-        self._snapshots.clear()
-        self._index = None
+        if not resume:
+            self._snapshots.clear()
+            self._index = None
         self.rollout_engines = list(rollout_engines)
         gpu_counts = list(engine_gpu_counts or [self.args.rollout_num_gpus_per_engine] * len(self.rollout_engines))
         self._engine_gpu_counts = gpu_counts
@@ -205,16 +209,64 @@ class UpdateWeightFromSparseHCCL:
         dist.barrier(group=get_gloo_group())
 
     def disconnect_rollout_engines(self) -> None:
+        self._suspended_baseline = None
         if self._trainer is not None:
             self._trainer.shutdown()
             self._trainer = None
         self._client = None
 
+    def suspend_rollout_engines(self) -> None:
+        """Release communication while retaining a verified baseline candidate."""
+        baseline = None
+        if self._seeded and not self._failed and not self._needs_reconnect:
+            baseline = (tuple(engine._actor_id for engine in self.rollout_engines), self.weight_version)
+        self.disconnect_rollout_engines()
+        self._suspended_baseline = baseline
+
+    def _can_resume_baseline(self, engines) -> bool:
+        decision = [False]
+        baseline = getattr(self, "_suspended_baseline", None)
+        if dist.get_rank() == 0 and baseline is not None and not self._failed:
+            try:
+                identities, version = baseline
+                if tuple(engine._actor_id for engine in engines) == identities and version == self.weight_version:
+                    versions = ray.get([engine.get_weight_version.remote() for engine in engines])
+                    decision[0] = bool(versions) and all(value == str(version) for value in versions)
+            except Exception:
+                logger.warning("Cannot verify suspended sparse baseline; sending a fresh seed", exc_info=True)
+        dist.broadcast_object_list(decision, src=0, group=get_gloo_group())
+        return decision[0]
+
     def pop_metrics(self) -> dict[str, float]:
         return {}
 
     def _ensure_export_index(self) -> None:
-        if self._index is not None and not self.args.offload_train:
+        if self._index is not None:
+            if self.args.offload_train:
+                # Layout is static across sleep; reacquire live parameter objects
+                # without repeating conversion probes or the slot-table exchange.
+                error = None
+                try:
+                    local_weights = self._iterator.local_weights()
+                    for record in self._index:
+                        param = local_weights.get(record.megatron_name)
+                        if (param is None) != (record.param is None) or (
+                            param is not None
+                            and (param.shape != record.param.shape or param.dtype != record.param.dtype)
+                        ):
+                            raise ValueError(f"Sparse export layout changed after offload: {record.megatron_name}")
+                except BaseException as exc:
+                    error = exc
+                failed, _ = self._sync_update_state(error)
+                if failed:
+                    self._raise_synchronized_error(error, "export-index refresh")
+                if any(record.gather_group is not dist.group.WORLD for record in self._index):
+                    self._gather_workspaces.clear()
+                for record in self._index:
+                    record.param = local_weights.get(record.megatron_name)
+                    # None means local-only to _GatherQueue, so retain an
+                    # explicit group and refresh it after wake_up recreates WORLD.
+                    record.gather_group = dist.group.WORLD
             return
         self._index = build_export_index(self._iterator, self.model)
 
