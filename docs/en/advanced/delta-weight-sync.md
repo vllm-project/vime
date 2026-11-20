@@ -9,7 +9,7 @@ Two transports are available: `disk` for shared-storage and cross-cluster deploy
 `sparse_hccl` for online transfer between Ascend trainers and vLLM-Ascend rollout workers.
 The first sync
 sends every checkpoint coordinate through the public sparse protocol; later syncs
-send only changed coordinates. Both seed and deltas are exported through Megatron-Bridge.
+send only changed coordinates. Both seed and deltas reuse VIME's existing `convert_to_hf()` rules.
 
 For disk transport, The trainer publishes each sync as a canonical HF checkpoint
 directory; the engine's `pull_weights` worker RPC (shipped in vime's vllm patch) fans the
@@ -24,13 +24,21 @@ Sparse HCCL:
 
 This path uses the native sparse HCCL engines already included in the pinned
 vLLM-Ascend dependency. No additional sparse-engine dependency patch is needed.
-VIME owns Bridge export, shard snapshots, ordered gathering and the update lifecycle.
+VIME owns native HF export, shard snapshots, ordered gathering and the update lifecycle.
 
-The NPU image installs Megatron-Bridge at `afcc7eee4cd916aedcf90562b01f3948ed76d82d`
-for conversion. Custom training images must include the same Bridge dependency;
-installing VIME alone does not install the training stack. Follow the pinned
-conversion dependencies in `docker/Dockerfile.npu` rather than resolving Bridge's
-CUDA training extras over an Ascend environment.
+No NVIDIA Megatron Bridge installation is required. Seeds use
+`HfWeightIteratorDirect`; deltas run the same `convert_to_hf()` with local NaN
+placeholders for missing TP shards. The ordinary TP merge is replayed locally,
+including FC1 gate/up sections and expert-TP layout. There are no dense weight
+collectives in the delta converter; actual changed entries are gathered through
+the existing sparse path. The metadata directory and slot exchange are collective.
+
+This is not an O(delta)-memory arithmetic index mapper: local probe/output
+buffers and output scans remain dense and their memory can grow with TP size.
+Only unquantized floating, value-preserving layouts are supported; draft/MTP
+weights are rejected. Qwen3-MoE layouts have CPU differential coverage. New
+model layouts require sparse/full differential validation; prior Bridge-based
+NPU results and timings do not validate this alternative implementation.
 
 ```bash
 --update-weight-mode delta
@@ -80,11 +88,11 @@ Initial and reconnected updates use Seed; subsequent updates use Diff.
 Both paths share Publish and Apply.
 
 1. **Seed.** On the first update or after reconnection, export all current training
-   weights through Bridge and produce complete checkpoint coordinates and target
+   weights through native VIME conversion and produce complete checkpoint coordinates and target
    values for Publish/Apply. After successful seeding, capture local shard snapshots
    as the baseline for later diffs. Reconnection fully overwrites worker weights.
 2. **Diff.** On later updates, compare current training shards with their snapshots
-   bitwise. Bridge mappings and NaN probes convert changed positions and values
+   bitwise. Native VIME conversion and local NaN probes convert changed positions and values
    into HF checkpoint coordinates.
 3. **Publish.** For Diff entries, first gather variable-length payloads to rank zero
    in a consistent directory order. For either Seed or Diff, rank zero validates

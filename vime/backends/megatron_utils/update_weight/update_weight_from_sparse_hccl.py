@@ -20,7 +20,7 @@ from vllm_ascend.distributed.weight_transfer.sparse_hccl_engine import (
 
 from vime.utils.distributed_utils import get_gloo_group
 
-from ..delta_sync.hf_weight_iterator_bridge import HfWeightIteratorBridge
+from ..delta_sync.hf_weight_iterator_vime import HfWeightIteratorVime
 from ..delta_sync.megatron_delta_export import (
     build_export_index,
     iter_delta_entries,
@@ -130,7 +130,12 @@ class UpdateWeightFromSparseHCCL:
         self.args = args
         self.model = model
         self.weight_version = 0
-        self._iterator = HfWeightIteratorBridge(args, model)
+        self._iterator = HfWeightIteratorVime(
+            args,
+            model,
+            model_name=model_name,
+            quantization_config=quantization_config,
+        )
         self._index = None
         self._snapshots: dict[str, torch.Tensor] = {}
         self._seeded = False
@@ -211,8 +216,7 @@ class UpdateWeightFromSparseHCCL:
     def _ensure_export_index(self) -> None:
         if self._index is not None and not self.args.offload_train:
             return
-        with self._iterator.model_context():
-            self._index = build_export_index(self._iterator.bridge, self.model)
+        self._index = build_export_index(self._iterator, self.model)
 
     def _begin_update(self) -> None:
         if dist.get_rank() != 0:
@@ -304,7 +308,7 @@ class UpdateWeightFromSparseHCCL:
                     end = min(start + max_elements, flat.numel())
                     indices = torch.arange(start, end, dtype=torch.int32, device=flat.device)
                     bucket.add(name, tensor.shape, indices, flat[start:end])
-            # Bridge may reuse export buffers when the iterator advances.
+            # The native converter may return views into temporary export buffers.
             bucket.flush()
 
     def _send_sparse_delta(self) -> None:
