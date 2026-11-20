@@ -8,8 +8,9 @@ import io
 import json
 import sys
 from argparse import Namespace
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 _tests_root = Path(__file__).resolve().parent
@@ -17,6 +18,7 @@ if str(_tests_root) not in sys.path:
     sys.path.insert(0, str(_tests_root))
 
 import _unit_stubs
+import httpx
 import numpy as np
 import pytest
 
@@ -47,14 +49,6 @@ class _FakeProcessor:
         }
 
 
-class _DummySemaphore:
-    async def __aenter__(self):
-        return None
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
-
-
 class _PatchedGenerateState:
     """Lightweight GenerateState for unit tests (no HF load)."""
 
@@ -64,7 +58,7 @@ class _PatchedGenerateState:
         self.args = args
         self.tokenizer = _FakeTokenizer()
         self.processor = None
-        self.semaphore = _DummySemaphore()
+        self.semaphore = asyncio.Semaphore(128)
         self.generation_pacer = AsyncPacer()
         self.aborted = False
         self.remaining_batch_size = 0
@@ -155,7 +149,7 @@ def _generate_response(
         "usage": {"prompt_tokens": 3, "completion_tokens": len(tids)},
     }
     if weight_version is not None:
-        response["weight_version"] = weight_version
+        response["choices"][0]["weight_versions"] = [{"version": weight_version, "start": 0, "end": len(tids)}]
     metrics = dict(request_metrics or {})
     if request_spec_decode_stats is not None:
         metrics["speculative_decoding"] = request_spec_decode_stats
@@ -228,7 +222,8 @@ def test_get_model_url_named_router_and_fallback():
 
 
 @pytest.mark.unit
-def test_geo3k_turn_preserves_sampling_metadata(monkeypatch):
+@pytest.mark.parametrize("finish", ["stop", "length", "abort", "cancelled"])
+def test_geo3k_turn_preserves_sampling_metadata(monkeypatch, finish):
     from examples.geo3k_vlm_multi_turn import rollout as geo3k
 
     monkeypatch.setattr(geo3k, "GenerateState", _PatchedGenerateState)
@@ -239,13 +234,13 @@ def test_geo3k_turn_preserves_sampling_metadata(monkeypatch):
             return_value={
                 "choices": [
                     {
-                        "finish_reason": "stop",
+                        "finish_reason": finish,
                         "token_ids": [65],
                         "logprobs": {"content": [{"logprob": -0.1}]},
                         "sampling_mask": [[65, 66]],
+                        "weight_versions": [{"version": "7", "start": 0, "end": 1}],
                     }
                 ],
-                "weight_version": "7",
             }
         ),
     )
@@ -260,6 +255,99 @@ def test_geo3k_turn_preserves_sampling_metadata(monkeypatch):
     assert sample.rollout_top_p_token_ids.tolist() == [65, 66]
     assert sample.rollout_top_p_token_offsets.tolist() == [0, 2]
     assert sample.weight_versions == ["7"]
+    assert sample.tokens == [1, 65]
+    assert sample.loss_mask == [1]
+    assert sample.rollout_log_probs == [-0.1]
+    assert turn.finish == ("abort" if finish == "cancelled" else finish)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "context_limit,max_new_tokens,finish,existing,max_turns,done,expected_budget,expected_tail,expected_status",
+    [
+        (20, 4, "stop", False, 1, False, 18, [65, 66, 67], "COMPLETED"),
+        (None, 6, "stop", False, 1, False, 4, [65, 66, 67], "COMPLETED"),
+        (None, 5, "stop", False, 1, False, 3, [65, 66, 67], "TRUNCATED"),
+        (None, 4, "stop", False, 1, False, 2, [65, 66, 67], "TRUNCATED"),
+        (None, 3, "stop", False, 1, True, 1, [65], "TRUNCATED"),
+        (None, 6, "stop", False, 1, True, 4, [65], "COMPLETED"),
+        (None, None, "stop", True, 1, False, None, [64, 65, 66, 67], "COMPLETED"),
+        (8, 3, "cancelled", True, 1, False, 5, [64, 65], "ABORTED"),
+        (None, 6, "length", False, 1, False, 4, [65], "TRUNCATED"),
+        (None, 6, "stop", False, 0, False, 4, [], "PENDING"),
+        (None, -1, "stop", False, 1, False, -3, [], "TRUNCATED"),
+        (-1, 6, "stop", False, 1, False, -3, [], "TRUNCATED"),
+    ],
+)
+def test_geo3k_source_lifecycle(
+    monkeypatch,
+    context_limit,
+    max_new_tokens,
+    finish,
+    existing,
+    max_turns,
+    done,
+    expected_budget,
+    expected_tail,
+    expected_status,
+):
+    from examples.geo3k_vlm_multi_turn import rollout as geo3k
+
+    monkeypatch.setattr(geo3k, "GenerateState", _PatchedGenerateState)
+    requests = []
+
+    async def post(url, body, **kwargs):
+        requests.append(body)
+        if url.endswith("/render"):
+            return {"token_ids": [1, 2]}
+        assert body["token_ids"] == [1, 2] + ([64] if existing else [])
+        if expected_budget is not None:
+            assert body["sampling_params"]["max_tokens"] == expected_budget
+        return {
+            "choices": [{"finish_reason": finish, "token_ids": [65], "logprobs": {"content": [{"logprob": -0.1}]}}]
+        }
+
+    monkeypatch.setattr(geo3k, "post", post)
+    monkeypatch.setattr(geo3k, "_observation_token_ids", lambda *args, **kwargs: [66, 67])
+    steps = []
+
+    def step(text):
+        steps.append(text)
+        return "feedback", done, {}
+
+    env = SimpleNamespace(step=step, format_observation=lambda text: {"role": "user", "content": text})
+    sample = Sample(
+        prompt="question",
+        tokens=[1, 2, 64] if existing else [],
+        response="old" if existing else "",
+        response_length=1 if existing else 0,
+        loss_mask=[1] if existing else None,
+        rollout_log_probs=[-0.2] if existing else None,
+        status=Sample.Status.ABORTED if existing else Sample.Status.PENDING,
+    )
+    rollout = geo3k._Geo3kRollout(
+        _rollout_args(max_turns=max_turns, rollout_max_context_len=context_limit),
+        sample,
+        {"max_new_tokens": max_new_tokens, "stop": "A", "temperature": 0.0, "top_p": 1.0},
+    )
+    rollout.state.tokenizer.eos_token_id = 99
+    rollout.state.tokenizer.convert_tokens_to_ids = lambda token: -1
+    asyncio.run(rollout._initialize_prompt())
+    assert rollout._remaining_budget == expected_budget
+    asyncio.run(rollout._run_turns(env))
+    result = rollout._finalize()
+    assert result.tokens == [1, 2] + expected_tail
+    assert result.response == "".join(chr(token) for token in expected_tail)
+    assert result.response_length == len(expected_tail)
+    assert result.status == getattr(Sample.Status, expected_status)
+    assert result.loss_mask == [0 if token in [66, 67] else 1 for token in expected_tail]
+    assert result.rollout_log_probs == [
+        -0.2 if token == 64 else -0.1 if token == 65 else 0.0 for token in expected_tail
+    ]
+    generated = max_turns > 0 and (expected_budget is None or expected_budget > 0)
+    assert len(requests) == 1 + int(generated)
+    advanced = generated and finish == "stop" and (expected_budget is None or expected_budget > 1)
+    assert steps == (["A"] if advanced else [])
 
 
 @pytest.mark.unit
@@ -291,19 +379,21 @@ def test_build_inference_sampling_params_maps_rollout_fields():
     assert sp["skip_special_tokens"] is False
     assert sp["spaces_between_special_tokens"] is False
     assert sp["logprobs"] == 1
+    assert sp["detokenize"] is True
 
 
 @pytest.mark.unit
 def test_build_inference_sampling_params_forwards_disabled_top_k():
     sp = mod._build_inference_sampling_params({"max_new_tokens": 8, "temperature": 0.0, "top_p": 1.0, "top_k": -1})
     assert sp["top_k"] == -1
+    assert sp["detokenize"] is False
 
 
 @pytest.mark.unit
-def test_inference_generate_tokens_and_logprobs_aligns_partial_content():
+def test_inference_generate_tokens_and_logprobs_aligns_content():
     token_ids, log_probs = mod._inference_generate_tokens_and_logprobs(
         {
-            "token_ids": [11, 12, 13],
+            "token_ids": [11, 12],
             "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
         }
     )
@@ -312,8 +402,39 @@ def test_inference_generate_tokens_and_logprobs_aligns_partial_content():
 
 
 @pytest.mark.unit
-def test_inference_generate_tokens_and_logprobs_rejects_invalid_token_ids():
-    assert mod._inference_generate_tokens_and_logprobs({"token_ids": [1, "2"]}) == ([], [])
+@pytest.mark.parametrize("token_ids", [[1, "2"], "12", 12])
+def test_inference_generate_tokens_and_logprobs_rejects_invalid_token_ids(token_ids):
+    with pytest.raises(ValueError, match="token_ids must be a list of integers"):
+        mod._inference_generate_tokens_and_logprobs({"token_ids": token_ids})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("token_ids", [[], [11], [11, 12, 13]])
+def test_inference_generate_tokens_and_logprobs_rejects_count_mismatch(token_ids):
+    with pytest.raises(ValueError, match="token/logprob count mismatch"):
+        mod._inference_generate_tokens_and_logprobs(
+            {"token_ids": token_ids, "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]}}
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("logprobs", [None, {}, {"content": None}, {"content": []}])
+@pytest.mark.parametrize("token_ids", [None, [], [11]])
+def test_inference_generate_tokens_and_logprobs_empty_tails(token_ids, logprobs):
+    choice = {"token_ids": token_ids, "logprobs": logprobs}
+    if token_ids:
+        with pytest.raises(ValueError, match="token/logprob count mismatch"):
+            mod._inference_generate_tokens_and_logprobs(choice)
+    else:
+        assert mod._inference_generate_tokens_and_logprobs(choice) == ([], [])
+    assert mod._inference_generate_tokens_and_logprobs({}) == ([], [])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("content", ["", {}, 0])
+def test_inference_generate_tokens_and_logprobs_rejects_invalid_content(content):
+    with pytest.raises(ValueError, match="logprobs.content must be a list"):
+        mod._inference_generate_tokens_and_logprobs({"token_ids": [], "logprobs": {"content": content}})
 
 
 @pytest.mark.unit
@@ -329,18 +450,14 @@ def test_mm_render_response_to_generate_body_flat_dict():
 
 @pytest.mark.unit
 def test_mm_render_response_to_generate_body_engine_prompts_list():
-    body = mod._mm_render_response_to_generate_body(
-        [
-            {"messages": []},
-            [{"prompt_token_ids": [5, 6], "multi_modal_data": {"img": 1}}],
-        ],
-        "model-b",
-    )
-    assert body == {
-        "token_ids": [5, 6],
-        "model": "model-b",
-        "features": '{"img": 1}',
-    }
+    with pytest.raises(ValueError, match="expected a dict with token_ids"):
+        mod._mm_render_response_to_generate_body(
+            [
+                {"messages": []},
+                [{"prompt_token_ids": [5, 6], "multi_modal_data": {"img": 1}}],
+            ],
+            "model-b",
+        )
 
 
 @pytest.mark.unit
@@ -375,10 +492,7 @@ def test_build_inference_sampling_params_omits_zero_top_k():
 @pytest.mark.unit
 def test_mm_render_response_token_ids_alias_and_cache_salt():
     body = mod._mm_render_response_to_generate_body(
-        [
-            {},
-            [{"token_ids": [7, 8], "features": {"f": 1}, "cache_salt": "salt-1"}],
-        ],
+        {"token_ids": [7, 8], "features": {"f": 1}, "cache_salt": "salt-1"},
         "model-c",
     )
     assert body["token_ids"] == [7, 8]
@@ -388,12 +502,13 @@ def test_mm_render_response_token_ids_alias_and_cache_salt():
 
 @pytest.mark.unit
 def test_mm_render_response_empty_engine_prompts_raises():
-    with pytest.raises(ValueError, match="non-empty engine_prompts"):
+    with pytest.raises(ValueError, match="expected a dict with token_ids"):
         mod._mm_render_response_to_generate_body([{}, []], "m")
 
 
 @pytest.mark.unit
-def test_generate_text_path_updates_sample(patch_generate_state, monkeypatch):
+@pytest.mark.parametrize("legacy_scalar", [False, True])
+def test_generate_text_path_updates_sample(patch_generate_state, monkeypatch, legacy_scalar):
     post_mock = AsyncMock(
         return_value=_generate_response(
             [50, 51],
@@ -414,6 +529,9 @@ def test_generate_text_path_updates_sample(patch_generate_state, monkeypatch):
             },
         )
     )
+    if legacy_scalar:
+        post_mock.return_value["choices"][0].pop("weight_versions")
+        post_mock.return_value["weight_version"] = "step-7"
     monkeypatch.setattr(mod, "post", post_mock)
 
     sample = Sample(index=0, prompt="abc")
@@ -460,12 +578,64 @@ def test_generate_text_path_updates_sample(patch_generate_state, monkeypatch):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("versions", "expected_staleness"),
+    [(["3", "7"], 7), (["7", "3"], 7), (["3", "11"], None), (["step-7"], None), ([], None), (None, None)],
+)
+def test_native_weight_versions_preserve_staleness(versions, expected_staleness):
+    from vime.utils.staleness import sample_staleness
+
+    output = _generate_response([50, 51])
+    output["weight_version"] = "ignored-legacy-field"
+    output["choices"][0]["weight_versions"] = [
+        {"version": version, "start": index, "end": index + 1} for index, version in enumerate(versions or [])
+    ] + [{"version": "unused", "start": 2, "end": 2}]
+    if versions is None:
+        output["choices"][0]["weight_versions"] = None
+    sample = Sample()
+    sample._apply_meta_info(_rollout_args(), mod._inference_generate_meta_info(output), new_token_count=2)
+
+    assert sample.weight_versions == (versions or [])
+    assert sample_staleness(sample, 10) == expected_staleness
+    sample._apply_meta_info(_rollout_args(), {"weight_versions": ["9"]}, new_token_count=0)
+    assert sample.weight_versions == (versions or [])
+
+
+@pytest.mark.unit
+def test_native_weight_versions_accumulate_across_partial_calls():
+    sample = Sample()
+    for version, finish_reason in [("3", "abort"), ("7", "stop")]:
+        output = _generate_response([50], weight_version=version)
+        output["choices"][0]["finish_reason"] = finish_reason
+        sample._apply_meta_info(_rollout_args(), mod._inference_generate_meta_info(output), new_token_count=1)
+    assert sample.weight_versions == ["3", "7"]
+    assert sample.status == Sample.Status.COMPLETED
+
+
+@pytest.mark.unit
+def test_custom_generator_scalar_weight_version_remains_supported():
+    sample = Sample()
+    sample._apply_meta_info(
+        _rollout_args(), {"weight_version": "3", "finish_reason": {"type": "stop"}}, new_token_count=1
+    )
+    assert sample.weight_versions == ["3"]
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("terminal_only", [False, True])
 @pytest.mark.parametrize("with_encoder", [False, True])
-def test_generate_streaming_records_weight_version(patch_generate_state, monkeypatch, terminal_only, with_encoder):
+@pytest.mark.parametrize(("mixed_versions", "legacy_scalar"), [(False, False), (True, False), (False, True)])
+def test_generate_streaming_records_weight_version(
+    patch_generate_state, monkeypatch, terminal_only, with_encoder, mixed_versions, legacy_scalar
+):
     from vime.rollout import vllm_streaming_rollout as streaming
 
     ec_params = {"caller-media": {"peer_host": "encoder", "peer_port": 9000, "metadata": {}}}
+    versions = (
+        [{"version": "3", "start": 0, "end": 1}, {"version": "7", "start": 1, "end": 2}]
+        if mixed_versions
+        else [{"version": "step-7", "start": 0, "end": 2}]
+    )
 
     class FakeStreamResponse:
         async def __aenter__(self):
@@ -481,7 +651,6 @@ def test_generate_streaming_records_weight_version(patch_generate_state, monkeyp
             chunks = [
                 {
                     "request_id": "stream-7",
-                    "weight_version": "step-7",
                     "metrics": {
                         "speculative_decoding": {
                             "num_accepted_tokens": 6,
@@ -499,12 +668,12 @@ def test_generate_streaming_records_weight_version(patch_generate_state, monkeyp
                     ],
                 },
                 {
-                    "weight_version": "step-7",
                     "choices": [
                         {
                             "token_ids": [51],
                             "sampling_mask": [[2, 3, 51]],
                             "finish_reason": "stop",
+                            "weight_versions": versions,
                             "logprobs": {"content": [{"logprob": -0.2}]},
                         }
                     ],
@@ -519,8 +688,17 @@ def test_generate_streaming_records_weight_version(patch_generate_state, monkeyp
             ]
             if terminal_only:
                 chunks[1]["choices"][0]["finish_reason"] = None
-                chunks.insert(2, {"choices": [{"token_ids": [], "finish_reason": "stop"}]})
+                chunks[1]["choices"][0].pop("weight_versions")
+                chunks.insert(
+                    2, {"choices": [{"token_ids": [], "finish_reason": "stop", "weight_versions": versions}]}
+                )
             for chunk in chunks:
+                chunk["weight_version"] = "step-7" if legacy_scalar else "ignored-legacy-field"
+                for choice in chunk.get("choices", []):
+                    if legacy_scalar:
+                        choice.pop("weight_versions", None)
+                    else:
+                        choice.setdefault("weight_versions", None)
                 yield f"data: {json.dumps(chunk)}"
             yield "data: [DONE]"
 
@@ -551,7 +729,7 @@ def test_generate_streaming_records_weight_version(patch_generate_state, monkeyp
     assert result.rollout_log_probs == pytest.approx([-0.1, -0.2])
     assert result.rollout_top_p_token_ids.tolist() == [1, 50, 2, 3, 51]
     assert result.rollout_top_p_token_offsets.tolist() == [0, 2, 5]
-    assert result.weight_versions == ["step-7"]
+    assert result.weight_versions == (["3", "7"] if mixed_versions else ["step-7"])
     assert result.spec_info.spec_accept_token_num == 6
     assert result.spec_info.spec_draft_token_num == 8
     assert result.spec_info.spec_verify_ct == 2
@@ -617,6 +795,87 @@ def test_generate_streaming_preserves_metadata_across_stream_intervals(
 
 
 @pytest.mark.unit
+def test_generate_streaming_handles_encoded_terminal_metadata(patch_generate_state, monkeypatch):
+    from vime.rollout import vllm_streaming_rollout as streaming
+
+    args = _rollout_args(use_rollout_routing_replay=True, num_layers=1, moe_router_topk=1)
+    state = _PatchedGenerateState(args)
+    state.tokenizer.decode = lambda token_ids, skip_special_tokens: "".join(
+        {11: "λ", 12: "" if skip_special_tokens else "<|eot_id|>"}[token_id] for token_id in token_ids
+    )
+    monkeypatch.setattr(streaming, "GenerateState", lambda _args: state)
+    monkeypatch.setattr(streaming, "_prepare_prompt_ids", lambda *_args: [1, 2])
+    routed_experts = np.asarray([[[101]], [[102]], [[103]]], dtype=np.int32)
+    encoded = io.BytesIO()
+    np.save(encoded, routed_experts, allow_pickle=False)
+
+    async def lines():
+        for token_id in (11, 12):
+            chunk = _generate_response([token_id], sampling_mask=[[token_id + 1000]])
+            chunk["choices"][0]["logprobs"]["content"][0]["logprob"] = -(token_id - 10) / 10
+            chunk["choices"][0]["finish_reason"] = None
+            yield "data: " + json.dumps(chunk)
+        yield "data: " + json.dumps(
+            {
+                "choices": [
+                    {
+                        "token_ids": [],
+                        "finish_reason": "length",
+                        "routed_experts": base64.b64encode(encoded.getvalue()).decode("ascii"),
+                    }
+                ]
+            }
+        )
+
+    @asynccontextmanager
+    async def stream(*_args, **_kwargs):
+        yield SimpleNamespace(raise_for_status=lambda: None, aiter_lines=lines)
+
+    monkeypatch.setattr(streaming.http_utils, "_http_client", SimpleNamespace(stream=stream))
+    result = asyncio.run(
+        streaming.generate_streaming(
+            args, Sample(prompt="hello"), _default_sampling_params(max_new_tokens=2, skip_special_tokens=False)
+        )
+    )
+    assert result.status == Sample.Status.TRUNCATED
+    assert result.response == "λ<|eot_id|>"
+    assert result.tokens == [1, 2, 11, 12]
+    assert result.response_length == 2
+    assert result.rollout_log_probs == [-0.1, -0.2]
+    assert result.rollout_top_p_token_ids.tolist() == [1011, 1012]
+    assert result.rollout_top_p_token_offsets.tolist() == [0, 1, 2]
+    assert result.rollout_routed_experts.tolist() == routed_experts.tolist()
+
+
+@pytest.mark.unit
+def test_server_abort_keeps_last_observed_prefix(patch_generate_state, monkeypatch):
+    from vime.rollout import vllm_streaming_rollout as streaming
+
+    args = _rollout_args()
+    state = _PatchedGenerateState(args)
+    monkeypatch.setattr(streaming, "GenerateState", lambda _args: state)
+
+    async def lines():
+        state.aborted = True
+        chunk = _generate_response([120], weight_version="step-7")
+        chunk["choices"][0]["finish_reason"] = None
+        yield "data: " + json.dumps(chunk)
+        raise AssertionError("server-aborted stream should stop after the next observed chunk")
+
+    @asynccontextmanager
+    async def stream(*_args, **_kwargs):
+        yield SimpleNamespace(raise_for_status=lambda: None, aiter_lines=lines)
+
+    monkeypatch.setattr(streaming.http_utils, "_http_client", SimpleNamespace(stream=stream))
+    result = asyncio.run(streaming.generate_streaming(args, Sample(prompt="abc"), _default_sampling_params()))
+    assert result.status == Sample.Status.ABORTED
+    assert (result.tokens, result.rollout_log_probs, result.response) == ([97, 98, 99, 120], [-0.1], "x")
+    assert result.response_length == 1
+    assert result.weight_versions == ["step-7"]
+    assert not state.cancellable_tasks
+
+
+@pytest.mark.unit
 def test_generate_streaming_stops_at_partial_token_budget(patch_generate_state, monkeypatch):
     from vime.rollout import vllm_streaming_rollout as streaming
 
@@ -632,7 +891,8 @@ def test_generate_streaming_stops_at_partial_token_budget(patch_generate_state, 
 
 
 @pytest.mark.unit
-def test_generate_streaming_rejects_unexpected_eof(patch_generate_state, monkeypatch):
+@pytest.mark.parametrize("logprob_count", [0, 1, 2])
+def test_generate_streaming_rejects_unexpected_eof(patch_generate_state, monkeypatch, logprob_count):
     from vime.rollout import vllm_streaming_rollout as streaming
 
     class FakeStreamResponse:
@@ -646,7 +906,10 @@ def test_generate_streaming_rejects_unexpected_eof(patch_generate_state, monkeyp
             return None
 
         async def aiter_lines(self):
-            yield 'data: {"choices": [{"token_ids": [50], "logprobs": {"content": [{"logprob": -0.1}]}, "finish_reason": null}]}'
+            chunk = _generate_response([50])
+            chunk["choices"][0]["finish_reason"] = None
+            chunk["choices"][0]["logprobs"]["content"] = [{"logprob": -0.1}] * logprob_count
+            yield "data: " + json.dumps(chunk)
             yield "data: [DONE]"
 
     class FakeClient:
@@ -656,7 +919,12 @@ def test_generate_streaming_rejects_unexpected_eof(patch_generate_state, monkeyp
     monkeypatch.setattr(streaming, "GenerateState", _PatchedGenerateState)
     monkeypatch.setattr(streaming.http_utils, "_http_client", FakeClient())
 
-    with pytest.raises(RuntimeError, match="without a terminal finish_reason"):
+    error, message = (
+        (RuntimeError, "without a terminal finish_reason")
+        if logprob_count == 1
+        else (ValueError, "vLLM token/logprob count mismatch")
+    )
+    with pytest.raises(error, match=message):
         asyncio.run(
             streaming.generate_streaming(
                 _rollout_args(),
@@ -685,10 +953,17 @@ def test_generate_consistent_hash_header(patch_generate_state, monkeypatch):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("with_encoder", [False, True])
+@pytest.mark.parametrize(("with_encoder", "encoder_failure"), [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("modality", ["image_url", "audio_url", "video_url"])
-def test_generate_multimodal_render_then_generate(patch_generate_state, monkeypatch, with_encoder, modality):
-    render_resp = {"token_ids": [11, 12]}
+def test_generate_multimodal_render_then_generate(
+    patch_generate_state, monkeypatch, with_encoder, encoder_failure, modality
+):
+    features = {
+        "kwargs_data": {"media": ["encoded-original-media"]},
+        "mm_hashes": {"media": ["caller-media"]},
+        "mm_placeholders": {"media": [{"offset": 0, "length": 1}]},
+    }
+    render_resp = {"token_ids": [11, 12], "features": features}
     gen_resp = _generate_response([13])
     item = {"type": modality, modality: {"url": "https://example.com/media"}, "uuid": "caller-media"}
     ec_params = {"caller-media": {"peer_host": "encoder", "peer_port": 9000, "metadata": {}}}
@@ -699,13 +974,18 @@ def test_generate_multimodal_render_then_generate(patch_generate_state, monkeypa
     async def fake_post(url, payload, headers=None, **kwargs):
         if url.startswith("http://encoder"):
             assert payload["messages"][0]["content"] == [item]
+            if encoder_failure:
+                raise mod.httpx.ConnectError("encoder unavailable")
             return {"ec_transfer_params": ec_params}
         if url.endswith("/render"):
+            assert payload["messages"][0]["content"] == [item]
             return render_resp
-        if with_encoder:
+        if with_encoder and not encoder_failure:
             assert payload["ec_transfer_params"] == ec_params
         else:
             assert "ec_transfer_params" not in payload
+        assert payload["features"]["kwargs_data"] == features["kwargs_data"]
+        assert payload["features"]["mm_hashes"] == features["mm_hashes"]
         return gen_resp
 
     monkeypatch.setattr(mod, "post", fake_post)
@@ -1072,7 +1352,7 @@ def test_eval_rollout_passk_requests_do_not_share_session_ids(patch_generate_sta
 
 @pytest.mark.unit
 @pytest.mark.parametrize("rollout_external", [False, True])
-def test_abort_deletes_inflight_without_pause_resume(patch_generate_state, monkeypatch, rollout_external):
+def test_abort_resumes_only_after_pending_groups_finish(patch_generate_state, monkeypatch, rollout_external):
     state = _PatchedGenerateState(_rollout_args())
     state.active_server_generations = 1
     monkeypatch.setattr(mod, "GenerateState", lambda args: state)
@@ -1083,14 +1363,17 @@ def test_abort_deletes_inflight_without_pause_resume(patch_generate_state, monke
     async def fake_get(url):
         return {"workers": [{"url": "http://w0:9000"}]}
 
-    async def abort_servers(urls):
-        aborted_urls.extend(urls)
-        aborted.set()
+    async def abort_servers(urls, *, paused):
+        if paused:
+            aborted_urls.extend(urls)
+            aborted.set()
+        else:
+            assert not state.pendings
 
     monkeypatch.setattr(mod, "get", fake_get)
     prune_mock = AsyncMock(return_value=[{"url": "http://w0:9000"}])
     monkeypatch.setattr(mod, "get_live_router_workers", prune_mock)
-    monkeypatch.setattr(mod, "abort_servers_until_idle", abort_servers)
+    monkeypatch.setattr(mod, "set_servers_paused", abort_servers)
 
     sample = Sample(index=0, prompt="p")
 
@@ -1116,6 +1399,95 @@ def test_abort_deletes_inflight_without_pause_resume(patch_generate_state, monke
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("partial_rollout, failure_stage", [(False, "pause"), (True, "pause"), (True, "collect")])
+@pytest.mark.parametrize("resume_fails", [False, True])
+def test_abort_failure_resumes_and_preserves_primary_error(
+    patch_generate_state, monkeypatch, partial_rollout, failure_stage, resume_fails, caplog
+):
+    args = _rollout_args(partial_rollout=partial_rollout)
+    state = _PatchedGenerateState(args)
+    state.active_server_generations = 2
+    monkeypatch.setattr(mod, "GenerateState", lambda args: state)
+    urls = ["http://w0:9000", "http://w1:9000"]
+    monkeypatch.setattr(mod, "get_live_router_workers", AsyncMock(return_value=[{"url": url} for url in urls]))
+    primary_error = RuntimeError(f"{failure_stage} failed")
+    paused_urls = set()
+    calls = []
+
+    async def control(control_urls, *, paused):
+        calls.append((list(control_urls), paused))
+        if paused:
+            paused_urls.add(control_urls[0])
+            if failure_stage == "pause":
+                raise primary_error
+            paused_urls.update(control_urls)
+        else:
+            paused_urls.difference_update(control_urls)
+            if resume_fails:
+                raise RuntimeError("resume failed")
+
+    monkeypatch.setattr(mod, "set_servers_paused", control)
+
+    async def failing_group():
+        raise primary_error
+
+    async def exercise():
+        if failure_stage == "collect":
+            state.pendings.add(asyncio.create_task(failing_group()))
+        with pytest.raises(RuntimeError) as caught:
+            await mod.abort(args, rollout_id=7)
+        assert caught.value is primary_error
+
+    async def run():
+        await asyncio.wait_for(exercise(), timeout=5)
+
+    asyncio.run(run())
+    assert calls == [(urls, True), (urls, False)]
+    assert not paused_urls
+    if resume_fails:
+        assert "Failed to resume vLLM servers" in caplog.text
+
+
+@pytest.mark.unit
+def test_abort_resume_failure_is_not_swallowed(patch_generate_state, monkeypatch):
+    state = _PatchedGenerateState(_rollout_args())
+    state.active_server_generations = 1
+    monkeypatch.setattr(mod, "GenerateState", lambda args: state)
+    monkeypatch.setattr(mod, "get_live_router_workers", AsyncMock(return_value=[{"url": "http://w0:9000"}]))
+    control = AsyncMock(side_effect=[None, RuntimeError("resume failed")])
+    monkeypatch.setattr(mod, "set_servers_paused", control)
+    with pytest.raises(RuntimeError, match="resume failed"):
+        asyncio.run(mod.abort(_rollout_args(), rollout_id=0))
+    assert control.await_count == 2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("aborted", [False, True])
+def test_late_paused_request_is_aborted_only_during_rollout_abort(aborted):
+    state = SimpleNamespace(active_server_generations=0, aborted=aborted)
+    sample = Sample(prompt="p")
+
+    async def rejected():
+        response = httpx.Response(
+            503,
+            json={"error": {"message": "Generation is paused. Please retry after it resumes."}},
+            request=httpx.Request("POST", "http://engine/inference/v1/generate"),
+        )
+        response.raise_for_status()
+
+    async def exercise():
+        if aborted:
+            assert await mod._run_server_abort_generate(state, sample, rejected()) is sample
+            assert sample.status == Sample.Status.ABORTED
+        else:
+            with pytest.raises(httpx.HTTPStatusError):
+                await mod._run_server_abort_generate(state, sample, rejected())
+        assert state.active_server_generations == 0
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("rollout_external", [False, True])
 def test_abort_collects_partial_samples_when_partial_rollout(patch_generate_state, monkeypatch, rollout_external):
     args = _rollout_args(partial_rollout=True, rollout_external=rollout_external)
@@ -1128,13 +1500,16 @@ def test_abort_collects_partial_samples_when_partial_rollout(patch_generate_stat
     async def fake_get(url):
         return {"workers": [{"url": "http://w0:9000"}]}
 
-    async def abort_servers(urls):
-        aborted.set()
+    async def abort_servers(urls, *, paused):
+        if paused:
+            aborted.set()
+        else:
+            assert not state.pendings
 
     monkeypatch.setattr(mod, "get", fake_get)
     prune_mock = AsyncMock(return_value=[{"url": "http://w0:9000"}])
     monkeypatch.setattr(mod, "get_live_router_workers", prune_mock)
-    monkeypatch.setattr(mod, "abort_servers_until_idle", abort_servers)
+    monkeypatch.setattr(mod, "set_servers_paused", abort_servers)
 
     sample = Sample(index=0, prompt="p")
     sample.response = "partial"
@@ -1192,6 +1567,7 @@ def test_abort_cancels_request_without_server_abort(patch_generate_state, monkey
 def test_stream_cancellation_closes_http_and_preserves_prefix(patch_generate_state, monkeypatch, unrelated_cancel):
     from vime.rollout import vllm_streaming_rollout as streaming
 
+    assert streaming.generate_streaming.abort_mode == "request"
     args = _rollout_args()
     state = _PatchedGenerateState(args)
     monkeypatch.setattr(mod, "GenerateState", lambda args: state)
@@ -1214,7 +1590,7 @@ def test_stream_cancellation_closes_http_and_preserves_prefix(patch_generate_sta
             return None
 
         async def aiter_lines(self):
-            chunk = _generate_response([120], sampling_mask=[[12, 120]])
+            chunk = _generate_response([120], weight_version="step-7", sampling_mask=[[12, 120]])
             chunk["choices"][0]["finish_reason"] = None
             yield f"data: {json.dumps(chunk)}"
             prefix_seen.set()
@@ -1230,7 +1606,7 @@ def test_stream_cancellation_closes_http_and_preserves_prefix(patch_generate_sta
         sample.status = Sample.Status.ABORTED
         return sample
 
-    async def abort_servers(urls):
+    async def abort_servers(urls, *, paused):
         assert urls == ["http://worker:9000"]
         server_released.set()
 
@@ -1240,7 +1616,7 @@ def test_stream_cancellation_closes_http_and_preserves_prefix(patch_generate_sta
     monkeypatch.setattr(mod, "get", get_mock)
     prune_mock = AsyncMock(return_value=[{"url": "http://worker:9000"}])
     monkeypatch.setattr(mod, "get_live_router_workers", prune_mock)
-    monkeypatch.setattr(mod, "abort_servers_until_idle", abort_servers)
+    monkeypatch.setattr(mod, "set_servers_paused", abort_servers)
     sample = Sample(prompt="abc", generate_function_path="streaming")
 
     async def exercise():
@@ -1274,6 +1650,7 @@ def test_stream_cancellation_closes_http_and_preserves_prefix(patch_generate_sta
     assert sample.rollout_log_probs == [-0.1]
     assert sample.rollout_top_p_token_ids.tolist() == [12, 120]
     assert sample.rollout_top_p_token_offsets.tolist() == [0, 2]
+    assert sample.weight_versions == ["step-7"]
     assert not state.cancellable_tasks
     assert state.active_server_generations == 0
 
@@ -1297,6 +1674,7 @@ def test_partial_abort_resumes_only_aborted_siblings(patch_generate_state, monke
         response="x",
         response_length=1,
         rollout_log_probs=[-0.1],
+        weight_versions=["step-3"],
         loss_mask=[1],
         status=Sample.Status.ABORTED,
     )
@@ -1324,7 +1702,7 @@ def test_partial_abort_resumes_only_aborted_siblings(patch_generate_state, monke
             return None
 
         async def aiter_lines(self):
-            yield f"data: {json.dumps(_generate_response([121]))}"
+            yield f"data: {json.dumps(_generate_response([121], weight_version='step-7'))}"
             yield "data: [DONE]"
 
     class FakeClient:
@@ -1357,6 +1735,7 @@ def test_partial_abort_resumes_only_aborted_siblings(patch_generate_state, monke
     assert partial.response == "xy"
     assert partial.response_length == 2
     assert partial.rollout_log_probs == [-0.1, -0.1]
+    assert partial.weight_versions == ["step-3", "step-7"]
     assert partial.loss_mask == [0, 1]
     assert partial.status == terminal.status == Sample.Status.COMPLETED
     assert partial.reward == 2.0

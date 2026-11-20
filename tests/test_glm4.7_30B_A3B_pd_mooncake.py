@@ -37,11 +37,23 @@ def write_vllm_config() -> str:
                         "worker_type": "prefill",
                         "num_gpus": 4,
                         "num_gpus_per_engine": 4,
+                        "overrides": {
+                            "kv_transfer_config": {
+                                "kv_connector": "MooncakeConnector",
+                                "kv_role": "kv_producer",
+                            }
+                        },
                     },
                     {
                         "worker_type": "decode",
                         "num_gpus": 4,
                         "num_gpus_per_engine": 4,
+                        "overrides": {
+                            "kv_transfer_config": {
+                                "kv_connector": "MooncakeConnector",
+                                "kv_role": "kv_consumer",
+                            }
+                        },
                     },
                 ],
             }
@@ -69,7 +81,7 @@ def execute():
         "--n-samples-per-prompt 2 "
         "--rollout-max-response-len 512 "
         "--rollout-temperature 1.0 "
-        "--rollout-top-p 1.0 "
+        "--rollout-top-p 0.95 "
         "--global-batch-size 8 "
     )
     optimizer_args = (
@@ -112,10 +124,12 @@ def execute():
         "--vllm-data-parallel-size 4 "
         "--vllm-enable-expert-parallel "
         "--vllm-gpu-memory-utilization 0.45 "
-        "--vllm-max-num-seqs 16 "
-        "--vllm-max-cudagraph-capture-size 40 "
-        '--vllm-speculative-config \'{"method":"mtp","num_speculative_tokens":4}\' '
+        "--vllm-max-num-seqs 4 "
+        "--vllm-max-cudagraph-capture-size 32 "
+        '--vllm-speculative-config \'{"method":"mtp","num_speculative_tokens":3}\' '
         "--router-request-timeout-secs 1200 "
+        '--vllm-watchdog-config \'{"timeout":1200,"abort_on_timeout":true}\' '
+        "--router-kv-connector mooncake "
         f"--vllm-config {vllm_config} "
     )
     misc_args = (

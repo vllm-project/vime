@@ -75,6 +75,7 @@ pod spec).
 
 Set `VIME_CI_IMAGE` to an immutable candidate digest for image-backed jobs;
 otherwise they use `vllm/vime:latest`. Do not update `latest` before merge.
+For an explicitly scoped rerun, `VIME_CI_TESTS` selects space-separated exact test filenames within the selected suites, retaining every configuration of each file; unset runs the full selected suites.
 
 ## Keeping it in sync
 

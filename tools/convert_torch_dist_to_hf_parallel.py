@@ -16,7 +16,12 @@ from tqdm import tqdm
 from transformers import AutoConfig
 from typing_extensions import override
 
-from vime.backends.megatron_utils.megatron_to_hf import convert_to_hf, remove_padding
+from vime.backends.megatron_utils.megatron_to_hf import (
+    convert_to_hf,
+    group_checkpoint_keys,
+    prepare_checkpoint_params,
+    remove_padding,
+)
 
 
 class DummyClass:
@@ -274,7 +279,7 @@ def process_param(args, model_name, name, param, vocab_size=None):
 def save_tensors(args, model_name, state_dict, output_dir, chunk_size, vocab_size=None, max_workers=1, worker_id=None):
     print(f"start saving to {output_dir}")
     os.makedirs(output_dir, exist_ok=True)
-    param_list = list(get_named_params(args, state_dict))
+    param_list = list(prepare_checkpoint_params(model_name, get_named_params(args, state_dict)))
     print(f"Total parameters to process: {len(param_list)}")
 
     all_converted_tensors = []
@@ -451,7 +456,9 @@ if __name__ == "__main__":
         hf_config = AutoConfig.from_pretrained(args.origin_hf_dir, trust_remote_code=True)
         args.model_name = type(hf_config).__name__.lower()
 
-    megatron_args = torch.load(os.path.join(args.input_dir, "common.pt"), weights_only=False)["args"]
+    from megatron.core.dist_checkpointing import load_common_state_dict
+
+    megatron_args = load_common_state_dict(args.input_dir)["args"]
 
     load_max_workers = args.load_max_workers
     save_max_workers = args.save_max_workers
@@ -464,6 +471,9 @@ if __name__ == "__main__":
     # These will be converted to q_a_proj and kv_a_proj_with_mqa later
     paired_keys = set()
     key_groups = []  # Each element is either a single key or a pair of keys
+    for group in group_checkpoint_keys(args.model_name, all_keys):
+        key_groups.append(group)
+        paired_keys.update(group)
 
     for key in all_keys:
         if key in paired_keys:

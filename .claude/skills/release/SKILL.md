@@ -1,6 +1,6 @@
 ---
 name: release
-description: Prepare and verify a vime release, including version bumps, stable Docker patch snapshots, Docker/conda dependency alignment, and release-specific validation. Use when cutting or auditing a vime release.
+description: Prepare and verify a vime release, including version bumps, pinned Docker dependencies, patch coverage, and release-specific validation. Use when cutting or auditing a vime release.
 ---
 
 # Release vime
@@ -14,8 +14,8 @@ scope-expanding actions.
 - Inspect the worktree and preserve unrelated user changes.
 - Compare the previous release tag and release commit to identify the current
   repository conventions.
-- Confirm the requested vime version and the current stable vLLM version
-  from `docker/Dockerfile` and `docker/README.md`.
+- Confirm the requested vime version, the immutable `BASE_IMAGE` digest and
+  the `VLLM_COMMIT` pin in `docker/Dockerfile`.
 - Do not pull in an unmerged vLLM/Docker upgrade merely because a newer
   branch exists. Treat that as a separate decision.
 
@@ -28,33 +28,29 @@ scope-expanding actions.
 - Search the repository for the old vime version and review every remaining
   occurrence instead of replacing unrelated dependency versions.
 
-## Freeze the stable Docker patches
+## Audit the Docker patch stack
 
-- Treat `docker/patch/latest/` as the patch stack for the current Docker base.
-- Snapshot it exactly into `docker/patch/<stable-vllm-version>/`. At release
-  time, the two directories must contain the same patch filenames and bytes.
-- Preserve older vLLM patch directories. Remove an obsolete file from the
-  current stable snapshot only after confirming it is absent from `latest`.
-- Verify the stable patch stack applies in Dockerfile order to clean checkouts
-  of the pinned vLLM and Megatron commits. Do not validate against a dirty
-  developer checkout.
+- Read `PATCH_VERSION` from the Dockerfile; its selected directory is the
+  release patch stack. Vime does not require a separate Conda/stable snapshot.
+- Check each Docker stage's copied and applied patches, including the Rust
+  frontend, router and conditional ARM SDK stage. All selected patches must
+  have an installation path; copying a patch does not prove it is applied.
+- Verify patches apply in Dockerfile order to clean checkouts of the pinned
+  upstream commits. Do not validate against a dirty developer checkout.
 
-## Audit Docker and conda together
+## Audit Docker dependencies
 
-Compare `build_conda.sh` with `docker/Dockerfile`, `docker/justfile`, and the
-stable patch snapshot. Check at least:
+Use `docker/Dockerfile` and `docker/justfile` as the build sources. Check at least:
 
-- vLLM version, commit, CUDA variant, `sglang-kernel`, and `sgl-deep-gemm`;
+- vLLM base digest, commit and CUDA variant;
 - Megatron, torch-memory-saver, FlashQLA, and other shared source pins;
-- `PATCH_VERSION`, patch filenames, application order, optional patches, and
-  failure-on-conflict behavior;
+- consistent source pins across Docker stages, `PATCH_VERSION`, patch filenames,
+  application order, optional patches and failure-on-conflict behavior;
 - PyTorch, torchvision, torchaudio, CUDA Python, Transformer Engine, router,
   NumPy, and SciPy pins;
 - whether dependency resolution can undo a compatibility pin later in the
   script; reassert and validate such pins after the resolving install;
-- intentional differences such as conda being CUDA-12-only, omitting FA3, or
-  not rebuilding feature-specific DeepGEMM/DeepEP forks. Keep a difference
-  only when the release CI scope makes it intentional.
+- architecture-specific dependency builds and conditional patches.
 
 Prefer direct loops over duplicated patch-application blocks while preserving
 required-versus-optional semantics and useful failure messages.
@@ -66,12 +62,11 @@ Run the checks that are available locally:
 - `python .claude/skills/release/scripts/check_release.py --repo .
   --expected-version <version>`;
 - `python setup.py --version`;
-- `bash -n build_conda.sh`;
-- byte-for-byte comparison of `docker/patch/latest/` and the stable snapshot;
 - patch parsing plus clean-checkout application against the pinned upstream
   commits;
 - `git diff --check` and a final review of the complete release diff.
 
-Run the release conda CI and relevant Docker builds when the environment and
-requested scope permit. The conda workflow is selected by a PR title containing
-`[release]`. Explicitly report any full build or GPU validation that was not run.
+The metadata checker is a static preflight, not proof of clean patch application,
+successful Docker builds or GPU correctness. Run relevant CPU/GPU CI and native
+AMD64/ARM64 Docker verification for the requested release scope. Explicitly report
+any build or GPU validation that was not run. Vime has no Conda release workflow.

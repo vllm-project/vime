@@ -20,7 +20,7 @@ def create_weight_updater(
     update_weight_transport = args.update_weight_transport
 
     if update_weight_mode == "delta":
-        # Delta sync is disk-transport only: each engine's /pull_weights applies the published
+        # Delta sync is disk-transport only: each engine's pull_weights worker RPC applies the published
         # deltas into a host-local checkpoint on every host it spans, and the engines reload
         # via vanilla update_weights_from_disk.
         assert not args.colocate, "--update-weight-mode=delta is not supported with --colocate"

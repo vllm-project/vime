@@ -3,13 +3,18 @@ from __future__ import annotations
 import importlib
 import sys
 import types
+from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 NUM_GPUS = 0
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def install_megatron_stubs() -> None:
@@ -24,16 +29,22 @@ def install_megatron_stubs() -> None:
     inference_mod = types.ModuleType("megatron.core.inference")
     inference_contexts_mod = types.ModuleType("megatron.core.inference.contexts")
     packed_seq_mod = types.ModuleType("megatron.core.packed_seq_params")
+    parallel_state_mod = types.ModuleType("megatron.core.parallel_state")
+    tensor_parallel_layers_mod = types.ModuleType("megatron.core.tensor_parallel.layers")
     transformer_mod = types.ModuleType("megatron.core.transformer")
     transformer_module_mod = types.ModuleType("megatron.core.transformer.module")
     spec_utils_mod = types.ModuleType("megatron.core.transformer.spec_utils")
     transformer_block_mod = types.ModuleType("megatron.core.transformer.transformer_block")
     transformer_layer_mod = types.ModuleType("megatron.core.transformer.transformer_layer")
+    utils_mod = types.ModuleType("megatron.core.utils")
 
+    @dataclass
     class PackedSeqParams:
-        def __init__(self, **kwargs):
-            for key, value in kwargs.items():
-                setattr(self, key, value)
+        cu_seqlens_q: torch.Tensor | None = None
+        cu_seqlens_kv: torch.Tensor | None = None
+        max_seqlen_q: int | None = None
+        max_seqlen_kv: int | None = None
+        qkv_format: str | None = None
 
     class MegatronModule(nn.Module):
         def __init__(self, config=None):
@@ -44,6 +55,14 @@ def install_megatron_stubs() -> None:
         def __init__(self, module=None, params=None):
             self.module = module
             self.params = params or {}
+
+    class FakeParallelLinear(nn.Module):
+        def __init__(self, in_features, out_features, config=None, init_method=None, bias=True, **kwargs):
+            super().__init__()
+            self.weight = nn.Parameter(torch.zeros(out_features, in_features))
+
+        def forward(self, x):
+            return F.linear(x, self.weight), None
 
     mpu_stub = types.SimpleNamespace(
         get_context_parallel_world_size=lambda: 1,
@@ -59,10 +78,15 @@ def install_megatron_stubs() -> None:
     gpt_layer_specs_mod.get_gpt_decoder_block_spec = lambda *args, **kwargs: None
     inference_contexts_mod.BaseInferenceContext = type("BaseInferenceContext", (), {})
     packed_seq_mod.PackedSeqParams = PackedSeqParams
+    parallel_state_mod.get_tensor_model_parallel_world_size = lambda: 1
+    tensor_parallel_layers_mod.ColumnParallelLinear = FakeParallelLinear
+    tensor_parallel_layers_mod.RowParallelLinear = FakeParallelLinear
     transformer_module_mod.MegatronModule = MegatronModule
     spec_utils_mod.ModuleSpec = ModuleSpec
     transformer_block_mod.get_num_layers_to_build = lambda *args, **kwargs: 0
     transformer_layer_mod.get_transformer_layer_offset = lambda *args, **kwargs: 0
+    utils_mod.divide = lambda x, y: x // y
+    utils_mod.init_method_normal = lambda std: (lambda tensor: tensor)
 
     core_mod.mpu = mpu_stub
     core_mod.tensor_parallel = tensor_parallel_stub
@@ -75,16 +99,20 @@ def install_megatron_stubs() -> None:
     sys.modules["megatron.core.inference"] = inference_mod
     sys.modules["megatron.core.inference.contexts"] = inference_contexts_mod
     sys.modules["megatron.core.packed_seq_params"] = packed_seq_mod
+    sys.modules["megatron.core.parallel_state"] = parallel_state_mod
+    sys.modules["megatron.core.tensor_parallel.layers"] = tensor_parallel_layers_mod
     sys.modules["megatron.core.transformer"] = transformer_mod
     sys.modules["megatron.core.transformer.module"] = transformer_module_mod
     sys.modules["megatron.core.transformer.spec_utils"] = spec_utils_mod
     sys.modules["megatron.core.transformer.transformer_block"] = transformer_block_mod
     sys.modules["megatron.core.transformer.transformer_layer"] = transformer_layer_mod
+    sys.modules["megatron.core.utils"] = utils_mod
 
 
 class FakeShortConvolution(nn.Module):
     def __init__(self, *args, **kwargs):
         super().__init__()
+        self.weight = nn.Parameter(torch.zeros(1))
 
     def forward(self, x, cu_seqlens=None, **kwargs):
         return x, None
@@ -93,9 +121,17 @@ class FakeShortConvolution(nn.Module):
 class FakeFusedRMSNormGated(nn.Module):
     def __init__(self, *args, **kwargs):
         super().__init__()
+        self.weight = nn.Parameter(torch.ones(args[0]))
 
     def forward(self, x, z):
         return x
+
+
+def make_fla_npu_stub() -> types.ModuleType:
+    fla_npu_mod = types.ModuleType("vime_plugins.models.gdn.fla_npu")
+    fla_npu_mod.QwenStyleRMSNormGated = FakeFusedRMSNormGated
+    fla_npu_mod.ShortConvolution = FakeShortConvolution
+    return fla_npu_mod
 
 
 def make_config() -> SimpleNamespace:
@@ -119,6 +155,35 @@ def load_module(module_name: str):
     return importlib.import_module(module_name)
 
 
+@pytest.mark.parametrize("backend", ["fla", "fla_npu"])
+@pytest.mark.parametrize("tp_size,sequence_parallel", [(1, False), (2, True), (2, False)])
+def test_fused_tp_shared_norm_uses_megatron_sum(monkeypatch, backend, tp_size, sequence_parallel):
+    module = load_module("vime_plugins.models.gdn.qwen3_5_tp")
+    monkeypatch.setattr(module.parallel_state, "get_tensor_model_parallel_world_size", lambda: tp_size)
+    monkeypatch.setattr(module.accelerator, "current_device", lambda: "cpu")
+    monkeypatch.setattr(module, "ShortConvolution", FakeShortConvolution)
+    monkeypatch.setattr(module, "FusedRMSNormGated", FakeFusedRMSNormGated)
+    monkeypatch.setattr(module, "get_chunk_gated_delta_rule", lambda backend: None)
+    monkeypatch.setitem(sys.modules, "vime_plugins.models.gdn.fla_npu", make_fla_npu_stub())
+    kwargs = dict(
+        config=make_config(),
+        layer_idx=0,
+        args=SimpleNamespace(qwen_gdn_backend=backend),
+        megatron_config=SimpleNamespace(sequence_parallel=sequence_parallel),
+    )
+    if tp_size > 1 and not sequence_parallel:
+        with pytest.raises(ValueError, match="requires --sequence-parallel"):
+            module.Qwen3_5GatedDeltaNetTP(**kwargs)
+        return
+    layer = module.Qwen3_5GatedDeltaNetTP(**kwargs)
+    assert layer.norm.weight.sequence_parallel == sequence_parallel
+    assert not getattr(layer.norm.weight, "average_gradients_across_tp_domain", False)
+    assert layer.norm.weight.shape == (make_config().linear_value_head_dim,)
+    # The wrapper gathers the input sequence before these projections.
+    assert layer.in_proj.sequence_parallel is False
+    assert layer.out_proj.sequence_parallel is False
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("module_name", "class_name", "args", "expected_backend"),
@@ -129,6 +194,13 @@ def load_module(module_name: str):
             "Qwen3_5GatedDeltaNet",
             SimpleNamespace(qwen_gdn_backend="flashqla"),
             "flashqla",
+        ),
+        ("vime_plugins.models.gdn.qwen3_5_tp", "Qwen3_5GatedDeltaNetTP", None, "fla"),
+        (
+            "vime_plugins.models.gdn.qwen3_5_tp",
+            "Qwen3_5GatedDeltaNetTP",
+            SimpleNamespace(qwen_gdn_backend="fla_npu"),
+            "fla_npu",
         ),
         ("vime_plugins.models.qwen3_next", "Qwen3NextGatedDeltaNet", None, "fla"),
         (
@@ -151,6 +223,7 @@ def test_linear_attention_forwards_cu_seqlens_to_chunk_kernel(
     monkeypatch.setattr(module.accelerator, "current_device", lambda: "cpu")
     monkeypatch.setattr(module, "ShortConvolution", FakeShortConvolution, raising=False)
     monkeypatch.setattr(module, "FusedRMSNormGated", FakeFusedRMSNormGated, raising=False)
+    monkeypatch.setitem(sys.modules, "vime_plugins.models.gdn.fla_npu", make_fla_npu_stub())
 
     chunk_calls = []
     selected_backends = []
@@ -162,9 +235,9 @@ def test_linear_attention_forwards_cu_seqlens_to_chunk_kernel(
         *,
         g,
         beta,
-        initial_state,
-        output_final_state,
         use_qk_l2norm_in_kernel,
+        initial_state=None,
+        output_final_state=False,
         cu_seqlens=None,
         **kwargs,
     ):
@@ -190,6 +263,232 @@ def test_linear_attention_forwards_cu_seqlens_to_chunk_kernel(
     assert output.shape == hidden_states.shape
     assert len(chunk_calls) == 1
     assert torch.equal(chunk_calls[0], cu_seqlens)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "module_name, class_name",
+    [
+        ("vime_plugins.models.qwen3_5", "Qwen3_5GatedDeltaNet"),
+        ("vime_plugins.models.qwen3_next", "Qwen3NextGatedDeltaNet"),
+    ],
+)
+def test_replicated_gdn_rejects_npu_kernel_layout(module_name, class_name):
+    module = load_module(module_name)
+    with pytest.raises(ValueError, match="fla_npu"):
+        getattr(module, class_name)(make_config(), layer_idx=0, args=SimpleNamespace(qwen_gdn_backend="fla_npu"))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("cp_size", [1, 2, 4])
+@pytest.mark.parametrize("cached_offsets", [False, True])
+@pytest.mark.parametrize("sequence_parallel", [False, True])
+def test_cp_wrapper_preserves_packed_outputs_and_gradients(monkeypatch, cp_size, cached_offsets, sequence_parallel):
+    module = load_module("vime_plugins.models.hf_attention")
+    lengths = [8, 16]
+    offsets = (0, 8, 24)
+
+    class Attention(module.HuggingfaceAttention):
+        def __init__(self):
+            nn.Module.__init__(self)
+            self.args = SimpleNamespace(sequence_parallel=sequence_parallel)
+            self.weight = nn.Parameter(torch.tensor([0.7, -0.4, 0.2], dtype=torch.float64))
+
+        def hf_forward(self, hidden_states, packed_seq_params):
+            # A causal operation with independent sequence boundaries exercises
+            # ordering as well as gradient contributions from later CP chunks.
+            return torch.cat(
+                [(seq * self.weight).tanh().cumsum(1) for seq in hidden_states.split(lengths, dim=1)], dim=1
+            )
+
+    def local_indices(rank):
+        indices = []
+        for start, end in zip(offsets[:-1], offsets[1:], strict=True):
+            chunks = torch.arange(start, end).chunk(2 * cp_size)
+            indices.extend([chunks[rank], chunks[-rank - 1]])
+        return torch.cat(indices)
+
+    torch.manual_seed(17)
+    full = torch.randn(24, 1, 3, dtype=torch.float64, requires_grad=True)
+    baseline = full.detach().clone().requires_grad_()
+    attention = Attention()
+    weight = attention.weight.detach().clone().requires_grad_()
+    expected = torch.cat([(seq * weight).tanh().cumsum(0) for seq in baseline.split(lengths)], dim=0)
+    gathered = tuple(full[local_indices(rank)] for rank in range(cp_size))
+    monkeypatch.setattr(module.mpu, "get_context_parallel_world_size", lambda: cp_size)
+    monkeypatch.setattr(module.dist_nn, "all_gather", lambda value, group: gathered)
+
+    def sp_gather(value, *, tensor_parallel_output_grad, group):
+        assert tensor_parallel_output_grad is False
+        return value
+
+    monkeypatch.setattr(module.tensor_parallel, "gather_from_sequence_parallel_region", sp_gather)
+    monkeypatch.setattr(module.tensor_parallel, "scatter_to_sequence_parallel_region", lambda value, group: value)
+    # A meta tensor cannot supply host scalars: the cached path must never read
+    # or convert the GPU-style offset tensor while rearranging hidden states.
+    packed = SimpleNamespace(
+        cu_seqlens_q=torch.tensor(offsets, device="meta" if cached_offsets else "cpu"),
+        cu_seqlens_q_cpu=offsets if cached_offsets else None,
+    )
+    losses = []
+    for rank in range(cp_size):
+        monkeypatch.setattr(module.mpu, "get_context_parallel_rank", lambda r=rank: r)
+        output, bias = attention(gathered[rank], None, packed_seq_params=packed)
+        torch.testing.assert_close(output, expected[local_indices(rank)])
+        assert bias is None
+        losses.append(output.square().sum())
+    sum(losses).backward()
+    expected.square().sum().backward()
+    torch.testing.assert_close(full.grad, baseline.grad)
+    torch.testing.assert_close(attention.weight.grad, weight.grad)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("cp_size", [1, 2, 4])
+@pytest.mark.parametrize("allgather_cp", [False, True])
+@pytest.mark.parametrize("lengths", [(5, 8), (8, 24)])
+def test_batch_keeps_host_offsets_aligned_with_padded_device_offsets(monkeypatch, cp_size, allgather_cp, lengths):
+    install_megatron_stubs()
+    from vime.backends.megatron_utils import data
+
+    monkeypatch.setattr(data.mpu, "get_context_parallel_world_size", lambda: cp_size)
+    monkeypatch.setattr(data.mpu, "get_context_parallel_rank", lambda: 0)
+    monkeypatch.setattr(data.mpu, "get_tensor_model_parallel_world_size", lambda: 2, raising=False)
+    monkeypatch.setattr(data.accelerator, "device", lambda: "cpu")
+    tokens = [torch.arange(length) for length in lengths]
+    batch = {
+        "tokens": tokens,
+        "loss_masks": [torch.ones(length - 2) for length in lengths],
+        "total_lengths": list(lengths),
+        "response_lengths": [length - 2 for length in lengths],
+    }
+    result = data.get_batch(SimpleNamespace(get_next=lambda keys: batch.copy()), list(batch), 4, allgather_cp)
+    packed = result["packed_seq_params"]
+    assert packed.cu_seqlens_q_cpu == tuple(packed.cu_seqlens_q.tolist())
+    assert packed.cu_seqlens_q_cpu[-1] == result["tokens"].numel() * cp_size
+    assert packed.max_seqlen_q == max(torch.diff(packed.cu_seqlens_q).tolist())
+    assert packed.max_seqlen_kv == packed.max_seqlen_q
+    assert result["full_loss_masks"].shape == result["tokens"].shape
+    if allgather_cp:
+        assert packed.cu_seqlens_q_cpu[:3] == (0, lengths[0], sum(lengths))
+    else:
+        multiple = 2 * cp_size if cp_size > 1 else 1
+        padded_lengths = [(length + multiple - 1) // multiple * multiple for length in lengths]
+        assert packed.cu_seqlens_q_cpu[:3] == (0, padded_lengths[0], sum(padded_lengths))
+
+
+def _get_multimodal_batch(monkeypatch, inputs):
+    install_megatron_stubs()
+    from vime.backends.megatron_utils import data
+
+    monkeypatch.setattr(data.mpu, "get_context_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(data.mpu, "get_context_parallel_rank", lambda: 0)
+    monkeypatch.setattr(data.mpu, "get_tensor_model_parallel_world_size", lambda: 1, raising=False)
+    monkeypatch.setattr(data.accelerator, "device", lambda: "cpu")
+    batch = {
+        "tokens": [torch.arange(4) for _ in inputs],
+        "loss_masks": [torch.ones(2) for _ in inputs],
+        "total_lengths": [4] * len(inputs),
+        "response_lengths": [2] * len(inputs),
+        "multimodal_train_inputs": inputs,
+    }
+    return data.get_batch(SimpleNamespace(get_next=lambda keys: batch), list(batch), 1)["multimodal_train_inputs"]
+
+
+@pytest.mark.parametrize("layout", ["tensor", "list", "tuple", "mixed", "ragged", "single"])
+def test_multimodal_batch_preserves_sample_and_image_order(monkeypatch, layout):
+    images = [torch.full((1, 3, 2 + (layout == "ragged" and i == 1), 4), float(i)) for i in range(3)]
+    if layout == "tensor":
+        values = [torch.cat(images[:2]), images[2]]
+    elif layout == "tuple":
+        values = [tuple(images[:2]), (images[2],)]
+    elif layout == "mixed":
+        values = [images[:2], images[2]]
+    elif layout == "single":
+        values = [images]
+    else:
+        values = [images[:2], [images[2]]]
+    inputs = [None, *[{"pixel_values": value} for value in values], None]
+    result = _get_multimodal_batch(monkeypatch, inputs)["pixel_values"]
+    if layout == "ragged":
+        assert len(result) == 3
+        for actual, expected in zip(result, images, strict=True):
+            torch.testing.assert_close(actual, expected)
+    else:
+        torch.testing.assert_close(result, torch.cat(images))
+
+
+def test_multimodal_audio_lists_keep_padding_and_numeric_metadata(monkeypatch):
+    features = [torch.full((1, 2, length), float(i + 1)) for i, length in enumerate([3, 5, 4])]
+    masks = [torch.ones(1, feature.shape[-1]) for feature in features]
+    result = _get_multimodal_batch(
+        monkeypatch,
+        [
+            {"input_features": features[:2], "feature_attention_mask": masks[:2], "lengths": [3, 5]},
+            {"input_features": features[2], "feature_attention_mask": masks[2], "lengths": 4},
+        ],
+    )
+    for key, values in [("input_features", features), ("feature_attention_mask", masks)]:
+        expected = torch.cat([torch.nn.functional.pad(value, (0, 5 - value.shape[-1])) for value in values])
+        torch.testing.assert_close(result[key], expected)
+    assert result["lengths"].tolist() == [3, 5, 4]
+    assert [value.shape[-1] for value in features] == [3, 5, 4]
+
+
+def _cp_wrapper_collective_worker(rank, world_size, rendezvous):
+    import torch.distributed as dist
+
+    torch.set_num_threads(1)
+    module = load_module("vime_plugins.models.hf_attention")
+    dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=world_size)
+    try:
+        module.mpu.get_context_parallel_world_size = lambda: world_size
+        module.mpu.get_context_parallel_rank = lambda: rank
+        module.mpu.get_context_parallel_group = lambda: dist.group.WORLD
+
+        class Attention(module.HuggingfaceAttention):
+            def __init__(self):
+                nn.Module.__init__(self)
+                self.args = SimpleNamespace(sequence_parallel=False)
+                self.weight = nn.Parameter(torch.tensor(0.7, dtype=torch.float64))
+
+            def hf_forward(self, hidden_states, packed_seq_params):
+                return torch.cat(
+                    [(seq * self.weight).tanh().cumsum(1) for seq in hidden_states.split([8, 16], dim=1)], dim=1
+                )
+
+        indices = torch.cat(
+            [
+                torch.arange(start, end).reshape(2 * world_size, -1)[[rank, 2 * world_size - rank - 1]].flatten()
+                for start, end in [(0, 8), (8, 24)]
+            ]
+        )
+        full = torch.linspace(-1.0, 1.0, 24 * 3, dtype=torch.float64).reshape(24, 1, 3).requires_grad_()
+        weight = torch.tensor(0.7, dtype=torch.float64, requires_grad=True)
+        expected = torch.cat([(seq * weight).tanh().cumsum(0) for seq in full.split([8, 16])])
+        local = full.detach()[indices].clone().requires_grad_()
+        attention = Attention()
+        packed = SimpleNamespace(cu_seqlens_q=torch.tensor([0, 8, 24]), cu_seqlens_q_cpu=(0, 8, 24))
+        output, _ = attention(local, None, packed_seq_params=packed)
+        torch.testing.assert_close(output, expected[indices])
+        output.square().sum().backward()
+        expected.square().sum().backward()
+        dist.all_reduce(attention.weight.grad)
+        torch.testing.assert_close(local.grad, full.grad[indices])
+        torch.testing.assert_close(attention.weight.grad, weight.grad)
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("cp_size", [2, 4])
+def test_cp_wrapper_gradients_with_real_collectives(tmp_path, cp_size):
+    torch.multiprocessing.spawn(
+        _cp_wrapper_collective_worker,
+        args=(cp_size, (tmp_path / "rendezvous").as_uri()),
+        nprocs=cp_size,
+        join=True,
+    )
 
 
 if __name__ == "__main__":

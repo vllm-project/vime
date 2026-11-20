@@ -1,7 +1,10 @@
 """Score Centering, arXiv:2609.20807, equations (9), (12), and (14)."""
 
+import json
 import math
+from typing import Any
 
+import msgspec
 import numpy as np
 import torch
 
@@ -130,6 +133,70 @@ def extract_sampler_topk(meta_info, count, k):
     for start in range(0, count, 1024):
         _validate_head_arrays(ids[start : start + 1024], logps[start : start + 1024].astype(np.float64))
     return ids, logps
+
+
+def _score_centering_metadata(choice, token_ids, *, top_p, top_k):
+    content = (choice.get("logprobs") or {}).get("content") or []
+    if len(content) != len(token_ids):
+        raise ValueError("Score centering requires top logprobs for every generated token.")
+
+    if top_p == 1.0:
+        shape = (len(content), top_k) if content else (0,)
+        head_token_ids = np.empty(shape, dtype=np.int32)
+        head_logprobs = np.empty(shape, dtype=np.float32)
+        for position, item in enumerate(content):
+            row = {entry["token_id"]: float(entry["logprob"]) for entry in item.get("top_logprobs") or []}
+            head = sorted(row.items(), key=lambda item: item[1], reverse=True)[:top_k]
+            if len(head) != top_k:
+                raise ValueError(f"Score centering requires {top_k} sampler top logprobs per token.")
+            head_token_ids[position] = [token_id for token_id, _ in head]
+            head_logprobs[position] = [logprob for _, logprob in head]
+        return {"score_centering_topk": (head_token_ids, head_logprobs)}, None
+
+    support = choice.get("sampling_mask")
+    if not isinstance(support, list) or len(support) != len(token_ids):
+        raise ValueError("Top-p score centering requires a sampling mask for every generated token.")
+    support_logprobs = choice.get("sampling_mask_logprobs")
+    if not isinstance(support_logprobs, list) or len(support_logprobs) != len(support):
+        raise ValueError("Top-p score centering requires logprobs aligned with the sampling mask.")
+    ids = np.asarray([token_id for row in support for token_id in row], dtype=np.int32)
+    offsets = np.cumsum([0, *(len(row) for row in support)], dtype=np.int32)
+    normalized_logprobs = []
+    sampled_logprobs = []
+    for sampled_token, support_ids, logprobs in zip(token_ids, support, support_logprobs, strict=True):
+        if len(support_ids) != len(logprobs):
+            raise ValueError("Top-p score centering requires logprobs aligned with the sampling mask.")
+        try:
+            sampled_logprobs.append(float(logprobs[support_ids.index(sampled_token)]))
+        except ValueError as error:
+            raise ValueError("Sampled token is missing from the top-p sampling mask.") from error
+        normalized_logprobs.extend(logprobs)
+    return {
+        "score_centering_top_p": (ids, offsets, np.asarray(normalized_logprobs, dtype=np.float32))
+    }, sampled_logprobs
+
+
+def _decode_score_centering_response_stdlib(content, k):
+    """Compact score data in the HTTP worker before Ray serialization; k=0 selects top-p."""
+    output = json.loads(content)
+    choice = output["choices"][0]
+    meta = output.setdefault("meta_info", {})
+    for key in ("score_centering_topk", "score_centering_top_p"):
+        meta.pop(key, None)
+    if not choice["token_ids"] and not (choice.get("logprobs") or {}).get("content"):
+        return output
+    metadata, sampled_logprobs = _score_centering_metadata(
+        choice, choice["token_ids"], top_p=1.0 if k else 0.0, top_k=k
+    )
+    meta.update(metadata)
+    for position, row in enumerate(choice["logprobs"]["content"]):
+        row.pop("top_logprobs", None)
+        if sampled_logprobs is not None:
+            row["logprob"] = sampled_logprobs[position]
+    if k == 0:
+        choice.pop("sampling_mask", None)
+        choice.pop("sampling_mask_logprobs", None)
+    return output
 
 
 def extract_sampler_top_p(meta_info, count):
@@ -262,3 +329,50 @@ def validate_sampler_topk(sample, k):
         _validate_head_arrays(
             np.asarray(ids[start : start + 1024]), np.asarray(logps[start : start + 1024], dtype=np.float64)
         )
+
+
+class _ScoreTopLogprob(msgspec.Struct):
+    token_id: Any
+    logprob: Any
+
+
+def decode_score_centering_response(content, k):
+    """Decode only top-k entries eagerly; leave every other JSON value untouched."""
+    if not k or not isinstance(content, (str, bytes, bytearray)):
+        return _decode_score_centering_response_stdlib(content, k)
+    try:
+        output = msgspec.json.decode(content, type=dict[str, msgspec.Raw])
+        choices = msgspec.json.decode(output["choices"], type=list[dict[str, msgspec.Raw]])
+        choice = choices[0]
+        token_ids = json.loads(bytes(choice["token_ids"]))
+        logprobs = msgspec.json.decode(choice.get("logprobs", b"null"), type=dict[str, msgspec.Raw] | None)
+        rows = (
+            msgspec.json.decode((logprobs or {}).get("content", b"null"), type=list[dict[str, msgspec.Raw]] | None)
+            or []
+        )
+        if not token_ids and not rows:
+            return _decode_score_centering_response_stdlib(content, k)
+        if len(rows) != len(token_ids):
+            raise ValueError("Score centering requires top logprobs for every generated token.")
+        shape = (len(rows), k) if rows else (0,)
+        head_ids = np.empty(shape, dtype=np.int32)
+        head_logprobs = np.empty(shape, dtype=np.float32)
+        for position, row in enumerate(rows):
+            entries = msgspec.json.decode(row.pop("top_logprobs", b"null"), type=list[_ScoreTopLogprob] | None) or []
+            values = {entry.token_id: float(entry.logprob) for entry in entries}
+            head = sorted(values.items(), key=lambda item: item[1], reverse=True)[:k]
+            if len(head) != k:
+                raise ValueError(f"Score centering requires {k} sampler top logprobs per token.")
+            head_ids[position] = [token_id for token_id, _ in head]
+            head_logprobs[position] = [logprob for _, logprob in head]
+        logprobs["content"] = rows
+        choice["logprobs"] = logprobs
+        output["choices"] = choices
+        output = json.loads(msgspec.json.encode(output))
+        meta = output.setdefault("meta_info", {})
+        for key in ("score_centering_topk", "score_centering_top_p"):
+            meta.pop(key, None)
+        meta["score_centering_topk"] = (head_ids, head_logprobs)
+        return output
+    except (msgspec.DecodeError, KeyError, IndexError, TypeError, ValueError, OverflowError):
+        return _decode_score_centering_response_stdlib(content, k)

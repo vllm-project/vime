@@ -236,8 +236,8 @@ def execute(
                                             "num_gpus_per_engine": rollout_gpus // 2,
                                             "overrides": {
                                                 "kv_transfer_config": {
-                                                    "kv_connector": "NixlConnector",
-                                                    "kv_role": "kv_both",
+                                                    "kv_connector": "MooncakeConnector",
+                                                    "kv_role": "kv_producer" if side == "prefill" else "kv_consumer",
                                                 }
                                             },
                                         }

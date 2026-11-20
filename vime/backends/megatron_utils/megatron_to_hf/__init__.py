@@ -1,16 +1,35 @@
 from .deepseekv3 import convert_deepseekv3_to_hf
 from .glm4 import convert_glm4_to_hf
 from .glm4moe import convert_glm4moe_to_hf
+from .glm5_next import convert_glm5_next_to_hf
 from .llama import convert_llama_to_hf
 from .mimo import convert_mimo_to_hf
 from .minimax_m2 import convert_minimax_m2_to_hf
+from .nemotron_h import convert_nemotron_h_to_hf
+from .nemotron_h_vl import convert_nemotron_h_vl_to_hf
 from .processors import quantize_params, remove_padding
 from .qwen2 import convert_qwen2_to_hf
-from .qwen3_5 import convert_qwen3_5_to_hf
+from .qwen3_5 import convert_qwen3_5_to_hf, group_qwen3_5_checkpoint_keys, merge_gdn_checkpoint_parts
 from .qwen3_next import convert_qwen3_next_to_hf
 from .qwen3_omni import convert_qwen3_omni_to_hf
 from .qwen3_vl import convert_qwen3vl_to_hf
 from .qwen3moe import convert_qwen3moe_to_hf
+
+
+def group_checkpoint_keys(model_name, keys):
+    """Return multi-key dependencies; all other keys use the tool's existing grouping."""
+    model_name = model_name.lower().replace("_", "").replace("-", "")
+    if "qwen35" in model_name:
+        return list(group_qwen3_5_checkpoint_keys(keys))
+    return []
+
+
+def prepare_checkpoint_params(model_name, named_params):
+    """Prepare offline checkpoint tensors for the existing per-parameter HF converters."""
+    model_name = model_name.lower().replace("_", "").replace("-", "")
+    if "qwen35" in model_name:
+        return merge_gdn_checkpoint_parts(named_params)
+    return named_params
 
 
 # TODO optimize code details
@@ -33,7 +52,20 @@ def convert_to_hf(args, model_name, name, param, quantization_config=None, trans
 # TODO optimize code details
 def _convert_to_hf_core(args, model_name, name, param):
     model_name = model_name.lower().replace("_", "").replace("-", "")
-    if "minimaxm2" in model_name:
+    if "nemotron" in model_name:
+        # VL members must be recognized before the plain one: `nemotron_h_omni`
+        # squashes to a name that still contains "nemotron", so it would
+        # otherwise reach the text-only converter and die on the first
+        # `vision_model.*` parameter. The model_type (`nemotron_h_omni`) and the
+        # config class name (`NemotronH_Omni_Reasoning_V3_Config`) both carry
+        # the marker.
+        if any(marker in model_name for marker in ("omni", "vl")):
+            converted_named_tensors = convert_nemotron_h_vl_to_hf(args, name, param)
+        else:
+            converted_named_tensors = convert_nemotron_h_to_hf(args, name, param)
+    elif "glm5next" in model_name or "glm53" in model_name:
+        converted_named_tensors = convert_glm5_next_to_hf(args, name, param)
+    elif "minimaxm2" in model_name:
         converted_named_tensors = convert_minimax_m2_to_hf(args, name, param)
     elif any(family in model_name for family in ("glm4moelite", "deepseekv3", "deepseekv32", "glmmoedsa", "kimi")):
         converted_named_tensors = convert_deepseekv3_to_hf(args, name, param)

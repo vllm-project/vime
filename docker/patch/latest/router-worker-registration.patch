@@ -1,0 +1,46 @@
+diff --git a/src/server.rs b/src/server.rs
+index 928dae7..9262272 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -532,6 +532,28 @@ async fn create_worker(
+         return response;
+     }
+ 
++    if state.router_manager.is_none() {
++        let registry = &state.context.worker_registry;
++        let dp_size = state.context.router_config.intra_node_data_parallel_size;
++        let registered = registry.get_by_url(&config.url).is_some()
++            || (dp_size > 1
++                && (0..dp_size).all(|rank| {
++                    registry
++                        .get_by_url(&format!("{}@{}", config.url, rank))
++                        .is_some()
++                }));
++        if registered {
++            return (
++                StatusCode::CONFLICT,
++                Json(WorkerErrorResponse {
++                    error: format!("Worker already exists at URL '{}'", config.url),
++                    code: "WORKER_ALREADY_EXISTS".to_string(),
++                }),
++            )
++                .into_response();
++        }
++    }
++
+     // Check if we have a RouterManager (enable_igw=true)
+     if let Some(router_manager) = &state.router_manager {
+         // Call RouterManager's add_worker method directly with the full config
+diff --git a/src/routers/http/router.rs b/src/routers/http/router.rs
+index 900895c..6345e0f 100644
+--- a/src/routers/http/router.rs
++++ b/src/routers/http/router.rs
+@@ -1173,7 +1173,7 @@ impl Router {
+             // Find and remove all workers with matching prefix
+             let all_workers = self.worker_registry.get_all();
+             for w in all_workers.iter() {
+-                if w.url().starts_with(&worker_url_prefix) {
++                if w.url() == worker_url || w.url().starts_with(&worker_url_prefix) {
+                     // Get model_id before removing
+                     let model_id = w.model_id().to_string();
+ 

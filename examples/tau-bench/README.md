@@ -14,7 +14,7 @@ pip install -e . --no-deps
 pip install litellm
 ```
 
-Use the following script to generate task index jsonl for training:
+Use the following script to generate mock data for vime training.
 
 ```bash
 cd /root/vime/examples/tau-bench
@@ -38,7 +38,7 @@ PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
 
 ## Running the Script
 
-You need to configure your litellm API in generate_with_tau.py for user simulation:
+You need to configure your litellm API in `generate_with_tau.py` for user simulation:
 
 ```python
 TAU_CONFIGS = {

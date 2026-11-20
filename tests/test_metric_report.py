@@ -16,6 +16,11 @@ end-to-end variants (real torch.distributed) live in
 
 from __future__ import annotations
 
+import ast
+import sys
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
+
 # Import the helpers BEFORE the vime imports so the megatron stub lands
 # in sys.modules first. pytest's prepend importmode puts this file's
 # directory (``tests/``) on sys.path, which is what makes the bare-name
@@ -34,6 +39,106 @@ from vime.observability.train_metric_utils import (  # noqa: E402
 )
 
 NUM_GPUS = 0
+
+
+@pytest.mark.parametrize("tracker_format", ["loss_sums", "loss_values", "values"])
+@pytest.mark.parametrize("per_token", [False, True])
+@pytest.mark.parametrize("microbatches", [1, 4])
+def test_mtp_reporting_reduces_once_and_preserves_normalization(monkeypatch, tracker_format, per_token, microbatches):
+    path = Path(__file__).resolve().parents[1] / "vime/backends/megatron_utils/model.py"
+    block = next(
+        node
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.If)
+        and ast.unparse(node.test) == "args.enable_mtp_training"
+        and any(
+            isinstance(child, ast.ImportFrom) and child.module.endswith("multi_token_prediction")
+            for child in node.body
+        )
+    )
+    tracker = {tracker_format: torch.tensor([6.0, 10.0]), "reduce_group": object(), "avg_group": object()}
+    reductions, cleaned, collectives = [], [], []
+
+    def reduce_tracker():
+        reductions.append(True)
+        # The native helper has already reduced and, in per-token mode, normalized these values.
+        tracker["values"] = torch.tensor([6.0, 10.0])
+
+    def clean():
+        cleaned.append(True)
+        for value in tracker.values():
+            if isinstance(value, torch.Tensor):
+                value.zero_()
+
+    helper = SimpleNamespace(tracker=tracker)
+    if tracker_format == "loss_sums":
+        helper.reduce_loss_in_tracker = reduce_tracker
+        helper.clean_metrics_in_tracker = clean
+    else:
+        helper.clean_loss_in_tracker = clean
+    module = ModuleType("megatron.core.transformer.multi_token_prediction")
+    module.MTPLossLoggingHelper = helper
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda values, **kwargs: collectives.append(kwargs))
+    namespace = {
+        "args": SimpleNamespace(enable_mtp_training=True, calculate_per_token_loss=per_token, ci_test=False),
+        "torch": torch,
+        "num_microbatches": [microbatches],
+        "step_id": 0,
+    }
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[block], type_ignores=[])), str(path), "exec"), namespace)
+    divisor = 1 if tracker_format == "loss_sums" and per_token else microbatches
+    torch.testing.assert_close(namespace["mtp_losses"], torch.tensor([6.0, 10.0]) / divisor)
+    assert reductions == ([True] if tracker_format == "loss_sums" else [])
+    assert len(collectives) == (0 if tracker_format == "loss_sums" else 2)
+    assert cleaned == [True]
+    assert all(value.count_nonzero() == 0 for value in tracker.values() if isinstance(value, torch.Tensor))
+
+
+def test_truncation_fraction_is_reported_once_for_all_rollout_sources(monkeypatch):
+    from types import SimpleNamespace
+
+    from megatron.core import mpu
+
+    from vime.observability import train_metric_utils
+    from vime.observability.rollout_metrics import compute_metrics_from_samples
+    from vime.utils.types import Sample
+
+    monkeypatch.setattr(mpu, "get_tensor_model_parallel_rank", lambda: 0, raising=False)
+    monkeypatch.setattr(mpu, "is_pipeline_last_stage", lambda: True, raising=False)
+    monkeypatch.setattr(mpu, "get_context_parallel_world_size", lambda: 1, raising=False)
+    monkeypatch.setattr(mpu, "get_data_parallel_world_size", lambda **kwargs: 1, raising=False)
+    captured = {}
+    monkeypatch.setattr(
+        train_metric_utils, "gather_log_data", lambda name, args, step, metrics: captured.update(metrics)
+    )
+    args = SimpleNamespace(
+        ci_test=False,
+        log_multi_turn=False,
+        log_passrate=False,
+        log_correct_samples=False,
+        advantage_estimator="ppo",
+        log_reward_category=None,
+    )
+    samples = [
+        Sample(index=0, response_length=1, response="ok", status=Sample.Status.COMPLETED),
+        Sample(index=1, response_length=1, response="partial", status=Sample.Status.TRUNCATED),
+    ]
+    rollout_metrics = compute_metrics_from_samples(args, samples)
+    assert "truncated_ratio" not in rollout_metrics
+    assert "truncated" not in rollout_metrics
+    data = {
+        "response_lengths": [1, 1],
+        "total_lengths": [2, 2],
+        "loss_masks": [[1], [1]],
+        "global_batch_sizes": [2],
+        "truncated": [0, 1],
+    }
+    train_metric_utils.log_rollout_data(0, args, data)
+    assert captured["truncated"] == (1, 2)
+    assert "truncated_ratio" not in captured
+    assert captured["response_lengths"] == (2, 2)
+    assert data["truncated"] == [0, 1]  # Training still receives the internal flags.
 
 
 @pytest.fixture

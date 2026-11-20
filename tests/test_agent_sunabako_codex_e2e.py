@@ -326,7 +326,7 @@ def execute(run_dir, checkpoint):
         --num-rollout 2 --rollout-batch-size 2 --n-samples-per-prompt 4 --num-steps-per-rollout 1
         --global-batch-size 8 --micro-batch-size 1 --rollout-max-context-len 65536 --rollout-max-response-len 4096
         --rollout-temperature 1.0 --rollout-top-p 0.95 --rollout-stop-token-ids 248046 248044
-        --tensor-model-parallel-size 2 --pipeline-model-parallel-size 4 --context-parallel-size 1 --sequence-parallel
+        --tensor-model-parallel-size 4 --pipeline-model-parallel-size 2 --context-parallel-size 1 --sequence-parallel
         --recompute-granularity full --recompute-method uniform --recompute-num-layers 1
         --use-dynamic-batch-size --max-tokens-per-gpu 16384 --log-probs-chunk-size 1024
         --data-pad-size-multiplier 1024

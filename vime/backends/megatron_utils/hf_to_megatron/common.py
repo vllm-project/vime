@@ -31,7 +31,7 @@ class SafetensorReader:
         return name in self.weight_map
 
     @functools.lru_cache(maxsize=1)  # noqa: B019 - cache belongs to this reader instance
-    def get_tensor(self, name: str) -> torch.Tensor:
+    def get_tensor(self, name: str, *, dequantize: bool = True) -> torch.Tensor:
         try:
             filename = self.weight_map[name]
         except KeyError as exc:
@@ -40,7 +40,7 @@ class SafetensorReader:
             self._files[filename] = safe_open(self.path / filename, framework="pt", device="cpu")
         tensor = self._files[filename].get_tensor(name)
         scale_name = f"{name}_scale_inv"
-        if tensor.element_size() == 1 and scale_name in self:
+        if dequantize and tensor.element_size() == 1 and scale_name in self:
             scale_file = self.weight_map[scale_name]
             if scale_file not in self._files:
                 self._files[scale_file] = safe_open(self.path / scale_file, framework="pt", device="cpu")
@@ -91,9 +91,21 @@ def _tensor_parallel_shard(
     parallel_rank: int,
     partition_dim: int,
     partition_stride: int,
+    partition_sections: tuple[int, ...] | None = None,
 ) -> torch.Tensor:
     if parallel_size == 1:
         return tensor
+
+    if partition_sections is not None:
+        if partition_stride != 1 or any(size % parallel_size for size in partition_sections):
+            raise ValueError("Projection sections must be divisible by TP and use partition_stride=1")
+        return torch.cat(
+            [
+                section.chunk(parallel_size, dim=partition_dim)[parallel_rank]
+                for section in tensor.split(partition_sections, dim=partition_dim)
+            ],
+            dim=partition_dim,
+        ).contiguous()
 
     if "linear_fc1.weight" in name or "linear_fc1.bias" in name:
         gate, up = tensor.chunk(2, dim=partition_dim)
@@ -131,6 +143,7 @@ def shard_mcore_tensor(name: str, tensor: torch.Tensor, parameter: torch.Tensor)
         parallel_rank=parallel_rank,
         partition_dim=parameter.partition_dim,
         partition_stride=parameter.partition_stride,
+        partition_sections=getattr(parameter, "partition_sections", None),
     )
 
 
@@ -155,6 +168,11 @@ def load_model_hf_weights(
     reader = SafetensorReader(path)
     with torch.no_grad():
         for name, parameter in named_params_and_buffers(args, model):
+            # Router._load_from_state_dict normally restores this buffer to
+            # FP32 before copying. Direct HF loading bypasses that hook; a
+            # model-wide BF16 cast must not quantize the routing correction.
+            if name.endswith(".router.expert_bias"):
+                parameter.data = parameter.data.float()
             tensor = get_hf_tensor(name, reader, config)
             if name.endswith("output_layer.weight") and parameter.shape[0] == 1 and tensor.shape[0] != 1:
                 continue

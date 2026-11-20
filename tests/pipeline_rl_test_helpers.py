@@ -73,16 +73,26 @@ class GenerationProbe:
                     for choice in data["choices"]:
                         with self.condition:
                             tokens = len(choice.get("token_ids") or [])
-                            if tokens:
-                                assert data.get("weight_version") is not None
                             self.events.append(
                                 {
                                     "tokens": (self.events[-1]["tokens"] if self.events else 0) + tokens,
-                                    "version": data.get("weight_version"),
+                                    "version": None,
                                     "finish_reason": choice.get("finish_reason"),
                                     "time": time.time(),
                                 }
                             )
+                            if choice.get("finish_reason") is not None:
+                                spans = choice["weight_versions"]
+                                end = 0
+                                for span in spans:
+                                    assert span["version"] is not None
+                                    assert span["start"] == end < span["end"]
+                                    end = span["end"]
+                                    for event in self.events:
+                                        if span["start"] < event["tokens"] <= end:
+                                            event["version"] = span["version"]
+                                assert end == self.events[-1]["tokens"]
+                                assert all(event["version"] is not None for event in self.events if event["tokens"])
                             self.condition.notify_all()
         except Exception as error:
             self.error = error
@@ -100,16 +110,12 @@ class GenerationProbe:
 
     def verify(self):
         first = self.events[0]
-        self.wait(
-            lambda events: any(e["version"] != first["version"] and e["tokens"] > first["tokens"] + 16 for e in events)
-        )
+        tokens_before = self.events[-1]["tokens"]
+        self.wait(lambda events: events[-1]["tokens"] > tokens_before + 16)
         # Every event up to this point belongs to the same uninterrupted HTTP
         # request. An abort/restart or a disk reload's implicit flush must fail.
         assert all(e["finish_reason"] is None for e in self.events), self.events[-3:]
-        latest = self.events[-1].copy()
-        response = requests.get(f"{self.url}/weight_info", timeout=10)
-        response.raise_for_status()
-        assert str(response.json()["weight_version"]) == latest["version"]
+        latest = self.events[-1]
         # End only our synthetic probe after it has proved continuity.
         response = requests.post(
             f"{self.url}/abort_requests", json={"request_ids": [self.engine_request_id]}, timeout=10
@@ -117,7 +123,13 @@ class GenerationProbe:
         response.raise_for_status()
         self.thread.join(timeout=30)
         assert not self.thread.is_alive()
-        return {"url": self.url, "rid": self.rid, "before": first, "after": latest}
+        self.wait(lambda events: events[-1]["finish_reason"] == "abort")
+        assert latest["version"] != first["version"]
+        assert latest["tokens"] > first["tokens"] + 16
+        response = requests.get(f"{self.url}/weight_info", timeout=10)
+        response.raise_for_status()
+        assert str(response.json()["weight_version"]) == latest["version"]
+        return {"url": self.url, "rid": self.rid, "before": first, "after": latest.copy()}
 
     def verify_flush(self):
         self.wait(lambda events: bool(events) and events[-1]["finish_reason"] is not None)

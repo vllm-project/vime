@@ -51,7 +51,7 @@ For long-context, multi-turn, or agentic workloads, KV cache capacity is often t
 
 This is a rollout-side setting. It does not change Megatron training precision; it increases effective vLLM KV cache capacity and can allow longer contexts or higher concurrency, subject to the accuracy/performance behavior of your vLLM version and GPU stack.
 
-For hybrid models such as Qwen3.8-27B and GLM-5.3-Flash, this flag applies only to attention-layer KV. Linear-attention recurrent state uses `--vllm-mamba-ssm-cache-dtype`, while vLLM manages attention KV and recurrent state through a shared paged-cache budget rather than independently sized pools. FP8 KV does not imply FP8 recurrent or convolution state. The builder leaves these overrides unset by default, and offers FP32/BF16 recurrent state for Qwen3.8-27B. See [hybrid cache settings, architecture sources and memory derivation](rl-systems.md#hybrid-cache).
+For hybrid models such as Qwen3.8-27B and GLM-5.3-Flash, this flag applies only to attention-layer KV. Linear-attention recurrent state uses `--vllm-mamba-ssm-cache-dtype`. FP8 KV does not imply FP8 recurrent or convolution state. The builder leaves dtype overrides unset by default, and offers FP32/BF16 recurrent state for Qwen3.8-27B. See [hybrid cache settings, architecture sources and memory derivation](rl-systems.md#hybrid-cache).
 
 ## FP8 Training with FP8 Rollout
 
@@ -128,10 +128,9 @@ RUNTIME_ENV_JSON="{
 
 3. Launch an example:
 
-```bash
-# Moonlight-16B-A3B INT4 training
-bash scripts/low_precision/run-moonlight-16B-A3B-int4.sh
+The Qwen3 launchers use Instruct-2507 checkpoints (256K context) with a 128K response limit and CP. Quantize and convert that same checkpoint; older Qwen3 weights use different RoPE settings.
 
+```bash
 # Qwen3-30B-A3B INT4 training
 bash scripts/low_precision/run-qwen3-30B-A3B-int4.sh
 

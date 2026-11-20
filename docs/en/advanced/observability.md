@@ -1,6 +1,6 @@
 # Observability
 
-vime's default observability path is intentionally small: training metrics still go to W&B / TensorBoard; high-frequency vLLM Prometheus metrics are no longer uploaded to W&B; request timings from vLLM response `meta_info` are stored in sample traces and aggregated once per rollout step as compact `perf/...` metrics.
+vime's default observability path is intentionally small: training metrics still go to W&B / TensorBoard; high-frequency vLLM Prometheus metrics are no longer uploaded to W&B; request timings from vLLM response `metrics` are stored in sample traces and aggregated once per rollout step as compact `perf/...` metrics.
 
 ## W&B / TensorBoard Metrics
 
@@ -12,25 +12,23 @@ perf/request/queue_time/median
 perf/request/count
 perf/request/profiled_count
 perf/decode/throughput/mean
-perf/prefill/bootstrap_queue_duration/mean
-perf/prefill/bootstrap_duration/mean
-perf/prefill/alloc_wait_duration/mean
-perf/prefill/forward_duration/max
+perf/prefill/queue_duration/mean
+perf/prefill/ttft_duration/max
 perf/prefill/transfer_speed_gb_s/mean
-perf/decode/prealloc_duration/mean
-perf/decode/bootstrap_duration/mean
-perf/decode/alloc_wait_duration/mean
-perf/decode/transfer_duration/max
-perf/decode/forward_duration/mean
+perf/decode/remote_kv_wait_duration/mean
+perf/decode/allocation_wait_duration/mean
+perf/decode/transfer_worker_duration/max
+perf/decode/handshake_wait_worker_duration/mean
+perf/decode/transfer_post_worker_duration/mean
 ```
 
 These metrics are aggregated once per rollout step, not emitted once per request, so they should not slow W&B like uploading raw Prometheus metrics would.
 
-Without PD, common `perf/request/...` metrics and available `perf/decode/throughput/...` metrics still exist. Detailed `perf/prefill/...` and `perf/decode/...duration` metrics only appear when vLLM returns the corresponding `pd_*` timing fields.
+Without PD, common `perf/request/...` metrics and available `perf/decode/throughput/...` metrics still exist. Detailed `perf/prefill/...` and `perf/decode/...duration` metrics only appear when vLLM returns the corresponding timing fields, which vime translates into `pd_*` trace attributes.
 
 ## Where Prometheus Data Is Stored
 
-vime does not store per-second Prometheus data. vLLM / router only expose `/metrics` and `/engine_metrics` HTTP endpoints. Prometheus scrapes those endpoints periodically and stores the time series in Prometheus's own TSDB.
+vime does not store per-second Prometheus data. vLLM exposes `/metrics` on each engine's HTTP port; the router exposes its own metrics on a separate Prometheus port. Prometheus scrapes those endpoints periodically and stores the time series in Prometheus's own TSDB.
 
 That means:
 
@@ -41,18 +39,16 @@ That means:
 Useful vLLM metrics include:
 
 ```text
-vllm:num_queue_reqs
-vllm:num_running_reqs
-vllm:num_prefill_bootstrap_queue_reqs
-vllm:num_prefill_inflight_queue_reqs
-vllm:num_decode_prealloc_queue_reqs
-vllm:num_decode_transfer_queue_reqs
-vllm:kv_transfer_speed_gb_s_bucket
-vllm:kv_transfer_latency_ms_bucket
-vllm:kv_transfer_total_mb_bucket
+vllm:num_requests_waiting
+vllm:num_requests_running
+vllm:num_requests_waiting_by_reason
+vllm:nixl_xfer_time_seconds_bucket
+vllm:nixl_bytes_transferred_bucket
+vllm:mooncake_xfer_time_seconds_bucket
+vllm:mooncake_bytes_transferred_bucket
 ```
 
-These are useful in Prometheus / Grafana for live queue buildup, transfer speed, latency histograms, failure counters, and other serving-side symptoms.
+Connector metrics depend on the selected backend: `nixl_*` for NIXL, `mooncake_*` for Mooncake. These are useful in Prometheus / Grafana for live queue buildup, transfer volume, latency histograms, and other serving-side symptoms.
 
 ## Starting Prometheus
 
@@ -66,13 +62,18 @@ global:
 
 scrape_configs:
   - job_name: vime-vllm
-    metrics_path: /engine_metrics
+    metrics_path: /metrics
     static_configs:
       - targets:
-          - "ROUTER_IP:ROUTER_PORT"
+          - "ENGINE_IP:ENGINE_PORT"
+  - job_name: vime-router
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - "ROUTER_IP:ROUTER_PROMETHEUS_PORT"
 ```
 
-Replace `ROUTER_IP:ROUTER_PORT` with the router address printed by vime, or with the explicit `--vllm-router-ip` / `--vllm-router-port` values.
+List each engine's HTTP address under `vime-vllm`. For `vime-router`, use the router address and the separate `Prometheus port` printed by vime, not `--vllm-router-port`.
 
 Start Prometheus with its TSDB path on persistent storage:
 
@@ -84,7 +85,7 @@ prometheus \
   --web.listen-address=0.0.0.0:9090
 ```
 
-The vime image includes the `prometheus` binary, so this command can run directly inside the container. You can also start a side container from the same image as long as it can reach the router address and mounts `/path/to/prometheus-data` on persistent storage.
+The vime image includes the `prometheus` binary, so this command can run directly inside the container. You can also start a side container from the same image as long as it can reach the configured engine and router scrape targets and mounts `/path/to/prometheus-data` on persistent storage.
 
 If `--storage.tsdb.path` points to container-local disk, the data is lost when the container is removed. If it points to NFS, a persistent volume, or a job output directory, you can restart Prometheus with the same TSDB directory after training and query the historical time range in the Prometheus UI or Grafana. This is time-series replay, not full per-request trace replay; per-sample request timings still come from sample traces / debug rollout data.
 

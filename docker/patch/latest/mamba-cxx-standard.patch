@@ -1,0 +1,13 @@
+--- a/setup.py
++++ b/setup.py
+@@ -224,9 +224,8 @@
+     else:
+         extra_compile_args = {
+-            "cxx": ["-O3", "-std=c++17"],
++            "cxx": ["-O3"],
+             "nvcc": append_nvcc_threads(
+                 [
+                     "-O3",
+-                    "-std=c++17",
+                     "-U__CUDA_NO_HALF_OPERATORS__",
+                     "-U__CUDA_NO_HALF_CONVERSIONS__",

@@ -122,6 +122,8 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
         writer = _SafetensorShardWriter(path, enabled=self._is_pp_src_rank)
         chunk_index = dist.get_rank()
         for chunk in self._source.iterator.get_hf_weight_chunks(self._source.weights_getter()):
+            if not self._is_pp_src_rank:
+                continue
             tensors = [(name, tensor.detach().to(device="cpu", copy=True).contiguous()) for name, tensor in chunk]
             for name, tensor in tensors:
                 self._snapshot[name] = tensor.view(torch.uint8).numpy().reshape(-1)

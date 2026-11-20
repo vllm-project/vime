@@ -146,5 +146,54 @@ def test_restart_publishes_restored_weights_above_every_attempt(tmp_path, delta_
     assert (source / "weight_v000008/config.json").read_text() == (base / "config.json").read_text()
 
 
+def test_full_snapshot_nonpublisher_consumes_chunks_without_cpu_copies(tmp_path, delta_module, monkeypatch):
+    args = SimpleNamespace(
+        update_weight_disk_dir=str(tmp_path),
+        update_weight_delta_encoding="xor",
+        update_weight_delta_checksum="adler32",
+        custom_update_weight_post_write_path=None,
+    )
+    monkeypatch.setattr(delta_module.dist, "get_rank", lambda: 1)
+    monkeypatch.setattr(delta_module.dist, "get_world_size", lambda: 2)
+    events = []
+    monkeypatch.setattr(delta_module.dist, "barrier", lambda **kwargs: events.append("barrier"))
+    finalized = []
+
+    def finalize(path, state):
+        events.append("finalize")
+        finalized.append((path, state))
+
+    monkeypatch.setattr(delta_module, "_finalize_distributed_shards", finalize)
+
+    def reject_snapshot():
+        pytest.fail("Nonpublishing rank must not detach or copy tensors for a CPU snapshot")
+
+    weights = {"first": SimpleNamespace(detach=reject_snapshot), "second": SimpleNamespace(detach=reject_snapshot)}
+
+    def chunks(local_weights):
+        assert local_weights is weights
+        for name, tensor in local_weights.items():
+            events.append(name)
+            yield [(name, tensor)]
+        events.append("exhausted")
+
+    updater = delta_module.UpdateWeightFromDiskDelta(
+        args, [], lambda: weights, model_name="test", quantization_config=None
+    )
+    updater.connect_rollout_engines(["engine"], None)
+    updater._source = SimpleNamespace(
+        iterator=SimpleNamespace(get_hf_weight_chunks=chunks), weights_getter=lambda: weights
+    )
+    updater._version_dir = str(tmp_path)
+    updater._snapshot["stale"] = np.zeros(1, dtype=np.uint8)
+
+    updater._publish_full()
+
+    assert events == ["first", "second", "exhausted", "barrier", "finalize"]
+    assert updater._snapshot == {}
+    assert finalized == [(tmp_path, {"total_size": 0, "weight_map": {}, "shard_files": []})]
+    assert updater.total_bytes == updater.changed_bytes == updater.wire_bytes == 0
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

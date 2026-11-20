@@ -92,6 +92,7 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
                 draft_loop.prepare_snapshot()
             draft_snapshot = draft_loop.pending_snapshot
 
+        was_paused = ray.get(rollout_manager.pause_rollout_admission.remote())
         actor_save_due = should_run_periodic_action(
             rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout
         )
@@ -103,7 +104,6 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
                 critic_model,
                 rollout_manager,
                 actor_trains=actor_trains,
-                restore_plan=restore_plan,
             )
 
         if draft_loop is not None and draft_loop.should_save(rollout_id, actor_save_due):
@@ -114,7 +114,6 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
             ray.get(rollout_manager.onload_weights.remote())
         if draft_snapshot is not None:
             actor_model.set_external_draft_weights(*draft_snapshot)
-        was_paused = ray.get(rollout_manager.pause_rollout_admission.remote())
         actor_model.update_weights()
         if draft_snapshot is not None:
             draft_loop.commit_publish(rollout_id)

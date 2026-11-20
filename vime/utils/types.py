@@ -163,7 +163,7 @@ class Sample:
     # metadata used during training, e.g., what loss to use for this sample.
     train_metadata: dict | None = None
 
-    # Session ID for consistent hashing routing (used when router policy is consistent_hash).
+    # Session ID for consistent hashing routing (used when router policy is consistent_hash)
     session_id: str | None = None
 
     non_generation_time: float = 0.0  # time spent in non-generation steps
@@ -184,8 +184,14 @@ class Sample:
             return self.completion_token_num / self.spec_verify_ct if self.spec_verify_ct > 0 else 0.0
 
         def add(self, meta_info: dict):
-            self.spec_accept_token_num += meta_info.get("spec_accept_token_num", 0)
-            self.spec_draft_token_num += meta_info.get("spec_draft_token_num", 0)
+            # SGLang renamed these counters; retain the older response format
+            # while preferring the strict draft counts (excluding bonus tokens).
+            self.spec_accept_token_num += meta_info.get(
+                "spec_num_correct_drafts", meta_info.get("spec_accept_token_num", 0)
+            )
+            self.spec_draft_token_num += meta_info.get(
+                "spec_num_proposed_drafts", meta_info.get("spec_draft_token_num", 0)
+            )
             self.spec_verify_ct += meta_info.get("spec_verify_ct", 0)
             self.completion_token_num += meta_info.get("completion_tokens", 0)
 
@@ -484,8 +490,11 @@ class Sample:
         # Collect prefix cache statistics
         self.prefix_cache_info.add(meta_info=meta_info)
 
-        if new_token_count > 0 and "weight_version" in meta_info:
-            self.weight_versions.append(meta_info["weight_version"])
+        if new_token_count > 0:
+            if "weight_versions" in meta_info:
+                self.weight_versions.extend(meta_info["weight_versions"])
+            elif "weight_version" in meta_info:
+                self.weight_versions.append(meta_info["weight_version"])
 
         match meta_info["finish_reason"]["type"]:
             case "length":

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import torch
 
+from vime.rollout.base_types import iter_samples
 from vime.utils.data import Dataset
 from vime.utils.misc import load_function
 from vime.utils.processing_utils import load_processor, load_tokenizer
@@ -170,7 +171,7 @@ class RolloutDataSource(DataSource):
     def save(self, rollout_id):
         path = Path(self.args.save) / "rollout" / f"global_dataset_state_dict_{rollout_id}.pt"
         path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(self.state_dict(), path)
+        torch.save(self.state_dict(), path, pickle_protocol=5)
 
     def load(self, rollout_id=None):
         if self.args.load is None:
@@ -248,7 +249,7 @@ def pop_oldest(args, rollout_id, buffer: list[list[Sample]], num_samples: int) -
     """Resume groups with the oldest generated tokens first; preserve ties."""
 
     def oldest_version(group):
-        versions = (str(v) for sample in group for v in (sample.weight_versions or []))
+        versions = (str(v) for sample in iter_samples(group) for v in (sample.weight_versions or []))
         return min(
             (int(v) for v in versions if v.isascii() and v.removeprefix("-").isdigit()),
             default=float("inf"),
