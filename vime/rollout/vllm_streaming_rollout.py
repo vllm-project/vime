@@ -47,6 +47,8 @@ from vime.rollout.vllm_rollout import (
     _inference_generate_tokens_and_logprobs,
     _mm_render_response_to_generate_body,
     _prepare_prompt_ids,
+    _prepare_trace_replay,
+    _validate_trace_replay_output,
     prime_encoder,
 )
 from vime.utils import http_utils
@@ -64,8 +66,6 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
     Writes the cumulative state from each SSE chunk onto ``sample`` so an
     abort that cuts the stream still leaves a coherent partial sample behind.
     """
-    if "trace_replay" in (sample.metadata or {}):
-        raise ValueError("Trace replay requires the default non-streaming rollout")
     if getattr(args, "use_score_centering", False):
         raise ValueError("Score centering does not support streaming rollout.")
 
@@ -81,20 +81,26 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
         Sample.Status.ABORTED,
     ), f"Sample status is {sample.status}"
 
-    prompt_ids = _prepare_prompt_ids(sample, state.tokenizer, state.processor)
+    trace_ids = None
+    params = dict(sampling_params)
+    if "trace_replay" in (sample.metadata or {}):
+        prompt_ids, trace_ids = _prepare_trace_replay(args, sample, params["max_new_tokens"])
+        params["max_new_tokens"] = len(trace_ids)
+    else:
+        prompt_ids = _prepare_prompt_ids(sample, state.tokenizer, state.processor)
+        params["max_new_tokens"] -= sample.response_length
 
     messages = build_multimodal_messages(sample.prompt, sample.multimodal_inputs)
-
-    params = dict(sampling_params)
-    params["max_new_tokens"] -= sample.response_length
 
     assert params["max_new_tokens"] >= 0, f"max_new_tokens: {params['max_new_tokens']} should not be less than 0"
     if params["max_new_tokens"] == 0:
         sample.status = Sample.Status.TRUNCATED
         return sample
     inference_sampling_params = _build_inference_sampling_params(params)
+    if trace_ids is not None:
+        inference_sampling_params["trace_decode_token_ids"] = trace_ids
 
-    if not sample.tokens:
+    if trace_ids is None and not sample.tokens:
         sample.tokens = prompt_ids
 
     if len(sample.response) > 0:
@@ -169,9 +175,13 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
                     continue
                 try:
                     chunk = json.loads(data_str)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as error:
+                    if trace_ids is not None:
+                        raise ValueError("Trace replay received invalid SSE data") from error
                     logger.warning("vllm_streaming: skipping non-JSON chunk: %r", data_str[:120])
                     continue
+                if trace_ids is not None and chunk.get("error"):
+                    raise ValueError(f"Trace replay stream failed: {chunk['error']}")
 
                 chunk_metrics = _inference_generate_metrics(chunk)
                 if chunk_metrics:
@@ -187,6 +197,8 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
                     if chunk.get("usage"):
                         last_usage = chunk["usage"]
                     continue
+                if trace_ids is not None and len(choices) != 1:
+                    raise ValueError("Trace replay requires exactly one output choice")
                 choice = choices[0]
                 last_choice = choice
                 chunk_meta = _inference_generate_meta_info(chunk)
@@ -200,8 +212,17 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
                 # Each chunk carries only its delta tokens + logprobs; accumulate.
                 delta_tokens, delta_log_probs = _inference_generate_tokens_and_logprobs(choice)
                 if delta_tokens:
+                    if trace_ids is not None:
+                        start = len(call_tokens)
+                        _validate_trace_replay_output(choice, trace_ids[start : start + len(delta_tokens)])
                     call_tokens += delta_tokens
                     call_log_probs += delta_log_probs
+
+                if trace_ids is not None:
+                    # A replayed sample is committed only after the entire trace has been checked.
+                    if state.aborted:
+                        break
+                    continue
 
                 # Surface partial state on the sample immediately. If the outer
                 # abort path cuts us, whatever we've written so far is what
@@ -230,7 +251,26 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
         if finish_reason and last_choice is not None:
             span.update(build_vllm_meta_trace_attrs({**trace_metadata, "choices": [last_choice], "usage": last_usage}))
 
-    if finish_reason and last_choice is not None:
+    if trace_ids is not None:
+        if finish_reason not in ("stop", "length") or len(call_tokens) != len(trace_ids):
+            if state.aborted:
+                sample.status = Sample.Status.ABORTED
+                return sample
+            raise ValueError(f"Trace replay did not complete: received {len(call_tokens)}/{len(trace_ids)} tokens")
+        if not sample.tokens:
+            sample.tokens = prompt_ids
+        meta = _inference_generate_meta_info(
+            {"choices": [last_choice], "usage": last_usage, "metrics": response_metrics}
+        )
+        sample.append_response_tokens(
+            args,
+            tokens=call_tokens,
+            log_probs=call_log_probs,
+            trainable=True,
+            meta_info=meta,
+            text=state.tokenizer.decode(call_tokens, skip_special_tokens=skip_decode),
+        )
+    elif finish_reason and last_choice is not None:
         meta = _inference_generate_meta_info(
             {"choices": [last_choice], "usage": last_usage, "metrics": response_metrics}
         )

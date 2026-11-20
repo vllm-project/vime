@@ -68,11 +68,9 @@ vime 支持将训练部分和推理部分分开进行调试，从而实现：
 
 回放使用完整的文本请求，并关闭 partial rollout、score centering 和 speculative decoding。比较模型原始概率时，在 [vLLM Config](../advanced/vllm-config.md) 的对应引擎组 `overrides` 中设置 `logprobs_mode: raw_logprobs`。仅调试推理时，可用 `--debug-rollout-only` 和 `--save-debug-rollout-data` 保存输出 token 和分数。
 
-### 分段提交 prompt token
+### 流式返回回放结果
 
-在 `metadata.trace_replay` 中增加 `"prompt_token_chunks":[[151644],[8948,198]]`，每段拼接后必须与 `prompt_token_ids` 一致。Vime 会把各段以 NDJSON 发送给同一个普通 vLLM worker。引擎接收并处理每段，最后一段使用完整的 `decode_token_ids`。Vime 一次性返回最终回放结果，前面各段产生的临时 token 不写进 rollout。
-
-安装当前 Vime 包，使 vLLM 能发现 `vime_trace_replay` endpoint 插件。启动前设置 `VLLM_PLUGINS=ascend,ascend_model,ascend_model_loader,vime_trace_replay`，并保留当前部署需要的其他插件名。跟完整 prompt 回放一样，分段回放需要启用 Model Runner V2 和 trace replay。分段路径需要普通 worker，暂不支持 P/D 分离和 MoE 路由数据回放。
+添加 `--custom-generate-function-path vime.rollout.vllm_streaming_rollout.generate_streaming` 可通过 SSE 接收回放结果。请求仍一次提交完整的 `prompt_token_ids` 和 `decode_token_ids`。Vime 逐段校验返回的 token 和 logprob，完整回放后才把结果写入样本。
 
 ## INT4 / Compressed-Tensors 量化 Checkpoint 问题
 

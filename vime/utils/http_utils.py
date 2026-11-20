@@ -384,20 +384,3 @@ async def get(url, *, timeout=None):
         return json.loads(content)
     finally:
         await response.aclose()
-
-
-async def post_ndjson(url, records, *, timeout, headers=None):
-    """Send records as an incremental request body using the rollout HTTP client."""
-
-    async def content():
-        for record in records:
-            yield (json.dumps(record) + "\n").encode()
-
-    response = await _http_client.post(
-        url,
-        content=content(),
-        headers={**(headers or {}), "Content-Type": "application/x-ndjson"},
-        timeout=timeout,
-    )
-    response.raise_for_status()
-    return response.json()

@@ -237,115 +237,71 @@ def test_generate_rejects_trace_over_budget_before_post(patch_generate_state, mo
     post_mock.assert_not_awaited()
 
 
-def test_generate_replays_prompt_chunks(patch_generate_state, monkeypatch):
-    args = _rollout_args(vllm_router_request_timeout_secs=30)
-    replay = {"prompt_token_ids": [10, 20, 30], "prompt_token_chunks": [[10], [20, 30]], "decode_token_ids": [65, 66]}
-    sample = Sample(prompt="abc", metadata={"trace_replay": replay})
-    response = _generate_response([65, 66])
-    for token_id, row in zip([65, 66], response["choices"][0]["logprobs"]["content"], strict=True):
-        row["token_id"] = token_id
-    workers = [
-        {"worker_type": "prefill", "url": "http://prefill"},
-        {"worker_type": "regular", "url": "http://worker"},
-    ]
-    monkeypatch.setattr(mod, "get", AsyncMock(return_value={"workers": workers}))
-    post = AsyncMock(return_value=response)
-    monkeypatch.setattr(mod, "post_ndjson", post)
+@pytest.mark.parametrize("outcome", ["complete", "wrong_token", "wrong_score_token", "incomplete", "abort"])
+def test_generate_streaming_replays_trace(patch_generate_state, monkeypatch, outcome):
+    from vime.rollout import vllm_streaming_rollout as streaming
 
-    result = asyncio.run(mod.generate(args, sample, _default_sampling_params()))
+    args = _rollout_args()
+    state = _PatchedGenerateState(args)
+    monkeypatch.setattr(streaming, "GenerateState", lambda _: state)
+    prompt_ids = [10, 20]
+    trace_ids = [65, 66]
+    sample = Sample(
+        prompt="different text",
+        metadata={
+            "trace_replay": {
+                "prompt_token_ids": prompt_ids,
+                "decode_token_ids": trace_ids,
+            }
+        },
+    )
 
-    url, (header, *chunks) = post.await_args.args
-    assert url == "http://worker/inference/v1/trace-replay-input"
-    assert header["chunk_count"] == 2
-    assert header["sampling_params"]["trace_decode_token_ids"] == [65, 66]
-    assert chunks == [[10], [20, 30]]
-    assert result.tokens == [10, 20, 30, 65, 66]
-    assert result.response_length == 2
+    async def lines():
+        first = {"token_ids": [65], "logprobs": {"content": [{"token_id": 65, "logprob": -0.1}]}}
+        yield "data: " + json.dumps({"choices": [first]})
+        assert sample.response_length == 0
+        if outcome == "abort":
+            state.aborted = True
+        last = {
+            "token_ids": [67 if outcome == "wrong_token" else 66],
+            "logprobs": {"content": [{"token_id": 67 if outcome == "wrong_score_token" else 66, "logprob": -0.2}]},
+        }
+        if outcome in ("abort", "incomplete"):
+            last = {"token_ids": []}
+        last["finish_reason"] = "abort" if outcome == "abort" else "length"
+        yield "data: " + json.dumps({"choices": [last]})
+        yield "data: [DONE]"
 
+    @asynccontextmanager
+    async def stream(method, url, *, json, headers):
+        assert method == "POST" and url.endswith("/inference/v1/generate")
+        assert json["stream"] is True and json["token_ids"] == prompt_ids
+        assert json["sampling_params"]["trace_decode_token_ids"] == trace_ids
+        assert json["sampling_params"]["max_tokens"] == len(trace_ids)
+        assert json["sampling_params"]["logprobs"] == 1
+        yield SimpleNamespace(raise_for_status=lambda: None, aiter_lines=lines)
 
-def test_generate_rejects_prompt_chunks_that_change_the_recorded_prompt(patch_generate_state, monkeypatch):
-    replay = {"prompt_token_ids": [10, 20], "prompt_token_chunks": [[10], [30]], "decode_token_ids": [65]}
-    sample = Sample(prompt="abc", metadata={"trace_replay": replay})
-    post = AsyncMock()
-    monkeypatch.setattr(mod, "post_ndjson", post)
-    with pytest.raises(ValueError, match="reconstruct prompt_token_ids"):
-        asyncio.run(mod.generate(_rollout_args(), sample, _default_sampling_params()))
-    post.assert_not_awaited()
-
-
-@pytest.mark.parametrize("finish_reason", ["abort", "length"])
-def test_trace_replay_endpoint_finishes_while_reading_upload(finish_reason):
-    pytest.importorskip("vllm.engine.protocol")
-    from fastapi import FastAPI
-
-    from vime.backends.vllm_utils.trace_replay_input import TraceReplayInputPlugin
-
-    async def run():
-        waiting_for_body = asyncio.Event()
-        body_closed = asyncio.Event()
-
-        class Engine:
-            model_config = SimpleNamespace(enable_trace_replay=True, max_model_len=32)
-
-            def check_admission(self, *, request_id):
-                pass
-
-            async def generate(self, chunks, params, request_id):
-                async def read():
-                    await anext(chunks)
-                    await anext(chunks)
-
-                task = asyncio.create_task(read())
-                try:
-                    await waiting_for_body.wait()
-                    yield SimpleNamespace(
-                        prompt_token_ids=[10],
-                        outputs=[SimpleNamespace(token_ids=[], logprobs=None, finish_reason=finish_reason)],
-                    )
-                finally:
-                    # AsyncLLM signals cancellation without waiting for the input task.
-                    task.cancel()
-
-        async def body():
-            params = {"max_tokens": 2, "logprobs": 1, "trace_decode_token_ids": [65, 66]}
-            yield (json.dumps({"chunk_count": 2, "sampling_params": params}) + "\n").encode()
-            yield b"[10]\n"
-            waiting_for_body.set()
-            try:
-                await asyncio.Future()
-            finally:
-                body_closed.set()
-
-        app = FastAPI()
-        app.state.trace_replay_engine = Engine()
-        TraceReplayInputPlugin().attach_router(app)
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            response = await client.post(
-                "/inference/v1/trace-replay-input",
-                content=body(),
-                headers={"Content-Type": "application/x-ndjson"},
-            )
-        assert body_closed.is_set()
-        return response
-
-    response = asyncio.run(asyncio.wait_for(run(), timeout=5))
-    if finish_reason == "abort":
-        assert response.status_code == 200
-        choice = response.json()["choices"][0]
-        assert choice["finish_reason"] == "abort"
-        assert choice["token_ids"] == []
-        assert choice["logprobs"]["content"] == []
+    monkeypatch.setattr(streaming.http_utils, "_http_client", SimpleNamespace(stream=stream))
+    params = _default_sampling_params(max_new_tokens=8)
+    generate = streaming.generate_streaming(args, sample, params)
+    messages = {
+        "wrong_token": "output token IDs",
+        "wrong_score_token": "logprob token ID mismatch",
+        "incomplete": "did not complete",
+    }
+    if outcome in messages:
+        with pytest.raises(ValueError, match=messages[outcome]):
+            asyncio.run(generate)
     else:
-        assert response.status_code == 502
-        assert response.json()["detail"] == "Engine returned an incomplete streaming-input replay"
-
-
-def test_generate_streaming_rejects_trace_replay():
-    from vime.rollout.vllm_streaming_rollout import generate_streaming
-
-    sample = Sample(prompt="abc", metadata={"trace_replay": {"prompt_token_ids": [10], "decode_token_ids": [20]}})
-    with pytest.raises(ValueError, match="non-streaming"):
-        asyncio.run(generate_streaming(_rollout_args(), sample, _default_sampling_params()))
+        asyncio.run(generate)
+    assert params["max_new_tokens"] == 8
+    if outcome == "complete":
+        assert sample.status == Sample.Status.TRUNCATED
+        assert sample.tokens == prompt_ids + trace_ids
+        assert sample.rollout_log_probs == [-0.1, -0.2]
+    else:
+        assert sample.status == (Sample.Status.ABORTED if outcome == "abort" else Sample.Status.PENDING)
+        assert sample.tokens == [] and sample.response_length == 0
 
 
 def _encode_routed(arr: np.ndarray) -> str:
