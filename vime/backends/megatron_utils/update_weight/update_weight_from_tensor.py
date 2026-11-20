@@ -364,7 +364,7 @@ class UpdateWeightFromTensor:
         accelerator.empty_cache()
 
     @torch.no_grad()
-    def update_weights(self) -> None:
+    def update_weights(self, *, resume_generation: bool = True) -> None:
         """
         version++, pause generation, optionally flush caches, process buckets.
         """
@@ -375,7 +375,9 @@ class UpdateWeightFromTensor:
         if self.rank == 0:
             ray.get(
                 [
-                    engine.pause_generation.remote(mode="abort" if flush_cache else "in_place")
+                    engine.pause_generation.remote(
+                        mode="abort" if flush_cache or not resume_generation else "in_place"
+                    )
                     for engine in self._all_rollout_engines
                 ]
             )
@@ -419,7 +421,8 @@ class UpdateWeightFromTensor:
                     post_process_quantization=True,
                     rollout_engines=self._all_rollout_engines,
                 )
-            ray.get([engine.continue_generation.remote() for engine in self._all_rollout_engines])
+            if resume_generation:
+                ray.get([engine.continue_generation.remote() for engine in self._all_rollout_engines])
         dist.barrier(group=get_gloo_group())
 
     def _update_rollout_weights(self, megatron_local_weights, *, draft: bool) -> None:
