@@ -2,9 +2,46 @@
 
 Delta 权重同步只发送两次同步之间发生变化的字节，而不是每次都写一份完整 checkpoint，以此让非 colocate 的 rollout engine 保持最新。它面向大模型、跨集群或跨数据中心的训推解耦场景——这种场景下每次都写整份 actor 权重是主要开销。
 
-它**只支持 disk transport**。训练端把每次同步发布为一份 canonical HF checkpoint 目录；engine 的 `pull_weights` worker RPC（随 vime 的 vllm patch 提供）把 apply 扇出到 **engine 覆盖的每一个 host** 并校验，随后 engine 通过 `update_weights_from_disk` 适配接口调用原生 reload RPC，加载打过补丁的本地 checkpoint。vime 对每个 engine 只与一个端点通信，所以多节点 serving 和外部 rollout engine 在 vime 侧都不需要任何额外支持。
+它支持两条传输路径：`disk` 面向跨集群共享存储，`sparse_hccl` 面向 Ascend
+训练和 vLLM-Ascend rollout 之间的在线传输。首次通过标准 sparse 协议发送全部 checkpoint 坐标，后续只发送变化坐标。
+
+对于 disk transport，训练端把每次同步发布为一份 canonical HF checkpoint 目录；engine 的 `pull_weights` worker RPC（随 vime 的 vllm patch 提供）把 apply 扇出到 **engine 覆盖的每一个 host** 并校验，随后 engine 通过 `update_weights_from_disk` 适配接口调用原生 reload RPC，加载打过补丁的本地 checkpoint。vime 对每个 engine 只与一个端点通信，所以多节点 serving 和外部 rollout engine 在 vime 侧都不需要任何额外支持。
 
 ## 配置
+
+Sparse HCCL：
+
+启用 `--offload-train --use-critic` 且未启用 `--colocate` 时，训练休眠会断开
+权重传输连接。重连时仅在 rollout actor 身份相同且报告最后一次完成的权重版本时
+保留快照并继续增量同步；接收端替换、版本查询失败或部分传输失败后重新发送完整
+seed。BF16 seed 的每个元素包含四字节索引和两字节值，载荷约为 dense 全量的
+三倍。常驻 actor 的性能数据不覆盖此配置。
+
+该路径使用 vLLM-Ascend 提供的 sparse HCCL 引擎。VIME 将权重导出为 HF checkpoint
+坐标，维护分片快照，按一致顺序汇聚变化项，并管理更新版本。全量导出和稀疏坐标转换
+使用相同的 `convert_to_hf()` 规则。
+
+坐标转换需要稠密临时缓冲和输出扫描，临时内存会随 TP 大小增长。支持未量化的浮点权重，
+转换需保持元素值不变；不支持 draft/MTP 权重。新增模型布局时，应验证稀疏重建与全量
+导出的结果一致。
+
+```bash
+--update-weight-mode delta
+--update-weight-transport sparse_hccl
+--update-weight-delta-batch-diff 32
+--update-weight-delta-batch-gather 32
+```
+
+该路径要求非 colocate、未量化 ND rollout 权重、关闭 EPLB，以及推理 PP=1；
+设置 `--vllm-pipeline-parallel-size 1`。接收端支持 TP/DP/EP，推理 PP>1
+在建组前明确拒绝。训练侧 PP/TP/EP 导出与 gather 保留。
+
+脚本 `scripts/run-qwen3-30B-A3B-sparse-hccl.sh` 使用训练 TP2/PP2/EP2、
+推理 TP2/PP1/EP2，四张训练卡加两张推理卡。设置 `DATA_ROOT` 指向包含
+`weights/` 和 `datasets/` 的目录，运行前加载 NPU 环境。VIME 在调用训练引擎前完成输入校验、
+设备转换及连续化，不改写引擎的发送或接收实现。
+
+磁盘传输配置：
 
 ```bash
 --update-weight-mode delta
@@ -14,6 +51,8 @@ Delta 权重同步只发送两次同步之间发生变化的字节，而不是�
 --update-weight-delta-encoding xor          # 或: overwrite
 --update-weight-delta-checksum xxh3-128     # 或: blake3, adler32
 ```
+
+表 1：磁盘 delta 传输参数及其作用。
 
 | 参数 | 作用 |
 |---|---|
@@ -25,6 +64,32 @@ Delta 权重同步只发送两次同步之间发生变化的字节，而不是�
 delta 始终用 zstd（level 1）压缩；profiling 显示对这类数据它在 wire 大小和解压速度上都优于 lz4 / gzip / snappy / brotli，所以不做成可配置项。
 
 ## 工作原理
+
+### Sparse HCCL
+
+首轮或无法验证基准的重连执行 Seed，后续更新执行 Diff；两条路径共用 Publish 和 Apply。
+显式休眠的连接仅在接收端身份及版本核对一致后恢复 Diff。
+
+1. **Seed。** 首轮或无法验证基准的重连后，将当前训练权重完整导出为 HF 格式，生成全部 checkpoint
+   坐标与目标值，交给 Publish／Apply 阶段发送和应用。首轮成功后保存本地 shard snapshot，
+   作为后续差分基准；重连时重新全量覆盖 worker 权重。
+2. **Diff。** 后续更新对当前训练分片与 snapshot 做 bitwise diff，使用与全量导出相同的转换规则，
+   将变化位置及其值转换为 HF checkpoint 坐标和值。
+3. **Publish。** 对 Diff 生成的变化项，先按一致目录执行变长 gather，聚合到 rank0。
+   rank0 对 Seed 或 Diff 的 payload 检查边界、重复索引和 NaN，转到通信设备并连续化，按字节预算分片。
+   sender 通过 `send_weight_chunk` 发布 metadata，并发启动接收 RPC 与 HCCL broadcast。
+4. **Apply。** rollout worker 通过 HCCL 接收 Publish 阶段广播的 checkpoint 坐标与目标值。
+   checkpoint 加载路径调用模型原生 loader，将这些更新映射到各 worker 的 TP 分片与本地专家，
+   再用收到的目标值原地覆盖对应权重，零值也会写入。
+
+wire 索引使用 int32，单个 checkpoint tensor 的元素数必须小于 `2**31`。
+接收端需要完整形状的 NaN staging；首轮 Seed 同时传输索引和值，wire 大于仅发送值的 dense 传输。
+
+gather 字节预算限制所有训练 rank 的接收缓冲区总量，超大 slot 按元素范围分块。
+调用方 delta 缓冲区、返回的合并结果、本地转换探针及接收端 staging 不计入此预算；
+它不是整个权重更新过程的峰值内存上限。
+
+### 磁盘传输
 
 1. **Seed。** 首次同步，以及训练端恢复或替换 engine 后的首次同步，会从训练端当前权重发布完整 HF checkpoint，并从同一批 tensor 捕获 CPU snapshot。所有 engine 加载成功后才恢复生成。版本号高于目录中所有已有版本，包括已经写盘但丢失应答的更新；重启不会删除旧版本流。
 2. **Publish。** 之后每次同步，训练端把每个 gather 出的 HF tensor 与 snapshot 做 diff，编码、压缩，写到 `--update-weight-disk-dir` 下的新版本目录 `weight_v{N:06d}/`。该目录是一份 canonical HF checkpoint——`model-NNNNN.safetensors` 文件装着压缩后的 diff tensor，外加 `model.safetensors.index.json`（tensor 名 → 文件）承载 apply 元数据——所以这个产物是可移植的，不绑定训练端的并行 layout。随后 snapshot 推进到新值，供下次 diff。

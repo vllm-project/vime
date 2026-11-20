@@ -188,6 +188,9 @@ class NpuVLLMLaunchPlatformOps(VLLMLaunchPlatformOps):
         env.pop("CUDA_VISIBLE_DEVICES", None)
         env.pop("HIP_VISIBLE_DEVICES", None)
         env["ASCEND_RT_VISIBLE_DEVICES"] = visible_devices
+        # vLLM's inner engine/worker processes must not inherit a forked CANN
+        # runtime from the multi-threaded API server (rtSetDevice can fail).
+        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         env["VLLM_USE_AOT_COMPILE"] = "0"
         cann_python_path = _cann_python_site_packages()
         if cann_python_path is not None:
