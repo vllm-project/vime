@@ -88,51 +88,47 @@ def filter_long_prompt(origin_samples: list[Sample], tokenizer, processor, max_l
     if max_length is None:
         return origin_samples
 
-    if not isinstance(origin_samples[0].prompt, str):
+    kept = set()
+    ordinary = []
+    for index, sample in enumerate(origin_samples):
+        metadata = sample.metadata or {}
+        if "trace_replay" not in metadata:
+            ordinary.append((index, sample))
+            continue
+        replay = metadata["trace_replay"]
+        prompt_ids = replay.get("prompt_token_ids") if isinstance(replay, dict) else None
+        if not isinstance(prompt_ids, list) or len(prompt_ids) <= max_length:
+            kept.add(index)
+
+    if ordinary and not isinstance(ordinary[0][1].prompt, str):
         logger.warning(
             "Skipping max_length check for list prompt. Set apply_chat_template=True to enable length filtering."
         )
-        return origin_samples
-
-    if processor:
-        # Use processor only for samples with actual multimodal content; use batched tokenizer for text-only.
+        kept.update(index for index, _ in ordinary)
+    else:
         text_only = []
         multimodal = []
-        for position, sample in enumerate(origin_samples):
-            if sample.multimodal_inputs and any(v is not None for v in sample.multimodal_inputs.values()):
-                multimodal.append((position, sample))
+        for index, sample in ordinary:
+            if processor and any(value is not None for value in (sample.multimodal_inputs or {}).values()):
+                multimodal.append((index, sample))
             else:
-                text_only.append((position, sample))
-        kept = []
+                text_only.append((index, sample))
         if text_only:
-            prompts = [s.prompt for _, s in text_only]
+            prompts = [sample.prompt for _, sample in text_only]
             input_ids_list = tokenizer(prompts, add_special_tokens=False)["input_ids"]
-            for (position, sample), input_ids in zip(text_only, input_ids_list, strict=True):
-                if len(input_ids) <= max_length:
-                    kept.append((position, sample))
+            kept.update(
+                index for (index, _), ids in zip(text_only, input_ids_list, strict=True) if len(ids) <= max_length
+            )
         if multimodal:
             from vime.utils.processing_utils import build_processor_kwargs
 
-            for position, sample in multimodal:
+            for index, sample in multimodal:
                 processor_kwargs = build_processor_kwargs(sample.multimodal_inputs)
                 processor_output = processor(text=sample.prompt, **processor_kwargs)
-                input_ids = processor_output["input_ids"][0]
-                if len(input_ids) <= max_length:
-                    kept.append((position, sample))
-        # The two groups are scored separately for throughput, so restore the
-        # dataset order here: without --rollout-shuffle the samples are consumed
-        # in this order, and training should not depend on which of them happen
-        # to carry multimodal content.
-        kept.sort(key=lambda position_and_sample: position_and_sample[0])
-        filtered_samples = [sample for _, sample in kept]
-    else:
-        prompts = [sample.prompt for sample in origin_samples]
-        input_ids_list = tokenizer(prompts, add_special_tokens=False)["input_ids"]
-        filtered_samples = [
-            sample
-            for sample, input_ids in zip(origin_samples, input_ids_list, strict=True)
-            if len(input_ids) <= max_length
-        ]
+                if len(processor_output["input_ids"][0]) <= max_length:
+                    kept.add(index)
+
+    filtered_samples = [sample for index, sample in enumerate(origin_samples) if index in kept]
 
     logger.info(f"Filtered {len(origin_samples) - len(filtered_samples)} samples longer than max_length={max_length}.")
 

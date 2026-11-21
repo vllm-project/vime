@@ -194,6 +194,16 @@ def is_generation_paused_error(error: Exception) -> bool:
     )
 
 
+def _is_permanent_replay_error(error: Exception, payload) -> bool:
+    if not isinstance(error, httpx.HTTPStatusError):
+        return False
+    status = error.response.status_code
+    if not 400 <= status < 500 or status in (408, 429):
+        return False
+    sampling_params = payload.get("sampling_params") if isinstance(payload, dict) else None
+    return isinstance(sampling_params, dict) and sampling_params.get("trace_decode_token_ids") is not None
+
+
 async def _post(client, url, payload, max_retries=60, headers=None, timeout=None, score_centering_top_k=None):
     retry_count = 0
     while retry_count < max_retries:
@@ -217,6 +227,8 @@ async def _post(client, url, payload, max_retries=60, headers=None, timeout=None
         except Exception as e:
             if is_generation_paused_error(e):
                 raise
+            if _is_permanent_replay_error(e, payload):
+                raise httpx.HTTPStatusError(f"{e}\n{e.response.text}", request=e.request, response=e.response) from e
             retry_count += 1
 
             if isinstance(e, httpx.HTTPStatusError):
@@ -360,7 +372,7 @@ async def post(url, payload, max_retries=60, headers=None, timeout=None, score_c
                 )
                 return await obj_ref
         except Exception as e:
-            if is_generation_paused_error(e):
+            if is_generation_paused_error(e) or _is_permanent_replay_error(e, payload):
                 raise
             logger.info(f"[http_utils] Distributed POST failed, falling back to local: {e} (url={url})")
             # fall through to local

@@ -5,6 +5,7 @@ import inspect
 import io
 import json
 import logging
+import math
 import uuid
 from argparse import Namespace
 from collections.abc import Awaitable, Callable
@@ -331,6 +332,72 @@ def _align_mm_feature_placeholders_to_tokens(generate_body: dict[str, Any], toke
         search_start = offset + len(placeholder_tokens)
 
 
+def _prepare_trace_replay(args: Namespace, sample: Sample, max_new_tokens: int | None) -> tuple[list[int], list[int]]:
+    replay = sample.metadata["trace_replay"]
+    if not isinstance(replay, dict):
+        raise ValueError(f"Sample {sample.index}: trace_replay must be an object")
+    if "prompt_token_chunks" in replay:
+        raise ValueError("Trace replay expects a complete prompt_token_ids list in one request")
+    prompt_ids = replay.get("prompt_token_ids")
+    trace_ids = replay.get("decode_token_ids")
+    for field, ids in (("prompt_token_ids", prompt_ids), ("decode_token_ids", trace_ids)):
+        if (
+            not isinstance(ids, list)
+            or not ids
+            or any(
+                isinstance(token_id, bool) or not isinstance(token_id, (int, np.integer)) or token_id < 0
+                for token_id in ids
+            )
+        ):
+            raise ValueError(
+                f"Sample {sample.index}: trace_replay.{field} must be a non-empty list of non-negative integers"
+            )
+
+    if any(value is not None for value in (sample.multimodal_inputs or {}).values()):
+        raise ValueError("Trace replay supports text-only rollout")
+    if getattr(args, "partial_rollout", False) or sample.response_length or sample.response:
+        raise ValueError("Trace replay requires a complete rollout from the original prompt")
+    if getattr(args, "use_score_centering", False) or getattr(args, "vllm_speculative_config", None):
+        raise ValueError("Trace replay is incompatible with score centering and speculative decoding in this rollout")
+    if sample.tokens and sample.tokens != prompt_ids:
+        raise ValueError(f"Sample {sample.index}: existing tokens differ from the recorded prompt")
+    if max_new_tokens is not None and len(trace_ids) > max_new_tokens:
+        raise ValueError(
+            f"Sample {sample.index}: trace length {len(trace_ids)} exceeds rollout response budget {max_new_tokens}"
+        )
+    context_len = getattr(args, "rollout_max_context_len", None)
+    if context_len is not None and len(prompt_ids) + len(trace_ids) > context_len:
+        raise ValueError(f"Sample {sample.index}: prompt and trace exceed rollout context budget {context_len}")
+    return [int(token_id) for token_id in prompt_ids], [int(token_id) for token_id in trace_ids]
+
+
+def _validate_trace_replay_output(choice: dict[str, Any], trace_ids: list[int]) -> None:
+    token_ids = choice.get("token_ids")
+    if isinstance(token_ids, list) and len(token_ids) < len(trace_ids):
+        raise ValueError(_short_trace_message(len(token_ids), len(trace_ids)))
+    if token_ids != trace_ids or any(type(token_id) is not int for token_id in token_ids):
+        raise ValueError("Trace replay output token IDs differ from the requested sequence")
+
+    logprobs = choice.get("logprobs")
+    rows = logprobs.get("content") if isinstance(logprobs, dict) else None
+    if not isinstance(rows, list) or len(rows) != len(trace_ids):
+        raise ValueError("Trace replay requires one logprob per output token")
+    for position, (token_id, row) in enumerate(zip(trace_ids, rows, strict=True)):
+        if not isinstance(row, dict) or type(row.get("token_id")) is not int or row["token_id"] != token_id:
+            raise ValueError(f"Trace replay logprob token ID mismatch at output position {position}")
+        logprob = row.get("logprob")
+        # vLLM uses -9999.0 as a floor, including for missing or invalid scores.
+        if type(logprob) not in (int, float) or not math.isfinite(logprob) or logprob <= -9999.0:
+            raise ValueError(f"Trace replay returned an invalid or clamped logprob at output position {position}")
+
+
+def _short_trace_message(received: int, expected: int) -> str:
+    return (
+        f"Trace replay did not complete: received {received}/{expected} tokens. "
+        "Check that the prompt and full trace fit the engine's max_model_len."
+    )
+
+
 async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, Any]) -> Sample:
     """Generate using traditional vLLM router with token-based workflow"""
     if args.ci_test:
@@ -343,16 +410,20 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         sample.status == Sample.Status.PENDING or sample.status == Sample.Status.ABORTED
     ), f"Sample status is {sample.status}"
 
-    prompt_ids = _prepare_prompt_ids(sample, state.tokenizer, state.processor)
-
-    sampling_params["max_new_tokens"] -= sample.response_length
-
-    assert (
-        sampling_params["max_new_tokens"] >= 0
-    ), f"max_new_tokens: {sampling_params['max_new_tokens']} should not be less than 0"
-    if sampling_params["max_new_tokens"] == 0:
-        sample.status = Sample.Status.TRUNCATED
-        return sample
+    sampling_params = dict(sampling_params)
+    trace_ids = None
+    if "trace_replay" in (sample.metadata or {}):
+        prompt_ids, trace_ids = _prepare_trace_replay(args, sample, sampling_params["max_new_tokens"])
+        sampling_params["max_new_tokens"] = len(trace_ids)
+    else:
+        prompt_ids = _prepare_prompt_ids(sample, state.tokenizer, state.processor)
+        sampling_params["max_new_tokens"] -= sample.response_length
+        assert (
+            sampling_params["max_new_tokens"] >= 0
+        ), f"max_new_tokens: {sampling_params['max_new_tokens']} should not be less than 0"
+        if sampling_params["max_new_tokens"] == 0:
+            sample.status = Sample.Status.TRUNCATED
+            return sample
 
     score_centering = getattr(args, "use_score_centering", False)
     if score_centering:
@@ -362,6 +433,8 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     logprobs = args.score_centering_top_k + 1 if score_centering and args.rollout_top_p == 1 else 1
     score_centering_top_k = (0 if args.rollout_top_p < 1 else args.score_centering_top_k) if score_centering else None
     inference_sampling_params = _build_inference_sampling_params(sampling_params, logprobs)
+    if trace_ids is not None:
+        inference_sampling_params["trace_decode_token_ids"] = trace_ids
     routed_experts_start = 0
     if args.use_rollout_routing_replay and sample.response_length:
         routed_experts_start = sample.get_rollout_routed_experts_length()
@@ -374,7 +447,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
 
     messages = build_multimodal_messages(sample.prompt, sample.multimodal_inputs)
 
-    if not sample.tokens:
+    if trace_ids is None and not sample.tokens:
         sample.tokens = prompt_ids
 
     # Use session_id for consistent hashing routing (vLLM router)
@@ -416,6 +489,18 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
             if hasattr(span, "update"):
                 span.update(build_vllm_meta_trace_attrs(output))
 
+    if trace_ids is not None:
+        choices = output.get("choices")
+        if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+            raise ValueError("Trace replay requires exactly one output choice")
+        finish_reason = choices[0].get("finish_reason")
+        if finish_reason in ("abort", "cancelled"):
+            sample.status = Sample.Status.ABORTED
+            return sample
+        if finish_reason not in ("stop", "length"):
+            raise ValueError(f"Trace replay did not complete: finish_reason={finish_reason!r}")
+        _validate_trace_replay_output(choices[0], trace_ids)
+
     choice = output["choices"][0]
 
     # Parse token_ids and logprobs from vLLM response
@@ -431,6 +516,8 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     skip_decode = True if skip_sp is None else bool(skip_sp)
     text = state.tokenizer.decode(new_response_tokens, skip_special_tokens=skip_decode) if new_response_tokens else ""
 
+    if trace_ids is not None and not sample.tokens:
+        sample.tokens = prompt_ids
     sample.append_response_tokens(
         args,
         tokens=new_response_tokens,
