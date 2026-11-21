@@ -155,6 +155,7 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
 
     call_tokens: list[int] = []
     call_log_probs: list[float] = []
+    replay_sampling_mask: list[list[int]] | None = None
     last_choice: dict[str, Any] | None = None
     last_usage: dict[str, Any] | None = None
     weight_versions: list[str] = []
@@ -212,9 +213,6 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
                     raise ValueError("Trace replay requires exactly one output choice")
                 choice = choices[0]
                 last_choice = choice
-                chunk_meta = _inference_generate_meta_info(chunk)
-                if "weight_versions" in choice or chunk.get("weight_version") is not None:
-                    weight_versions = chunk_meta["weight_versions"]
                 if chunk.get("usage"):
                     last_usage = chunk["usage"]
                 if choice.get("finish_reason"):
@@ -226,6 +224,13 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
                     if trace_ids is not None:
                         start = len(call_tokens)
                         _validate_trace_replay_output(choice, trace_ids[start : start + len(delta_tokens)])
+                        chunk_mask = choice.get("sampling_mask")
+                        if chunk_mask is not None:
+                            if not isinstance(chunk_mask, list) or len(chunk_mask) != len(delta_tokens):
+                                raise ValueError("Trace replay requires one sampling-mask row per output token")
+                            if replay_sampling_mask is None:
+                                replay_sampling_mask = []
+                            replay_sampling_mask.extend(chunk_mask)
                     call_tokens += delta_tokens
                     call_log_probs += delta_log_probs
 
@@ -234,6 +239,10 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
                     if state.aborted:
                         break
                     continue
+
+                chunk_meta = _inference_generate_meta_info(chunk)
+                if "weight_versions" in choice or chunk.get("weight_version") is not None:
+                    weight_versions = chunk_meta["weight_versions"]
 
                 # Surface partial state on the sample immediately. If the outer
                 # abort path cuts us, whatever we've written so far is what
@@ -270,11 +279,15 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
             raise ValueError(f"Trace replay did not complete: finish_reason={finish_reason!r}")
         if len(call_tokens) != len(trace_ids):
             raise ValueError(_short_trace_message(len(call_tokens), len(trace_ids)))
+        if replay_sampling_mask is not None and len(replay_sampling_mask) != len(call_tokens):
+            raise ValueError("Trace replay is missing sampling masks for some output tokens")
+        assert last_choice is not None
+        replay_choice = {**last_choice, "sampling_mask": replay_sampling_mask}
+        meta = _inference_generate_meta_info(
+            {"choices": [replay_choice], "usage": last_usage, "metrics": response_metrics}
+        )
         if not sample.tokens:
             sample.tokens = prompt_ids
-        meta = _inference_generate_meta_info(
-            {"choices": [last_choice], "usage": last_usage, "metrics": response_metrics}
-        )
         sample.append_response_tokens(
             args,
             tokens=call_tokens,

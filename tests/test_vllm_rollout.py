@@ -312,7 +312,8 @@ def test_generate_streaming_http_error_body(patch_generate_state, monkeypatch, r
 def test_generate_streaming_replays_trace(patch_generate_state, monkeypatch, outcome):
     from vime.rollout import vllm_streaming_rollout as streaming
 
-    args = _rollout_args()
+    top_p = 0.9 if outcome == "complete" else 1.0
+    args = _rollout_args(rollout_top_p=top_p)
     state = _PatchedGenerateState(args)
     monkeypatch.setattr(streaming, "GenerateState", lambda _: state)
     prompt_ids = [10, 20]
@@ -329,13 +330,19 @@ def test_generate_streaming_replays_trace(patch_generate_state, monkeypatch, out
 
     async def lines():
         first = {"token_ids": [65], "logprobs": {"content": [{"token_id": 65, "logprob": -0.1}]}}
+        if outcome == "complete":
+            first["sampling_mask"] = [[65, 165]]
         yield "data: " + json.dumps({"choices": [first]})
         assert sample.response_length == 0
         last = {
             "token_ids": [67 if outcome == "wrong_token" else 66],
             "logprobs": {"content": [{"token_id": 66, "logprob": -0.2}]},
         }
-        if outcome in ("abort", "incomplete"):
+        if outcome == "complete":
+            last["sampling_mask"] = [[66]]
+            yield "data: " + json.dumps({"choices": [last]})
+            last = {"token_ids": []}
+        elif outcome in ("abort", "incomplete"):
             last = {"token_ids": []}
         last["finish_reason"] = "abort" if outcome == "abort" else "length"
         yield "data: " + json.dumps({"choices": [last]})
@@ -351,7 +358,7 @@ def test_generate_streaming_replays_trace(patch_generate_state, monkeypatch, out
         yield SimpleNamespace(raise_for_status=lambda: None, aiter_lines=lines)
 
     monkeypatch.setattr(streaming.http_utils, "_http_client", SimpleNamespace(stream=stream))
-    params = _default_sampling_params(max_new_tokens=8)
+    params = _default_sampling_params(max_new_tokens=8, top_p=top_p)
     generate = streaming.generate_streaming(args, sample, params)
     messages = {
         "wrong_token": "output token IDs",
@@ -367,6 +374,8 @@ def test_generate_streaming_replays_trace(patch_generate_state, monkeypatch, out
         assert sample.status == Sample.Status.TRUNCATED
         assert sample.tokens == prompt_ids + trace_ids
         assert sample.rollout_log_probs == [-0.1, -0.2]
+        assert sample.rollout_top_p_token_ids.tolist() == [65, 165, 66]
+        assert sample.rollout_top_p_token_offsets.tolist() == [0, 2, 3]
     else:
         assert sample.status == (Sample.Status.ABORTED if outcome == "abort" else Sample.Status.PENDING)
         assert sample.tokens == [] and sample.response_length == 0
