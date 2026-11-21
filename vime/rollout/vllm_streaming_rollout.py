@@ -36,6 +36,8 @@ import logging
 from argparse import Namespace
 from typing import Any
 
+import httpx
+
 from vime.observability.trace_utils import build_vllm_meta_trace_attrs, trace_span
 from vime.rollout.vllm_rollout import (
     GenerateState,
@@ -167,7 +169,15 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
         sample, "vllm_inference_generate_stream", attrs={"max_new_tokens": params["max_new_tokens"]}
     ) as span:
         async with client.stream("POST", url, json=payload, headers=headers) as response:
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as error:
+                if trace_ids is None:
+                    raise
+                await response.aread()
+                raise httpx.HTTPStatusError(
+                    f"{error}\n{response.text}", request=error.request, response=response
+                ) from error
             async for raw_line in response.aiter_lines():
                 if not raw_line or not raw_line.startswith("data:"):
                     continue

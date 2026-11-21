@@ -290,6 +290,34 @@ def test_replay_http_retry_preserves_transient_retries(monkeypatch, status, repl
         assert len(calls) == 2
 
 
+@pytest.mark.parametrize(("status_code", "replay"), [(400, True), (503, True), (400, False)])
+def test_generate_streaming_http_error_body(patch_generate_state, monkeypatch, status_code, replay):
+    from vime.rollout import vllm_streaming_rollout as streaming
+
+    monkeypatch.setattr(streaming, "GenerateState", _PatchedGenerateState)
+    sample = Sample(prompt="abc")
+    if replay:
+        sample.metadata = {"trace_replay": {"prompt_token_ids": [10, 20], "decode_token_ids": [65]}}
+    body = b"vLLM engine rejected the request"
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(status_code, stream=httpx.ByteStream(body))
+
+    async def generate():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            monkeypatch.setattr(streaming.http_utils, "_http_client", client)
+            return await streaming.generate_streaming(_rollout_args(), sample, _default_sampling_params())
+
+    with pytest.raises(httpx.HTTPStatusError) as error:
+        asyncio.run(generate())
+
+    assert error.value.response.status_code == status_code
+    assert (body.decode() in str(error.value)) is replay
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("outcome", ["complete", "wrong_token", "wrong_score_token", "incomplete", "abort"])
 def test_generate_streaming_replays_trace(patch_generate_state, monkeypatch, outcome):
     from vime.rollout import vllm_streaming_rollout as streaming

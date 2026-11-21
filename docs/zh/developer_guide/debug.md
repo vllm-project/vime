@@ -72,6 +72,8 @@ vime 支持将训练部分和推理部分分开进行调试，从而实现：
 
 添加 `--custom-generate-function-path vime.rollout.vllm_streaming_rollout.generate_streaming` 可通过 SSE 接收回放结果。请求仍一次提交完整的 `prompt_token_ids` 和 `decode_token_ids`。Vime 逐段校验返回的 token 和 logprob，完整回放后才把结果写入样本。
 
+流式回放遇到 HTTP 错误或连接中断时会直接失败。需要在临时故障后自动重试时，请使用默认非流式 rollout。
+
 ## INT4 / Compressed-Tensors 量化 Checkpoint 问题
 
 使用 INT4 量化模型（如 `compressed-tensors` 的 `W4A16`）时，checkpoint 的 `config.json` 中有一个 `quantization_config.ignore` 列表，指定哪些参数**不**做量化。在线权重更新（Megatron → vLLM）时，vime 也会读取这个 ignore list 来决定哪些参数需要 INT4 量化。ignore list 不正确会导致静默错误：

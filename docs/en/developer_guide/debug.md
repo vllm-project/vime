@@ -74,6 +74,8 @@ Use complete text requests with partial rollout, score centering and speculative
 
 Set `--custom-generate-function-path vime.rollout.vllm_streaming_rollout.generate_streaming` to receive replay results over SSE. Send the complete `prompt_token_ids` and `decode_token_ids` in one request. Vime checks the tokens and logprobs as each output chunk arrives and saves the sample after the replay completes.
 
+Streaming replay does not retry automatically. An HTTP error or interrupted connection fails the request. Use the default non-streaming rollout if you need automatic retries for transient errors.
+
 ## INT4 / Compressed-Tensors Quantization Checkpoint Issues
 
 When using INT4-quantized models (e.g., `compressed-tensors` with `W4A16`), the checkpoint's `config.json` contains a `quantization_config.ignore` list that specifies which parameters should **not** be quantized. During online weight updates (Megatron → vLLM), vime also reads this ignore list to decide which parameters to INT4-quantize. An incorrect ignore list can cause silent errors:
