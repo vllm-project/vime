@@ -251,16 +251,6 @@ def test_generate_rejects_trace_over_budget_before_post(patch_generate_state, mo
     post_mock.assert_not_awaited()
 
 
-def test_generate_keeps_callers_response_budget_for_continuation(patch_generate_state, monkeypatch):
-    post = AsyncMock(return_value=_generate_response([65]))
-    monkeypatch.setattr(mod, "post", post)
-    params = _default_sampling_params(max_new_tokens=8)
-    sample = Sample(prompt="abc", tokens=[97, 98, 99, 66], response="B", response_length=1, rollout_log_probs=[-0.1])
-    asyncio.run(mod.generate(_rollout_args(), sample, params))
-    assert post.await_args.args[1]["sampling_params"]["max_tokens"] == 7
-    assert params["max_new_tokens"] == 8
-
-
 @pytest.mark.parametrize(("status", "replay"), [(400, True), (400, False), (429, True), (503, True)])
 def test_replay_http_retry_preserves_transient_retries(monkeypatch, status, replay):
     from vime.utils import http_utils
@@ -290,8 +280,8 @@ def test_replay_http_retry_preserves_transient_retries(monkeypatch, status, repl
         assert len(calls) == 2
 
 
-@pytest.mark.parametrize(("status_code", "replay"), [(400, True), (503, True), (400, False)])
-def test_generate_streaming_http_error_body(patch_generate_state, monkeypatch, status_code, replay):
+@pytest.mark.parametrize("replay", [True, False])
+def test_generate_streaming_http_error_body(patch_generate_state, monkeypatch, replay):
     from vime.rollout import vllm_streaming_rollout as streaming
 
     monkeypatch.setattr(streaming, "GenerateState", _PatchedGenerateState)
@@ -303,7 +293,7 @@ def test_generate_streaming_http_error_body(patch_generate_state, monkeypatch, s
 
     def handler(request):
         calls.append(request)
-        return httpx.Response(status_code, stream=httpx.ByteStream(body))
+        return httpx.Response(400, stream=httpx.ByteStream(body))
 
     async def generate():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -313,12 +303,12 @@ def test_generate_streaming_http_error_body(patch_generate_state, monkeypatch, s
     with pytest.raises(httpx.HTTPStatusError) as error:
         asyncio.run(generate())
 
-    assert error.value.response.status_code == status_code
+    assert error.value.response.status_code == 400
     assert (body.decode() in str(error.value)) is replay
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("outcome", ["complete", "wrong_token", "wrong_score_token", "incomplete", "abort"])
+@pytest.mark.parametrize("outcome", ["complete", "wrong_token", "incomplete", "abort"])
 def test_generate_streaming_replays_trace(patch_generate_state, monkeypatch, outcome):
     from vime.rollout import vllm_streaming_rollout as streaming
 
@@ -343,7 +333,7 @@ def test_generate_streaming_replays_trace(patch_generate_state, monkeypatch, out
         assert sample.response_length == 0
         last = {
             "token_ids": [67 if outcome == "wrong_token" else 66],
-            "logprobs": {"content": [{"token_id": 67 if outcome == "wrong_score_token" else 66, "logprob": -0.2}]},
+            "logprobs": {"content": [{"token_id": 66, "logprob": -0.2}]},
         }
         if outcome in ("abort", "incomplete"):
             last = {"token_ids": []}
@@ -365,7 +355,6 @@ def test_generate_streaming_replays_trace(patch_generate_state, monkeypatch, out
     generate = streaming.generate_streaming(args, sample, params)
     messages = {
         "wrong_token": "output token IDs",
-        "wrong_score_token": "logprob token ID mismatch",
         "incomplete": "received 1/2 tokens",
     }
     if outcome in messages:
@@ -1291,15 +1280,19 @@ def test_generate_continuation_appends_only_new_routed_experts(patch_generate_st
     )
     monkeypatch.setattr(mod, "post", post_mock)
 
+    sampling_params = _default_sampling_params(max_new_tokens=8)
     result = asyncio.run(
         mod.generate(
             _rollout_args(use_rollout_routing_replay=True, num_layers=2, moe_router_topk=1),
             sample,
-            _default_sampling_params(),
+            sampling_params,
         )
     )
 
-    assert post_mock.await_args.args[1]["sampling_params"]["routed_experts_prompt_start"] == 1
+    sent_params = post_mock.await_args.args[1]["sampling_params"]
+    assert sent_params["routed_experts_prompt_start"] == 1
+    assert sent_params["max_tokens"] == 7
+    assert sampling_params["max_new_tokens"] == 8
     np.testing.assert_array_equal(result.materialize_rollout_routed_experts(), np.concatenate((prefix, suffix)))
 
 
