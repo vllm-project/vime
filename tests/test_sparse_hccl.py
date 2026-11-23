@@ -23,6 +23,7 @@ Run:
     python -m pytest -q tests/test_sparse_hccl.py
 """
 
+import ast
 import importlib
 import os
 import pathlib
@@ -1434,3 +1435,144 @@ def cpu_gather():
 @pytest.mark.unit
 def test_sparse_gather_cpu_oversized_slots_and_total_receive_budget(tmp_path, cpu_gather):
     mp.spawn(cpu_gather, args=(f"file://{tmp_path / 'rendezvous'}",), nprocs=2, join=True)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("offload", [False, True])
+@pytest.mark.parametrize("with_ref,with_teacher", [(False, False), (True, False), (False, True), (True, True)])
+def test_initial_actor_seed_and_snapshot_ignore_reference_weights(
+    coordinate_converter, monkeypatch, offload, with_ref, with_teacher
+):
+    # Execute the complete production init and switch methods. Isolate heavyweight
+    # training bootstrap, while using real tensors and the HF/delta converters.
+    from unittest.mock import MagicMock
+
+    probe_module, _, converter = coordinate_converter
+    export = importlib.import_module("vime.backends.megatron_utils.delta_sync.megatron_delta_export")
+    source = pathlib.Path(__file__).resolve().parents[1] / "vime/backends/megatron_utils/actor.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    actor_class = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "MegatronTrainRayActor")
+    actor_class.body = [
+        n for n in actor_class.body if isinstance(n, ast.FunctionDef) and n.name in {"init", "_switch_model"}
+    ]
+    for method in actor_class.body:
+        method.decorator_list = []
+    isolated = ast.Module(body=[actor_class], type_ignores=[])
+    live = torch.nn.Parameter(torch.tensor([1.0, 2.0, 3.0, 4.0]))
+    original = live.detach().clone()
+    name = "module.module.decoder.final_layernorm.weight"
+    events = []
+
+    class Base:
+        def init(self, args, role, *unused):
+            self.args, self.role = args, role
+
+    class Backuper:
+        def __init__(self, source_getter):
+            self.source_getter, self.weights = source_getter, {}
+
+        @property
+        def backup_tags(self):
+            return list(self.weights)
+
+        def backup(self, tag):
+            self.weights[tag] = {k: v.detach().clone() for k, v in self.source_getter()}
+
+        def get(self, tag):
+            return self.weights[tag]
+
+        def restore(self, tag):
+            events.append(tag)
+            with torch.no_grad():
+                for key, value in self.source_getter():
+                    value.copy_(self.weights[tag][key])
+
+    mpu = MagicMock()
+    mpu.get_virtual_pipeline_model_parallel_world_size.return_value = 1
+    distributed = MagicMock()
+    distributed.get_rank.return_value = 0
+    namespace = dict(
+        TrainRayActor=Base,
+        TensorBackuper=Backuper,
+        mpu=mpu,
+        dist=distributed,
+        init=MagicMock(),
+        current_platform=MagicMock(),
+        is_megatron_main_rank=lambda: False,
+        TrainProfiler=MagicMock(),
+        load_hf_config=MagicMock(return_value=SimpleNamespace()),
+        AutoTokenizer=MagicMock(),
+        get_gloo_group=lambda: None,
+        initialize_model_and_optimizer=lambda *a: ([live], None, None, -1),
+        named_params_and_buffers=lambda *a: [(name, live)],
+        create_weight_updater=MagicMock(),
+        clear_memory=MagicMock(),
+        monkey_patch_torch_dist=MagicMock(),
+        register_default_process_group=MagicMock(),
+        os=os,
+        timedelta=timedelta,
+    )
+    exec(compile(isolated, str(source), "exec", flags=__import__("__future__").annotations.compiler_flag), namespace)
+    actor = namespace["MegatronTrainRayActor"]()
+
+    def load_other(tag, path):
+        with torch.no_grad():
+            live.fill_(10 if tag == "ref" else 20)
+        actor.weights_backuper.backup(tag)
+        actor._active_model_tag = tag
+
+    actor.load_other_checkpoint = load_other
+    actor.sleep = lambda: events.append("sleep")
+    args = SimpleNamespace(
+        debug_rollout_only=False,
+        offload_train=offload,
+        distributed_timeout_minutes=1,
+        num_gpus_per_node=1,
+        hf_checkpoint="unused",
+        ref_load="ref",
+        opd_teacher_load="teacher",
+        vocab_size=4,
+        start_rollout_id=None,
+        model_name="qwen3",
+        rollout_data_postprocess_path=None,
+        kv_channels=2,
+        hidden_size=4,
+        num_attention_heads=2,
+        num_query_groups=1,
+    )
+    actor.init(args, "actor", with_ref, with_teacher)
+    assert actor._active_model_tag == "actor"
+    assert torch.equal(live, original)
+    expected_events = (["actor"] if with_ref or with_teacher else []) + (["sleep"] if offload else [])
+    assert events == expected_events
+
+    seed = dict(converter.convert_to_hf(args, "qwen3", name, live.detach().clone(), quantization_config=None))
+    info = SimpleNamespace(name=name, attrs={})
+    record = SimpleNamespace(
+        param=live,
+        contributes=True,
+        megatron_name=name,
+        slots=None,
+        hf_vocab_size=4,
+        module=None,
+        gather_group=None,
+        probe=probe_module.SparseHFProbe(args, "qwen3", info, 0, 1),
+    )
+    # Only the accelerator access boundary is replaced for this CPU regression.
+    monkeypatch.setattr(export, "_device_shard", lambda record: record.param.detach().view(-1))
+    snapshots = {}
+    export.prime_delta_snapshots([record], snapshots)
+    assert torch.equal(snapshots[name], original)
+    assert snapshots[name].data_ptr() != live.data_ptr()
+    with torch.no_grad():
+        live[1] = 0
+        live[3] = 9
+    entries = list(export.iter_delta_entries([record], snapshots))
+    slots, _, counts, indices, values, _ = entries[0]
+    assert counts.tolist() == [2]
+    assert indices.tolist() == [1, 3]
+    reconstructed = next(iter(seed.values())).clone().view(-1)
+    reconstructed[indices.long()] = values
+    expected = dict(converter.convert_to_hf(args, "qwen3", name, live.detach(), quantization_config=None))
+    assert torch.equal(reconstructed, expected[slots[0][0]].view(-1))
+    assert torch.equal(snapshots[name], live.detach())
