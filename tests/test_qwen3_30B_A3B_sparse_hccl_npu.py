@@ -6,6 +6,8 @@ SPARSE_HCCL_BASELINE_PROMPT selects the prompt (default: a short arithmetic task
 Token IDs and every generated-token logprob must match exactly; no tolerance.
 Set SPARSE_HCCL_OFFLOAD_CRITIC=1 to run PPO with shared actor/critic devices
 and training offload. This mode still exports a full checkpoint for comparison.
+SPARSE_HCCL_OFFLOAD_SMOKE=1 selects one offload/critic round without checkpoint
+export or inference comparison; results are written to offload-smoke.json.
 """
 
 import copy
@@ -38,6 +40,10 @@ def prepare():
         U.exec_command(f"hf download Qwen/Qwen3-30B-A3B --local-dir {shlex.quote(MODEL_DIR)}")
     if not Path(PROMPT_DATA).is_file():
         U.exec_command(f"hf download --repo-type dataset zhuzilin/dapo-math-17k --local-dir {shlex.quote(DATASET_DIR)}")
+
+
+def _offload_smoke():
+    return os.environ.get("SPARSE_HCCL_OFFLOAD_SMOKE", "0") == "1"
 
 
 def execute():
@@ -101,7 +107,9 @@ def execute():
 
     runtime_args = "--train-backend megatron --actor-num-nodes 1 --actor-num-gpus-per-node 4 --rollout-num-gpus 2 --ci-test "
 
-    offload_critic = os.environ.get("SPARSE_HCCL_OFFLOAD_CRITIC", "0") == "1"
+    if _offload_smoke():
+        rollout_args = rollout_args.replace("--num-rollout " + os.environ.get("SPARSE_HCCL_NUM_ROLLOUT", "3"), "--num-rollout 1")
+    offload_critic = _offload_smoke() or os.environ.get("SPARSE_HCCL_OFFLOAD_CRITIC", "0") == "1"
     if offload_critic:
         grpo_args = "--advantage-estimator ppo --kl-coef 0 --entropy-coef 0.001 --eps-clip 0.2 --eps-clip-high 0.28 "
         runtime_args += "--offload-train --use-critic --critic-num-gpus-per-node 4 --num-critic-only-steps 0 "
@@ -119,6 +127,7 @@ def execute():
             "DISABLE_L2_CACHE": "1",
             "VLLM_USE_AOT_COMPILE": "0",
             "SPARSE_HCCL_RESULT_DIR": RESULT_DIR,
+            "SPARSE_HCCL_OFFLOAD_SMOKE": "1" if _offload_smoke() else "0",
             "SPARSE_HCCL_BASELINE_PROMPT": BASELINE_PROMPT,
             "SPARSE_HCCL_BASELINE_TOKENS": os.environ.get("SPARSE_HCCL_BASELINE_TOKENS", "64"),
         },
@@ -204,7 +213,19 @@ def run_e2e(args):
     from vime.observability.logging_utils import configure_logger, finish_tracking, init_tracking
     from vime.ray.placement_group import create_rollout_manager, create_training_models
 
-    class OracleTrainActor(MegatronTrainRayActor):
+    class LifecycleTrainActor(MegatronTrainRayActor):
+        def sleep(self):
+            super().sleep()
+            self._sleep_count = getattr(self, "_sleep_count", 0) + 1
+
+        def wake_up(self):
+            super().wake_up()
+            self._wake_count = getattr(self, "_wake_count", 0) + 1
+
+        def lifecycle(self):
+            return {"rank": self._rank, "role": self.role, "sleep": getattr(self, "_sleep_count", 0), "wake_up": getattr(self, "_wake_count", 0)}
+
+    class OracleTrainActor(LifecycleTrainActor):
         def update_weights(self):
             updater = self.weight_updater
             root = self._rank == 0
@@ -283,6 +304,8 @@ def run_e2e(args):
             _raise_if_rank_zero_failed("finalize comparison checkpoint", error)
             return self.weight_updater.weight_version if root else None
 
+    if _offload_smoke() and not (args.offload_train and args.use_critic and args.num_rollout - args.start_rollout_id == 1 and args.num_critic_only_steps == 0):
+        raise ValueError("Offload smoke requires exactly one actor/critic training round")
     if args.offload_rollout or args.release_train:
         raise ValueError("This comparison requires a resident rollout engine and retained training actors")
     if args.use_critic and not args.offload_train:
@@ -320,7 +343,7 @@ def run_e2e(args):
     try:
         startup = create_rollout_manager(args)
         args, pgs, manager = startup.args, startup.placements, startup.manager
-        actor, critic = create_training_models(args, pgs, manager, actor_cls=OracleTrainActor)
+        actor, critic = create_training_models(args, pgs, manager, actor_cls=OracleTrainActor, critic_cls=LifecycleTrainActor)
         actor.update_weights()
         ray.get(manager.training_ready.remote())
         for rollout_id in range(args.start_rollout_id, args.num_rollout):
@@ -345,6 +368,22 @@ def run_e2e(args):
             raise AssertionError("The comparison requires exactly one rollout engine")
         url = ray.get(engines[0].get_url.remote())
         version = ray.get(engines[0].get_weight_version.remote())
+        if _offload_smoke():
+            lifecycle = ray.get([worker.lifecycle.remote() for group in (actor, critic) for worker in group._actor_handlers])
+            _validate_offload_smoke(sync_records, lifecycle, version)
+            _write_json(
+                output / "offload-smoke.json",
+                {
+                    "passed": True,
+                    "rounds": 1,
+                    "weight_version": version,
+                    "lifecycle": lifecycle,
+                    "sync_records": sync_records,
+                    "inference_compared": False,
+                },
+            )
+            print("SPARSE HCCL OFFLOAD CRITIC SMOKE PASS", flush=True)
+            return
         export_version = ray.get([worker.export_checkpoint.remote(str(checkpoint)) for worker in actor._actor_handlers])[0]
         if str(version) != str(export_version):
             raise AssertionError("Inference weight version does not match the exported training model")
@@ -409,6 +448,21 @@ def run_e2e(args):
                 finish_tracking(args)
 
 
+def _validate_offload_smoke(sync_records, lifecycle, version):
+    if not sync_records:
+        raise AssertionError("Missing weight update records")
+    for records in sync_records:
+        if len(records) != 2 or str(records[-1]["weight_version"]) != str(version):
+            raise AssertionError("Expected initial seed and one update at the serving version")
+    root = sync_records[0]
+    if [row["seed_calls"] for row in root] != [1, 0] or root[-1]["transmitted_elements"] <= 0:
+        raise AssertionError("Expected a nonempty sparse update without reseeding")
+    if {row["role"] for row in lifecycle} != {"actor", "critic"}:
+        raise AssertionError("Missing actor/critic lifecycle records")
+    if any(row["sleep"] < 1 or row["wake_up"] < 1 for row in lifecycle):
+        raise AssertionError("Every training rank must complete sleep and wake_up")
+
+
 def test_exact_inference_comparison():
     reference = {"token_ids": [17, 25], "logprobs": [-0.25, -1.5], "finish_reason": "length"}
     assert _compare(reference, copy.deepcopy(reference))["passed"]
@@ -424,8 +478,8 @@ def test_exact_inference_comparison():
 
 @pytest.mark.unit
 @pytest.mark.parametrize("ray_running", [False, True])
-@pytest.mark.parametrize("offload_critic", [False, True])
-def test_comparison_launcher_uses_custom_driver(monkeypatch, ray_running, offload_critic):
+@pytest.mark.parametrize("offload_critic, smoke", [(False, False), (True, False), (True, True)])
+def test_comparison_launcher_uses_custom_driver(monkeypatch, ray_running, offload_critic, smoke):
     from vime.utils.external_utils import launch
 
     commands = []
@@ -435,6 +489,8 @@ def test_comparison_launcher_uses_custom_driver(monkeypatch, ray_running, offloa
     monkeypatch.setitem(sys.modules, utilities.__name__, utilities)
     monkeypatch.setattr(launch, "current_platform", lambda: launch.PLATFORMS["npu"])
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: types.SimpleNamespace(returncode=0 if ray_running else 1))
+    monkeypatch.setenv("SPARSE_HCCL_OFFLOAD_SMOKE", "1" if smoke else "0")
+    monkeypatch.setenv("SPARSE_HCCL_NUM_ROLLOUT", "3")
     monkeypatch.setenv("VIME_SCRIPT_EXTERNAL_RAY", "0")
     monkeypatch.setenv("SPARSE_HCCL_OFFLOAD_CRITIC", "1" if offload_critic else "0")
     execute()
@@ -447,6 +503,9 @@ def test_comparison_launcher_uses_custom_driver(monkeypatch, ray_running, offloa
     assert "SPARSE_HCCL_RESULT_DIR" in commands[-1]
     assert ("--offload-train" in commands[-1]) == offload_critic
     assert ("--use-critic" in commands[-1]) == offload_critic
+    if smoke:
+        assert "--num-rollout 1 " in commands[-1]
+        assert "--num-rollout 3 " not in commands[-1]
     if offload_critic:
         assert "--advantage-estimator ppo" in commands[-1]
         assert "--num-critic-only-steps 0" in commands[-1]
@@ -465,3 +524,19 @@ if __name__ == "__main__":
         run_e2e(parse_args())
     else:
         main()
+
+
+@pytest.mark.unit
+def test_offload_smoke_validation():
+    records = [[{"weight_version": 1, "seed_calls": 1, "transmitted_elements": 100}, {"weight_version": 2, "seed_calls": 0, "transmitted_elements": 1}]]
+    lifecycle = [{"role": role, "rank": 0, "sleep": 1, "wake_up": 1} for role in ("actor", "critic")]
+    _validate_offload_smoke(records, lifecycle, 2)
+    for role in range(2):
+        broken = copy.deepcopy(lifecycle)
+        broken[role]["wake_up"] = 0
+        with pytest.raises(AssertionError):
+            _validate_offload_smoke(records, broken, 2)
+    broken = copy.deepcopy(records)
+    broken[0][1]["seed_calls"] = 1
+    with pytest.raises(AssertionError):
+        _validate_offload_smoke(broken, lifecycle, 2)

@@ -240,7 +240,7 @@ def create_actor_model(args, pgs, rollout_manager, actor_cls=None):
     return actor_model, actor_start_rollout_ids
 
 
-def create_training_models(args, pgs, rollout_manager, actor_cls=None):
+def create_training_models(args, pgs, rollout_manager, actor_cls=None, critic_cls=None):
     actor_model, actor_start_rollout_ids = create_actor_model(args, pgs, rollout_manager, actor_cls=actor_cls)
 
     critic_model = None
@@ -261,6 +261,7 @@ def create_training_models(args, pgs, rollout_manager, actor_cls=None):
             num_gpus_per_node=args.critic_num_gpus_per_node,
             pg=pgs["critic"],
             role="critic",
+            actor_cls=critic_cls,
         )
         critic_start_rollout_ids = critic_model.create(rollout_manager=rollout_manager)
 
