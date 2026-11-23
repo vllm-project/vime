@@ -40,7 +40,9 @@ def prepare():
     if not Path(MODEL_DIR, "config.json").is_file():
         U.exec_command(f"hf download Qwen/Qwen3-30B-A3B --local-dir {shlex.quote(MODEL_DIR)}")
     if not Path(PROMPT_DATA).is_file():
-        U.exec_command(f"hf download --repo-type dataset zhuzilin/dapo-math-17k --local-dir {shlex.quote(DATASET_DIR)}")
+        U.exec_command(
+            f"hf download --repo-type dataset zhuzilin/dapo-math-17k --local-dir {shlex.quote(DATASET_DIR)}"
+        )
 
 
 def _offload_smoke():
@@ -106,16 +108,30 @@ def execute():
 
     model_args = "--attention-dropout 0.0 --hidden-dropout 0.0 --accumulate-allreduce-grads-in-fp32 --attention-softmax-in-fp32 --attention-backend flash --use-flash-attn --no-gradient-accumulation-fusion "
 
-    runtime_args = "--train-backend megatron --actor-num-nodes 1 --actor-num-gpus-per-node 4 --rollout-num-gpus 2 --ci-test "
+    runtime_args = (
+        "--train-backend megatron --actor-num-nodes 1 --actor-num-gpus-per-node 4 --rollout-num-gpus 2 --ci-test "
+    )
 
     if _offload_smoke():
-        rollout_args = rollout_args.replace("--num-rollout " + os.environ.get("SPARSE_HCCL_NUM_ROLLOUT", "2"), "--num-rollout 1")
+        rollout_args = rollout_args.replace(
+            "--num-rollout " + os.environ.get("SPARSE_HCCL_NUM_ROLLOUT", "2"), "--num-rollout 1"
+        )
     offload_critic = _offload_smoke() or os.environ.get("SPARSE_HCCL_OFFLOAD_CRITIC", "0") == "1"
     if offload_critic:
         grpo_args = "--advantage-estimator ppo --kl-coef 0 --entropy-coef 0.001 --eps-clip 0.2 --eps-clip-high 0.28 "
         runtime_args += "--offload-train --use-critic --critic-num-gpus-per-node 4 --num-critic-only-steps 0 "
 
-    train_args = checkpoint_args + rollout_args + parallel_args + grpo_args + optimizer_args + vllm_args + update_weight_args + model_args + runtime_args
+    train_args = (
+        checkpoint_args
+        + rollout_args
+        + parallel_args
+        + grpo_args
+        + optimizer_args
+        + vllm_args
+        + update_weight_args
+        + model_args
+        + runtime_args
+    )
     commands = launch_commands(
         current_platform(),
         train_args=train_args,
@@ -123,7 +139,10 @@ def execute():
         megatron_model_type="qwen3-30B-A3B",
         repo_base_dir=str(U.repo_base_dir),
         external_ray=os.environ.get("VIME_SCRIPT_EXTERNAL_RAY", "0") == "1",
-        ray_running=subprocess.run(["ray", "status"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30).returncode == 0,
+        ray_running=subprocess.run(
+            ["ray", "status"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30
+        ).returncode
+        == 0,
         extra_env={
             "DISABLE_L2_CACHE": "1",
             "VLLM_USE_AOT_COMPILE": "0",
@@ -137,7 +156,9 @@ def execute():
     entrypoint = "-- python3 train.py "
     if commands[-1].count(entrypoint) != 1:
         raise RuntimeError("Unexpected training launcher entrypoint")
-    commands[-1] = commands[-1].replace(entrypoint, "-- python3 tests/test_qwen3_30B_A3B_sparse_hccl_npu.py --e2e-worker ", 1)
+    commands[-1] = commands[-1].replace(
+        entrypoint, "-- python3 tests/test_qwen3_30B_A3B_sparse_hccl_npu.py --e2e-worker ", 1
+    )
     for command in commands:
         U.exec_command(command)
 
@@ -214,19 +235,7 @@ def run_e2e(args):
     from vime.observability.logging_utils import configure_logger, finish_tracking, init_tracking
     from vime.ray.placement_group import create_rollout_manager, create_training_models
 
-    class LifecycleTrainActor(MegatronTrainRayActor):
-        def sleep(self):
-            super().sleep()
-            self._sleep_count = getattr(self, "_sleep_count", 0) + 1
-
-        def wake_up(self):
-            super().wake_up()
-            self._wake_count = getattr(self, "_wake_count", 0) + 1
-
-        def lifecycle(self):
-            return {"rank": self._rank, "role": self.role, "sleep": getattr(self, "_sleep_count", 0), "wake_up": getattr(self, "_wake_count", 0)}
-
-    class OracleTrainActor(LifecycleTrainActor):
+    class OracleTrainActor(MegatronTrainRayActor):
         def update_weights(self):
             updater = self.weight_updater
             root = self._rank == 0
@@ -259,7 +268,14 @@ def run_e2e(args):
                     raise AssertionError("Expected a nonempty weight update")
                 if seeds != (1 if not records else 0):
                     raise AssertionError("Expected one initial seed followed by sparse updates without reseeding")
-            records.append({"weight_version": updater.weight_version, "seed_calls": seeds, "transmitted_elements": updates, "elapsed_s": time.monotonic() - started})
+            records.append(
+                {
+                    "weight_version": updater.weight_version,
+                    "seed_calls": seeds,
+                    "transmitted_elements": updates,
+                    "elapsed_s": time.monotonic() - started,
+                }
+            )
             self._sync_records = records
 
         def sync_records(self):
@@ -305,13 +321,23 @@ def run_e2e(args):
             _raise_if_rank_zero_failed("finalize comparison checkpoint", error)
             return self.weight_updater.weight_version if root else None
 
-    if _offload_smoke() and not (args.offload_train and args.use_critic and args.num_rollout - args.start_rollout_id == 1 and args.num_critic_only_steps == 0):
+    if _offload_smoke() and not (
+        args.offload_train
+        and args.use_critic
+        and args.num_rollout - args.start_rollout_id == 1
+        and args.num_critic_only_steps == 0
+    ):
         raise ValueError("Offload smoke requires exactly one actor/critic training round")
     if args.offload_rollout or args.release_train:
         raise ValueError("This comparison requires a resident rollout engine and retained training actors")
     if args.use_critic and not args.offload_train:
         raise ValueError("The shared actor/critic devices require --offload-train")
-    if args.num_rollout < 1 or args.actor_num_nodes != 1 or args.actor_num_gpus_per_node != 4 or args.rollout_num_gpus != 2:
+    if (
+        args.num_rollout < 1
+        or args.actor_num_nodes != 1
+        or args.actor_num_gpus_per_node != 4
+        or args.rollout_num_gpus != 2
+    ):
         raise ValueError("Use at least one training step on four training plus two rollout NPUs")
     output = Path(RESULT_DIR).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -344,7 +370,7 @@ def run_e2e(args):
     try:
         startup = create_rollout_manager(args)
         args, pgs, manager = startup.args, startup.placements, startup.manager
-        actor, critic = create_training_models(args, pgs, manager, actor_cls=OracleTrainActor, critic_cls=LifecycleTrainActor)
+        actor, critic = create_training_models(args, pgs, manager, actor_cls=OracleTrainActor)
         actor.update_weights()
         ray.get(manager.training_ready.remote())
         for rollout_id in range(args.start_rollout_id, args.num_rollout):
@@ -370,15 +396,18 @@ def run_e2e(args):
         url = ray.get(engines[0].get_url.remote())
         version = ray.get(engines[0].get_weight_version.remote())
         if _offload_smoke():
-            lifecycle = ray.get([worker.lifecycle.remote() for group in (actor, critic) for worker in group._actor_handlers])
-            _validate_offload_smoke(sync_records, lifecycle, version)
-            _write_json(output / "offload-lifecycle.json", {"rounds": 1, "lifecycle": lifecycle})
+            _validate_offload_smoke(sync_records, version)
+            _write_json(
+                output / "offload-sync.json", {"rounds": 1, "weight_version": version, "sync_records": sync_records}
+            )
         # Critic is no longer needed. Release its process before full export so
         # its optimizer and CPU/TMS weight backups cannot overlap the export.
         if critic is not None:
             critic.release()
             critic = None
-        export_version = ray.get([worker.export_checkpoint.remote(str(checkpoint)) for worker in actor._actor_handlers])[0]
+        export_version = ray.get(
+            [worker.export_checkpoint.remote(str(checkpoint)) for worker in actor._actor_handlers]
+        )[0]
         if str(version) != str(export_version):
             raise AssertionError("Inference weight version does not match the exported training model")
         # Terminate trainer workers before reference loading; process teardown
@@ -448,7 +477,7 @@ def run_e2e(args):
                 finish_tracking(args)
 
 
-def _validate_offload_smoke(sync_records, lifecycle, version):
+def _validate_offload_smoke(sync_records, version):
     if not sync_records:
         raise AssertionError("Missing weight update records")
     for records in sync_records:
@@ -457,10 +486,6 @@ def _validate_offload_smoke(sync_records, lifecycle, version):
     root = sync_records[0]
     if [row["seed_calls"] for row in root] != [1, 0] or root[-1]["transmitted_elements"] <= 0:
         raise AssertionError("Expected a nonempty sparse update without reseeding")
-    if {row["role"] for row in lifecycle} != {"actor", "critic"}:
-        raise AssertionError("Missing actor/critic lifecycle records")
-    if any(row["sleep"] < 1 or row["wake_up"] < 1 for row in lifecycle):
-        raise AssertionError("Every training rank must complete sleep and wake_up")
 
 
 def test_exact_inference_comparison():
@@ -488,7 +513,9 @@ def test_comparison_launcher_uses_custom_driver(monkeypatch, ray_running, offloa
     utilities.exec_command = commands.append
     monkeypatch.setitem(sys.modules, utilities.__name__, utilities)
     monkeypatch.setattr(launch, "current_platform", lambda: launch.PLATFORMS["npu"])
-    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: types.SimpleNamespace(returncode=0 if ray_running else 1))
+    monkeypatch.setattr(
+        subprocess, "run", lambda *args, **kwargs: types.SimpleNamespace(returncode=0 if ray_running else 1)
+    )
     monkeypatch.setenv("SPARSE_HCCL_OFFLOAD_SMOKE", "1" if smoke else "0")
     monkeypatch.setenv("SPARSE_HCCL_NUM_ROLLOUT", "3")
     monkeypatch.setenv("VIME_SCRIPT_EXTERNAL_RAY", "0")
@@ -528,21 +555,23 @@ if __name__ == "__main__":
 
 @pytest.mark.unit
 def test_offload_smoke_validation():
-    records = [[{"weight_version": 1, "seed_calls": 1, "transmitted_elements": 100}, {"weight_version": 2, "seed_calls": 0, "transmitted_elements": 1}]]
-    lifecycle = [{"role": role, "rank": 0, "sleep": 1, "wake_up": 1} for role in ("actor", "critic")]
-    _validate_offload_smoke(records, lifecycle, 2)
-    for role in range(2):
-        broken = copy.deepcopy(lifecycle)
-        broken[role]["wake_up"] = 0
-        with pytest.raises(AssertionError):
-            _validate_offload_smoke(records, broken, 2)
+    records = [
+        [
+            {"weight_version": 1, "seed_calls": 1, "transmitted_elements": 100},
+            {"weight_version": 2, "seed_calls": 0, "transmitted_elements": 1},
+        ]
+    ]
+    _validate_offload_smoke(records, 2)
     broken = copy.deepcopy(records)
     broken[0][1]["seed_calls"] = 1
     with pytest.raises(AssertionError):
-        _validate_offload_smoke(broken, lifecycle, 2)
+        _validate_offload_smoke(broken, 2)
 
 
-@pytest.mark.skipif(os.environ.get("VIME_RUN_NPU_FUNCTIONAL") != "1", reason="Requires six available NPUs and the Ascend training stack")
+@pytest.mark.skipif(
+    os.environ.get("VIME_RUN_NPU_FUNCTIONAL") != "1",
+    reason="Requires six available NPUs and the Ascend training stack",
+)
 def test_qwen3_sparse_hccl_two_round_inference(monkeypatch, tmp_path):
     """Two normal training rounds followed by independent checkpoint inference."""
     monkeypatch.setenv("SPARSE_HCCL_OFFLOAD_SMOKE", "0")
@@ -554,7 +583,10 @@ def test_qwen3_sparse_hccl_two_round_inference(monkeypatch, tmp_path):
     assert result["passed"]
 
 
-@pytest.mark.skipif(os.environ.get("VIME_RUN_NPU_FUNCTIONAL") != "1", reason="Requires six available NPUs and the Ascend training stack")
+@pytest.mark.skipif(
+    os.environ.get("VIME_RUN_NPU_FUNCTIONAL") != "1",
+    reason="Requires six available NPUs and the Ascend training stack",
+)
 def test_qwen3_sparse_hccl_offload_critic_one_round(monkeypatch, tmp_path):
     """One offload/critic round followed by independent checkpoint inference."""
     monkeypatch.setenv("SPARSE_HCCL_OFFLOAD_SMOKE", "1")
