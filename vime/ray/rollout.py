@@ -7,7 +7,7 @@ from typing import Any
 
 import ray
 
-from vime.backends.vllm_utils.weight_checker import validate_checksums
+from vime.backends.vllm_utils.weight_checker import validate_checksums, validate_worker_ids
 from vime.data.batch_builder import BatchBuilder
 from vime.data.transport import DiskPayloadRef, accept_raw_rollout, check_rollout_storage, load_rollout_samples
 from vime.observability import logging_utils
@@ -608,6 +608,7 @@ class RolloutManager:
             for record, response in zip(records, responses, strict=True):
                 try:
                     record["baseline"] = validate_checksums(response, record["info"]["rank_prefixes"])
+                    record["worker_ids"] = validate_worker_ids(response, record["info"]["rank_prefixes"])
                 except ValueError as error:
                     raise RuntimeError(f"{record['label']}: {error}") from error
             self._weight_check_state = "baselined"
@@ -666,6 +667,16 @@ class RolloutManager:
                     or response["match"] != (not mismatches)
                 ):
                     errors.append(f"{record['label']}: invalid compare response {response!r}")
+                    continue
+                try:
+                    worker_ids = validate_worker_ids(response, record["info"]["rank_prefixes"])
+                except ValueError as error:
+                    errors.append(f"{record['label']}: {error}")
+                    continue
+                if worker_ids != record["worker_ids"]:
+                    errors.append(
+                        f"{record['label']}: weight checker worker instances changed after taking the baseline"
+                    )
                 elif not response["match"]:
                     errors.append(f"{record['label']}: mismatches={sorted(mismatches)}")
             if errors:

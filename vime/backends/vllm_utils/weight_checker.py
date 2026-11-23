@@ -5,6 +5,7 @@ from itertools import product
 
 _KEY_PATTERN = re.compile(r"(dp\d+:pp\d+:pcp\d+:tp\d+):(.+)")
 _DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}")
+_INSTANCE_PATTERN = re.compile(r"[0-9a-f]{32}")
 
 
 def expected_rank_prefixes(config: dict) -> set[str]:
@@ -44,3 +45,15 @@ def validate_checksums(response: dict, expected_ranks: list[str]) -> dict[str, s
             f"unexpected={sorted(ranks - set(expected_ranks))}"
         )
     return dict(checksums)
+
+
+def validate_worker_ids(response: dict, expected_ranks: list[str]) -> dict[str, str]:
+    worker_ids = response.get("worker_ids") if isinstance(response, dict) else None
+    if not isinstance(worker_ids, dict) or set(worker_ids) != set(expected_ranks) or not worker_ids:
+        raise ValueError(
+            "Weight checker requires worker_ids covering every managed rank; "
+            "install the paired Vime vLLM patch on the serving engines"
+        )
+    if any(not isinstance(value, str) or _INSTANCE_PATTERN.fullmatch(value) is None for value in worker_ids.values()):
+        raise ValueError("Invalid weight checker worker instance ID")
+    return dict(worker_ids)

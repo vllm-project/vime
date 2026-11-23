@@ -104,6 +104,8 @@ Add `--check-weight-update-equal` to the training launch to check the first weig
 
 The caller retains checksum dictionaries. vLLM performs the parameter hashing and exact byte-digest comparison. Errors include the engine endpoint and keys of the form `dp0:pp0:pcp0:tp0:<tensor_name>`. The checker covers the first model selected for weight updates, including its prefill and decode engines. Frozen reference and reward models retain their weights.
 
+Install the paired `docker/npu_patch/vllm.patch` on the serving stack, including externally launched engines, before enabling this check. It provides shared worker hashing/reset for Ascend and the opt-in `include_worker_ids` checker response. Each rank's digests are bound to its worker instance ID; replacing a worker invalidates the baseline even when the endpoint and restored HF weights are unchanged. Missing instance IDs fail preparation before any reset. Existing callers that omit `include_worker_ids` keep the upstream response format.
+
 Use `--weight-checker-timeout 1800` for a longer per-phase and HTTP timeout on large models. The default is 300 seconds. A comparison mismatch, invalid response, missing rank, changed engine, or timeout fails startup and keeps rollout admission paused. A timed-out remote operation can still be running, so recovery must establish a stable serving state and install complete weights before generation resumes.
 
 Retained serving attachments and debug-only modes log a skipped check. A retained engine may contain weights from a different training boundary than the restored trainer. A fresh startup that loads different training and inference checkpoints reports their parameter differences.

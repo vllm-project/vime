@@ -110,6 +110,8 @@ vime 支持将训练部分和推理部分分开进行调试，从而实现：
 
 检查对象、量化布局和 offload 支持范围遵循配套 vLLM 版本，具体参数范围和限制见 [vLLM Weight Checker 文档](https://docs.vllm.ai/en/latest/training/weight_checker/)。
 
+校验前需要在 serving 栈（包括外部启动的引擎）安装配套的 `docker/npu_patch/vllm.patch`。补丁将摘要和 reset 实现放在共享 worker 层，使 Ascend 可以继承使用，并提供可选的 `include_worker_ids` 响应。每个 rank 的摘要与其实际 worker 实例标识绑定；即使地址和重新加载的 HF 权重不变，worker 替换也会使 baseline 失效。缺少实例标识会在 reset 前中止准备；未请求该字段的原有 API 调用保持原响应格式。
+
 ## Debug vllm illegal memory access (IMA)
 
 在进行大规模 RL 时，不时会遇到 vLLM IMA 的问题，以下是我们的一些 debug 建议：

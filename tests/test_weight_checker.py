@@ -32,6 +32,7 @@ class Engine:
         self.events = events
         self._actor_id = SimpleNamespace(hex=lambda: name)
         self.values = {KEY: "a" * 64}
+        self.worker_ids = {"dp0:pp0:pcp0:tp0": "1" * 32}
         self.info = {"url": f"http://{name}:8000", "generation": 1, "rank_prefixes": ["dp0:pp0:pcp0:tp0"]}
         self.paused = False
         self.errors = {}
@@ -60,7 +61,7 @@ class Engine:
             assert self.paused
             value = copy.deepcopy(self.info)
         elif action == "checksum":
-            value = {"checksums": dict(self.values)}
+            value = {"checksums": dict(self.values), "worker_ids": dict(self.worker_ids)}
         elif action == "reset":
             self.values = {key: "0" * 64 for key in self.values}
             value = {"status": "reset"}
@@ -68,7 +69,7 @@ class Engine:
             mismatches = sorted(
                 key for key in self.values.keys() | baseline.keys() if self.values.get(key) != baseline.get(key)
             )
-            value = {"match": not mismatches, "mismatches": mismatches}
+            value = {"match": not mismatches, "mismatches": mismatches, "worker_ids": dict(self.worker_ids)}
         return Reply(value)
 
 
@@ -214,6 +215,34 @@ def test_engine_changes_invalidate_baseline(manager, replacement):
     assert not any(action == "compare" for _, action in manager.events)
 
 
+def test_external_worker_restart_invalidates_equal_weights(manager):
+    manager.prepare_weight_check()
+    restore(manager)
+    # Rebooting the backend can reload the HF baseline without reinitializing
+    # the adapter. URL, Ray actor and layout all remain unchanged.
+    manager.engines[1].worker_ids["dp0:pp0:pcp0:tp0"] = "2" * 32
+    with pytest.raises(RuntimeError, match="actor1.*worker instances changed"):
+        manager.finish_weight_check()
+    assert manager._weight_check_state == "failed"
+    assert manager.producer.paused
+    assert not any(action == "resume" for _, action in manager.events)
+
+
+@pytest.mark.parametrize("phase", ["checksum", "compare"])
+def test_missing_worker_identity_fails_closed(manager, phase):
+    if phase == "compare":
+        manager.prepare_weight_check()
+        restore(manager)
+    manager.engines[1].responses[phase] = (
+        {"checksums": {KEY: "a" * 64}} if phase == "checksum" else {"match": True, "mismatches": []}
+    )
+    operation = manager.prepare_weight_check if phase == "checksum" else manager.finish_weight_check
+    with pytest.raises(RuntimeError, match="actor1.*worker_ids"):
+        operation()
+    assert manager.producer.paused
+    assert not any(action == ("reset" if phase == "checksum" else "resume") for _, action in manager.events)
+
+
 @pytest.mark.parametrize("mode", ["reused", "debug_train_only", "debug_rollout_only"])
 def test_reused_and_debug_serving_skip_destructive_check(manager, mode):
     if mode != "reused":
@@ -307,7 +336,8 @@ def test_full_disk_reload_honors_resume_generation(monkeypatch, tmp_path, resume
 
 
 @pytest.mark.parametrize("corrupt", [False, True])
-def test_cpu_http_checksum_reset_restore_and_compare(manager, corrupt):
+@pytest.mark.parametrize("restart", [False, True])
+def test_cpu_http_checksum_reset_restore_and_compare(manager, corrupt, restart):
     """Exercise the real HTTP adapter against CPU tensors and a protocol fixture."""
     import hashlib
     import json
@@ -322,7 +352,7 @@ def test_cpu_http_checksum_reset_restore_and_compare(manager, corrupt):
     model = torch.nn.Linear(2, 2, bias=False)
     model.register_buffer("cache", torch.tensor(7.0))
     original = model.weight.detach().clone()
-    state = SimpleNamespace(paused=False)
+    state = SimpleNamespace(paused=False, worker_id="1" * 32)
 
     def checksums():
         return {
@@ -354,17 +384,23 @@ def test_cpu_http_checksum_reset_restore_and_compare(manager, corrupt):
                 state.paused = path == "/pause"
                 body = {"status": "paused" if state.paused else "resumed"}
             elif payload["action"] == "checksum":
-                body = {"checksums": checksums()}
+                assert payload["include_worker_ids"] is True
+                body = {"checksums": checksums(), "worker_ids": {"dp0:pp0:pcp0:tp0": state.worker_id}}
             elif payload["action"] == "reset":
                 with torch.no_grad():
                     model.weight.zero_()
                 body = {"status": "reset"}
             else:
+                assert payload["include_worker_ids"] is True
                 current, baseline = checksums(), payload["baseline"]
                 mismatches = sorted(
                     key for key in current.keys() | baseline.keys() if current.get(key) != baseline.get(key)
                 )
-                body = {"match": not mismatches, "mismatches": mismatches}
+                body = {
+                    "match": not mismatches,
+                    "mismatches": mismatches,
+                    "worker_ids": {"dp0:pp0:pcp0:tp0": state.worker_id},
+                }
             self.respond(body)
 
         def log_message(self, *args):
@@ -397,8 +433,11 @@ def test_cpu_http_checksum_reset_restore_and_compare(manager, corrupt):
                 model.weight.copy_(original)
                 if corrupt:
                     model.weight[0, 0].add_(1)
-            if corrupt:
-                with pytest.raises(RuntimeError, match="dp0:pp0:pcp0:tp0:model.weight"):
+            if restart:
+                state.worker_id = "2" * 32
+            if corrupt or restart:
+                error = "worker instances changed" if restart else "dp0:pp0:pcp0:tp0:model.weight"
+                with pytest.raises(RuntimeError, match=error):
                     manager.finish_weight_check()
                 assert state.paused and manager.producer.paused
             else:

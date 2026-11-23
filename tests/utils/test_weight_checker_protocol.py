@@ -2,7 +2,7 @@
 
 import pytest
 
-from vime.backends.vllm_utils.weight_checker import expected_rank_prefixes, validate_checksums
+from vime.backends.vllm_utils.weight_checker import expected_rank_prefixes, validate_checksums, validate_worker_ids
 
 NUM_GPUS = 0
 pytestmark = pytest.mark.unit
@@ -74,3 +74,22 @@ def test_validated_baseline_is_an_independent_dictionary():
     baseline = validate_checksums({"checksums": values}, ["dp0:pp0:pcp0:tp0"])
     values.clear()
     assert baseline == {"dp0:pp0:pcp0:tp0:w": "a" * 64}
+
+
+@pytest.mark.parametrize("response", [None, {}, {"worker_ids": {}}, {"worker_ids": {"dp1:pp0:pcp0:tp0": "a" * 32}}])
+def test_worker_identity_requires_complete_rank_coverage(response):
+    with pytest.raises(ValueError, match="worker_ids"):
+        validate_worker_ids(response, ["dp0:pp0:pcp0:tp0"])
+
+
+@pytest.mark.parametrize("value", [None, 1, "", "a" * 64, "g" * 32])
+def test_worker_identity_rejects_malformed_ids(value):
+    with pytest.raises(ValueError, match="instance ID"):
+        validate_worker_ids({"worker_ids": {"dp0:pp0:pcp0:tp0": value}}, ["dp0:pp0:pcp0:tp0"])
+
+
+def test_worker_identity_is_an_independent_dictionary():
+    ids = {"dp0:pp0:pcp0:tp0": "a" * 32}
+    saved = validate_worker_ids({"worker_ids": ids}, ["dp0:pp0:pcp0:tp0"])
+    ids.clear()
+    assert saved == {"dp0:pp0:pcp0:tp0": "a" * 32}

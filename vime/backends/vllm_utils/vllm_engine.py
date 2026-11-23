@@ -465,6 +465,8 @@ class VLLMEngine(RayActor):
         if action == "compare" and baseline is None:
             raise ValueError("Weight checker compare requires a baseline")
         payload = {"action": action}
+        if action != "reset":
+            payload["include_worker_ids"] = True
         if baseline is not None:
             payload["baseline"] = baseline
         return self._make_request(

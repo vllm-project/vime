@@ -1359,6 +1359,8 @@ def test_check_weights_worker_rank_skips_http(vllm_engine, monkeypatch, action):
 def test_check_weights_uses_vllm_protocol(vllm_engine, monkeypatch, action):
     baseline = {"dp0:pp0:pcp0:tp0:weight": "a" * 64} if action == "compare" else None
     payload = {"action": action}
+    if action != "reset":
+        payload["include_worker_ids"] = True
     if baseline is not None:
         payload["baseline"] = baseline
     body = {"match": False, "mismatches": list(baseline or {})}
