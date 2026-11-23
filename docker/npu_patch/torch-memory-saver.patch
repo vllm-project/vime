@@ -123,7 +123,7 @@ diff --git a/contrib/torch_memory_saver/csrc/core.cpp b/contrib/torch_memory_sav
      SIMPLE_CHECK(ret == ACL_SUCCESS, "aclrtFreePhysical failed.");
  
  #ifdef TMS_DEBUG_LOG
-@@ -120,16 +120,19 @@
+@@ -120,13 +120,13 @@
      aclrtDrvMemHandle newAllocHandle;
      CANNUtils::cann_mem_create(&newAllocHandle, metadata.size, metadata.device);
  
@@ -135,18 +135,10 @@ diff --git a/contrib/torch_memory_saver/csrc/core.cpp b/contrib/torch_memory_sav
                     "cpu_backup should not be nullptr");
        // TODO may use cudaMemcpyAsync if needed
 -      aclrtMemcpy(ptr, metadata.size, metadata.cpu_backup, metadata.size,
-+      aclError restore_ret = TMS_CANN_CALL(aclrtMemcpy, ptr, metadata.size, metadata.cpu_backup, metadata.size,
++      TMS_CANN_CALL(aclrtMemcpy, ptr, metadata.size, metadata.cpu_backup, metadata.size,
                    ACL_MEMCPY_HOST_TO_DEVICE);
--      // maybe we can free host memory if needed (currently keep it there to
--      // reduce re-alloc time)
-+      SIMPLE_CHECK(restore_ret == ACL_SUCCESS, "CPU backup restore failed.");
-+      // Release the redundant host copy after the synchronous restore.
-+      aclError free_ret = TMS_CANN_CALL(aclrtFreeHost, metadata.cpu_backup);
-+      SIMPLE_CHECK(free_ret == ACL_SUCCESS, "CPU backup release failed.");
-+      metadata.cpu_backup = nullptr;
-     }
- 
- #ifdef TMS_DEBUG_LOG
+       // maybe we can free host memory if needed (currently keep it there to
+       // reduce re-alloc time)
 diff --git a/contrib/torch_memory_saver/csrc/entrypoint.cpp b/contrib/torch_memory_saver/csrc/entrypoint.cpp
 --- a/contrib/torch_memory_saver/csrc/entrypoint.cpp
 +++ b/contrib/torch_memory_saver/csrc/entrypoint.cpp
