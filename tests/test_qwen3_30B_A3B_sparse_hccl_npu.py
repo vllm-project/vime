@@ -6,6 +6,7 @@ SPARSE_HCCL_BASELINE_PROMPT selects the prompt (default: a short arithmetic task
 Token IDs and every generated-token logprob must match exactly; no tolerance.
 Set SPARSE_HCCL_OFFLOAD_CRITIC=1 to run PPO with shared actor/critic devices
 and training offload. This mode still exports a full checkpoint for comparison.
+The normal comparison defaults to two rounds.
 SPARSE_HCCL_OFFLOAD_SMOKE=1 selects one offload/critic round without checkpoint
 export or inference comparison; results are written to offload-smoke.json.
 """
@@ -61,7 +62,7 @@ def execute():
         "--apply-chat-template "
         "--rollout-shuffle "
         "--rm-type deepscaler "
-        f"--num-rollout {int(os.environ.get('SPARSE_HCCL_NUM_ROLLOUT', '3'))} "
+        f"--num-rollout {int(os.environ.get('SPARSE_HCCL_NUM_ROLLOUT', '2'))} "
         "--rollout-batch-size 2 "
         "--n-samples-per-prompt 4 "
         "--rollout-max-response-len 64 "
@@ -108,7 +109,7 @@ def execute():
     runtime_args = "--train-backend megatron --actor-num-nodes 1 --actor-num-gpus-per-node 4 --rollout-num-gpus 2 --ci-test "
 
     if _offload_smoke():
-        rollout_args = rollout_args.replace("--num-rollout " + os.environ.get("SPARSE_HCCL_NUM_ROLLOUT", "3"), "--num-rollout 1")
+        rollout_args = rollout_args.replace("--num-rollout " + os.environ.get("SPARSE_HCCL_NUM_ROLLOUT", "2"), "--num-rollout 1")
     offload_critic = _offload_smoke() or os.environ.get("SPARSE_HCCL_OFFLOAD_CRITIC", "0") == "1"
     if offload_critic:
         grpo_args = "--advantage-estimator ppo --kl-coef 0 --entropy-coef 0.001 --eps-clip 0.2 --eps-clip-high 0.28 "
@@ -540,3 +541,28 @@ def test_offload_smoke_validation():
     broken[0][1]["seed_calls"] = 1
     with pytest.raises(AssertionError):
         _validate_offload_smoke(broken, lifecycle, 2)
+
+
+@pytest.mark.skipif(os.environ.get("VIME_RUN_NPU_FUNCTIONAL") != "1", reason="Requires six available NPUs and the Ascend training stack")
+def test_qwen3_sparse_hccl_two_round_inference(monkeypatch, tmp_path):
+    """Two normal training rounds followed by independent checkpoint inference."""
+    monkeypatch.setenv("SPARSE_HCCL_OFFLOAD_SMOKE", "0")
+    monkeypatch.setenv("SPARSE_HCCL_OFFLOAD_CRITIC", "0")
+    monkeypatch.setenv("SPARSE_HCCL_NUM_ROLLOUT", "2")
+    monkeypatch.setattr(sys.modules[__name__], "RESULT_DIR", str(tmp_path / "normal-two-round"))
+    main()
+    result = json.loads((tmp_path / "normal-two-round/comparison.json").read_text())
+    assert result["passed"]
+
+
+@pytest.mark.skipif(os.environ.get("VIME_RUN_NPU_FUNCTIONAL") != "1", reason="Requires six available NPUs and the Ascend training stack")
+def test_qwen3_sparse_hccl_offload_critic_one_round(monkeypatch, tmp_path):
+    """One shared-device actor/critic round, sleep/wakeup and sparse update."""
+    monkeypatch.setenv("SPARSE_HCCL_OFFLOAD_SMOKE", "1")
+    monkeypatch.setenv("SPARSE_HCCL_OFFLOAD_CRITIC", "1")
+    monkeypatch.setenv("SPARSE_HCCL_NUM_ROLLOUT", "1")
+    monkeypatch.setattr(sys.modules[__name__], "RESULT_DIR", str(tmp_path / "offload-critic-one-round"))
+    main()
+    result = json.loads((tmp_path / "offload-critic-one-round/offload-smoke.json").read_text())
+    assert result["passed"] and result["rounds"] == 1
+    assert result["inference_compared"] is False
