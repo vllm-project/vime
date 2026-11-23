@@ -7,8 +7,8 @@ Token IDs and every generated-token logprob must match exactly; no tolerance.
 Set SPARSE_HCCL_OFFLOAD_CRITIC=1 to run PPO with shared actor/critic devices
 and training offload. This mode still exports a full checkpoint for comparison.
 The normal comparison defaults to two rounds.
-SPARSE_HCCL_OFFLOAD_SMOKE=1 selects one offload/critic round without checkpoint
-export or inference comparison; results are written to offload-smoke.json.
+SPARSE_HCCL_OFFLOAD_SMOKE=1 selects one offload/critic round with the same
+independent checkpoint inference comparison as the normal two-round case.
 """
 
 import copy
@@ -372,22 +372,19 @@ def run_e2e(args):
         if _offload_smoke():
             lifecycle = ray.get([worker.lifecycle.remote() for group in (actor, critic) for worker in group._actor_handlers])
             _validate_offload_smoke(sync_records, lifecycle, version)
-            _write_json(
-                output / "offload-smoke.json",
-                {
-                    "passed": True,
-                    "rounds": 1,
-                    "weight_version": version,
-                    "lifecycle": lifecycle,
-                    "sync_records": sync_records,
-                    "inference_compared": False,
-                },
-            )
-            print("SPARSE HCCL OFFLOAD CRITIC SMOKE PASS", flush=True)
-            return
+            _write_json(output / "offload-lifecycle.json", {"rounds": 1, "lifecycle": lifecycle})
+        # Critic is no longer needed. Release its process before full export so
+        # its optimizer and CPU/TMS weight backups cannot overlap the export.
+        if critic is not None:
+            critic.release()
+            critic = None
         export_version = ray.get([worker.export_checkpoint.remote(str(checkpoint)) for worker in actor._actor_handlers])[0]
         if str(version) != str(export_version):
             raise AssertionError("Inference weight version does not match the exported training model")
+        # Terminate trainer workers before reference loading; process teardown
+        # releases model/optimizer CPU backups and sparse baseline snapshots.
+        actor.release()
+        actor = None
         ray.get(engines[0].flush_cache.remote())
         actual = _infer(url, prompt_ids, sampling)
         _write_json(output / "sparse-inference.json", actual)
@@ -395,11 +392,6 @@ def run_e2e(args):
         repeat = _infer(url, prompt_ids, sampling)
         if not _compare(actual, repeat)["passed"]:
             raise AssertionError("Sparse inference is not exactly repeatable on the baseline prompt")
-        if critic is not None:
-            critic.release()
-            critic = None
-        actor.release()
-        actor = None
         startup.close(failed=False)
         startup = manager = None
 
@@ -423,7 +415,14 @@ def run_e2e(args):
         process = launch_server_process(kwargs)
         expected = _infer(f"http://127.0.0.1:{port}", prompt_ids, sampling)
         _write_json(output / "checkpoint-inference.json", expected)
-        comparison = {"weight_version": version, "checkpoint": str(checkpoint), **_compare(actual, expected)}
+        comparison = {
+            "weight_version": version,
+            "checkpoint": str(checkpoint),
+            "inference_compared": True,
+            "offload_critic": bool(args.offload_train and args.use_critic),
+            "rounds": args.num_rollout - args.start_rollout_id,
+            **_compare(actual, expected),
+        }
         _write_json(output / "comparison.json", comparison)
         if not comparison["passed"]:
             raise AssertionError(f"Sparse/checkpoint token IDs or logprobs differ: {comparison}")
@@ -557,12 +556,13 @@ def test_qwen3_sparse_hccl_two_round_inference(monkeypatch, tmp_path):
 
 @pytest.mark.skipif(os.environ.get("VIME_RUN_NPU_FUNCTIONAL") != "1", reason="Requires six available NPUs and the Ascend training stack")
 def test_qwen3_sparse_hccl_offload_critic_one_round(monkeypatch, tmp_path):
-    """One shared-device actor/critic round, sleep/wakeup and sparse update."""
+    """One offload/critic round followed by independent checkpoint inference."""
     monkeypatch.setenv("SPARSE_HCCL_OFFLOAD_SMOKE", "1")
     monkeypatch.setenv("SPARSE_HCCL_OFFLOAD_CRITIC", "1")
     monkeypatch.setenv("SPARSE_HCCL_NUM_ROLLOUT", "1")
     monkeypatch.setattr(sys.modules[__name__], "RESULT_DIR", str(tmp_path / "offload-critic-one-round"))
     main()
-    result = json.loads((tmp_path / "offload-critic-one-round/offload-smoke.json").read_text())
+    result = json.loads((tmp_path / "offload-critic-one-round/comparison.json").read_text())
     assert result["passed"] and result["rounds"] == 1
-    assert result["inference_compared"] is False
+    assert result["inference_compared"] is True
+    assert result["offload_critic"] is True
