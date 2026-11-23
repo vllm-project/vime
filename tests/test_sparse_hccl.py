@@ -30,6 +30,7 @@ import pathlib
 import sys
 import time
 import types
+from contextlib import nullcontext
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import patch as mock_patch
@@ -1440,7 +1441,7 @@ def test_sparse_gather_cpu_oversized_slots_and_total_receive_budget(tmp_path, cp
 @pytest.mark.unit
 @pytest.mark.parametrize("offload", [False, True])
 @pytest.mark.parametrize("with_ref,with_teacher", [(False, False), (True, False), (False, True), (True, True)])
-def test_initial_actor_seed_and_snapshot_ignore_reference_weights(
+def test_sparse_update_restores_actor_before_seed_and_snapshot(
     coordinate_converter, monkeypatch, offload, with_ref, with_teacher
 ):
     # Execute the complete production init and switch methods. Isolate heavyweight
@@ -1453,7 +1454,9 @@ def test_initial_actor_seed_and_snapshot_ignore_reference_weights(
     tree = ast.parse(source.read_text(encoding="utf-8"))
     actor_class = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "MegatronTrainRayActor")
     actor_class.body = [
-        n for n in actor_class.body if isinstance(n, ast.FunctionDef) and n.name in {"init", "_switch_model"}
+        n
+        for n in actor_class.body
+        if isinstance(n, ast.FunctionDef) and n.name in {"init", "_switch_model", "update_weights"}
     ]
     for method in actor_class.body:
         method.decorator_list = []
@@ -1511,6 +1514,11 @@ def test_initial_actor_seed_and_snapshot_ignore_reference_weights(
         register_default_process_group=MagicMock(),
         os=os,
         timedelta=timedelta,
+        ray=SimpleNamespace(get=lambda value: value),
+        nullcontext=nullcontext,
+        reload_process_groups=lambda: events.append("reload"),
+        print_memory=MagicMock(),
+        torch_memory_saver=SimpleNamespace(disable=nullcontext),
     )
     exec(compile(isolated, str(source), "exec", flags=__import__("__future__").annotations.compiler_flag), namespace)
     actor = namespace["MegatronTrainRayActor"]()
@@ -1541,9 +1549,40 @@ def test_initial_actor_seed_and_snapshot_ignore_reference_weights(
         num_query_groups=1,
     )
     actor.init(args, "actor", with_ref, with_teacher)
+    events.clear()
+    # Already-active actor weights can be newer than their CPU backup. Do not
+    # restore that stale backup at the resident-actor update boundary.
+    if not offload and not with_ref and not with_teacher:
+        with torch.no_grad():
+            live.add_(5)
+        original = live.detach().clone()
+    args.debug_train_only = False
+    args.rollout_external = True
+    args.use_fault_tolerance = False
+    args.use_critic = False
+    args.colocate = False
+    args.dspark_enabled = False
+    args.update_weight_mode = "delta"
+    args.update_weight_transport = "sparse_hccl"
+    actor.rollout_manager = SimpleNamespace(
+        get_updatable_engines_and_lock=SimpleNamespace(remote=lambda: ([object()], None, 0, [1], [0], [{}]))
+    )
+    sent = []
+    actor.weight_updater = SimpleNamespace(
+        update_weights=lambda: (events.append("send"), sent.append(live.detach().clone()))
+    )
+
+    def wake():
+        events.append("wake")
+        actor._switch_model("actor")
+
+    actor.wake_up = wake
+    actor.update_weights()
     assert actor._active_model_tag == "actor"
-    assert torch.equal(live, original)
-    expected_events = (["actor"] if with_ref or with_teacher else []) + (["sleep"] if offload else [])
+    assert torch.equal(sent[0], original)
+    expected_events = (
+        ["wake", "actor", "send", "sleep"] if offload else (["actor"] if with_ref or with_teacher else []) + ["send"]
+    )
     assert events == expected_events
 
     seed = dict(converter.convert_to_hf(args, "qwen3", name, live.detach().clone(), quantization_config=None))
@@ -1566,7 +1605,7 @@ def test_initial_actor_seed_and_snapshot_ignore_reference_weights(
     assert snapshots[name].data_ptr() != live.data_ptr()
     with torch.no_grad():
         live[1] = 0
-        live[3] = 9
+        live[3] = 11
     entries = list(export.iter_delta_entries([record], snapshots))
     slots, _, counts, indices, values, _ = entries[0]
     assert counts.tolist() == [2]

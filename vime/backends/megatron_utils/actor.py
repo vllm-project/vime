@@ -159,11 +159,9 @@ class MegatronTrainRayActor(TrainRayActor):
         # empty cache after initialization
         clear_memory()
 
-        # Reference/teacher loading may leave different weights in the live model.
-        # Restore actor weights before the first export and snapshot capture.
-        if self._active_model_tag != "actor":
-            self._switch_model("actor")
         if self.args.offload_train:
+            # recover to actor in the end.
+            self._switch_model("actor")
             self.sleep()
 
         self.rollout_engines = None
@@ -845,6 +843,15 @@ class MegatronTrainRayActor(TrainRayActor):
             self.wake_up()
         elif self.args.offload_train:
             reload_process_groups()
+
+        # Sparse export reads the live model, which may still hold ref/teacher weights.
+        # Preserve live actor updates; restore the backup only when switching roles.
+        if (
+            self.args.update_weight_mode == "delta"
+            and self.args.update_weight_transport == "sparse_hccl"
+            and self._active_model_tag != "actor"
+        ):
+            self._switch_model("actor")
 
         if num_new_engines > 0 or reconnect_rollout_engines:
             # A replacement trainer must reconnect even to surviving engines;
