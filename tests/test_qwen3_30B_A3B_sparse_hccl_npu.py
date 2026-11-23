@@ -4,6 +4,8 @@ MODEL_PATH and PROMPT_DATA_PATH reuse local inputs. SPARSE_HCCL_RESULT_DIR
 stores an independent full checkpoint, sync metrics and both inference results.
 SPARSE_HCCL_BASELINE_PROMPT selects the prompt (default: a short arithmetic task).
 Token IDs and every generated-token logprob must match exactly; no tolerance.
+Set SPARSE_HCCL_OFFLOAD_CRITIC=1 to run PPO with shared actor/critic devices
+and training offload. This mode still exports a full checkpoint for comparison.
 """
 
 import copy
@@ -35,9 +37,7 @@ def prepare():
     if not Path(MODEL_DIR, "config.json").is_file():
         U.exec_command(f"hf download Qwen/Qwen3-30B-A3B --local-dir {shlex.quote(MODEL_DIR)}")
     if not Path(PROMPT_DATA).is_file():
-        U.exec_command(
-            "hf download --repo-type dataset zhuzilin/dapo-math-17k " f"--local-dir {shlex.quote(DATASET_DIR)}"
-        )
+        U.exec_command(f"hf download --repo-type dataset zhuzilin/dapo-math-17k --local-dir {shlex.quote(DATASET_DIR)}")
 
 
 def execute():
@@ -46,9 +46,7 @@ def execute():
 
     model_dir = shlex.quote(MODEL_DIR)
     prompt_data = shlex.quote(PROMPT_DATA)
-    checkpoint_args = (
-        f"--hf-checkpoint {model_dir} " f"--load {model_dir} " f"--ref-load {model_dir} " "--no-load-optim "
-    )
+    checkpoint_args = f"--hf-checkpoint {model_dir} --load {model_dir} --ref-load {model_dir} --no-load-optim "
 
     rollout_args = (
         f"--prompt-data {prompt_data} "
@@ -82,27 +80,9 @@ def execute():
         "--micro-batch-size 1 "
     )
 
-    grpo_args = (
-        "--advantage-estimator grpo "
-        "--use-kl-loss "
-        "--kl-loss-coef 0.00 "
-        "--kl-loss-type low_var_kl "
-        "--entropy-coef 0.001 "
-        "--eps-clip 0.2 "
-        "--eps-clip-high 0.28 "
-    )
+    grpo_args = "--advantage-estimator grpo --use-kl-loss --kl-loss-coef 0.00 --kl-loss-type low_var_kl --entropy-coef 0.001 --eps-clip 0.2 --eps-clip-high 0.28 "
 
-    optimizer_args = (
-        "--optimizer adam "
-        "--lr 1e-6 "
-        "--lr-decay-style constant "
-        "--weight-decay 0.1 "
-        "--adam-beta1 0.9 "
-        "--adam-beta2 0.98 "
-        "--optimizer-cpu-offload "
-        "--overlap-cpu-optimizer-d2h-h2d "
-        "--use-precision-aware-optimizer "
-    )
+    optimizer_args = "--optimizer adam --lr 1e-6 --lr-decay-style constant --weight-decay 0.1 --adam-beta1 0.9 --adam-beta2 0.98 --optimizer-cpu-offload --overlap-cpu-optimizer-d2h-h2d --use-precision-aware-optimizer "
 
     vllm_args = (
         "--rollout-num-gpus-per-engine 2 "
@@ -115,42 +95,18 @@ def execute():
         """--vllm-additional-config '{"weight_nz_mode":0}' """
     )
 
-    update_weight_args = (
-        "--update-weight-mode delta "
-        "--update-weight-transport sparse_hccl "
-        "--update-weight-delta-batch-diff 32 "
-        "--update-weight-delta-batch-gather 32 "
-    )
+    update_weight_args = "--update-weight-mode delta --update-weight-transport sparse_hccl --update-weight-delta-batch-diff 32 --update-weight-delta-batch-gather 32 "
 
-    model_args = (
-        "--attention-dropout 0.0 "
-        "--hidden-dropout 0.0 "
-        "--accumulate-allreduce-grads-in-fp32 "
-        "--attention-softmax-in-fp32 "
-        "--attention-backend flash "
-        "--use-flash-attn "
-        "--no-gradient-accumulation-fusion "
-    )
+    model_args = "--attention-dropout 0.0 --hidden-dropout 0.0 --accumulate-allreduce-grads-in-fp32 --attention-softmax-in-fp32 --attention-backend flash --use-flash-attn --no-gradient-accumulation-fusion "
 
-    runtime_args = (
-        "--train-backend megatron "
-        "--actor-num-nodes 1 "
-        "--actor-num-gpus-per-node 4 "
-        "--rollout-num-gpus 2 "
-        "--ci-test "
-    )
+    runtime_args = "--train-backend megatron --actor-num-nodes 1 --actor-num-gpus-per-node 4 --rollout-num-gpus 2 --ci-test "
 
-    train_args = (
-        checkpoint_args
-        + rollout_args
-        + parallel_args
-        + grpo_args
-        + optimizer_args
-        + vllm_args
-        + update_weight_args
-        + model_args
-        + runtime_args
-    )
+    offload_critic = os.environ.get("SPARSE_HCCL_OFFLOAD_CRITIC", "0") == "1"
+    if offload_critic:
+        grpo_args = "--advantage-estimator ppo --kl-coef 0 --entropy-coef 0.001 --eps-clip 0.2 --eps-clip-high 0.28 "
+        runtime_args += "--offload-train --use-critic --critic-num-gpus-per-node 4 --num-critic-only-steps 0 "
+
+    train_args = checkpoint_args + rollout_args + parallel_args + grpo_args + optimizer_args + vllm_args + update_weight_args + model_args + runtime_args
     commands = launch_commands(
         current_platform(),
         train_args=train_args,
@@ -158,10 +114,7 @@ def execute():
         megatron_model_type="qwen3-30B-A3B",
         repo_base_dir=str(U.repo_base_dir),
         external_ray=os.environ.get("VIME_SCRIPT_EXTERNAL_RAY", "0") == "1",
-        ray_running=subprocess.run(
-            ["ray", "status"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30
-        ).returncode
-        == 0,
+        ray_running=subprocess.run(["ray", "status"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30).returncode == 0,
         extra_env={
             "DISABLE_L2_CACHE": "1",
             "VLLM_USE_AOT_COMPILE": "0",
@@ -174,9 +127,7 @@ def execute():
     entrypoint = "-- python3 train.py "
     if commands[-1].count(entrypoint) != 1:
         raise RuntimeError("Unexpected training launcher entrypoint")
-    commands[-1] = commands[-1].replace(
-        entrypoint, "-- python3 tests/test_qwen3_30B_A3B_sparse_hccl_npu.py --e2e-worker ", 1
-    )
+    commands[-1] = commands[-1].replace(entrypoint, "-- python3 tests/test_qwen3_30B_A3B_sparse_hccl_npu.py --e2e-worker ", 1)
     for command in commands:
         U.exec_command(command)
 
@@ -256,8 +207,17 @@ def run_e2e(args):
     class OracleTrainActor(MegatronTrainRayActor):
         def update_weights(self):
             updater = self.weight_updater
+            root = self._rank == 0
             publish = updater._publish_flush
+            send_seed = updater._send_seed
+            seeds = 0
             updates = 0
+            started = time.monotonic()
+
+            def observe_seed():
+                nonlocal seeds
+                seeds += 1
+                return send_seed()
 
             def observe(patches):
                 nonlocal updates
@@ -265,14 +225,34 @@ def run_e2e(args):
                 updates += sum(patch.indices.numel() for patch in patches)
 
             updater._publish_flush = observe
+            updater._send_seed = observe_seed
             try:
                 super().update_weights()
             finally:
                 updater._publish_flush = publish
-            if dist.get_rank() == 0 and updates == 0:
-                raise AssertionError("Expected a nonempty weight update")
+                updater._send_seed = send_seed
+            records = getattr(self, "_sync_records", [])
+            if root:
+                if updates == 0:
+                    raise AssertionError("Expected a nonempty weight update")
+                if seeds != (1 if not records else 0):
+                    raise AssertionError("Expected one initial seed followed by sparse updates without reseeding")
+            records.append({"weight_version": updater.weight_version, "seed_calls": seeds, "transmitted_elements": updates, "elapsed_s": time.monotonic() - started})
+            self._sync_records = records
+
+        def sync_records(self):
+            return self._sync_records
 
         def export_checkpoint(self, directory):
+            if self.args.offload_train:
+                self.wake_up()
+            try:
+                return self._export_checkpoint(directory)
+            finally:
+                if self.args.offload_train:
+                    self.sleep()
+
+        def _export_checkpoint(self, directory):
             # Full native VIME export from the frozen training model, independent of
             # sparse patches and their snapshots. Every trainer rank participates.
             path = Path(directory)
@@ -303,14 +283,11 @@ def run_e2e(args):
             _raise_if_rank_zero_failed("finalize comparison checkpoint", error)
             return self.weight_updater.weight_version if root else None
 
-    if args.use_critic or args.offload_train or args.offload_rollout or args.release_train:
-        raise ValueError("This comparison requires a resident actor and one resident rollout engine")
-    if (
-        args.num_rollout < 1
-        or args.actor_num_nodes != 1
-        or args.actor_num_gpus_per_node != 4
-        or args.rollout_num_gpus != 2
-    ):
+    if args.offload_rollout or args.release_train:
+        raise ValueError("This comparison requires a resident rollout engine and retained training actors")
+    if args.use_critic and not args.offload_train:
+        raise ValueError("The shared actor/critic devices require --offload-train")
+    if args.num_rollout < 1 or args.actor_num_nodes != 1 or args.actor_num_gpus_per_node != 4 or args.rollout_num_gpus != 2:
         raise ValueError("Use at least one training step on four training plus two rollout NPUs")
     output = Path(RESULT_DIR).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -339,31 +316,36 @@ def run_e2e(args):
     )
     configure_logger()
     init_tracking(args)
-    startup = manager = actor = process = None
+    startup = manager = actor = critic = process = None
     try:
         startup = create_rollout_manager(args)
         args, pgs, manager = startup.args, startup.placements, startup.manager
-        actor, _ = create_training_models(args, pgs, manager, actor_cls=OracleTrainActor)
+        actor, critic = create_training_models(args, pgs, manager, actor_cls=OracleTrainActor)
         actor.update_weights()
         ray.get(manager.training_ready.remote())
         for rollout_id in range(args.start_rollout_id, args.num_rollout):
             data = ray.get(manager.generate.remote(rollout_id))
-            ray.get(actor.async_train(rollout_id, data))
+            if critic is not None:
+                values = critic.async_train(rollout_id, data)
+                ray.get(actor.async_train(rollout_id, data, external_data=values))
+            else:
+                ray.get(actor.async_train(rollout_id, data))
             ray.get(manager.training_completed.remote(rollout_id))
             was_paused = ray.get(manager.pause_rollout_admission.remote())
-            actor.clear_memory()
+            if not args.offload_train:
+                actor.clear_memory()
             actor.update_weights()
             if rollout_id + 1 < args.num_rollout:
                 ray.get(manager.resume_rollout_admission.remote(was_paused))
+        sync_records = ray.get([worker.sync_records.remote() for worker in actor._actor_handlers])
+        _write_json(output / "sync-records.json", sync_records)
         ray.get(manager.health_monitoring_pause.remote())
         engines, *_ = ray.get(manager.get_updatable_engines_and_lock.remote())
         if len(engines) != 1:
             raise AssertionError("The comparison requires exactly one rollout engine")
         url = ray.get(engines[0].get_url.remote())
         version = ray.get(engines[0].get_weight_version.remote())
-        export_version = ray.get(
-            [worker.export_checkpoint.remote(str(checkpoint)) for worker in actor._actor_handlers]
-        )[0]
+        export_version = ray.get([worker.export_checkpoint.remote(str(checkpoint)) for worker in actor._actor_handlers])[0]
         if str(version) != str(export_version):
             raise AssertionError("Inference weight version does not match the exported training model")
         ray.get(engines[0].flush_cache.remote())
@@ -373,6 +355,9 @@ def run_e2e(args):
         repeat = _infer(url, prompt_ids, sampling)
         if not _compare(actual, repeat)["passed"]:
             raise AssertionError("Sparse inference is not exactly repeatable on the baseline prompt")
+        if critic is not None:
+            critic.release()
+            critic = None
         actor.release()
         actor = None
         startup.close(failed=False)
@@ -410,8 +395,12 @@ def run_e2e(args):
             kill_process_tree(process.pid)
             process.join(timeout=30)
         try:
-            if actor is not None:
-                actor.release()
+            try:
+                if critic is not None:
+                    critic.release()
+            finally:
+                if actor is not None:
+                    actor.release()
         finally:
             try:
                 if startup is not None:
@@ -435,7 +424,8 @@ def test_exact_inference_comparison():
 
 @pytest.mark.unit
 @pytest.mark.parametrize("ray_running", [False, True])
-def test_comparison_launcher_uses_custom_driver(monkeypatch, ray_running):
+@pytest.mark.parametrize("offload_critic", [False, True])
+def test_comparison_launcher_uses_custom_driver(monkeypatch, ray_running, offload_critic):
     from vime.utils.external_utils import launch
 
     commands = []
@@ -444,10 +434,9 @@ def test_comparison_launcher_uses_custom_driver(monkeypatch, ray_running):
     utilities.exec_command = commands.append
     monkeypatch.setitem(sys.modules, utilities.__name__, utilities)
     monkeypatch.setattr(launch, "current_platform", lambda: launch.PLATFORMS["npu"])
-    monkeypatch.setattr(
-        subprocess, "run", lambda *args, **kwargs: types.SimpleNamespace(returncode=0 if ray_running else 1)
-    )
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: types.SimpleNamespace(returncode=0 if ray_running else 1))
     monkeypatch.setenv("VIME_SCRIPT_EXTERNAL_RAY", "0")
+    monkeypatch.setenv("SPARSE_HCCL_OFFLOAD_CRITIC", "1" if offload_critic else "0")
     execute()
     assert len(commands) == (1 if ray_running else 2)
     if not ray_running:
@@ -456,6 +445,12 @@ def test_comparison_launcher_uses_custom_driver(monkeypatch, ray_running):
     assert "-- python3 train.py " not in commands[-1]
     assert "--update-weight-transport sparse_hccl" in commands[-1]
     assert "SPARSE_HCCL_RESULT_DIR" in commands[-1]
+    assert ("--offload-train" in commands[-1]) == offload_critic
+    assert ("--use-critic" in commands[-1]) == offload_critic
+    if offload_critic:
+        assert "--advantage-estimator ppo" in commands[-1]
+        assert "--num-critic-only-steps 0" in commands[-1]
+        assert "--advantage-estimator grpo" not in commands[-1]
 
 
 if __name__ == "__main__":
