@@ -166,8 +166,18 @@ def load_model_hf_weights(
     from vime.backends.megatron_utils.update_weight.common import named_params_and_buffers
 
     reader = SafetensorReader(path)
+    parameters = list(named_params_and_buffers(args, model))
+    value_heads = {
+        name.removesuffix(".weight")
+        for name, parameter in parameters
+        if name.endswith("output_layer.weight") and parameter.ndim == 2 and parameter.shape[0] == 1
+    }
     with torch.no_grad():
-        for name, parameter in named_params_and_buffers(args, model):
+        for name, parameter in parameters:
+            # A critic's scalar value head keeps its initialized bias when
+            # bootstrapping from an HF language model, which has no value head.
+            if name.endswith("output_layer.bias") and name.removesuffix(".bias") in value_heads:
+                continue
             # Router._load_from_state_dict normally restores this buffer to
             # FP32 before copying. Direct HF loading bypasses that hook; a
             # model-wide BF16 cast must not quantize the routing correction.

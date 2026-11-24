@@ -380,6 +380,7 @@ def run_e2e(args):
                 ray.get(actor.async_train(rollout_id, data, external_data=values))
             else:
                 ray.get(actor.async_train(rollout_id, data))
+            _assert_training_workers_alive(ray, actor, critic)
             ray.get(manager.training_completed.remote(rollout_id))
             was_paused = ray.get(manager.pause_rollout_admission.remote())
             if not args.offload_train:
@@ -400,6 +401,7 @@ def run_e2e(args):
             _write_json(
                 output / "offload-sync.json", {"rounds": 1, "weight_version": version, "sync_records": sync_records}
             )
+        _assert_training_workers_alive(ray, actor, critic)
         # Critic is no longer needed. Release its process before full export so
         # its optimizer and CPU/TMS weight backups cannot overlap the export.
         if critic is not None:
@@ -475,6 +477,19 @@ def run_e2e(args):
                     startup.close(failed=False)
             finally:
                 finish_tracking(args)
+
+
+def _assert_training_workers_alive(ray_module, *groups):
+    # Idle critic workers can be killed by Ray's memory monitor after returning
+    # their values. A one-round run must not report success just because no
+    # later critic task observes that loss.
+    refs = [
+        worker.get_master_addr_and_port.remote()
+        for group in groups
+        if group is not None
+        for worker in group._actor_handlers
+    ]
+    ray_module.get(refs, timeout=30)
 
 
 def _validate_offload_smoke(sync_records, version):
@@ -598,3 +613,27 @@ def test_qwen3_sparse_hccl_offload_critic_one_round(monkeypatch, tmp_path):
     assert result["passed"] and result["rounds"] == 1
     assert result["inference_compared"] is True
     assert result["offload_critic"] is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("dead_role", [None, "actor", "critic"])
+def test_training_worker_health_detects_idle_critic_loss(dead_role):
+    def group(role):
+        def probe():
+            if role == dead_role:
+                raise RuntimeError("training worker lost to memory pressure")
+            return "127.0.0.1", 12345
+
+        worker = types.SimpleNamespace(get_master_addr_and_port=types.SimpleNamespace(remote=lambda: probe))
+        return types.SimpleNamespace(_actor_handlers=[worker] * 4)
+
+    def get(refs, timeout):
+        assert len(refs) == 8 and timeout == 30
+        return [probe() for probe in refs]
+
+    runtime = types.SimpleNamespace(get=get)
+    if dead_role is None:
+        _assert_training_workers_alive(runtime, group("actor"), group("critic"))
+    else:
+        with pytest.raises(RuntimeError, match="memory pressure"):
+            _assert_training_workers_alive(runtime, group("actor"), group("critic"))

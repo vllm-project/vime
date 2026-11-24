@@ -37,7 +37,7 @@ def gather_slot_entries_to_rank0(
     rank = dist.get_rank(group)
     world = dist.get_world_size(group)
     device = idx_concat.device
-    if device.type == "cpu" and hasattr(torch, "npu"):
+    if device.type == "cpu" and hasattr(torch, "npu") and dist.get_backend(group) == "hccl":
         # Delta extraction may leave its compact buffers on CPU after the
         # trainer releases model memory.  The Megatron group is HCCL-only, so
         # normalize every collective tensor to the current NPU first.
