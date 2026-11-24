@@ -141,6 +141,8 @@ class UpdateWeightFromSparseHCCL:
         self._seeded = False
         self._payload_started = False
         self._failed = False
+        # Receiver integrity outlives a transport session and reconnects.
+        self._requires_full_seed = False
         self._trainer = None
         self._needs_reconnect = False
         self._engine_gpu_counts = None
@@ -172,6 +174,7 @@ class UpdateWeightFromSparseHCCL:
         self.disconnect_rollout_engines()
         self._gather_workspaces.clear()
         self._seeded = resume
+        # Reconnect resets session failure, not potentially partial receiver weights.
         self._failed = False
         if not resume:
             self._snapshots.clear()
@@ -218,7 +221,7 @@ class UpdateWeightFromSparseHCCL:
     def suspend_rollout_engines(self) -> None:
         """Release communication while retaining a verified baseline candidate."""
         baseline = None
-        if self._seeded and not self._failed and not self._needs_reconnect:
+        if self._seeded and not self._failed and not self._needs_reconnect and not self._requires_full_seed:
             baseline = (tuple(engine._actor_id for engine in self.rollout_engines), self.weight_version)
         self.disconnect_rollout_engines()
         self._suspended_baseline = baseline
@@ -226,7 +229,7 @@ class UpdateWeightFromSparseHCCL:
     def _can_resume_baseline(self, engines) -> bool:
         decision = [False]
         baseline = getattr(self, "_suspended_baseline", None)
-        if dist.get_rank() == 0 and baseline is not None and not self._failed:
+        if dist.get_rank() == 0 and baseline is not None and not self._failed and not self._requires_full_seed:
             try:
                 identities, version = baseline
                 if tuple(engine._actor_id for engine in engines) == identities and version == self.weight_version:
@@ -283,6 +286,10 @@ class UpdateWeightFromSparseHCCL:
             return
         assert self._client is not None
         self._client.finish_weight_update(str(self.weight_version))
+        if self._requires_full_seed:
+            versions = ray.get([engine.get_weight_version.remote() for engine in self.rollout_engines])
+            if not versions or any(version != str(self.weight_version) for version in versions):
+                raise RuntimeError("Sparse full-seed recovery did not confirm every receiver version")
         torch.accelerator.synchronize()
         ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
 
@@ -309,7 +316,7 @@ class UpdateWeightFromSparseHCCL:
                     exc_info=True,
                 )
             try:
-                if cleanup_error is None:
+                if cleanup_error is None and not self._requires_full_seed:
                     ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
             except Exception as error:
                 cleanup_error = error
@@ -319,6 +326,7 @@ class UpdateWeightFromSparseHCCL:
                 )
         cleanup_failed, _ = self._sync_update_state(cleanup_error)
         self._failed = cleanup_failed
+        # A previous partial update stays paused even if this attempt sent nothing.
         self._needs_reconnect = not cleanup_failed
         # Diff preparation may already have advanced snapshots. Force the next
         # successful attempt through a dense seed instead of reusing them.
@@ -349,19 +357,27 @@ class UpdateWeightFromSparseHCCL:
         """Seed new or reconnected workers from the complete training weights."""
         bucket = _SparseFlushBucket(self.args.update_weight_buffer_size, self._publish_flush)
         for chunk in self._iterator.get_hf_weight_chunks():
-            if dist.get_rank() != 0 or not chunk:
-                continue
-            for name, tensor in chunk:
-                flat = tensor.reshape(-1)
-                if flat.numel() >= 2**31:
-                    raise ValueError(f"Sparse loader requires checkpoint tensors smaller than 2**31 elements: {name}")
-                max_elements = max(self.args.update_weight_buffer_size // (4 + flat.element_size()), 1)
-                for start in range(0, flat.numel(), max_elements):
-                    end = min(start + max_elements, flat.numel())
-                    indices = torch.arange(start, end, dtype=torch.int32, device=flat.device)
-                    bucket.add(name, tensor.shape, indices, flat[start:end])
-            # The native converter may return views into temporary export buffers.
-            bucket.flush()
+            error = None
+            try:
+                if dist.get_rank() == 0 and chunk:
+                    for name, tensor in chunk:
+                        flat = tensor.reshape(-1)
+                        if flat.numel() >= 2**31:
+                            raise ValueError(
+                                f"Sparse loader requires checkpoint tensors smaller than 2**31 elements: {name}"
+                            )
+                        max_elements = max(self.args.update_weight_buffer_size // (4 + flat.element_size()), 1)
+                        for start in range(0, flat.numel(), max_elements):
+                            end = min(start + max_elements, flat.numel())
+                            indices = torch.arange(start, end, dtype=torch.int32, device=flat.device)
+                            bucket.add(name, tensor.shape, indices, flat[start:end])
+                    # The native converter may return views into temporary export buffers.
+                    bucket.flush()
+            except BaseException as exc:
+                error = exc
+            # Every rank must learn the publication result before the generator
+            # enters the next HF export collective, including ranks with no output.
+            self._sync_publish_error(error)
 
     def _send_sparse_delta(self) -> None:
         assert self._index is not None
@@ -418,6 +434,8 @@ class UpdateWeightFromSparseHCCL:
         try:
             self._ensure_export_index()
             validate_export_weights(self._index)
+            if self._requires_full_seed:
+                self._seeded = False
             if not self._seeded:
                 self._send_seed()
                 prime_delta_snapshots(self._index, self._snapshots, pin=True)
@@ -431,6 +449,8 @@ class UpdateWeightFromSparseHCCL:
         if failed:
             if payload_started:
                 self._failed = True
+                self._requires_full_seed = True
+                self._seeded = False
                 if dist.get_rank() == 0:
                     logger.error(
                         "Sparse HCCL update failed after payload transmission began; generation remains paused"
@@ -448,6 +468,10 @@ class UpdateWeightFromSparseHCCL:
         failed, _ = self._sync_update_state(finish_error)
         if failed:
             self._failed = True
+            self._requires_full_seed = True
+            self._seeded = False
             if dist.get_rank() == 0:
                 logger.error("Sparse HCCL finish failed; reconnect the updater before reusing it")
             self._raise_synchronized_error(finish_error, "finish")
+        # Only a fully published and successfully finished update restores integrity.
+        self._requires_full_seed = False

@@ -345,6 +345,7 @@ def _make_updater(**args):
     instance.args = SimpleNamespace(**args)
     instance._client = object()
     instance._failed = False
+    instance._requires_full_seed = False
     instance._seeded = True
     instance._needs_reconnect = False
     instance._payload_started = False
@@ -946,6 +947,7 @@ def test_sparse_seed_uses_public_sparse_chunks(monkeypatch, rank, capacity):
         send_weight_chunk=lambda patches: sent.append(list(patches)),
     )
     monkeypatch.setattr(updater_module.dist, "get_rank", lambda: rank)
+    instance._sync_update_state = lambda error: (error is not None, False)
     assert instance._send_seed() is None
     assert exported == list(expected)
     assert instance._payload_started == (rank == 0)
@@ -1615,3 +1617,238 @@ def test_sparse_update_restores_actor_before_seed_and_snapshot(
     expected = dict(converter.convert_to_hf(args, "qwen3", name, live.detach(), quantization_config=None))
     assert torch.equal(reconstructed, expected[slots[0][0]].view(-1))
     assert torch.equal(snapshots[name], live.detach())
+
+
+def _seed_publication_worker(rank, rendezvous, capacity, fail):
+    # Load the real seed/bucket methods without bootstrapping NPU dependencies.
+    source = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "vime/backends/megatron_utils/update_weight/update_weight_from_sparse_hccl.py"
+    )
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    selected = []
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "_SparseFlushBucket":
+            selected.append(node)
+        elif isinstance(node, ast.ClassDef) and node.name == "UpdateWeightFromSparseHCCL":
+            node.body = [
+                n
+                for n in node.body
+                if isinstance(n, ast.FunctionDef)
+                and n.name in {"_send_seed", "_sync_publish_error", "_raise_synchronized_error"}
+            ]
+            selected.append(node)
+    namespace = {"torch": torch, "dist": dist, "SparseWeightPatch": SimpleNamespace}
+    exec(
+        compile(
+            ast.Module(body=selected, type_ignores=[]),
+            str(source),
+            "exec",
+            flags=__import__("__future__").annotations.compiler_flag,
+        ),
+        namespace,
+    )
+    dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=2, timeout=timedelta(seconds=15))
+    visited, published = [], []
+    try:
+
+        def chunks():
+            for number in range(2):
+                # Models the next export's collective; entering this after a
+                # peer has switched to error reduction is the reported bug.
+                dist.barrier()
+                visited.append(number)
+                yield [(f"weight{number}", torch.tensor([1.0, 2.0]))] if rank == 0 else []
+
+        def publish(patches):
+            published.extend(p.name for p in patches)
+            if fail:
+                raise ValueError("injected first-chunk send failure")
+
+        def sync(error):
+            flag = torch.tensor([int(error is not None)], dtype=torch.int64)
+            dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+            return bool(flag.item()), False
+
+        updater = namespace["UpdateWeightFromSparseHCCL"]()
+        updater.args = SimpleNamespace(update_weight_buffer_size=capacity)
+        updater._iterator = SimpleNamespace(get_hf_weight_chunks=chunks)
+        updater._publish_flush = publish
+        updater._sync_update_state = sync
+        if fail:
+            with pytest.raises((ValueError, RuntimeError)):
+                updater._send_seed()
+            assert visited == [0]
+            assert published == (["weight0"] if rank == 0 else [])
+        else:
+            updater._send_seed()
+            assert visited == [0, 1]
+            assert bool(published) == (rank == 0)
+        dist.barrier()
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("capacity", [8, 128], ids=["bucket-add-send", "explicit-flush-send"])
+@pytest.mark.parametrize("fail", [False, True], ids=["success", "first-chunk-failure"])
+def test_seed_publication_result_precedes_next_export_collective(tmp_path, cpu_gather, capacity, fail):
+    # cpu_gather marks this as CPU-only for the module dependency fixture.
+    mp.spawn(
+        _seed_publication_worker, args=(f"file://{tmp_path / 'seed-rendezvous'}", capacity, fail), nprocs=2, join=True
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("retry_failure", [None, "cleanup", "seed", "finish", "version"])
+def test_partial_update_reconnect_stays_paused_until_full_seed(tmp_path, cpu_gather, retry_failure):
+    # Run the production recovery state machine with a receiver session double.
+    # Tensor writes and comparisons are real; no NPU/bootstrap dependencies.
+    import logging
+    import socket
+
+    source = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "vime/backends/megatron_utils/update_weight/update_weight_from_sparse_hccl.py"
+    )
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    node = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "UpdateWeightFromSparseHCCL")
+    expected = torch.tensor([9.0, 8.0])
+    receiver = torch.tensor([1.0, 2.0])
+    state = {"active": False, "version": "1", "resumes": 0, "failure": None}
+    events = []
+
+    def remote(fn):
+        return SimpleNamespace(remote=fn)
+
+    def resume():
+        assert torch.equal(receiver, expected), "resumed generation with mixed weights"
+        state["resumes"] += 1
+        events.append("resume")
+
+    engine = SimpleNamespace(
+        _actor_id="receiver",
+        pause_generation=remote(lambda: events.append("pause")),
+        flush_cache=remote(lambda: None),
+        continue_generation=remote(resume),
+        get_weight_version=remote(lambda: state["version"]),
+    )
+
+    class Client:
+        def __init__(self, *a):
+            pass
+
+        def start_weight_update(self):
+            if state["active"]:
+                raise RuntimeError("old receiver session still active")
+            state["active"] = True
+
+        def finish_weight_update(self, version):
+            if state["failure"] in {"cleanup", "finish"}:
+                raise RuntimeError("injected finish/cleanup failure")
+            state["active"] = False
+            state["version"] = "wrong" if state["failure"] == "version" else version
+
+    trainer = SimpleNamespace(shutdown=lambda: None)
+    namespace = dict(
+        torch=torch,
+        dist=SimpleNamespace(
+            get_rank=lambda: 0, barrier=lambda **kw: None, broadcast_object_list=lambda *a, **kw: None
+        ),
+        ray=SimpleNamespace(
+            get=lambda refs: refs,
+            _private=SimpleNamespace(services=SimpleNamespace(get_node_ip_address=lambda: "127.0.0.1")),
+        ),
+        get_gloo_group=lambda: None,
+        socket=socket,
+        logger=logging.getLogger(__name__),
+        VimeRayWeightSyncClient=Client,
+        SparseHCCLTrainerInitInfo=lambda **kw: kw,
+        SparseHCCLTrainerWeightTransferEngine=SimpleNamespace(trainer_init=lambda *a, **kw: trainer),
+        validate_export_weights=lambda index: None,
+        prime_delta_snapshots=lambda index, snapshots, **kw: snapshots.update(weight=expected.clone()),
+    )
+    exec(
+        compile(
+            ast.Module(body=[node], type_ignores=[]),
+            str(source),
+            "exec",
+            flags=__import__("__future__").annotations.compiler_flag,
+        ),
+        namespace,
+    )
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+        cls = namespace["UpdateWeightFromSparseHCCL"]
+        updater = cls.__new__(cls)
+        updater.args = SimpleNamespace(rollout_num_gpus_per_engine=1, vllm_pipeline_parallel_size=1)
+        updater.weight_version = 1
+        updater._client = Client()
+        updater._trainer = trainer
+        updater._seeded, updater._failed, updater._requires_full_seed = True, False, False
+        updater._needs_reconnect, updater._payload_started = False, False
+        updater._index, updater._snapshots, updater._gather_workspaces = [], {"weight": receiver.clone()}, {}
+        updater.rollout_engines = [engine]
+        updater._ensure_export_index = lambda: None
+        updater._sync_update_state = lambda error: (error is not None, updater._payload_started)
+
+        def partial_delta():
+            updater._payload_started = True
+            receiver[0] = expected[0]
+            raise ValueError("second chunk validation failed")
+
+        updater._send_sparse_delta = partial_delta
+        with pytest.raises(ValueError, match="second chunk"):
+            updater.update_weights()
+        assert updater._requires_full_seed and updater._failed
+        assert not torch.equal(receiver, expected)
+        updater.connect_rollout_engines([engine], None)
+        assert updater._requires_full_seed and not updater._seeded
+        assert not updater._snapshots and state["resumes"] == 0
+        state["failure"] = "cleanup" if retry_failure == "cleanup" else None
+        with pytest.raises(RuntimeError, match="old receiver session"):
+            updater.update_weights()
+        assert updater._requires_full_seed and state["resumes"] == 0
+
+        state["failure"] = retry_failure if retry_failure != "cleanup" else None
+        updater.connect_rollout_engines([engine], None)
+        # A failed cleanup still leaves the old session active. Clean it on the
+        # next failed start; it must remain paused throughout.
+        if state["active"]:
+            with pytest.raises(RuntimeError, match="old receiver session"):
+                updater.update_weights()
+            assert state["resumes"] == 0
+            updater.connect_rollout_engines([engine], None)
+
+        def full_seed():
+            events.append("seed")
+            updater._payload_started = True
+            if state["failure"] == "seed":
+                raise ValueError("recovery seed failed")
+            receiver.copy_(expected)
+
+        updater._send_seed = full_seed
+        updater._send_sparse_delta = lambda: pytest.fail("partial receiver requires full seed")
+        if retry_failure in {"seed", "finish", "version"}:
+            with pytest.raises((ValueError, RuntimeError)):
+                updater.update_weights()
+            assert updater._requires_full_seed and state["resumes"] == 0
+            state["failure"] = None
+            updater.connect_rollout_engines([engine], None)
+            if state["active"]:
+                with pytest.raises(RuntimeError, match="old receiver session"):
+                    updater.update_weights()
+                assert updater._requires_full_seed and state["resumes"] == 0
+                updater.connect_rollout_engines([engine], None)
+            updater.update_weights()
+            assert not updater._requires_full_seed and state["resumes"] == 1
+            assert torch.equal(receiver, expected)
+        else:
+            updater.update_weights()
+            assert events[-2:] == ["seed", "resume"]
+            assert not updater._requires_full_seed and state["resumes"] == 1
+            assert state["version"] == str(updater.weight_version)
+            assert torch.equal(receiver, expected)
+    finally:
+        monkeypatch.undo()
