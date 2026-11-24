@@ -45,7 +45,7 @@ def prepare(checkpoint_root):
     return str(checkpoint_path)
 
 
-def _train_args(*, ref_load: str, debug_data: Path) -> str:
+def _train_args(*, ref_load: str) -> str:
     ckpt_args = f"--hf-checkpoint {shlex.quote(MODEL_DIR)} --ref-load {shlex.quote(ref_load)} --no-load-optim "
 
     rollout_args = (
@@ -118,7 +118,6 @@ def _train_args(*, ref_load: str, debug_data: Path) -> str:
     verify_args = (
         "--ci-test "
         "--ci-disable-kl-checker "
-        f"--save-debug-rollout-data {shlex.quote(str(debug_data / 'rollout_{{rollout_id}}.pt'))} "
     )
 
     misc_args = (
@@ -151,15 +150,12 @@ def _train_args(*, ref_load: str, debug_data: Path) -> str:
 
 
 def execute(ref_load: str):
-    scratch = Path(TEST_ROOT) / "tmp"
-    scratch.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="vime_pd_35b_", dir=scratch) as debug_dir:
-        U.execute_train(
-            train_args=_train_args(ref_load=ref_load, debug_data=Path(debug_dir)),
-            num_gpus_per_node=NUM_GPUS,
-            megatron_model_type=MODEL_TYPE,
-            extra_env_vars={"DISABLE_L2_CACHE": "1", "VLLM_USE_AOT_COMPILE": "0"},
-        )
+    U.execute_train(
+        train_args=_train_args(ref_load=ref_load),
+        num_gpus_per_node=NUM_GPUS,
+        megatron_model_type=MODEL_TYPE,
+        extra_env_vars={"DISABLE_L2_CACHE": "1", "VLLM_USE_AOT_COMPILE": "0"},
+    )
 
 
 def main():

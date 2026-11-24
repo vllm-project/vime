@@ -251,10 +251,39 @@ def test_add_vllm_router_arguments_defaults_to_cache_aware(args_mod):
     args_mod.add_vllm_router_arguments(parser)
     parsed, _ = parser.parse_known_args([])
     assert parsed.router_policy == "cache_aware"
-    assert parsed.router_kv_connector == "mooncake"
+    assert parsed.router_kv_connector is None
     parsed = parser.parse_args(["--router-kv-connector", "nixl"])
     assert parsed.router_kv_connector == "nixl"
 
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("has_pd, expected", [(True, "nixl"), (False, "mooncake")])
+def test_router_kv_connector_defaults_to_nixl_on_npu_pd(args_mod, monkeypatch, has_pd, expected):
+    from vllm_router.router_args import RouterArgs
+
+    from vime.backends.vllm_utils import deployment
+
+    parser = argparse.ArgumentParser(add_help=False)
+    args_mod.add_vllm_router_arguments(parser)
+    args = parser.parse_args([])
+    assert args.router_kv_connector is None
+    router_args = SimpleNamespace(kv_connector=None, log_level="warning")
+    monkeypatch.setattr(RouterArgs, "from_cli_args", lambda *a, **k: router_args)
+    monkeypatch.setattr(deployment, "find_available_port", lambda port: port)
+    monkeypatch.setattr(deployment.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        deployment.multiprocessing,
+        "Process",
+        lambda *, target, args: SimpleNamespace(start=lambda: None, is_alive=lambda: True),
+    )
+    monkeypatch.setattr(deployment, "get_host_info", lambda: (None, "127.0.0.1"))
+    monkeypatch.setattr(deployment, "current_platform", lambda: SimpleNamespace(name="npu"))
+    args.vllm_router_ip = None
+    args.vllm_router_port = 30000
+    args.vllm_data_parallel_size = 1
+    deployment._start_router(args, has_pd_disaggregation=has_pd)
+    assert router_args.kv_connector == expected
 
 @pytest.mark.unit
 @pytest.mark.parametrize("flags, expected", [([], "warning"), (["--router-log-level", "debug"], "debug")])

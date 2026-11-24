@@ -693,6 +693,22 @@ def test_build_vllm_subprocess_env_sets_disaggregation_side_channel(vllm_args, n
         assert env["VLLM_NIXL_SIDE_CHANNEL_HOST"] == "10.0.0.8"
         assert env["VLLM_NIXL_SIDE_CHANNEL_PORT"] == "29999"
 
+@pytest.mark.unit
+def test_build_vllm_subprocess_env_skips_side_channel_without_bootstrap_port(vllm_args):
+    env = mod._build_subprocess_env(
+        {
+            "_args": vllm_args,
+            "_visible_devices": "0",
+            "_worker_type": "decode",
+            "node_rank": 0,
+            "host": "10.0.0.8",
+        }
+    )
+    assert "VLLM_MOONCAKE_BOOTSTRAP_PORT" not in env
+    assert "VLLM_NIXL_SIDE_CHANNEL_HOST" not in env
+    assert "VLLM_NIXL_SIDE_CHANNEL_PORT" not in env
+
+
 
 @pytest.mark.unit
 def test_compute_server_args_adds_sleep_mode_for_offload_rollout(vllm_args):
