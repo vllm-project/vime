@@ -25,7 +25,6 @@ export HYDRA_FULL_ERROR=1
 export DISABLE_L2_CACHE=1
 export VLLM_ASCEND_ENABLE_NZ=0
 export VLLM_USE_AOT_COMPILE=0
-export VLLM_ASCEND_VECTOR_SEQ_LENS=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export PYTHONPATH="/root/Megatron-LM/:${PYTHONPATH:-}"
 
@@ -105,9 +104,9 @@ VLLM_ARGS=(
    --vllm-additional-config '{"weight_nz_mode":0}'
    --rollout-num-gpus-per-engine 4
    --vllm-gpu-memory-utilization 0.6
-   --vllm-max-model-len 4096
-   --vllm-max-num-batched-tokens 4096
-   --vllm-speculative-config "{\"method\":\"dspark\",\"model\":\"${DRAFT_MODEL}\",\"num_speculative_tokens\":2,\"disable_eagle_block_drop\":true}"
+   --vllm-max-num-seqs 32
+   --vllm-max-num-batched-tokens 16384
+   --vllm-speculative-config "{\"method\":\"dspark\",\"model\":\"${DRAFT_MODEL}\",\"num_speculative_tokens\":7}"
 )
 
 DRAFT_ARGS=(
