@@ -1,0 +1,93 @@
+diff --git a/transformer_engine/pytorch/attention/rope.py b/transformer_engine/pytorch/attention/rope.py
+index e05343cc9578..6198cea9e96c 100644
+--- a/transformer_engine/pytorch/attention/rope.py
++++ b/transformer_engine/pytorch/attention/rope.py
+@@ -185,37 +185,22 @@
+     sin_: torch.Tensor,
+     interleaved: bool = False,
+ ) -> torch.Tensor:
+-    """Backward of the ``npu_rotary_mul`` kernel transform, two-path dispatch.
+-
+-    Path 1 (fast, fused kernel): when the freqs are in the duplicated-angle
+-    format produced by every standard rotary embedding constructor
+-    (``cat(freqs, freqs)`` non-interleaved / stacked interleaved — Megatron
+-    ``RotaryEmbedding`` and TE ``RotaryPositionEmbedding`` alike), the halves
+-    of ``sin_`` are elementwise equal, so ``npu_rotary_mul(g, cos, -sin)``
+-    — whose only flaw is swapping the per-pair sin indices (REPORT atk
+-    3#10) — is numerically exact. Verified on NPU: bitwise identical to the
+-    adjoint in fp32; bf16 differs only by 1-ULP rounding order (kernel
+-    accumulates in one pass, the Python adjoint rounds between ops). This is
+-    the real-training path (Megatron always feeds duplicated angles).
+-
+-    Path 2 (exact Python adjoint): arbitrary freqs where
+-    ``sin_[..., :w/2] != sin_[..., w/2:]`` — the kernel's index swap would be
+-    a real gradient error, so ``_rotary_mul_adjoint`` (the exact transpose)
+-    is used instead.
+-
+-    The dispatch check is one equality over the freqs-width tensor (~1 MB at
+-    seq 4096) — negligible against the rope operand (~64 MB).
++    """Apply the rotary transform's adjoint without reading device scalars.
++
++    For each pair (i, j), forward uses sin[i] in output i and sin[j] in
++    output j. Its transpose therefore needs -sin[j] at i and -sin[i] at j.
++    Swapping each pair before negation lets the fused kernel implement the
++    adjoint for arbitrary angles, including duplicated-angle embeddings.
+     """
+     w = grad.shape[-1]
+-    if w >= 2:
+-        if interleaved:
+-            # stacked format: pairs (2j, 2j+1) duplicate within each pair
+-            dup = torch.equal(sin_[..., 0::2], sin_[..., 1::2])
+-        else:
+-            dup = torch.equal(sin_[..., : w // 2], sin_[..., w // 2 :])
+-        if dup:
+-            return _npu_rotary_mul(grad, cos_, -sin_, interleaved)
+-    return _rotary_mul_adjoint(grad, cos_, sin_, interleaved)
++    if w < 2 or w % 2:
++        return _rotary_mul_adjoint(grad, cos_, sin_, interleaved)
++    if interleaved:
++        sin_adjoint = -torch.stack((sin_[..., 1::2], sin_[..., 0::2]), dim=-1).flatten(-2)
++    else:
++        half = w // 2
++        sin_adjoint = -torch.cat((sin_[..., half:], sin_[..., :half]), dim=-1)
++    return _npu_rotary_mul(grad, cos_, sin_adjoint, interleaved)
+
+
+ def _apply_fused_rope_4d(
+@@ -378,13 +363,8 @@
+                 )
+                 rot_dim = seq_freqs.shape[-1]
+                 x_grad_rot = x_grad[..., :rot_dim]
+-                # The THD forward runs the asymmetric npu_rotary_mul kernel
+-                # (via _apply_fused_rope_thd_single); the exact transpose of
+-                # that transform, not the symmetric _rotate_half_thd formula,
+-                # is the correct adjoint (REPORT atk 3#10, same sin-index fix
+-                # as the sbhd/bshd kernel branches). _rotary_mul_bwd keeps the
+-                # fused kernel for duplicated-angle freqs (fast path) and
+-                # falls back to the exact adjoint for arbitrary freqs.
++                # Pair-swapped sine coefficients give the exact transpose
++                # without a device-to-host equality check for each sequence.
+                 x_grad_rot = _rotary_mul_bwd(x_grad_rot, cos_, sin_, interleaved)
+                 if rot_dim < x_grad.shape[-1]:
+                     grad_inputs.append(torch.cat([x_grad_rot, x_grad[..., rot_dim:]], dim=-1))
+@@ -412,9 +392,7 @@
+                 use_npu_kernel = False
+
+         if use_npu_kernel:
+-            # Two-path backward (REPORT atk 3#10): duplicated-angle freqs
+-            # (every standard rotary constructor) keep the fused kernel —
+-            # numerically exact there; arbitrary freqs take the exact adjoint.
++            # The pair-swapped coefficients also handle arbitrary angles.
+             grad_input_rot = _rotary_mul_bwd(grad_output_rot, cos_, sin_, interleaved)
+         else:
+             grad_input_rot = (grad_output_rot * cos_) - (
+@@ -537,8 +515,7 @@
+         grad_q_rot = grad_q[..., :q_rot_dim].contiguous()
+         grad_q_pass = grad_q[..., q_rot_dim:]
+         if use_npu_kernel:
+-            # Two-path backward (REPORT atk 3#10): duplicated-angle freqs keep
+-            # the fused kernel; arbitrary freqs take the exact adjoint.
++            # The pair-swapped coefficients also handle arbitrary angles.
+             grad_q_rot = _rotary_mul_bwd(grad_q_rot, q_cos, q_sin, interleaved)
+         else:
+             grad_q_rot = (grad_q_rot * q_cos) - (_rotate_half(grad_q_rot, interleaved) * q_sin)
