@@ -1,13 +1,17 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import random
-
-import aiohttp
+from typing import TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
 from vime.utils.misc import load_function
 from vime.utils.types import Sample
+
+if TYPE_CHECKING:
+    import aiohttp
 
 from .deepscaler import get_deepscaler_rule_based_reward
 from .f1 import f1_score
@@ -20,6 +24,8 @@ _shared_session: aiohttp.ClientSession | None = None
 
 
 def _get_shared_session() -> aiohttp.ClientSession:
+    import aiohttp
+
     global _shared_session
     if _shared_session is None or _shared_session.closed:
         connector = aiohttp.TCPConnector(
