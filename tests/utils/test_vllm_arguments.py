@@ -256,7 +256,6 @@ def test_add_vllm_router_arguments_defaults_to_cache_aware(args_mod):
     assert parsed.router_kv_connector == "nixl"
 
 
-
 @pytest.mark.unit
 @pytest.mark.parametrize("has_pd, expected", [(True, "nixl"), (False, "mooncake")])
 def test_router_kv_connector_defaults_to_nixl_on_npu_pd(args_mod, monkeypatch, has_pd, expected):
@@ -284,6 +283,7 @@ def test_router_kv_connector_defaults_to_nixl_on_npu_pd(args_mod, monkeypatch, h
     args.vllm_data_parallel_size = 1
     deployment._start_router(args, has_pd_disaggregation=has_pd)
     assert router_args.kv_connector == expected
+
 
 @pytest.mark.unit
 @pytest.mark.parametrize("flags, expected", [([], "warning"), (["--router-log-level", "debug"], "debug")])

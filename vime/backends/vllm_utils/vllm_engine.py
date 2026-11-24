@@ -103,7 +103,11 @@ def _build_subprocess_env(server_args_dict: dict[str, Any]) -> dict[str, str]:
     bootstrap_port = server_args_dict.get("_disaggregation_bootstrap_port")
     if worker_type in ("prefill", "decode") and bootstrap_port is not None:
         env["VLLM_MOONCAKE_BOOTSTRAP_PORT"] = str(bootstrap_port)
-    if worker_type in ("prefill", "decode") and server_args_dict.get("node_rank", 0) == 0 and bootstrap_port is not None:
+    if (
+        worker_type in ("prefill", "decode")
+        and server_args_dict.get("node_rank", 0) == 0
+        and bootstrap_port is not None
+    ):
         host_for_subprocess = (server_args_dict.get("host") or "127.0.0.1").strip("[]")
         env["VLLM_NIXL_SIDE_CHANNEL_HOST"] = host_for_subprocess
         env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(bootstrap_port)

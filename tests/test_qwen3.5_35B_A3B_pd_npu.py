@@ -115,10 +115,7 @@ def _train_args(*, ref_load: str) -> str:
         "--prefill-num-servers 1 "
     )
 
-    verify_args = (
-        "--ci-test "
-        "--ci-disable-kl-checker "
-    )
+    verify_args = "--ci-test " "--ci-disable-kl-checker "
 
     misc_args = (
         "--attention-dropout 0.0 "
