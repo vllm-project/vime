@@ -49,7 +49,7 @@ steps:
 
       - label: ":pipeline: upload NPU suites"
         key: upload-npu-suites
-        depends_on: 
+        depends_on:
           - npu-gate
         agents:
           queue: "ascend-a3"

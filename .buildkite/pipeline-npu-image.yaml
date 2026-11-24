@@ -1,7 +1,7 @@
 steps:
   - label: ":docker: Build and Push NPU Test Image - A3"
     key: image-build-npu
-    depends_on: 
+    depends_on:
       - pre-commit-npu
       - npu-gate
     timeout_in_minutes: 240
