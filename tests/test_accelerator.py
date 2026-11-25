@@ -441,3 +441,26 @@ def test_backend_overrides_resolve_without_a_local_device(monkeypatch, no_local_
     assert megatron_lifecycle.current() is module
     assert accelerator.weight_transfer_backend("distributed") == "custom_distributed"
     assert accelerator.weight_transfer_init_info("distributed", rank=3).rank == 3
+
+
+@pytest.mark.unit
+def test_function_factory_requires_runtime_selection_before_describing_backend(monkeypatch, no_local_backend):
+    from vime.ray import resources
+
+    calls = []
+
+    def factory():
+        calls.append("create")
+        return FakeAccelerator()
+
+    accelerator.register_accelerator("custom", factory, lambda: True)
+    monkeypatch.setenv("VIME_ACCELERATOR", "custom")
+
+    with pytest.raises(TypeError, match="custom.*requires class registration"):
+        resources.actor_options(1)
+    assert calls == []
+
+    selected = accelerator.get_accelerator()
+    assert accelerator.get_accelerator() is selected
+    assert resources.actor_options(1) == {"num_gpus": 1}
+    assert calls == ["create"]

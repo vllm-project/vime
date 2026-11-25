@@ -326,9 +326,9 @@ def _describing_backend() -> type[Accelerator]:
     Side effects by branch, because they are not uniform:
 
     * An already selected backend, and the neutral default: none.
-    * An explicit request: the registered class is returned as a class. A
-      registration whose factory is not itself a class is called once to
-      learn the type, so such a factory must stay cheap.
+    * An explicit request: the registered class is returned without calling
+      its constructor. Non-class factories require runtime selection before
+      their backend can be described.
     * Falling through to auto-detection: this runs the ordinary selection,
       which probes for devices, may import a vendor runtime, and installs
       the process-wide backend. A caller that must not reach a runtime names
@@ -344,7 +344,12 @@ def _describing_backend() -> type[Accelerator]:
             registered = ", ".join(sorted(_REGISTRY))
             raise ValueError(f"Unknown accelerator {requested!r}; registered backends: {registered}")
         factory = entry.factory
-        return factory if isinstance(factory, type) else type(factory())
+        if not isinstance(factory, type):
+            raise TypeError(
+                f"Accelerator {requested!r} requires class registration "
+                "to query configuration before runtime selection"
+            )
+        return factory
     selected = initialize_accelerator()
     if selected is not None:
         return type(selected)
