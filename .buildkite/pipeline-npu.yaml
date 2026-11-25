@@ -52,7 +52,8 @@ steps:
         depends_on: 
           - npu-gate
         agents:
-          queue: small_cpu_queue_premerge
+          queue: "ascend-a3"
+          resource_class: "npu-2"
         timeout_in_minutes: 180
         command:  |
           NPU_SUITES=$$(buildkite-agent meta-data get "npu-suites" --default "")
