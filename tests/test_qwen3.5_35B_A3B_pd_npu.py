@@ -84,7 +84,6 @@ def _train_args(*, ref_load: str) -> str:
 
     grpo_args = (
         "--advantage-estimator grpo "
-        "--use-kl-loss "
         "--kl-loss-coef 0.00 "
         "--kl-loss-type low_var_kl "
         "--entropy-coef 0.00 "
