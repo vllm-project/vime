@@ -156,7 +156,8 @@ class RayTrainGroup:
         """Do one rollout training. Returns a list of Ray refs (one per worker).
 
         For critics, each ref resolves to ``{"values": [cpu tensors...]}`` (or ``{}``
-        for non-last-PP-stage workers). Actor refs resolve to ``None``.
+        for non-last-PP-stage workers). Actors normally resolve to ``None``; when
+        external Draft collection is enabled they return feature manifests.
 
         ``external_data`` may be a list (one item per worker) or a single dict
         broadcast to all workers.
@@ -195,6 +196,28 @@ class RayTrainGroup:
         if self._release_train_enabled():
             self.release()
         self._reload_rollout_weights_from_disk(disk_weight_dir, str(weight_version))
+
+    def set_external_draft_weights(self, weights_ref, draft_version: str) -> None:
+        """Stage Draft tensors on Actor rank zero and publish the pending flag to all ranks."""
+        if not self._actor_handlers:
+            raise RuntimeError("Cannot stage external Draft weights before Actor creation")
+        ray.get(
+            [
+                actor.set_external_draft_weights.remote(
+                    weights_ref if rank == 0 else None,
+                    draft_version,
+                )
+                for rank, actor in enumerate(self._actor_handlers)
+            ]
+        )
+
+    def get_weight_version(self) -> int:
+        if not self._actor_handlers:
+            return int(self._disk_weight_version)
+        versions = ray.get([actor.get_weight_version.remote() for actor in self._actor_handlers])
+        if len(set(int(value) for value in versions)) != 1:
+            raise RuntimeError(f"Actor weight versions diverged across ranks: {versions}")
+        return int(versions[0])
 
     def onload(self):
         return ray.get([actor.wake_up.remote() for actor in self._actor_handlers])
