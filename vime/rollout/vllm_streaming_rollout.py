@@ -42,11 +42,13 @@ from vime.observability.trace_utils import build_vllm_meta_trace_attrs, trace_sp
 from vime.rollout.vllm_rollout import (
     GenerateState,
     _align_mm_feature_placeholders_to_tokens,
+    _apply_trace_replay_sampling_params,
     _build_inference_sampling_params,
     _coerce_flat_int_token_ids,
     _inference_generate_meta_info,
     _inference_generate_metrics,
     _inference_generate_tokens_and_logprobs,
+    _inference_generate_weight_versions,
     _mm_render_response_to_generate_body,
     _prepare_prompt_ids,
     _prepare_trace_replay,
@@ -101,7 +103,7 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
         return sample
     inference_sampling_params = _build_inference_sampling_params(params)
     if trace_ids is not None:
-        inference_sampling_params["trace_decode_token_ids"] = trace_ids
+        _apply_trace_replay_sampling_params(inference_sampling_params, trace_ids)
 
     if trace_ids is None and not sample.tokens:
         sample.tokens = prompt_ids
@@ -235,6 +237,9 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
                     call_log_probs += delta_log_probs
 
                 if trace_ids is not None:
+                    chunk_weight_versions = _inference_generate_weight_versions(chunk, choice)
+                    if chunk_weight_versions:
+                        weight_versions = chunk_weight_versions
                     # A replayed sample is committed only after the entire trace has been checked.
                     if state.aborted:
                         break
@@ -286,6 +291,8 @@ async def generate_streaming(args: Namespace, sample: Sample, sampling_params: d
         meta = _inference_generate_meta_info(
             {"choices": [replay_choice], "usage": last_usage, "metrics": response_metrics}
         )
+        if weight_versions:
+            meta["weight_versions"] = weight_versions
         if not sample.tokens:
             sample.tokens = prompt_ids
         sample.append_response_tokens(

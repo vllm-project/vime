@@ -371,6 +371,12 @@ def _prepare_trace_replay(args: Namespace, sample: Sample, max_new_tokens: int |
     return [int(token_id) for token_id in prompt_ids], [int(token_id) for token_id in trace_ids]
 
 
+def _apply_trace_replay_sampling_params(inference_sampling_params: dict[str, Any], trace_ids: list[int]) -> None:
+    inference_sampling_params["max_tokens"] = len(trace_ids)
+    inference_sampling_params["min_tokens"] = 0
+    inference_sampling_params["trace_decode_token_ids"] = trace_ids
+
+
 def _validate_trace_replay_output(choice: dict[str, Any], trace_ids: list[int]) -> None:
     token_ids = choice.get("token_ids")
     if isinstance(token_ids, list) and len(token_ids) < len(trace_ids):
@@ -434,7 +440,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     score_centering_top_k = (0 if args.rollout_top_p < 1 else args.score_centering_top_k) if score_centering else None
     inference_sampling_params = _build_inference_sampling_params(sampling_params, logprobs)
     if trace_ids is not None:
-        inference_sampling_params["trace_decode_token_ids"] = trace_ids
+        _apply_trace_replay_sampling_params(inference_sampling_params, trace_ids)
     routed_experts_start = 0
     if args.use_rollout_routing_replay and sample.response_length:
         routed_experts_start = sample.get_rollout_routed_experts_length()
@@ -535,6 +541,14 @@ def _inference_generate_metrics(output: dict[str, Any]) -> dict[str, Any]:
     return metrics if isinstance(metrics, dict) else {}
 
 
+def _inference_generate_weight_versions(output: dict[str, Any], choice: dict[str, Any]) -> list[str]:
+    if "weight_versions" in choice:
+        return [span["version"] for span in choice.get("weight_versions") or [] if span["start"] < span["end"]]
+    if output.get("weight_version") is not None:
+        return [str(output["weight_version"])]
+    return []
+
+
 def _inference_generate_meta_info(output: dict[str, Any]) -> dict[str, Any]:
     choice = output["choices"][0]
     # Build meta_info from the vLLM `choices` response format.
@@ -548,11 +562,7 @@ def _inference_generate_meta_info(output: dict[str, Any]) -> dict[str, Any]:
     else:
         finish = {"type": "stop"}
     meta: dict[str, Any] = {"finish_reason": finish}
-    meta["weight_versions"] = [
-        span["version"] for span in choice.get("weight_versions") or [] if span["start"] < span["end"]
-    ]
-    if "weight_versions" not in choice and output.get("weight_version") is not None:
-        meta["weight_versions"] = [str(output["weight_version"])]
+    meta["weight_versions"] = _inference_generate_weight_versions(output, choice)
     usage = output.get("usage")
     if usage:
         meta["prompt_tokens"] = usage.get("prompt_tokens", 0)

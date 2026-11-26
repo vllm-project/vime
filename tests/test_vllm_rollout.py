@@ -213,7 +213,7 @@ def test_generate_replays_trace_and_checks_output(patch_generate_state, monkeypa
         rows.pop()
     post_mock = AsyncMock(return_value=response)
     monkeypatch.setattr(mod, "post", post_mock)
-    sampling_params = _default_sampling_params(max_new_tokens=32)
+    sampling_params = _default_sampling_params(max_new_tokens=32, min_new_tokens=32)
 
     if fault == "abort":
         result = asyncio.run(mod.generate(_rollout_args(), sample, sampling_params))
@@ -238,8 +238,10 @@ def test_generate_replays_trace_and_checks_output(patch_generate_state, monkeypa
     assert payload["sampling_params"]["trace_decode_token_ids"] == trace_ids
     json.dumps(payload)
     assert payload["sampling_params"]["max_tokens"] == len(trace_ids)
+    assert payload["sampling_params"]["min_tokens"] == 0
     assert payload["sampling_params"]["logprobs"] == 1
     assert sampling_params["max_new_tokens"] == 32
+    assert sampling_params["min_new_tokens"] == 32
 
 
 def test_generate_rejects_trace_over_budget_before_post(patch_generate_state, monkeypatch):
@@ -330,9 +332,11 @@ def test_generate_streaming_replays_trace(patch_generate_state, monkeypatch, out
 
     async def lines():
         first = {"token_ids": [65], "logprobs": {"content": [{"token_id": 65, "logprob": -0.1}]}}
+        first_chunk = {"choices": [first]}
         if outcome == "complete":
             first["sampling_mask"] = [[65, 165]]
-        yield "data: " + json.dumps({"choices": [first]})
+            first_chunk["weight_version"] = "step-7"
+        yield "data: " + json.dumps(first_chunk)
         assert sample.response_length == 0
         last = {
             "token_ids": [67 if outcome == "wrong_token" else 66],
@@ -340,7 +344,7 @@ def test_generate_streaming_replays_trace(patch_generate_state, monkeypatch, out
         }
         if outcome == "complete":
             last["sampling_mask"] = [[66]]
-            yield "data: " + json.dumps({"choices": [last]})
+            yield "data: " + json.dumps({"choices": [last], "weight_version": "step-7"})
             last = {"token_ids": []}
         elif outcome in ("abort", "incomplete"):
             last = {"token_ids": []}
@@ -354,11 +358,12 @@ def test_generate_streaming_replays_trace(patch_generate_state, monkeypatch, out
         assert json["stream"] is True and json["token_ids"] == prompt_ids
         assert json["sampling_params"]["trace_decode_token_ids"] == trace_ids
         assert json["sampling_params"]["max_tokens"] == len(trace_ids)
+        assert json["sampling_params"]["min_tokens"] == 0
         assert json["sampling_params"]["logprobs"] == 1
         yield SimpleNamespace(raise_for_status=lambda: None, aiter_lines=lines)
 
     monkeypatch.setattr(streaming.http_utils, "_http_client", SimpleNamespace(stream=stream))
-    params = _default_sampling_params(max_new_tokens=8, top_p=top_p)
+    params = _default_sampling_params(max_new_tokens=8, min_new_tokens=8, top_p=top_p)
     generate = streaming.generate_streaming(args, sample, params)
     messages = {
         "wrong_token": "output token IDs",
@@ -370,12 +375,14 @@ def test_generate_streaming_replays_trace(patch_generate_state, monkeypatch, out
     else:
         asyncio.run(generate)
     assert params["max_new_tokens"] == 8
+    assert params["min_new_tokens"] == 8
     if outcome == "complete":
         assert sample.status == Sample.Status.TRUNCATED
         assert sample.tokens == prompt_ids + trace_ids
         assert sample.rollout_log_probs == [-0.1, -0.2]
         assert sample.rollout_top_p_token_ids.tolist() == [65, 165, 66]
         assert sample.rollout_top_p_token_offsets.tolist() == [0, 2, 3]
+        assert sample.weight_versions == ["step-7"]
     else:
         assert sample.status == (Sample.Status.ABORTED if outcome == "abort" else Sample.Status.PENDING)
         assert sample.tokens == [] and sample.response_length == 0
