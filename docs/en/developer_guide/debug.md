@@ -95,7 +95,7 @@ When using INT4-quantized models (e.g., `compressed-tensors` with `W4A16`), the 
 
 4. **How to diagnose**
 
-   - Use `--check-weight-update-equal` to verify that weights after a Megatron → vLLM sync match the expected values. If a parameter shows all zeros on the vLLM side, it was likely incorrectly quantized or missing from the checkpoint.
+   - Use `--check-weight-update-equal` to verify that weights after a Megatron → vLLM sync match the expected values. The checker deliberately zeroes parameters before the first full sync. If a parameter that was nonzero in the baseline is still zero after the sync, use the reported endpoint, rank and parameter name to check the weight mapping, checkpoint shards and quantization layout.
    - Use `--debug-rollout-only` with a small number of GPUs to quickly test whether vLLM can generate coherent text from the quantized checkpoint alone.
 
 ## Check the initial weight update
@@ -110,7 +110,7 @@ Use `--weight-checker-timeout 1800` for a longer per-phase and HTTP timeout on l
 
 Retained serving attachments and debug-only modes log a skipped check. To repeat a failed check, recreate serving from the intended checkpoint and start a fresh training attachment to run the initial sync again. A retained engine may contain weights from a different training boundary than the restored trainer. A fresh startup that loads different training and inference checkpoints reports their parameter differences.
 
-With rollout offload, weight memory is restored before comparison, and KV memory is restored afterwards. If weights-only wake-up unexpectedly resumes generation, the checker pauses the engine again and reports the scheduling change. Backend sleep/wake behavior therefore needs coverage in the deployment's integration tests.
+On the first weight update with rollout offload enabled, Vime waits for the KV cache to be restored before explicitly resuming generation and restoring the rollout producer’s previous admission state. When the checker runs, each endpoint must pass comparison before KV restoration. When the check is disabled or skipped, KV restoration follows the weight update directly. This startup order also applies to release-train with a full checkpoint published on disk. If weights-only wake-up unexpectedly resumes generation, the checker pauses the engine again and reports the scheduling change. Backend sleep/wake behavior therefore needs coverage in the deployment's integration tests.
 
 The checked tensors and supported quantization/offload layouts follow the paired vLLM version. The target-model parameter scope and upstream limitations are described in the [vLLM Weight Checker documentation](https://docs.vllm.ai/en/latest/training/weight_checker/).
 

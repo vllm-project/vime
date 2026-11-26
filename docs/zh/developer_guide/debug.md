@@ -93,7 +93,7 @@ vime 支持将训练部分和推理部分分开进行调试，从而实现：
 
 4. **如何排查**
 
-   - 使用 `--check-weight-update-equal` 验证 Megatron → vLLM 权重同步后的值是否正确。如果某个参数在 vLLM 侧全为零，说明它可能被错误量化或在 checkpoint 中缺失。
+   - 使用 `--check-weight-update-equal` 验证 Megatron → vLLM 权重同步后的值是否正确。校验会在首次完整同步前主动清零参数。如果基线中非零的参数在同步完成后仍为零，可根据报错中的端点、rank 和参数名排查权重映射、checkpoint 分片和量化布局。
    - 使用 `--debug-rollout-only` 配合少量 GPU，快速测试 vLLM 能否从量化 checkpoint 正常生成文本。
 
 ## 检查首次权重同步
@@ -108,7 +108,7 @@ vime 支持将训练部分和推理部分分开进行调试，从而实现：
 
 复用已有 serving 和 debug-only 模式会明确记录 skipped。失败后要重新校验，请从预期 checkpoint 重新创建 serving 并建立新的训练 attachment，再执行首次完整同步。已有引擎可能持有与恢复后的 trainer 不同训练时刻的权重。新建 serving 时，训练与推理加载不同 checkpoint 会报告实际参数差异。
 
-开启 rollout offload 时，先恢复权重内存并完成比较，再恢复 KV 内存。如果 weights-only 唤醒意外恢复了生成，检查会再次暂停该引擎并报告调度状态变化。目标部署的集成测试需要覆盖对应后端的 sleep/wake 行为。
+首次供权启用 rollout offload 时，Vime 等待 KV cache 唤醒成功后才显式恢复引擎生成，并将 rollout producer 恢复到原先的准入状态。本次执行校验时，各端点的权重须先通过比较，再恢复 KV；关闭或跳过校验时，供权完成后直接恢复 KV。release-train 通过磁盘发布完整 checkpoint 时也遵循这一次序。如果 weights-only 唤醒意外恢复了生成，检查会再次暂停该引擎并报告调度状态变化。目标部署的集成测试需要覆盖对应后端的 sleep/wake 行为。
 
 检查对象、量化布局和 offload 支持范围遵循配套 vLLM 版本，具体参数范围和限制见 [vLLM Weight Checker 文档](https://docs.vllm.ai/en/latest/training/weight_checker/)。
 

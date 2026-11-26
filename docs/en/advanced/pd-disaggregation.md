@@ -61,6 +61,14 @@ python train.py \
   ...
 ```
 
+### Single-node 1P1D with external Ascend engines
+
+On Ascend 950DT, one TP1 prefill engine and one TP1 decode engine were verified with the following settings. In each engine’s `--kv-transfer-config`, set `kv_connector` to `MooncakeConnector` and `kv_connector_module_path` to `vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector`. Use `kv_producer` for prefill and `kv_consumer` for decode, with distinct `kv_port` values. In `kv_connector_extra_config`, set both `prefill` and `decode` to `{"dp_size": 1, "tp_size": 1}`. Both engines used `--no-enable-prefix-caching`.
+
+Start vllm-router in PD mode with static prefill and decode URLs and router-side `kv_connector="nixl"`. In this mode the router forwards the prefill engine’s KV metadata to the decode engine; the Ascend Mooncake connector transfers the KV blocks between NPUs. With this setup, both endpoints passed the [initial weight check](../developer_guide/debug.md#check-the-initial-weight-update) and produced the same deterministic completion before and after weight restoration.
+
+The tested vllm-router 0.1.17 image required endpoint URLs at startup and returned HTTP 400 on dynamic registration through `POST /workers`. Use static registration with that image. This validation covered PD inference and the checker; full PD training remains unverified.
+
 ## Why This Matters for RL
 
 RL rollout is often not a uniform batch of short completions. Agentic and verifier-based workloads commonly have:
