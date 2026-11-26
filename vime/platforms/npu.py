@@ -13,6 +13,7 @@ from vime.utils.accelerator.torch_accelerator import TorchAccelerator
 
 from .base import (
     CheckpointCapabilities,
+    PDPortLayout,
     Platform,
     RayResourceSpec,
     TrainingBootstrap,
@@ -182,6 +183,16 @@ class NpuWeightTransferPlatformOps(WeightTransferPlatformOps):
 
 
 class NpuVLLMLaunchPlatformOps(VLLMLaunchPlatformOps):
+    def pd_port_layout(self, gpus_per_engine: int) -> PDPortLayout:
+        return PDPortLayout(kv_offset=0, handshake_offset=gpus_per_engine, count=2 * gpus_per_engine)
+
+    def pd_config(self, worker_type: str, bootstrap_port: int | None, gpus_per_engine: int):
+        assert bootstrap_port is not None, "Ascend PD workers require disaggregation_bootstrap_port"
+        role = {"prefill": "kv_producer", "decode": "kv_consumer"}[worker_type]
+        layout = self.pd_port_layout(gpus_per_engine)
+        config = {"kv_connector": "MooncakePullConnector", "kv_role": role, "kv_port": layout.kv_port(bootstrap_port)}
+        return config, layout.registered(bootstrap_port)
+
     def subprocess_env(self, base_env, *, visible_devices: str, colocate: bool) -> dict[str, str]:
         env = dict(base_env)
         env.pop("PYTORCH_CUDA_ALLOC_CONF", None)

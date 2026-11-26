@@ -38,7 +38,9 @@ def add_vllm_router_arguments(parser):
     RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
     # Keep driver logs quiet by default while allowing --router-log-level to
     # expose router dispatch and retry details when needed.
-    parser.set_defaults(router_log_level="warning", router_kv_connector="mooncake")
+    # None defers the choice to launch time: Ascend PD defaults the router to
+    # nixl there (mooncake bootstrap cannot query the Ascend pull transport).
+    parser.set_defaults(router_log_level="warning", router_kv_connector=None)
     return parser
 
 

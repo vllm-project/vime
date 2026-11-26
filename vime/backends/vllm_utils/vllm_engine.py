@@ -100,16 +100,21 @@ def _build_subprocess_env(server_args_dict: dict[str, Any]) -> dict[str, str]:
         env.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     worker_type = server_args_dict.get("_worker_type", "regular")
-    if worker_type in ("prefill", "decode"):
-        env["VLLM_MOONCAKE_BOOTSTRAP_PORT"] = str(server_args_dict["_disaggregation_bootstrap_port"])
-    if worker_type in ("prefill", "decode") and server_args_dict.get("node_rank", 0) == 0:
+    bootstrap_port = server_args_dict.get("_disaggregation_bootstrap_port")
+    if worker_type in ("prefill", "decode") and bootstrap_port is not None:
+        env["VLLM_MOONCAKE_BOOTSTRAP_PORT"] = str(bootstrap_port)
+    if (
+        worker_type in ("prefill", "decode")
+        and server_args_dict.get("node_rank", 0) == 0
+        and bootstrap_port is not None
+    ):
         host_for_subprocess = (server_args_dict.get("host") or "127.0.0.1").strip("[]")
         env["VLLM_NIXL_SIDE_CHANNEL_HOST"] = host_for_subprocess
-        env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(server_args_dict["_disaggregation_bootstrap_port"])
+        env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(bootstrap_port)
 
-    if worker_type == "encoder" and server_args_dict.get("node_rank", 0) == 0:
+    if worker_type == "encoder" and server_args_dict.get("node_rank", 0) == 0 and bootstrap_port is not None:
         env["VLLM_EC_SIDE_CHANNEL_HOST"] = (server_args_dict.get("host") or "127.0.0.1").strip("[]")
-        env["VLLM_EC_SIDE_CHANNEL_PORT"] = str(server_args_dict["_disaggregation_bootstrap_port"])
+        env["VLLM_EC_SIDE_CHANNEL_PORT"] = str(bootstrap_port)
 
     return env
 
@@ -767,20 +772,15 @@ def _compute_server_args(
         if node_rank != 0:
             kwargs["headless"] = True
 
-    if worker_type == "prefill":
-        assert (
-            disaggregation_bootstrap_port is not None
-        ), "disaggregation_bootstrap_port must be set for prefill worker"
+    if worker_type in ("prefill", "decode"):
+        if worker_type == "prefill":
+            assert (
+                disaggregation_bootstrap_port is not None
+            ), "disaggregation_bootstrap_port must be set for prefill worker"
         if not args.rollout_external:
-            kwargs["kv_transfer_config"] = {
-                "kv_connector": "MooncakeConnector",
-                "kv_role": "kv_producer",
-            }
-    elif worker_type == "decode" and not args.rollout_external:
-        kwargs["kv_transfer_config"] = {
-            "kv_connector": "MooncakeConnector",
-            "kv_role": "kv_consumer",
-        }
+            kwargs["kv_transfer_config"], disaggregation_bootstrap_port = current_platform().vllm.pd_config(
+                worker_type, disaggregation_bootstrap_port, _gpus_per_engine
+            )
 
     if ec_transfer_override is not None and worker_type in ("encoder", "regular", "prefill"):
         kwargs["ec_transfer_config"] = {

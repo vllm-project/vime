@@ -10,6 +10,7 @@ from vime.backends.vllm_utils.disaggregation import start_epd_server_groups, sta
 from vime.backends.vllm_utils.engine_group import RolloutServer, ServerGroupPlacement
 from vime.backends.vllm_utils.external import start_external_rollout_servers
 from vime.backends.vllm_utils.vllm_config import resolve_vllm_config
+from vime.platforms import current_platform
 from vime.utils.http_utils import _wrap_ipv6, find_available_port, get_host_info
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,15 @@ def _start_router(
     router_args.port = router_port
     router_args.prometheus_port = find_available_port(random.randint(4000, 5000))
     router_args.request_timeout_secs = args.vllm_router_request_timeout_secs
+
+    if router_args.kv_connector is None:
+        # Ascend PD's pull transport serves ZMQ bootstrap on the engine port,
+        # which the mooncake router's HTTP bootstrap cannot query; default the
+        # router to nixl there and keep any connector the caller chose.
+        if has_pd_disaggregation and current_platform().name == "npu":
+            router_args.kv_connector = "nixl"
+        else:
+            router_args.kv_connector = "mooncake"
 
     if has_pd_disaggregation:
         router_args.vllm_pd_disaggregation = True
