@@ -86,6 +86,10 @@ def _build_subprocess_env(server_args_dict: dict[str, Any]) -> dict[str, str]:
         visible_devices=server_args_dict["_visible_devices"],
         colocate=getattr(args, "colocate", False),
     )
+    if current_platform().is_npu and server_args_dict.get("weight_transfer_config", {}).get("backend") == "sparse_hccl":
+        # Sparse HCCL workers must not inherit an initialized CANN runtime.
+        # Preserve the launch behavior of all existing transport backends.
+        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     env.setdefault("VLLM_SERVER_DEV_MODE", "1")
     env["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     if getattr(args, "vllm_enable_deterministic_inference", False):

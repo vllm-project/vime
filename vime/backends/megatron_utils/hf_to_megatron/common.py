@@ -166,12 +166,21 @@ def load_model_hf_weights(
     from vime.backends.megatron_utils.update_weight.common import named_params_and_buffers
 
     reader = SafetensorReader(path)
-    parameters = list(named_params_and_buffers(args, model))
-    value_heads = {
-        name.removesuffix(".weight")
-        for name, parameter in parameters
-        if name.endswith("output_layer.weight") and parameter.ndim == 2 and parameter.shape[0] == 1
-    }
+    parameters = named_params_and_buffers(args, model)
+    value_heads = set()
+    if (
+        getattr(args, "update_weight_mode", None) == "delta"
+        and getattr(args, "update_weight_transport", None) == "sparse_hccl"
+        and getattr(args, "use_critic", False)
+    ):
+        # Only sparse critic bootstrap needs to retain its initialized value
+        # bias. Other backends keep the existing streaming HF load behavior.
+        parameters = list(parameters)
+        value_heads = {
+            name.removesuffix(".weight")
+            for name, parameter in parameters
+            if name.endswith("output_layer.weight") and parameter.ndim == 2 and parameter.shape[0] == 1
+        }
     with torch.no_grad():
         for name, parameter in parameters:
             # A critic's scalar value head keeps its initialized bias when

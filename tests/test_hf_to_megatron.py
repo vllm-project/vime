@@ -72,7 +72,8 @@ def test_direct_hf_load_preserves_critic_value_head(tmp_path, monkeypatch, prefi
     monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
     monkeypatch.setattr(common, "shard_mcore_tensor", lambda name, tensor, parameter: tensor)
 
-    common.load_model_hf_weights(_EXPORT_ARGS, [], tmp_path, _config("qwen3_moe"), qwen_moe_hf_tensor)
+    args = types.SimpleNamespace(update_weight_mode="delta", update_weight_transport="sparse_hccl", use_critic=True)
+    common.load_model_hf_weights(args, [], tmp_path, _config("qwen3_moe"), qwen_moe_hf_tensor)
 
     torch.testing.assert_close(weight, torch.full((1, 4), 0.125), rtol=0, atol=0)
     torch.testing.assert_close(bias, torch.zeros(1), rtol=0, atol=0)
@@ -713,3 +714,29 @@ def test_reader_dequantizes_block_scaled_fp8(tmp_path):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
+
+
+@pytest.mark.parametrize(
+    "mode,transport,use_critic",
+    [
+        ("full", "nccl", True),
+        ("full", "disk", True),
+        ("delta", "disk", True),
+        ("delta", "sparse_hccl", False),
+    ],
+)
+def test_direct_hf_load_scalar_bias_unchanged_outside_sparse_critic(tmp_path, monkeypatch, mode, transport, use_critic):
+    from vime.backends.megatron_utils.hf_to_megatron import common
+
+    tensors = {"output_layer.weight": torch.ones(1, 4), "output_layer.bias": torch.tensor([0.75])}
+    save_file(tensors, tmp_path / "model.safetensors")
+    parameters = {name: torch.nn.Parameter(torch.zeros_like(tensor)) for name, tensor in tensors.items()}
+    runtime = types.ModuleType("vime.backends.megatron_utils.update_weight.common")
+    runtime.named_params_and_buffers = lambda args, model: iter(parameters.items())
+    monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
+    monkeypatch.setattr(common, "shard_mcore_tensor", lambda name, tensor, parameter: tensor)
+    monkeypatch.setattr(common, "_pad_vocab", lambda args, name, tensor: tensor)
+    args = types.SimpleNamespace(update_weight_mode=mode, update_weight_transport=transport, use_critic=use_critic)
+    common.load_model_hf_weights(args, [], tmp_path, _config(), lambda name, reader, config: reader.get_tensor(name))
+    for name, tensor in tensors.items():
+        torch.testing.assert_close(parameters[name], tensor, rtol=0, atol=0)
