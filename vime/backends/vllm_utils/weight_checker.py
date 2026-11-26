@@ -9,11 +9,14 @@ _INSTANCE_PATTERN = re.compile(r"[0-9a-f]{32}")
 
 
 def expected_rank_prefixes(config: dict) -> set[str]:
+    # The global DP index survives local rank remapping; older configs expose the rank.
     dp_start = int(config.get("data_parallel_index", config.get("data_parallel_rank", 0)))
     dp_size = int(config.get("data_parallel_size", 1))
+    # External/hybrid load balancers expose only the DP ranks owned by this endpoint.
     local_only = config.get("data_parallel_external_lb") or config.get("data_parallel_hybrid_lb")
     if local_only:
         dp_size = int(config.get("data_parallel_size_local") or 1)
+    # An explicitly addressed local worker owns a single DP rank.
     if config.get("data_parallel_rank_local") is not None:
         dp_size = 1
     pp_size = int(config.get("pipeline_parallel_size", 1))

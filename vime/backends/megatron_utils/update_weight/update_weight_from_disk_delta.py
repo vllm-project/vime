@@ -21,7 +21,7 @@ from ray.actor import ActorHandle
 from vime.utils import accelerator
 from vime.utils.disk_delta import NUM_WORKERS, checksum, overwrite_encode
 from vime.utils.distributed_utils import get_gloo_group
-from vime.utils.weight_sync import should_flush_cache
+from vime.utils.weight_sync import should_flush_cache, weight_update_pause_mode
 
 from ..hf_checkpoint_saver import _copy_hf_assets, _finalize_distributed_shards, _SafetensorShardWriter
 from .update_weight_from_distributed import UpdateWeightFromDistributed
@@ -109,10 +109,7 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
             self._publish_full()
         else:
             self._publish()
-        if resume_generation:
-            self._reload_engines()
-        else:
-            self._reload_engines(resume_generation=False)
+        self._reload_engines(resume_generation=resume_generation)
         self._needs_full_sync = False
         self._record_metrics()
 
@@ -195,7 +192,7 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
             ray.get(
                 [
                     engine.pause_generation.remote(
-                        mode="abort" if flush_cache or not resume_generation else "in_place"
+                        mode=weight_update_pause_mode(flush_cache=flush_cache, resume_generation=resume_generation)
                     )
                     for engine in self.rollout_engines
                 ]

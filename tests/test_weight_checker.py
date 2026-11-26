@@ -288,7 +288,7 @@ def test_driver_compares_before_kv_and_training_ready(monkeypatch, offload, comp
     actor.update_weights.side_effect = lambda **kwargs: events.append(("update", kwargs))
     endpoint.onload_weights.remote.side_effect = lambda: events.append(("weights", None))
     endpoint.onload_kv.remote.side_effect = lambda: events.append(("kv", None))
-    endpoint.training_ready.remote.side_effect = lambda: events.append(("ready", None))
+    endpoint.training_ready.remote.side_effect = lambda **kwargs: events.append(("ready", None))
 
     def compare():
         events.append(("compare", None))
@@ -312,6 +312,42 @@ def test_driver_compares_before_kv_and_training_ready(monkeypatch, offload, comp
         if offload:
             expected = [("weights", None), *expected, ("kv", None)]
         assert events == [*expected, ("ready", None)]
+
+
+@pytest.mark.parametrize("kv_fails", [False, True])
+def test_unchecked_offload_restores_kv_before_engines_and_producers_resume(manager, monkeypatch, kv_fails):
+    monkeypatch.setitem(sys.modules, "vime.utils.arguments", SimpleNamespace(parse_args=None))
+    train = runpy.run_path(str(Path(__file__).resolve().parents[1] / "train.py"))["train"]
+    actor, endpoint = Mock(), Mock()
+    manager._weight_check_state = "skipped"
+    manager._recovery_admission_was_paused = False
+    manager.get_updatable_engines_and_lock = lambda: (manager.engines, None)
+    manager.resume_rollout_admission = lambda was_paused: manager.events.append(("producer", "resume"))
+
+    def sync(*, resume_generation):
+        assert not resume_generation
+        manager.events.append(("actor", "update"))
+
+    def wake_kv():
+        manager.events.append(("kv", "wake"))
+        if kv_fails:
+            raise RuntimeError("wake failed")
+
+    actor.update_weights.side_effect = sync
+    endpoint.onload_kv.remote.side_effect = wake_kv
+    endpoint.training_ready.remote.side_effect = manager.training_ready
+    monkeypatch.setitem(train.__globals__, "create_training_models", lambda *args: (actor, None))
+    args = SimpleNamespace(
+        release_train=False, offload_rollout=True, start_rollout_id=0, num_rollout=0, eval_interval=None
+    )
+    expected = [("actor", "update"), ("kv", "wake")]
+    if kv_fails:
+        with pytest.raises(RuntimeError, match="wake failed"):
+            train(args, {}, endpoint, 1, None)
+    else:
+        train(args, {}, endpoint, 1, None)
+        expected.extend([("actor0", "resume"), ("actor1", "resume"), ("producer", "resume")])
+    assert manager.events == expected
 
 
 @pytest.mark.parametrize("resume_generation", [False, True])
@@ -467,10 +503,11 @@ def test_train_group_propagates_initial_resume_control(monkeypatch, tmp_path, tr
     group._reload_rollout_weights_from_disk = Mock()
     monkeypatch.setattr(actor_group.ray, "get", lambda value: value)
     group.update_weights(resume_generation=resume_generation)
-    kwargs = {} if resume_generation else {"resume_generation": False}
     for actor in group._actor_handlers:
-        actor.update_weights.remote.assert_called_once_with(**kwargs)
+        actor.update_weights.remote.assert_called_once_with(resume_generation=resume_generation)
     if transport == "disk":
-        group._reload_rollout_weights_from_disk.assert_called_once_with(tmp_path / "weight_v000001", "1", **kwargs)
+        group._reload_rollout_weights_from_disk.assert_called_once_with(
+            tmp_path / "weight_v000001", "1", resume_generation=resume_generation
+        )
     else:
         group._reload_rollout_weights_from_disk.assert_not_called()

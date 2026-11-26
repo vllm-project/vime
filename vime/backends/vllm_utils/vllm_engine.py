@@ -481,6 +481,7 @@ class VLLMEngine(RayActor):
         response = requests.get(f"{url}/is_paused", timeout=timeout)
         response.raise_for_status()
         if response.json().get("is_paused") is not True:
+            # Serving survives a failed attachment. Keep the endpoint paused for recovery.
             self.pause_generation()
             raise RuntimeError(f"Weight checker requires paused generation at {url}")
         config = get_server_info(url, timeout=timeout)

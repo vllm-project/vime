@@ -18,6 +18,11 @@ from vime.utils.cleanup import Cleanup
 from vime.utils.health_monitor import RolloutHealthMonitor
 
 
+def first_updatable_server(servers):
+    """Weight updates and verification both target the first updatable model."""
+    return next(((name, server) for name, server in servers.items() if server.update_weights), (None, None))
+
+
 @dataclass
 class ServingDeployment:
     """Startup handoff; ordinary health checks return only the engine snapshot."""
@@ -219,7 +224,7 @@ class ServingCluster:
         self.driver_job_id = None
 
     def _updatable_server(self):
-        return next((server for server in self.servers.values() if server.update_weights), None)
+        return first_updatable_server(self.servers)[1]
 
     def get_updatable_engines_and_lock(self):
         server = self._updatable_server()

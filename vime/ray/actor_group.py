@@ -11,7 +11,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from vime.platforms import current_platform
 from vime.ray.training_recovery import configure_recovery_checkpoint, training_recovery_enabled
 from vime.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, add_default_ray_env_vars
-from vime.utils.weight_sync import should_flush_cache
+from vime.utils.weight_sync import should_flush_cache, weight_update_pause_mode
 
 
 class RayTrainGroup:
@@ -184,18 +184,21 @@ class RayTrainGroup:
 
     def update_weights(self, *, resume_generation: bool = True) -> None:
         """Publish actor weights; disk reload is coordinated after all ranks save."""
-        kwargs = {} if resume_generation else {"resume_generation": False}
         if not self._full_disk_weight_update_enabled():
-            ray.get([actor.update_weights.remote(**kwargs) for actor in self._actor_handlers])
+            ray.get(
+                [actor.update_weights.remote(resume_generation=resume_generation) for actor in self._actor_handlers]
+            )
             return
 
         weight_version = self._disk_weight_version + 1
         disk_weight_dir = Path(self.args.update_weight_disk_dir) / f"weight_v{weight_version:06d}"
-        ray.get([actor.update_weights.remote(**kwargs) for actor in self._actor_handlers])
+        ray.get([actor.update_weights.remote(resume_generation=resume_generation) for actor in self._actor_handlers])
         self._disk_weight_version = weight_version
         if self._release_train_enabled():
             self.release()
-        self._reload_rollout_weights_from_disk(disk_weight_dir, str(weight_version), **kwargs)
+        self._reload_rollout_weights_from_disk(
+            disk_weight_dir, str(weight_version), resume_generation=resume_generation
+        )
 
     def onload(self):
         return ray.get([actor.wake_up.remote() for actor in self._actor_handlers])
@@ -275,7 +278,9 @@ class RayTrainGroup:
         )
         ray.get(
             [
-                engine.pause_generation.remote(mode="abort" if flush_cache or not resume_generation else "in_place")
+                engine.pause_generation.remote(
+                    mode=weight_update_pause_mode(flush_cache=flush_cache, resume_generation=resume_generation)
+                )
                 for engine in engines
             ]
         )

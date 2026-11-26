@@ -11,3 +11,8 @@ def should_flush_cache(flush_cache_interval: int, weight_version: int, initial_w
     return weight_version == initial_weight_version + 1 or (
         flush_cache_interval > 0 and (weight_version - 1) % flush_cache_interval == 0
     )
+
+
+def weight_update_pause_mode(*, flush_cache: bool, resume_generation: bool) -> str:
+    """Abort in-flight requests for a flush or deferred resume. Cache clearing is a separate RPC."""
+    return "abort" if flush_cache or not resume_generation else "in_place"

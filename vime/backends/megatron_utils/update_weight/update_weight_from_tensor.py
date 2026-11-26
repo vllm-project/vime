@@ -17,7 +17,7 @@ from vime.platforms import current_platform
 from vime.utils import accelerator
 from vime.utils.distributed_utils import get_gloo_group
 from vime.utils.types import ParamInfo
-from vime.utils.weight_sync import should_flush_cache
+from vime.utils.weight_sync import should_flush_cache, weight_update_pause_mode
 
 from ..dspark.export import export_dspark_model_weights
 from ..megatron_to_hf import convert_to_hf
@@ -376,7 +376,7 @@ class UpdateWeightFromTensor:
             ray.get(
                 [
                     engine.pause_generation.remote(
-                        mode="abort" if flush_cache or not resume_generation else "in_place"
+                        mode=weight_update_pause_mode(flush_cache=flush_cache, resume_generation=resume_generation)
                     )
                     for engine in self._all_rollout_engines
                 ]

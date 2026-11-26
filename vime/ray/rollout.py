@@ -25,6 +25,7 @@ from vime.utils.http_utils import init_http_client
 from vime.utils.misc import load_function
 from vime.utils.staleness import fully_async_metrics_enabled
 
+from .serving import first_updatable_server
 from .utils import Lock, add_default_ray_env_vars
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -277,7 +278,7 @@ class RolloutManager:
             return state_dict()
         return None
 
-    def training_ready(self):
+    def training_ready(self, *, resume_offloaded_engines=False):
         state = getattr(self, "_weight_check_state", "idle")
         if state not in ("idle", "skipped", "verified", "ready"):
             raise RuntimeError(f"Cannot resume training with weight checker state {state!r}")
@@ -293,6 +294,9 @@ class RolloutManager:
             except Exception:
                 self._weight_check_state = "failed"
                 raise
+        elif resume_offloaded_engines:
+            engines, *_ = self.get_updatable_engines_and_lock()
+            ray.get([engine.continue_generation.remote() for engine in engines])
         # train.py calls this only after publishing restored weights. Starting
         # producers earlier could generate with the failed attempt's weights.
         if self._recovery_admission_was_paused is not None:
@@ -333,7 +337,7 @@ class RolloutManager:
         When multiple updatable servers exist, returns the first one
         (multi-model weight update is not yet supported).
         """
-        return next((server for server in self.servers.values() if server.update_weights), None)
+        return first_updatable_server(self.servers)[1]
 
     @property
     def rollout_engines(self):
@@ -542,9 +546,7 @@ class RolloutManager:
             return
 
     def _weight_check_engines(self):
-        name, server = next(
-            ((name, server) for name, server in self.servers.items() if server.update_weights), (None, None)
-        )
+        name, server = first_updatable_server(self.servers)
         engines = server.engines if server is not None else []
         if not engines or any(engine is None for engine in engines):
             raise RuntimeError("Weight checking requires all engines of the updatable model to be available")

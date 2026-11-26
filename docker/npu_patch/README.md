@@ -18,6 +18,13 @@ This guide provides instructions for installing Vime with NPU support, including
 | TransformerEngineNPU | `d405be23773968bf7fdc567854005054550830fc` + `transformer-engine-npu.patch` | [GitCode](https://gitcode.com/Ascend/TransformerEngineNPU) |
 | torch_memory_saver (NPU) | `sgl-kernel-npu` tag `2026.6.0` + `torch-memory-saver.patch` | [GitHub](https://github.com/sgl-project/sgl-kernel-npu) |
 
+## Updating the vLLM checker patch
+
+When bumping vLLM, verify that both GPU and Ascend workers inherit the shared
+checksum/reset methods on WorkerBase. Check the runner's model accessor, rank
+prefixes and the per-worker identity returned by the HTTP API. The NPU smoke
+suite runs `tests/npu/check_weight_checker_backend.py` against the patched runtime.
+
 ## Preparing the Running Environment
 
 Run the following steps inside the base image listed above, with the Ascend devices and host driver mounted. The base image provides Python, CANN, PyTorch, torch-npu, vLLM, vLLM-Ascend and FLA NPU.

@@ -23,20 +23,13 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan, *, we
     if args.offload_rollout and not release_train:
         ray.get(rollout_manager.onload_weights.remote())
 
-    # Always push actor weights to rollout once weights are loaded.
+    # Keep generation paused until both the weights and the KV cache are ready.
+    actor_model.update_weights(resume_generation=not (weight_check_prepared or args.offload_rollout))
     if weight_check_prepared:
-        actor_model.update_weights(resume_generation=False)
         ray.get(rollout_manager.finish_weight_check.remote())
-        if args.offload_rollout:
-            ray.get(rollout_manager.onload_kv.remote())
-    else:
-        actor_model.update_weights()
-    # Reattached async producers stay paused until restored weights are installed.
-    # This startup notification resumes them once, before entering the train loop.
-    ray.get(rollout_manager.training_ready.remote())
-
-    if args.offload_rollout and not weight_check_prepared:
+    if args.offload_rollout:
         ray.get(rollout_manager.onload_kv.remote())
+    ray.get(rollout_manager.training_ready.remote(resume_offloaded_engines=args.offload_rollout))
 
     # special case for eval-only
     if args.num_rollout == 0 and args.eval_interval is not None:

@@ -1471,12 +1471,16 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 default="torch",
             )
             reset_arg(parser, "--record-memory-history", action="store_true", default=False)
-            parser.add_argument("--check-weight-update-equal", action="store_true")
+            parser.add_argument(
+                "--check-weight-update-equal",
+                action="store_true",
+                help="On fresh serving startup, reset rollout weights and verify the first full sync before enabling generation.",
+            )
             parser.add_argument(
                 "--weight-checker-timeout",
                 type=float,
                 default=300.0,
-                help="Timeout in seconds for each initial weight-checker phase and HTTP request.",
+                help="Maximum seconds to wait for each checker phase, including RPC overhead. Individual checker HTTP requests also use this limit.",
             )
             return parser
 

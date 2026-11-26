@@ -95,7 +95,8 @@ def test_restart_publishes_restored_weights_above_every_attempt(tmp_path, delta_
         updater._iter_hf_tensors = lambda: iter(current.items())
         updater._record_metrics = lambda: None
 
-        def reload():
+        def reload(*, resume_generation):
+            assert resume_generation
             directory = Path(updater._version_dir)
             index = json.loads((directory / "model.safetensors.index.json").read_text())
             versions.append(updater.weight_version)
@@ -130,8 +131,8 @@ def test_restart_publishes_restored_weights_above_every_attempt(tmp_path, delta_
     replacement = make_updater()
     original_reload = replacement._reload_engines
 
-    def lose_reply():
-        original_reload()
+    def lose_reply(*, resume_generation):
+        original_reload(resume_generation=resume_generation)
         raise TimeoutError("GPU reload reply lost after local pull")
 
     replacement._reload_engines = lose_reply

@@ -678,10 +678,7 @@ class MegatronTrainRayActor(TrainRayActor):
                     if ".draft_model." in name:
                         param.data = backup[name].to(param.device)
             print_memory("before update_weights")
-            if resume_generation:
-                self.weight_updater.update_weights()
-            else:
-                self.weight_updater.update_weights(resume_generation=False)
+            self.weight_updater.update_weights(resume_generation=resume_generation)
             print_memory("after update_weights")
 
         if reconnect_rollout_engines:
