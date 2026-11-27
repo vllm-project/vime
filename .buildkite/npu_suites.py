@@ -29,6 +29,7 @@ BUILDKITE_SOURCE = os.environ.get("BUILDKITE_SOURCE", "")
 SUITES = {
     "smk": [
         ("npu/check_weight_checker_backend.py", "npu-2", "", {}),
+        ("npu/test_qwen3_moe_ep2_weight_checker_npu.py", "npu-4", "", {"ASCEND_RT_VISIBLE_DEVICES": "0,1,2"}),
         ("test_delta_disk_weight_update.py", "npu-4", "", {}),
         ("test_qwen3_4B_npu.py", "npu-8", "", {}),
         (

@@ -1,5 +1,5 @@
 """Single-node NPU integration test. Run from the repository root with
-VIME_PLATFORM=npu python tests/test_qwen3_moe_ep2_weight_checker_npu.py
+VIME_PLATFORM=npu python tests/npu/test_qwen3_moe_ep2_weight_checker_npu.py
 on a dedicated three-NPU allocation with the paired Megatron/vLLM runtimes.
 """
 
@@ -77,7 +77,7 @@ def main():
             --vllm-max-num-seqs 4 --vllm-max-num-batched-tokens 128 --vllm-kv-cache-memory 268435456
             --vllm-additional-config '{{"weight_nz_mode":0}}' --check-weight-update-equal --weight-checker-timeout 300
         """
-        repo = Path(__file__).resolve().parents[1]
+        repo = Path(__file__).resolve().parents[2]
         with ray.init(address="local", num_gpus=0, resources={"NPU": 3}, include_dashboard=False) as cluster:
             completed = subprocess.run(
                 [sys.executable, str(repo / "train.py"), *shlex.split(args)],

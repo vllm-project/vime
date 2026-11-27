@@ -11,7 +11,6 @@ import time
 import weakref
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import fields
-from multiprocessing import get_context
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1593,18 +1592,6 @@ def _rollout_args(tmp_path, *, fanout=False, transport="straw"):
     [(False, "straw", False), (True, "straw", False), (True, "straw", True)],
 )
 def test_two_ray_nodes_generate_transfer_and_restore(tmp_path, fanout, transport, rewind):
-    # Each case owns a real Ray cluster. Keep its native driver lifecycle out
-    # of the shared pytest process, and include child shutdown in the result.
-    driver = get_context("spawn").Process(
-        target=_run_two_ray_nodes_generate_transfer_and_restore,
-        args=(tmp_path, fanout, transport, rewind),
-    )
-    driver.start()
-    driver.join()
-    assert driver.exitcode == 0, f"Ray test driver exited with status {driver.exitcode}"
-
-
-def _run_two_ray_nodes_generate_transfer_and_restore(tmp_path, fanout, transport, rewind):
     multiplier = 2 if fanout else 1
     import ray
     from ray.cluster_utils import Cluster
