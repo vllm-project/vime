@@ -22,13 +22,15 @@ need nothing extra on the vime side.
 
 Sparse HCCL:
 
-With `--offload-train --use-critic` and without `--colocate`, training sleep
-releases the weight-transfer connection. Reconnection preserves snapshots only
-when the same rollout actors still report the last completed weight version;
-otherwise it sends a complete seed. Receiver replacement, failed version queries,
-and partial transmission failures require a fresh seed. BF16 seeds carry a four-byte
-index plus a two-byte value per element, approximately three times the dense payload.
-The resident-actor performance measurements do not cover this configuration.
+**Currently unsupported:** Sparse HCCL with `--offload-train --use-critic`.
+HF language-model initialization of the critic can fail when loading its scalar
+value-head bias; this is a generic critic initialization issue, tracked separately
+from sparse transport in PR #545. A historical local run with an initialization fix matched
+independent checkpoint inference, but subsequently lost a critic worker to host
+memory pressure. It is not an overall end-to-end pass. The offload/critic
+functional case is not enabled in this PR's CI; only the normal two-round case is
+scheduled. Neither fixing initialization nor matching inference establishes
+resource stability for this combination.
 
 This path uses the sparse HCCL engines included in vLLM-Ascend.
 VIME exports weights into HF checkpoint coordinates, tracks shard snapshots,

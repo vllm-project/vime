@@ -166,27 +166,8 @@ def load_model_hf_weights(
     from vime.backends.megatron_utils.update_weight.common import named_params_and_buffers
 
     reader = SafetensorReader(path)
-    parameters = named_params_and_buffers(args, model)
-    value_heads = set()
-    if (
-        getattr(args, "update_weight_mode", None) == "delta"
-        and getattr(args, "update_weight_transport", None) == "sparse_hccl"
-        and getattr(args, "use_critic", False)
-    ):
-        # Only sparse critic bootstrap needs to retain its initialized value
-        # bias. Other backends keep the existing streaming HF load behavior.
-        parameters = list(parameters)
-        value_heads = {
-            name.removesuffix(".weight")
-            for name, parameter in parameters
-            if name.endswith("output_layer.weight") and parameter.ndim == 2 and parameter.shape[0] == 1
-        }
     with torch.no_grad():
-        for name, parameter in parameters:
-            # A critic's scalar value head keeps its initialized bias when
-            # bootstrapping from an HF language model, which has no value head.
-            if name.endswith("output_layer.bias") and name.removesuffix(".bias") in value_heads:
-                continue
+        for name, parameter in named_params_and_buffers(args, model):
             # Router._load_from_state_dict normally restores this buffer to
             # FP32 before copying. Direct HF loading bypasses that hook; a
             # model-wide BF16 cast must not quantize the routing correction.

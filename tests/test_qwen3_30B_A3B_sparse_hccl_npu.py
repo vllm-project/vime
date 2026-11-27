@@ -4,11 +4,8 @@ MODEL_PATH and PROMPT_DATA_PATH reuse local inputs. SPARSE_HCCL_RESULT_DIR
 stores an independent full checkpoint, sync metrics and both inference results.
 SPARSE_HCCL_BASELINE_PROMPT selects the prompt (default: a short arithmetic task).
 Token IDs and every generated-token logprob must match exactly; no tolerance.
-Set SPARSE_HCCL_OFFLOAD_CRITIC=1 to run PPO with shared actor/critic devices
-and training offload. This mode still exports a full checkpoint for comparison.
-The normal comparison defaults to two rounds.
-SPARSE_HCCL_OFFLOAD_SMOKE=1 selects one offload/critic round with the same
-independent checkpoint inference comparison as the normal two-round case.
+The normal comparison defaults to two rounds. Offload + critic is currently
+unsupported; its functional case is retained locally and is not scheduled in CI.
 """
 
 import copy
@@ -596,23 +593,6 @@ def test_qwen3_sparse_hccl_two_round_inference(monkeypatch, tmp_path):
     main()
     result = json.loads((tmp_path / "normal-two-round/comparison.json").read_text())
     assert result["passed"]
-
-
-@pytest.mark.skipif(
-    os.environ.get("VIME_RUN_NPU_FUNCTIONAL") != "1",
-    reason="Requires six available NPUs and the Ascend training stack",
-)
-def test_qwen3_sparse_hccl_offload_critic_one_round(monkeypatch, tmp_path):
-    """One offload/critic round followed by independent checkpoint inference."""
-    monkeypatch.setenv("SPARSE_HCCL_OFFLOAD_SMOKE", "1")
-    monkeypatch.setenv("SPARSE_HCCL_OFFLOAD_CRITIC", "1")
-    monkeypatch.setenv("SPARSE_HCCL_NUM_ROLLOUT", "1")
-    monkeypatch.setattr(sys.modules[__name__], "RESULT_DIR", str(tmp_path / "offload-critic-one-round"))
-    main()
-    result = json.loads((tmp_path / "offload-critic-one-round/comparison.json").read_text())
-    assert result["passed"] and result["rounds"] == 1
-    assert result["inference_compared"] is True
-    assert result["offload_critic"] is True
 
 
 @pytest.mark.unit

@@ -11,11 +11,12 @@ Delta 权重同步只发送两次同步之间发生变化的字节，而不是�
 
 Sparse HCCL：
 
-启用 `--offload-train --use-critic` 且未启用 `--colocate` 时，训练休眠会断开
-权重传输连接。重连时仅在 rollout actor 身份相同且报告最后一次完成的权重版本时
-保留快照并继续增量同步；接收端替换、版本查询失败或部分传输失败后重新发送完整
-seed。BF16 seed 的每个元素包含四字节索引和两字节值，载荷约为 dense 全量的
-三倍。常驻 actor 的性能数据不覆盖此配置。
+**当前暂不支持** Sparse HCCL 与 `--offload-train --use-critic` 的组合。
+critic 从 HF 语言模型初始化时，标量 value-head bias 的加载可能失败；这是通用
+critic 初始化问题，由独立 PR #545 修复，不属于 sparse 传输逻辑。历史本地实验在修复
+初始化后完成了独立 checkpoint 推理一致性对比，但随后 critic worker 因主机内存
+压力被终止，不能视为整体端到端通过。本 PR 不启用 offload/critic 专项功能用例的
+CI，仅运行普通两轮用例。初始化修复及推理一致性都不能证明该组合的资源稳定性。
 
 该路径使用 vLLM-Ascend 提供的 sparse HCCL 引擎。VIME 将权重导出为 HF checkpoint
 坐标，维护分片快照，按一致顺序汇聚变化项，并管理更新版本。全量导出和稀疏坐标转换

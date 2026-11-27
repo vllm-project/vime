@@ -51,55 +51,6 @@ from vime.backends.megatron_utils.megatron_to_hf.qwen3moe import convert_qwen3mo
 NUM_GPUS = 0
 
 
-@pytest.mark.parametrize("prefix", ["", "module.module.language_model."])
-def test_direct_hf_load_preserves_critic_value_head(tmp_path, monkeypatch, prefix):
-    from vime.backends.megatron_utils.hf_to_megatron import common
-
-    norm = torch.arange(4, dtype=torch.float32)
-    save_file({"lm_head.weight": torch.ones(8, 4), "model.norm.weight": norm}, tmp_path / "model.safetensors")
-    weight = torch.nn.Parameter(torch.full((1, 4), 0.125))
-    bias = torch.nn.Parameter(torch.zeros(1))
-    backbone = torch.nn.Parameter(torch.zeros(4))
-    runtime = types.ModuleType("vime.backends.megatron_utils.update_weight.common")
-    # Bias deliberately comes first; the loader must identify its owning head.
-    runtime.named_params_and_buffers = lambda args, model: iter(
-        [
-            (prefix + "output_layer.bias", bias),
-            (prefix + "output_layer.weight", weight),
-            (prefix + "decoder.final_layernorm.weight", backbone),
-        ]
-    )
-    monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
-    monkeypatch.setattr(common, "shard_mcore_tensor", lambda name, tensor, parameter: tensor)
-
-    args = types.SimpleNamespace(update_weight_mode="delta", update_weight_transport="sparse_hccl", use_critic=True)
-    common.load_model_hf_weights(args, [], tmp_path, _config("qwen3_moe"), qwen_moe_hf_tensor)
-
-    torch.testing.assert_close(weight, torch.full((1, 4), 0.125), rtol=0, atol=0)
-    torch.testing.assert_close(bias, torch.zeros(1), rtol=0, atol=0)
-    torch.testing.assert_close(backbone, norm, rtol=0, atol=0)
-
-
-def test_direct_hf_load_does_not_skip_language_model_head_bias(tmp_path, monkeypatch):
-    from vime.backends.megatron_utils.hf_to_megatron import common
-
-    tensors = {"output_layer.weight": torch.ones(8, 4), "output_layer.bias": torch.arange(8).float()}
-    save_file(tensors, tmp_path / "model.safetensors")
-    parameters = {name: torch.nn.Parameter(torch.zeros_like(tensor)) for name, tensor in tensors.items()}
-    runtime = types.ModuleType("vime.backends.megatron_utils.update_weight.common")
-    runtime.named_params_and_buffers = lambda args, model: iter(parameters.items())
-    monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
-    monkeypatch.setattr(common, "shard_mcore_tensor", lambda name, tensor, parameter: tensor)
-    monkeypatch.setattr(common, "_pad_vocab", lambda args, name, tensor: tensor)
-
-    common.load_model_hf_weights(
-        _EXPORT_ARGS, [], tmp_path, _config(), lambda name, reader, config: reader.get_tensor(name)
-    )
-
-    for name, tensor in tensors.items():
-        torch.testing.assert_close(parameters[name], tensor, rtol=0, atol=0)
-
-
 def test_direct_hf_load_preserves_fp32_expert_bias(tmp_path, monkeypatch):
     from vime.backends.megatron_utils.hf_to_megatron import common
 
@@ -714,29 +665,3 @@ def test_reader_dequantizes_block_scaled_fp8(tmp_path):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
-
-
-@pytest.mark.parametrize(
-    "mode,transport,use_critic",
-    [
-        ("full", "nccl", True),
-        ("full", "disk", True),
-        ("delta", "disk", True),
-        ("delta", "sparse_hccl", False),
-    ],
-)
-def test_direct_hf_load_scalar_bias_unchanged_outside_sparse_critic(tmp_path, monkeypatch, mode, transport, use_critic):
-    from vime.backends.megatron_utils.hf_to_megatron import common
-
-    tensors = {"output_layer.weight": torch.ones(1, 4), "output_layer.bias": torch.tensor([0.75])}
-    save_file(tensors, tmp_path / "model.safetensors")
-    parameters = {name: torch.nn.Parameter(torch.zeros_like(tensor)) for name, tensor in tensors.items()}
-    runtime = types.ModuleType("vime.backends.megatron_utils.update_weight.common")
-    runtime.named_params_and_buffers = lambda args, model: iter(parameters.items())
-    monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
-    monkeypatch.setattr(common, "shard_mcore_tensor", lambda name, tensor, parameter: tensor)
-    monkeypatch.setattr(common, "_pad_vocab", lambda args, name, tensor: tensor)
-    args = types.SimpleNamespace(update_weight_mode=mode, update_weight_transport=transport, use_critic=use_critic)
-    common.load_model_hf_weights(args, [], tmp_path, _config(), lambda name, reader, config: reader.get_tensor(name))
-    for name, tensor in tensors.items():
-        torch.testing.assert_close(parameters[name], tensor, rtol=0, atol=0)
