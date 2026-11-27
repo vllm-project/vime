@@ -354,14 +354,22 @@ def test_update_uses_native_main_and_draft_lifecycles(update_module, monkeypatch
 
 
 @pytest.mark.unit
-def test_initial_weight_check_retains_pause_after_transfer(update_module, monkeypatch):
-    updater = _updater_for_transfer(update_module, mtp=True)
+@pytest.mark.parametrize("draft_source", ["mtp", "external"])
+def test_initial_weight_check_retains_pause_after_transfer(update_module, monkeypatch, draft_source):
+    updater = _updater_for_transfer(update_module, mtp=draft_source == "mtp")
+    if draft_source == "external":
+        updater.set_external_draft_weights({"named_tensors": [("draft.weight", torch.ones(1))]}, "1")
     monkeypatch.setattr(update_module.dist, "get_rank", lambda: 0)
     monkeypatch.setattr(update_module.dist, "barrier", lambda *args, **kwargs: None)
     updater.update_weights(resume_generation=False)
     engine = updater.rollout_engines[0]
+    assert updater._trainer.draft_states == [False, True]
+    assert len(engine.start_draft_weight_update.calls) == 1
     assert len(engine.finish_weight_update.calls) == 2
     assert engine.continue_generation.calls == []
+    if draft_source == "external":
+        assert updater._external_draft_named_tensors is None
+        assert updater._external_draft_version is None
 
 
 @pytest.mark.unit
