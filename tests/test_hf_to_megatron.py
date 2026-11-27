@@ -3,6 +3,7 @@ import inspect
 import sys
 import types
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -72,7 +73,10 @@ def test_direct_hf_load_preserves_critic_value_head(tmp_path, monkeypatch, prefi
     monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
     monkeypatch.setattr(common, "shard_mcore_tensor", lambda name, tensor, parameter: tensor)
 
-    common.load_model_hf_weights(_EXPORT_ARGS, [], tmp_path, _config("qwen3_moe"), qwen_moe_hf_tensor)
+    config = _config("qwen3_moe")
+    lookup = Mock(wraps=qwen_moe_hf_tensor)
+    common.load_model_hf_weights(_EXPORT_ARGS, [], tmp_path, config, lookup)
+    assert [c.args[0] for c in lookup.call_args_list].count(prefix + "output_layer.weight") == 1
 
     torch.testing.assert_close(weight, torch.full((1, 4), 0.125), rtol=0, atol=0)
     torch.testing.assert_close(bias, torch.zeros(1), rtol=0, atol=0)
@@ -732,7 +736,9 @@ def test_direct_hf_load_restores_matching_scalar_head(tmp_path, monkeypatch, mod
     monkeypatch.setattr(common, "shard_mcore_tensor", lambda name, tensor, parameter: tensor)
     monkeypatch.setattr(common, "_pad_vocab", lambda args, name, tensor: tensor)
     args = types.SimpleNamespace(update_weight_mode=mode, update_weight_transport=transport, use_critic=use_critic)
-    common.load_model_hf_weights(args, [], tmp_path, _config(), lambda name, reader, config: reader.get_tensor(name))
+    lookup = Mock(side_effect=lambda name, reader, config: reader.get_tensor(name))
+    common.load_model_hf_weights(args, [], tmp_path, _config(), lookup)
+    assert [c.args[0] for c in lookup.call_args_list].count("output_layer.weight") == 1
     for name, tensor in tensors.items():
         torch.testing.assert_close(parameters[name], tensor, rtol=0, atol=0)
 

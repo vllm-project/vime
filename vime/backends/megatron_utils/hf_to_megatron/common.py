@@ -166,22 +166,23 @@ def load_model_hf_weights(
     from vime.backends.megatron_utils.update_weight.common import named_params_and_buffers
 
     reader = SafetensorReader(path)
-    parameters = list(named_params_and_buffers(args, model))
+    initialized_value_heads = set()
+
+    def parameters_with_head_biases_last():
+        # The bias may precede its weight. Defer only the target bias references
+        # until we know which scalar heads kept their initialized weights.
+        biases = []
+        for name, parameter in named_params_and_buffers(args, model):
+            if name.endswith("output_layer.bias"):
+                biases.append((name, parameter))
+            else:
+                yield name, parameter
+        for name, parameter in biases:
+            if name.removesuffix(".bias") not in initialized_value_heads:
+                yield name, parameter
+
     with torch.no_grad():
-        # Match the existing scalar-head weight rule for its companion bias.
-        # Inspect the source head first so a matching value-head checkpoint is
-        # restored normally, regardless of parameter enumeration order.
-        initialized_value_heads = {
-            name.removesuffix(".weight")
-            for name, parameter in parameters
-            if name.endswith("output_layer.weight")
-            and parameter.ndim == 2
-            and parameter.shape[0] == 1
-            and get_hf_tensor(name, reader, config).shape[0] != 1
-        }
-        for name, parameter in parameters:
-            if name.endswith("output_layer.bias") and name.removesuffix(".bias") in initialized_value_heads:
-                continue
+        for name, parameter in parameters_with_head_biases_last():
             # Router._load_from_state_dict normally restores this buffer to
             # FP32 before copying. Direct HF loading bypasses that hook; a
             # model-wide BF16 cast must not quantize the routing correction.
@@ -189,6 +190,8 @@ def load_model_hf_weights(
                 parameter.data = parameter.data.float()
             tensor = get_hf_tensor(name, reader, config)
             if name.endswith("output_layer.weight") and parameter.shape[0] == 1 and tensor.shape[0] != 1:
+                if parameter.ndim == 2:
+                    initialized_value_heads.add(name.removesuffix(".weight"))
                 continue
             tensor = shard_mcore_tensor(name, _pad_vocab(args, name, tensor), parameter)
             if tensor.shape != parameter.shape:
