@@ -11,7 +11,7 @@ from ray.actor import ActorHandle
 
 from vime.platforms import current_platform
 from vime.utils.distributed_utils import get_gloo_group
-from vime.utils.weight_sync import should_flush_cache
+from vime.utils.weight_sync import should_flush_cache, weight_update_pause_mode
 
 from ..dspark.export import export_dspark_model_weights
 from .common import HfWeightSource, VimeRayWeightSyncClient
@@ -110,7 +110,7 @@ class UpdateWeightFromDistributed:
         ]
 
     @torch.no_grad()
-    def update_weights(self) -> None:
+    def update_weights(self, *, resume_generation: bool = True) -> None:
         assert self._trainer is not None
         self.weight_version += 1
         flush_cache = should_flush_cache(
@@ -121,7 +121,9 @@ class UpdateWeightFromDistributed:
         if dist.get_rank() == 0:
             ray.get(
                 [
-                    engine.pause_generation.remote(mode="abort" if flush_cache else "in_place")
+                    engine.pause_generation.remote(
+                        mode=weight_update_pause_mode(flush_cache=flush_cache, resume_generation=resume_generation)
+                    )
                     for engine in self.rollout_engines
                 ]
             )
@@ -170,7 +172,8 @@ class UpdateWeightFromDistributed:
                     post_process_quantization=True,
                     rollout_engines=self.rollout_engines,
                 )
-            ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
+            if resume_generation:
+                ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
 
 

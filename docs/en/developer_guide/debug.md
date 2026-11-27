@@ -95,8 +95,26 @@ When using INT4-quantized models (e.g., `compressed-tensors` with `W4A16`), the 
 
 4. **How to diagnose**
 
-   - Use `--check-weight-update-equal` to verify that weights after a Megatron → vLLM sync match the expected values. If a parameter shows all zeros on the vLLM side, it was likely incorrectly quantized or missing from the checkpoint.
+   - Use `--check-weight-update-equal` to verify that weights after a Megatron → vLLM sync match the expected values. The checker deliberately zeroes parameters before the first full sync. If a parameter that was nonzero in the baseline is still zero after the sync, use the reported endpoint, rank and parameter name to check the weight mapping, checkpoint shards and quantization layout.
    - Use `--debug-rollout-only` with a small number of GPUs to quickly test whether vLLM can generate coherent text from the quantized checkpoint alone.
+
+## Check the initial weight update
+
+Add `--check-weight-update-equal` to the training launch to check the first weight sync into newly created serving engines. Initialize training and inference from the same logical checkpoint. Each updatable engine is paused, its target-model parameter SHA-256 digests are saved, and its parameters are zeroed through vLLM's `/weight_checker`. After the first complete weight update, every engine is compared against its own baseline before rollout resumes.
+
+The caller retains checksum dictionaries. vLLM performs the parameter hashing and exact byte-digest comparison. Errors include the engine endpoint and keys of the form `dp0:pp0:pcp0:tp0:<tensor_name>`. The checker covers the first model selected for weight updates, including its prefill and decode engines. Frozen reference and reward models retain their weights.
+
+Install the paired `docker/npu_patch/vllm.patch` on the serving stack, including externally launched engines, before enabling this check. It provides shared worker hashing/reset for Ascend and the opt-in `include_worker_ids` checker response. Each rank's digests are bound to its worker instance ID; replacing a worker invalidates the baseline even when the endpoint and restored HF weights are unchanged. Missing instance IDs fail preparation before any reset. Existing callers that omit `include_worker_ids` keep the upstream response format.
+
+Use `--weight-checker-timeout 1800` for a longer per-phase and HTTP timeout on large models. The default is 300 seconds. The phase wait includes Ray scheduling and result delivery, so a request using the full HTTP budget may exceed the phase deadline. A comparison mismatch, invalid response, missing rank, changed engine, or timeout fails startup and keeps rollout admission paused. A timed-out remote operation can still be running, so recovery must establish a stable serving state and install complete weights before generation resumes.
+
+Retained serving attachments and debug-only modes log a skipped check. To repeat a failed check, recreate serving from the intended checkpoint and start a fresh training attachment to run the initial sync again. A retained engine may contain weights from a different training boundary than the restored trainer. A fresh startup that loads different training and inference checkpoints reports their parameter differences.
+
+On the first weight update with rollout offload enabled, Vime waits for the KV cache to be restored before explicitly resuming generation and restoring the rollout producer’s previous admission state. When the checker runs, each endpoint must pass comparison before KV restoration. When the check is disabled or skipped, KV restoration follows the weight update directly. This startup order also applies to release-train with a full checkpoint published on disk. If weights-only wake-up unexpectedly resumes generation, the checker pauses the engine again and reports the scheduling change. Backend sleep/wake behavior therefore needs coverage in the deployment's integration tests.
+
+The checked tensors and supported quantization/offload layouts follow the paired vLLM version. The target-model parameter scope and upstream limitations are described in the [vLLM Weight Checker documentation](https://docs.vllm.ai/en/latest/training/weight_checker/).
+
+When using [online external draft training](../advanced/speculative-decoding.md#online-training-for-external-draft-models), the initial checker still compares target-model parameters. To verify draft publication, check that `/start_draft_weight_update`, `/update_weights` and `/finish_weight_update` succeed in order and that the next rollout generates with speculative decoding.
 
 ## Debug vllm illegal memory access (IMA)
 

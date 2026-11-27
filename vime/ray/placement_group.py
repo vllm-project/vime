@@ -290,6 +290,7 @@ class RolloutStartup:
     serving: object = None
     placements: dict | None = None
     num_rollout_per_epoch: int | None = None
+    weight_check_prepared: bool = False
 
     def close(self, *, failed):
         timeout = getattr(self.args, "rollout_cleanup_timeout", 60)
@@ -405,11 +406,8 @@ def _attach_rollout_manager(startup):
         num_rollout_per_epoch = ray.get(manager.get_num_rollout_per_epoch.remote())
         args.num_rollout = num_rollout_per_epoch * args.num_epoch
         assert args.num_rollout > 0
-    if args.check_weight_update_equal and not reused:
-        # This diagnostic resets initial weights. Reused engines must retain
-        # their current weights until the restarted trainer replaces them.
-        ray.get(manager.check_weights.remote(action="snapshot"))
-        ray.get(manager.check_weights.remote(action="reset_tensors"))
+    if args.check_weight_update_equal:
+        startup.weight_check_prepared = ray.get(manager.prepare_weight_check.remote(reused=reused))
     if args.offload_rollout:
         ray.get(manager.offload.remote())
     startup.num_rollout_per_epoch = num_rollout_per_epoch

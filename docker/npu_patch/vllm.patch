@@ -415,21 +415,32 @@ index b0c418c53126242a2a94453e7e8a264c0a8a83f7..b8599874c4cfe57144723812b06a55b6
              sleep_mode_backend=self.sleep_mode_backend,
              sleep_mode_offload_cudagraph=self.sleep_mode_offload_cudagraph,
 diff --git a/vllm/engine/protocol.py b/vllm/engine/protocol.py
-index 149a5a54a113961c2a8d3bc22aff824b85d4af31..39b19bb319ad3877cb35b5ea2d449b8d03b77749 100644
+index 149a5a54a113961c2a8d3bc22aff824b85d4af31..f7e3431a46675a1f4400b830880bc9e297081526
 --- a/vllm/engine/protocol.py
 +++ b/vllm/engine/protocol.py
-@@ -165,6 +165,11 @@ class EngineClient(ABC):
-         """Raise if unhealthy."""
+@@ -166,6 +166,11 @@
          ...
- 
-+    @abstractmethod
+
+     @abstractmethod
 +    async def check_health_generate(self, timeout: float = 20.0) -> None:
 +        """Require a scheduler or inference response, not just a live frontend."""
 +        ...
 +
-     @abstractmethod
++    @abstractmethod
      async def start_profile(
          self,
+         profile_prefix: str | None = None,
+@@ -286,6 +291,10 @@
+         """Return rank-qualified weight digests from every worker of every engine."""
+         raise NotImplementedError
+
++    async def get_weight_checker_states(self) -> list[dict[str, Any]]:
++        """Return digests bound to the instance of each managed worker."""
++        raise NotImplementedError
++
+     async def handle_fault(
+         self, fault_tolerance_request: FaultToleranceRequest
+     ) -> FaultToleranceResult:
 diff --git a/vllm/entrypoints/generate/base/protocol.py b/vllm/entrypoints/generate/base/protocol.py
 index a0122cadf5b2f5f9caf9f8deaaa19bbbf64f6bbf..f6d390907ec1df33163e0bc4bef870d1a9a2dae8 100644
 --- a/vllm/entrypoints/generate/base/protocol.py
@@ -5818,10 +5829,10 @@ index 13e3e27a712f2e209437c18d9667f05d405400f9..ff113b5b30db81e586707f1cc5489427
      @property
      def finished(self) -> bool:
 diff --git a/vllm/v1/engine/async_llm.py b/vllm/v1/engine/async_llm.py
-index 0ca5a45c3352074400b41c74fe053a72b898eae4..c330e7e22d9e37b356c7a7f995716c4e63e64bba 100644
+index 0ca5a45c3352074400b41c74fe053a72b898eae4..ddbd363742c6508b2246cf259b1b24c42c12ffea
 --- a/vllm/v1/engine/async_llm.py
 +++ b/vllm/v1/engine/async_llm.py
-@@ -51,6 +51,7 @@ from vllm.tokenizers import TokenizerLike
+@@ -51,6 +51,7 @@
  from vllm.tracing import init_tracer, log_tracing_disabled_warning
  from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
  from vllm.usage.usage_lib import UsageContext
@@ -5829,10 +5840,10 @@ index 0ca5a45c3352074400b41c74fe053a72b898eae4..c330e7e22d9e37b356c7a7f995716c4e
  from vllm.utils.async_utils import cancel_task_threadsafe
  from vllm.utils.collection_utils import as_list
  from vllm.v1.engine import EngineCoreRequest, PauseMode
-@@ -1133,6 +1134,29 @@ class AsyncLLM(EngineClient):
+@@ -1133,6 +1134,29 @@
          if self.errored:
              raise self.dead_error
- 
+
 +    async def check_health_generate(self, timeout: float = 20.0) -> None:
 +        """Require a scheduler reply when busy, or an inference result when idle."""
 +        async with asyncio.timeout(timeout):
@@ -5859,6 +5870,21 @@ index 0ca5a45c3352074400b41c74fe053a72b898eae4..c330e7e22d9e37b356c7a7f995716c4e
      async def start_profile(
          self,
          profile_prefix: str | None = None,
+@@ -1228,6 +1252,14 @@
+     async def compute_weight_checksums(self) -> list[dict[str, str]]:
+         return await self.engine_core.compute_weight_checksums_async()
+
++    async def get_weight_checker_states(self) -> list[dict[str, Any]]:
++        # collective_rpc() returns only one DP engine's result. Keep every
++        # engine's states so replacement of any managed worker is observable.
++        per_engine = await self.engine_core.call_utility_all_async(
++            "collective_rpc", "get_weight_checker_state", None, (), None
++        )
++        return [worker for workers in per_engine for worker in workers]
++
+     async def add_lora(self, lora_request: LoRARequest) -> bool:
+         """Load a new LoRA adapter into the engine for future requests."""
+         return await self.engine_core.add_lora_async(lora_request)
 diff --git a/vllm/v1/engine/input_processor.py b/vllm/v1/engine/input_processor.py
 index 17e8af5caeeff4056f912440b622f8c3a6babf2e..cc1918b529b4e391e44aeaa1202fd5f90148fbc6 100644
 --- a/vllm/v1/engine/input_processor.py
@@ -6718,13 +6744,48 @@ index 2200c173ab39fa9085fe80eea07b3e5824ddbe85..f0b479f125eab1cfddfd94be10b49fc9
                  )
              del processed_logits
 diff --git a/vllm/v1/worker/gpu_worker.py b/vllm/v1/worker/gpu_worker.py
-index 04e1e7730b16455cf5df1ac922305ef56f204504..f02a4a4b13b82ddf61e98d8d7b5463e614135819 100644
+index 04e1e7730b16455cf5df1ac922305ef56f204504..b69a0c70d44c1b7aab0c6d870d106aea1f7a1082
 --- a/vllm/v1/worker/gpu_worker.py
 +++ b/vllm/v1/worker/gpu_worker.py
-@@ -637,6 +637,24 @@ class Worker(WorkerBase):
+@@ -67,10 +67,6 @@
+     share_source_lm_heads,
+ )
+ from vllm.model_executor.model_loader import get_model_loader
+-from vllm.model_executor.model_loader.weight_checksum import (
+-    compute_tensor_digests,
+-    zero_weights,
+-)
+ from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
+ from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
+ from vllm.platforms import current_platform
+@@ -377,22 +373,6 @@
+     def checkpoint_restore(self) -> None:
+         checkpoint_restore_distributed_state()
+
+-    def _weight_checksum_prefix(self) -> str:
+-        # data_parallel_rank is 0 in dense workers; only the index is unique.
+-        dp = self.parallel_config.data_parallel_index
+-        pp = get_pp_group().rank_in_group
+-        pcp = get_pcp_group().rank_in_group
+-        tp = get_tp_group().rank_in_group
+-        return f"dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:"
+-
+-    def compute_weight_checksums(self) -> dict[str, str]:
+-        prefix = self._weight_checksum_prefix()
+-        digests = compute_tensor_digests(self.model_runner.get_model())
+-        return {prefix + name: digest for name, digest in digests.items()}
+-
+-    def reset_weights(self) -> None:
+-        zero_weights(self.model_runner.get_model())
+-
+     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
+         if (
+             current_platform.is_cuda_alike()
+@@ -636,6 +616,24 @@
+     def reload_weights(self, *args, **kwargs) -> None:
          with set_current_vllm_config(self.vllm_config):
              self.model_runner.reload_weights(*args, **kwargs)
- 
++
 +    def pull_weights(
 +        self,
 +        local_checkpoint_dir: str,
@@ -6742,14 +6803,13 @@ index 04e1e7730b16455cf5df1ac922305ef56f204504..f02a4a4b13b82ddf61e98d8d7b5463e6
 +        )
 +
 +        return {"success": True, "weight_version": str(target_version)}
-+
+
      @torch.inference_mode()
      def determine_available_memory(self) -> int:
-         """Profiles the peak memory usage of the model to determine how much
-@@ -1474,6 +1492,11 @@ class Worker(WorkerBase):
+@@ -1474,6 +1472,11 @@
      def pin_lora(self, lora_id: int) -> bool:
          return self.model_runner.pin_lora(lora_id)
- 
+
 +    def dumper_control(self, action: str, body: str = "{}") -> dict:
 +        if not self.use_v2_model_runner or self.model_runner.tensor_dumper is None:
 +            raise RuntimeError("Dumper was not enabled at startup.")
@@ -7018,3 +7078,128 @@ diff --git a/vllm/model_executor/models/qwen3_dflash.py b/vllm/model_executor/mo
          self._rope_is_neox = attn0.rotary_emb.is_neox_style
          # Validation that RoPE params are the same across all layers
          for attn in layers_attn[1:]:
+diff --git a/vllm/v1/worker/worker_base.py b/vllm/v1/worker/worker_base.py
+index e1a4eaf29102c80e1b3162eeac0674185984c80e..33a9ada593f2df4ff4102900ea15ce43043e8440
+--- a/vllm/v1/worker/worker_base.py
++++ b/vllm/v1/worker/worker_base.py
+@@ -1,6 +1,7 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
++import uuid
+ from collections.abc import Callable
+ from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
+
+@@ -9,6 +10,7 @@
+
+ import vllm.ir
+ from vllm.config import VllmConfig, set_current_vllm_config
++from vllm.distributed import get_pcp_group, get_pp_group, get_tp_group
+ from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
+ from vllm.logger import init_logger
+ from vllm.lora.request import LoRARequest
+@@ -152,6 +154,43 @@
+
+     def get_model(self) -> nn.Module:
+         raise NotImplementedError
++
++    def _weight_checksum_model(self) -> nn.Module:
++        # Some runners expose get_model(); others expose the loaded module directly.
++        get_model = getattr(self.model_runner, "get_model", None)
++        return get_model() if callable(get_model) else self.model_runner.model
++
++    def _weight_checksum_prefix(self) -> str:
++        # The index remains unique when dense workers reset data_parallel_rank.
++        dp = self.parallel_config.data_parallel_index
++        pp = get_pp_group().rank_in_group
++        pcp = get_pcp_group().rank_in_group
++        tp = get_tp_group().rank_in_group
++        return f"dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:"
++
++    def compute_weight_checksums(self) -> dict[str, str]:
++        from vllm.model_executor.model_loader.weight_checksum import (
++            compute_tensor_digests,
++        )
++
++        prefix = self._weight_checksum_prefix()
++        digests = compute_tensor_digests(self._weight_checksum_model())
++        return {prefix + name: digest for name, digest in digests.items()}
++
++    def reset_weights(self) -> None:
++        from vllm.model_executor.model_loader.weight_checksum import zero_weights
++
++        zero_weights(self._weight_checksum_model())
++
++    def get_weight_checker_state(self) -> dict[str, Any]:
++        """Return digests and the identity of the worker that computed them."""
++        if not hasattr(self, "_weight_checker_instance_id"):
++            self._weight_checker_instance_id = uuid.uuid4().hex
++        return {
++            "rank_prefix": self._weight_checksum_prefix().removesuffix(":"),
++            "instance_id": self._weight_checker_instance_id,
++            "checksums": self.compute_weight_checksums(),
++        }
+
+     def supports_draft_weight_updates(self) -> bool:
+         """Whether this worker can update its configured speculative model."""
+diff --git a/vllm/entrypoints/rl/online/api_router.py b/vllm/entrypoints/rl/online/api_router.py
+index 24e9e9a8db6d9b713d194ae98f8fa22deb4e4f19..b959e13c506276287628f6b26679fdc8dcdc6d81
+--- a/vllm/entrypoints/rl/online/api_router.py
++++ b/vllm/entrypoints/rl/online/api_router.py
+@@ -234,6 +234,7 @@
+     raw_request: Request,
+     action: Annotated[Literal["checksum", "reset", "compare"], Body(embed=True)],
+     baseline: Annotated[dict[str, str] | None, Body(embed=True)] = None,
++    include_worker_ids: Annotated[bool, Body(embed=True)] = False,
+ ) -> JSONResponse:
+     """Checksum, reset, or compare model weights against a baseline."""
+     client = engine_client(raw_request)
+@@ -246,8 +247,23 @@
+             detail="action='compare' requires a 'baseline' object",
+         )
+
++    worker_ids: dict[str, str] = {}
++    if include_worker_ids:
++        states = await client.get_weight_checker_states()
++        for state in states:
++            prefix = state["rank_prefix"]
++            if prefix in worker_ids:
++                raise HTTPException(
++                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
++                    detail=f"Duplicate weight checker rank: {prefix}",
++                )
++            worker_ids[prefix] = state["instance_id"]
++        workers = [state["checksums"] for state in states]
++    else:
++        workers = await client.compute_weight_checksums()
++
+     checksums: dict[str, str] = {}
+-    for worker_checksums in await client.compute_weight_checksums():
++    for worker_checksums in workers:
+         if duplicates := checksums.keys() & worker_checksums.keys():
+             raise HTTPException(
+                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+@@ -255,7 +271,10 @@
+             )
+         checksums.update(worker_checksums)
+     if action == "checksum":
+-        return JSONResponse(content={"checksums": checksums})
++        content: dict[str, Any] = {"checksums": checksums}
++        if include_worker_ids:
++            content["worker_ids"] = worker_ids
++        return JSONResponse(content=content)
+
+     assert baseline is not None
+     mismatches = sorted(
+@@ -263,7 +282,10 @@
+         for key in checksums.keys() | baseline.keys()
+         if checksums.get(key) != baseline.get(key)
+     )
+-    return JSONResponse(content={"match": not mismatches, "mismatches": mismatches})
++    content = {"match": not mismatches, "mismatches": mismatches}
++    if include_worker_ids:
++        content["worker_ids"] = worker_ids
++    return JSONResponse(content=content)
+
+
+ @router.get("/get_world_size")

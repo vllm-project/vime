@@ -1078,7 +1078,9 @@ def test_disk_weight_updates_do_not_require_actor_return_values(tmp_path, monkey
     monkeypatch.setattr("vime.ray.actor_group.ray.get", lambda value: value)
     reloaded = []
     monkeypatch.setattr(
-        group, "_reload_rollout_weights_from_disk", lambda path, version: reloaded.append((path, version))
+        group,
+        "_reload_rollout_weights_from_disk",
+        lambda path, version, *, resume_generation: reloaded.append((path, version, resume_generation)),
     )
     monkeypatch.setattr(group, "release", lambda: group._actor_handlers.clear())
     monkeypatch.setattr(group, "_allocate_gpus_for_actor", lambda *a: group._actor_handlers.append(worker))
@@ -1092,7 +1094,7 @@ def test_disk_weight_updates_do_not_require_actor_return_values(tmp_path, monkey
     expected = (
         []
         if mode == "nccl"
-        else [(tmp_path / "weights" / f"weight_v{version:06d}", str(version)) for version in (13, 14, 15, 16)]
+        else [(tmp_path / "weights" / f"weight_v{version:06d}", str(version), True) for version in (13, 14, 15, 16)]
     )
     assert reloaded == expected
 

@@ -18,6 +18,13 @@ This guide provides instructions for installing Vime with NPU support, including
 | TransformerEngineNPU | `d405be23773968bf7fdc567854005054550830fc` + `transformer-engine-npu.patch` | [GitCode](https://gitcode.com/Ascend/TransformerEngineNPU) |
 | torch_memory_saver (NPU) | `sgl-kernel-npu` tag `2026.6.0` + `torch-memory-saver.patch` | [GitHub](https://github.com/sgl-project/sgl-kernel-npu) |
 
+## Updating the vLLM checker patch
+
+When bumping vLLM, verify that both GPU and Ascend workers inherit the shared
+checksum/reset methods on WorkerBase. Check the runner's model accessor, rank
+prefixes and the per-worker identity returned by the HTTP API. The NPU smoke
+suite runs `tests/npu/check_weight_checker_backend.py` against the patched runtime.
+
 ## Preparing the Running Environment
 
 Run the following steps inside the base image listed above, with the Ascend devices and host driver mounted. The base image provides Python, CANN, PyTorch, torch-npu, vLLM, vLLM-Ascend and FLA NPU.
@@ -67,6 +74,10 @@ git -C /vllm-workspace/vllm apply "${PATCH_DIR}/vllm.patch"
 git -C /vllm-workspace/vllm-ascend apply --check "${PATCH_DIR}/vllm-ascend.patch"
 git -C /vllm-workspace/vllm-ascend apply "${PATCH_DIR}/vllm-ascend.patch"
 ```
+
+Online external draft publication uses `start_draft_weight_update` on the
+Ascend worker. If the serving engine reports that this method is missing, use
+the vLLM and vLLM-Ascend builds and patches paired with this Vime revision.
 
 ### 2. Megatron-LM
 
@@ -150,6 +161,14 @@ Then install Vime:
 ```bash
 pip install -r "${VIME_INSTALL_ROOT}/vime/requirements.txt" 'opentelemetry-exporter-otlp==1.45.1'
 pip install --no-deps --no-build-isolation -e "${VIME_INSTALL_ROOT}/vime"
+```
+
+For online external draft training, install the versions used by
+[`Dockerfile.npu`](../Dockerfile.npu). Use `--no-deps` to retain the NumPy and
+Transformers versions provided by the NPU stack.
+
+```bash
+pip install --no-deps speculators==0.9.0 hs-connectors==0.9.0
 ```
 
 Qwen3.5/3.6 NPU training uses the base image's `fla_npu` package with

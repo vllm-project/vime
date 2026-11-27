@@ -93,8 +93,26 @@ vime 支持将训练部分和推理部分分开进行调试，从而实现：
 
 4. **如何排查**
 
-   - 使用 `--check-weight-update-equal` 验证 Megatron → vLLM 权重同步后的值是否正确。如果某个参数在 vLLM 侧全为零，说明它可能被错误量化或在 checkpoint 中缺失。
+   - 使用 `--check-weight-update-equal` 验证 Megatron → vLLM 权重同步后的值是否正确。校验会在首次完整同步前主动清零参数。如果基线中非零的参数在同步完成后仍为零，可根据报错中的端点、rank 和参数名排查权重映射、checkpoint 分片和量化布局。
    - 使用 `--debug-rollout-only` 配合少量 GPU，快速测试 vLLM 能否从量化 checkpoint 正常生成文本。
+
+## 检查首次权重同步
+
+在训练启动参数中加入 `--check-weight-update-equal`，检查新建 serving 引擎的首次权重同步。训练与推理初始化应对应同一份逻辑 checkpoint。检查会暂停接收更新的引擎，保存 target model 参数的 SHA-256 摘要，并通过 vLLM 的 `/weight_checker` 将参数清零。首次完整权重同步结束后，每个引擎分别与自己的基线比较，全部通过后恢复 rollout。
+
+调用方保留 checksum 字典，参数摘要与精确字节摘要比较由 vLLM 执行。错误包含引擎 endpoint，以及形如 `dp0:pp0:pcp0:tp0:<tensor_name>` 的参数 key。检查覆盖实际接收权重更新的第一个模型，包括其 prefill 与 decode 引擎。冻结的 reference 和 reward 模型保留原有权重。
+
+校验前需要在 serving 栈（包括外部启动的引擎）安装配套的 `docker/npu_patch/vllm.patch`。补丁将摘要和 reset 实现放在共享 worker 层，使 Ascend 可以继承使用，并提供可选的 `include_worker_ids` 响应。每个 rank 的摘要与其实际 worker 实例标识绑定；即使地址和重新加载的 HF 权重不变，worker 替换也会使 baseline 失效。缺少实例标识会在 reset 前中止准备；未请求该字段的原有 API 调用保持原响应格式。
+
+大模型可使用 `--weight-checker-timeout 1800` 延长单个检查阶段及 HTTP 请求的超时，默认值为 300 秒。阶段的等待时间包含 Ray 调度和结果返回，请求耗尽其 HTTP 预算时整个阶段可能已超时。比较不一致、响应异常、rank 缺失、引擎变化或超时会使启动失败，并保持 rollout admission 暂停。超时后远端操作可能仍在执行，恢复流程需要先建立稳定的 serving 状态，再完整安装权重并恢复生成。
+
+复用已有 serving 和 debug-only 模式会明确记录 skipped。失败后要重新校验，请从预期 checkpoint 重新创建 serving 并建立新的训练 attachment，再执行首次完整同步。已有引擎可能持有与恢复后的 trainer 不同训练时刻的权重。新建 serving 时，训练与推理加载不同 checkpoint 会报告实际参数差异。
+
+首次供权启用 rollout offload 时，Vime 等待 KV cache 唤醒成功后才显式恢复引擎生成，并将 rollout producer 恢复到原先的准入状态。本次执行校验时，各端点的权重须先通过比较，再恢复 KV；关闭或跳过校验时，供权完成后直接恢复 KV。release-train 通过磁盘发布完整 checkpoint 时也遵循这一次序。如果 weights-only 唤醒意外恢复了生成，检查会再次暂停该引擎并报告调度状态变化。目标部署的集成测试需要覆盖对应后端的 sleep/wake 行为。
+
+检查对象、量化布局和 offload 支持范围遵循配套 vLLM 版本，具体参数范围和限制见 [vLLM Weight Checker 文档](https://docs.vllm.ai/en/latest/training/weight_checker/)。
+
+启用[外部 draft 模型在线训练](../advanced/speculative-decoding.md#外部-draft-模型在线训练)时，首次 checker 仍对比 target model 参数。验证 draft 发布时，确认 `/start_draft_weight_update`、`/update_weights` 和 `/finish_weight_update` 依次成功，并检查下一轮 rollout 能正常使用投机采样生成。
 
 ## Debug vllm illegal memory access (IMA)
 

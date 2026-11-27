@@ -68,4 +68,16 @@ vime currently supports online training of the MTP layers during RL, updating th
 
 And note that this requires a torch dist checkpoint with the MTP weight, you need to add `--mtp-num-layers 1` during the checkpoint conversion from huggingface to torch dist.
 
-Training external draft models is still a WIP.
+## Online Training for External Draft Models
+
+On Ascend, Vime can train EAGLE3 or DSpark drafts from rollout features and
+publish the updated draft weights to vLLM for the next rollout. Set
+`--enable-external-draft-training` and choose `eagle3` or `dspark` with
+`--draft-algorithm`. Point `--draft-model-path` and the model in
+`--vllm-speculative-config` to the same draft checkpoint.
+
+Use separate Megatron training and vLLM rollout devices, with pipeline and
+context parallel sizes set to 1. Use `--update-weight-mode full` and
+`--update-weight-transport nccl`, which selects HCCL on Ascend. The Qwen3-4B
+launch scripts show how to configure [EAGLE3](https://github.com/vllm-project/vime/blob/ascend/scripts/run-qwen3-4B-npu-eagle3.sh)
+and [DSpark](https://github.com/vllm-project/vime/blob/ascend/scripts/run-qwen3-4B-npu-dspark.sh).

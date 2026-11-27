@@ -3,6 +3,7 @@ import copy
 import importlib.util
 import json
 import logging
+import math
 import os
 from typing import Any
 
@@ -1470,7 +1471,17 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 default="torch",
             )
             reset_arg(parser, "--record-memory-history", action="store_true", default=False)
-            parser.add_argument("--check-weight-update-equal", action="store_true")
+            parser.add_argument(
+                "--check-weight-update-equal",
+                action="store_true",
+                help="On fresh serving startup, reset rollout weights and verify the first full sync before enabling generation.",
+            )
+            parser.add_argument(
+                "--weight-checker-timeout",
+                type=float,
+                default=300.0,
+                help="Maximum seconds to wait for each checker phase, including RPC overhead. Individual checker HTTP requests also use this limit.",
+            )
             return parser
 
         def add_network_arguments(parser):
@@ -2165,6 +2176,9 @@ def vime_validate_args(args):
     args = copy.deepcopy(args)
     if getattr(args, "rollout_cleanup_timeout", 60) <= 0:
         raise ValueError("--rollout-cleanup-timeout must be positive")
+    weight_checker_timeout = getattr(args, "weight_checker_timeout", 300.0)
+    if not math.isfinite(weight_checker_timeout) or weight_checker_timeout <= 0:
+        raise ValueError("--weight-checker-timeout must be finite and positive")
     get_pg_loss_type(args)
     validate_score_centering_args(args)
     args.eval_datasets = _resolve_eval_datasets(args)

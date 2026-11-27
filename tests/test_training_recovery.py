@@ -238,7 +238,8 @@ def test_initial_weight_sync_controls_retained_producer_resume(args, monkeypatch
     endpoint, actor = Mock(), Mock()
     endpoint.training_ready.remote.side_effect = manager.training_ready
 
-    def publish_weights():
+    def publish_weights(*, resume_generation):
+        assert resume_generation
         producer.resume.assert_not_called()
         if weight_sync_fails:
             raise RuntimeError("weight sync failed")
@@ -256,7 +257,7 @@ def test_initial_weight_sync_controls_retained_producer_resume(args, monkeypatch
         assert manager._recovery_admission_was_paused is was_paused
     else:
         train(args, {}, endpoint, 1, RestorePlan())
-        endpoint.training_ready.remote.assert_called_once_with()
+        endpoint.training_ready.remote.assert_called_once_with(resume_offloaded_engines=False)
         assert manager._recovery_admission_was_paused is None
         manager.training_ready()
     assert producer.resume.call_count == int(not weight_sync_fails and was_paused is False)

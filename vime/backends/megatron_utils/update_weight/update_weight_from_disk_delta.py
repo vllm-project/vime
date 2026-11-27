@@ -21,7 +21,7 @@ from ray.actor import ActorHandle
 from vime.utils import accelerator
 from vime.utils.disk_delta import NUM_WORKERS, checksum, overwrite_encode
 from vime.utils.distributed_utils import get_gloo_group
-from vime.utils.weight_sync import should_flush_cache
+from vime.utils.weight_sync import should_flush_cache, weight_update_pause_mode
 
 from ..hf_checkpoint_saver import _copy_hf_assets, _finalize_distributed_shards, _SafetensorShardWriter
 from .update_weight_from_distributed import UpdateWeightFromDistributed
@@ -84,7 +84,7 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
         pass  # no NCCL groups to tear down
 
     @torch.no_grad()
-    def update_weights(self) -> None:
+    def update_weights(self, *, resume_generation: bool = True) -> None:
         if self._needs_full_sync:
             # A failed update may have reached host-local checkpoints without
             # reaching GPU weights. Publish above every attempted disk version,
@@ -109,7 +109,7 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
             self._publish_full()
         else:
             self._publish()
-        self._reload_engines()
+        self._reload_engines(resume_generation=resume_generation)
         self._needs_full_sync = False
         self._record_metrics()
 
@@ -176,7 +176,7 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
             _atomic_write(os.path.join(self._version_dir, "model.safetensors.index.json"), json.dumps(index).encode())
         dist.barrier(group=group)
 
-    def _reload_engines(self) -> None:
+    def _reload_engines(self, *, resume_generation: bool = True) -> None:
         """Commit the published files, have each engine pull the delta onto every host it spans
         (checksum-verified), then reload the engines."""
         if self._post_write_hook is not None:
@@ -191,7 +191,9 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
             ray.get([engine.pull_weights.remote(self.weight_version) for engine in self.rollout_engines])
             ray.get(
                 [
-                    engine.pause_generation.remote(mode="abort" if flush_cache else "in_place")
+                    engine.pause_generation.remote(
+                        mode=weight_update_pause_mode(flush_cache=flush_cache, resume_generation=resume_generation)
+                    )
                     for engine in self.rollout_engines
                 ]
             )
@@ -207,7 +209,8 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
                     for engine in self.rollout_engines
                 ]
             )
-            ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
+            if resume_generation:
+                ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
 
     def _iter_hf_tensors(self):

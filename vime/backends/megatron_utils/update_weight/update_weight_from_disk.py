@@ -63,7 +63,8 @@ class UpdateWeightFromDisk:
         return out
 
     @torch.no_grad()
-    def update_weights(self) -> None:
+    def update_weights(self, *, resume_generation: bool = True) -> None:
+        """Write this rank's checkpoint. RayTrainGroup owns reload and generation resume."""
         self.weight_version += 1
         version_dir = Path(self.args.update_weight_disk_dir) / f"weight_v{self.weight_version:06d}"
 

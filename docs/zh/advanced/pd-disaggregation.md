@@ -61,6 +61,14 @@ python train.py \
   ...
 ```
 
+### Ascend 单机 1P1D 外部引擎
+
+在 Ascend 950DT 上，已验证一个 TP1 prefill 引擎和一个 TP1 decode 引擎的组合。两端的 `--kv-transfer-config` 均设置 `kv_connector=MooncakeConnector`，并用 `kv_connector_module_path=vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector` 选择 Ascend 实现。prefill 使用 `kv_producer`，decode 使用 `kv_consumer`，两端分别分配不同的 `kv_port`。在 `kv_connector_extra_config` 中，`prefill` 和 `decode` 均设为 `{"dp_size": 1, "tp_size": 1}`。两端均使用 `--no-enable-prefix-caching`。
+
+以 PD 模式启动 vllm-router，静态指定 prefill 和 decode 的 URL，并在 router 侧设置 `kv_connector="nixl"`。该模式将 prefill 返回的 KV 元数据转交给 decode；两张 NPU 之间的 KV 块由 Ascend Mooncake connector 传输。在这组配置下，两个端点均通过[首次权重同步校验](../developer_guide/debug.md#检查首次权重同步)，权重恢复前后的确定性生成结果一致。
+
+实测的 vllm-router 0.1.17 镜像要求在启动时提供端点地址，通过 `POST /workers` 动态注册返回 HTTP 400。使用该镜像时应采用静态注册。本次验证覆盖 PD 推理及权重校验，完整 PD 训练尚待验证。
+
 ## 为什么这对 RL 重要
 
 RL rollout 往往不是一批短 completion。Agentic 和 verifier-based workload 常见特征包括：

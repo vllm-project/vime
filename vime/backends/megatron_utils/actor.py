@@ -801,7 +801,7 @@ class MegatronTrainRayActor(TrainRayActor):
             self.sleep()
 
     @timer
-    def update_weights(self) -> bool | None:
+    def update_weights(self, *, resume_generation: bool = True) -> bool | None:
         if self.args.debug_train_only or self.args.debug_rollout_only:
             return
 
@@ -861,7 +861,7 @@ class MegatronTrainRayActor(TrainRayActor):
                     self._pending_external_draft_version,
                 )
             try:
-                self.weight_updater.update_weights()
+                self.weight_updater.update_weights(resume_generation=resume_generation)
             finally:
                 self._pending_external_draft_weights = None
                 self._pending_external_draft_version = None
