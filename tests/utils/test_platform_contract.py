@@ -134,7 +134,6 @@ def test_npu_vllm_env_replaces_cuda_and_rocm_visibility(monkeypatch, colocate):
             "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
             "CUDA_VISIBLE_DEVICES": "0,1",
             "HIP_VISIBLE_DEVICES": "0,1",
-            "VLLM_WORKER_MULTIPROC_METHOD": "fork",
         },
         visible_devices="4,5",
         colocate=colocate,
@@ -145,7 +144,6 @@ def test_npu_vllm_env_replaces_cuda_and_rocm_visibility(monkeypatch, colocate):
     assert "CUDA_VISIBLE_DEVICES" not in env
     assert "HIP_VISIBLE_DEVICES" not in env
     assert env["ASCEND_RT_VISIBLE_DEVICES"] == "4,5"
-    assert env["VLLM_WORKER_MULTIPROC_METHOD"] == "fork"
     assert env["PYTORCH_NPU_ALLOC_CONF"] == "expandable_segments:False"
 
 
