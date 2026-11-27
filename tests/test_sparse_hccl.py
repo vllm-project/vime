@@ -482,11 +482,12 @@ def test_suspend_connect_update_preserves_only_verified_baseline(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "mode,transport,release", [
+    "mode,transport,release",
+    [
         ("delta", "sparse_hccl", None),
         ("delta", "sparse_hccl", "suspend"),
         ("full", "nccl", "disconnect"),
-    ]
+    ],
 )
 def test_actor_offload_sleep_wake_order(monkeypatch, mode, transport, release):
     module = importlib.import_module("vime.backends.megatron_utils.actor")
