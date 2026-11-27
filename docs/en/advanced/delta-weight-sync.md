@@ -28,8 +28,8 @@ value-head bias; this is a generic critic initialization issue, tracked separate
 from sparse transport in PR #545. A historical local run with an initialization fix matched
 independent checkpoint inference, but subsequently lost a critic worker to host
 memory pressure. It is not an overall end-to-end pass. The offload/critic
-functional case is not enabled in this PR's CI; only the normal two-round case is
-scheduled. Neither fixing initialization nor matching inference establishes
+functional case is not enabled in this PR's CI; CI schedules two resident rounds and a separate one-round
+actor-only training offload case. Neither fixing initialization nor matching inference establishes
 resource stability for this combination.
 
 This path uses the sparse HCCL engines included in vLLM-Ascend.

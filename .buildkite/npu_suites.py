@@ -44,6 +44,7 @@ SUITES = {
         ),
         ("test_qwen3_30B_A3B_npu.py", "npu-16", "", {}),
         ("test_qwen3_30B_A3B_sparse_hccl_npu.py", "npu-8", "", {}),
+        ("test_qwen3_30B_A3B_sparse_hccl_npu.py", "npu-8", "--offload-train", {}),
         ("test_qwen3_vl_8B_npu.py", "npu-8", "", {}),
         ("test_glm4.7_30B_A3B_npu.py", "npu-16", "", {}),
         # 35B convert plus the first rollout does not fit in the default 180 minutes.

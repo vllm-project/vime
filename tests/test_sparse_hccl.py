@@ -482,7 +482,11 @@ def test_suspend_connect_update_preserves_only_verified_baseline(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "mode,transport,release", [("delta", "sparse_hccl", "suspend"), ("full", "nccl", "disconnect")]
+    "mode,transport,release", [
+        ("delta", "sparse_hccl", None),
+        ("delta", "sparse_hccl", "suspend"),
+        ("full", "nccl", "disconnect"),
+    ]
 )
 def test_actor_offload_sleep_wake_order(monkeypatch, mode, transport, release):
     module = importlib.import_module("vime.backends.megatron_utils.actor")
@@ -505,7 +509,7 @@ def test_actor_offload_sleep_wake_order(monkeypatch, mode, transport, release):
     actor = SimpleNamespace(
         args=SimpleNamespace(
             offload_train=True,
-            use_critic=True,
+            use_critic=release is not None,
             colocate=False,
             update_weight_mode=mode,
             update_weight_transport=transport,
@@ -519,7 +523,7 @@ def test_actor_offload_sleep_wake_order(monkeypatch, mode, transport, release):
     )
     module.MegatronTrainRayActor.sleep.__wrapped__(actor)
     module.MegatronTrainRayActor.wake_up.__wrapped__(actor)
-    assert events == [release, "destroy", "pause", "resume", "reload", "barrier", "actor"]
+    assert events == ([release] if release else []) + ["destroy", "pause", "resume", "reload", "barrier", "actor"]
 
 
 def _run_gather_regression():

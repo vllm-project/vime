@@ -4,7 +4,7 @@ MODEL_PATH and PROMPT_DATA_PATH reuse local inputs. SPARSE_HCCL_RESULT_DIR
 stores an independent full checkpoint, sync metrics and both inference results.
 SPARSE_HCCL_BASELINE_PROMPT selects the prompt (default: a short arithmetic task).
 Token IDs and every generated-token logprob must match exactly; no tolerance.
-The comparison runs two GRPO rounds with a resident actor.
+Run two resident GRPO rounds, or one actor-only offload round with --offload-train.
 """
 
 import copy
@@ -41,7 +41,7 @@ def prepare():
         )
 
 
-def execute():
+def execute(*, offload_train=False):
     import vime.utils.external_utils.command_utils as U
     from vime.utils.external_utils.launch import current_platform, launch_commands
 
@@ -56,7 +56,7 @@ def execute():
         "--apply-chat-template "
         "--rollout-shuffle "
         "--rm-type deepscaler "
-        "--num-rollout 2 "
+        f"--num-rollout {1 if offload_train else 2} "
         "--rollout-batch-size 2 "
         "--n-samples-per-prompt 4 "
         "--rollout-max-response-len 64 "
@@ -104,6 +104,9 @@ def execute():
         "--train-backend megatron --actor-num-nodes 1 --actor-num-gpus-per-node 4 --rollout-num-gpus 2 --ci-test "
     )
 
+    if offload_train:
+        runtime_args += "--offload-train "
+
     train_args = (
         checkpoint_args
         + rollout_args
@@ -145,11 +148,11 @@ def execute():
         U.exec_command(command)
 
 
-def main():
+def main(*, offload_train=False):
     prepare()
     for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         os.environ.pop(proxy_var, None)
-    execute()
+    execute(offload_train=offload_train)
 
 
 def _write_json(path, value):
@@ -218,6 +221,21 @@ def run_e2e(args):
     from vime.ray.placement_group import create_rollout_manager, create_training_models
 
     class OracleTrainActor(MegatronTrainRayActor):
+        def _baseline_state(self):
+            updater = self.weight_updater
+            # Track identity and in-place writes without copying model-sized snapshots.
+            return (
+                id(updater._index),
+                tuple(id(row.slots) for row in updater._index),
+                {name: (id(t), t._version) for name, t in updater._snapshots.items()},
+            )
+
+        def sleep(self):
+            updater = getattr(self, "weight_updater", None)
+            if updater is not None and updater._seeded and not hasattr(self, "_seed_baseline"):
+                self._seed_baseline = self._baseline_state()
+            super().sleep()
+
         def update_weights(self):
             updater = self.weight_updater
             root = self._rank == 0
@@ -237,6 +255,20 @@ def run_e2e(args):
                 publish(patches)
                 updates += sum(patch.indices.numel() for patch in patches)
 
+            send_delta = updater._send_sparse_delta
+            baseline_reused = False
+
+            def observe_delta():
+                nonlocal baseline_reused
+                live = updater._iterator.local_weights()
+                baseline_reused = self._baseline_state() == self._seed_baseline and all(
+                    row.param is live.get(row.megatron_name) and row.gather_group is dist.group.WORLD
+                    for row in updater._index
+                )
+                return send_delta()
+
+            if self.args.offload_train:
+                updater._send_sparse_delta = observe_delta
             updater._publish_flush = observe
             updater._send_seed = observe_seed
             try:
@@ -244,6 +276,8 @@ def run_e2e(args):
             finally:
                 updater._publish_flush = publish
                 updater._send_seed = send_seed
+                if self.args.offload_train:
+                    updater._send_sparse_delta = send_delta
             records = getattr(self, "_sync_records", [])
             if root:
                 if updates == 0:
@@ -254,6 +288,7 @@ def run_e2e(args):
                 {
                     "weight_version": updater.weight_version,
                     "seed_calls": seeds,
+                    "baseline_reused": baseline_reused,
                     "transmitted_elements": updates,
                     "elapsed_s": time.monotonic() - started,
                 }
@@ -264,6 +299,15 @@ def run_e2e(args):
             return self._sync_records
 
         def export_checkpoint(self, directory):
+            if not self.args.offload_train:
+                return self._export_checkpoint(directory)
+            self.wake_up()
+            try:
+                return self._export_checkpoint(directory)
+            finally:
+                self.sleep()
+
+        def _export_checkpoint(self, directory):
             # Full native VIME export from the frozen training model, independent of
             # sparse patches and their snapshots. Every trainer rank participates.
             path = Path(directory)
@@ -294,15 +338,15 @@ def run_e2e(args):
             _raise_if_rank_zero_failed("finalize comparison checkpoint", error)
             return self.weight_updater.weight_version if root else None
 
-    if args.offload_train or args.use_critic or args.offload_rollout or args.release_train:
-        raise ValueError("This comparison requires a resident actor and rollout engine without a critic")
+    if args.use_critic or args.offload_rollout or args.release_train:
+        raise ValueError("This comparison requires a retained actor and resident rollout engine without a critic")
     if (
-        args.num_rollout != 2
+        args.num_rollout != (1 if args.offload_train else 2)
         or args.actor_num_nodes != 1
         or args.actor_num_gpus_per_node != 4
         or args.rollout_num_gpus != 2
     ):
-        raise ValueError("Use two training rounds on four training plus two rollout NPUs")
+        raise ValueError("Use one offload or two resident rounds on four training plus two rollout NPUs")
     output = Path(RESULT_DIR).resolve()
     output.mkdir(parents=True, exist_ok=True)
     checkpoint = output / "updated-checkpoint"
@@ -342,12 +386,18 @@ def run_e2e(args):
             ray.get(actor.async_train(rollout_id, data))
             ray.get(manager.training_completed.remote(rollout_id))
             was_paused = ray.get(manager.pause_rollout_admission.remote())
-            actor.clear_memory()
+            if not args.offload_train:
+                actor.clear_memory()
             actor.update_weights()
             if rollout_id + 1 < args.num_rollout:
                 ray.get(manager.resume_rollout_admission.remote(was_paused))
         sync_records = ray.get([worker.sync_records.remote() for worker in actor._actor_handlers])
         _write_json(output / "sync-records.json", sync_records)
+        if args.offload_train:
+            for records in sync_records:
+                assert [r["weight_version"] for r in records] == [1, 2]
+                assert [r["seed_calls"] for r in records] == [1, 0]
+                assert records[1]["baseline_reused"], "Seed snapshots, slots, or live shard bindings changed"
         ray.get(manager.health_monitoring_pause.remote())
         engines, *_ = ray.get(manager.get_updatable_engines_and_lock.remote())
         if len(engines) != 1:
@@ -436,7 +486,8 @@ def test_exact_inference_comparison():
 
 @pytest.mark.unit
 @pytest.mark.parametrize("ray_running", [False, True])
-def test_comparison_launcher_uses_custom_driver(monkeypatch, ray_running):
+@pytest.mark.parametrize("offload_train", [False, True])
+def test_comparison_launcher_uses_custom_driver(monkeypatch, ray_running, offload_train):
     from vime.utils.external_utils import launch
 
     commands = []
@@ -449,7 +500,7 @@ def test_comparison_launcher_uses_custom_driver(monkeypatch, ray_running):
         subprocess, "run", lambda *args, **kwargs: types.SimpleNamespace(returncode=0 if ray_running else 1)
     )
     monkeypatch.setenv("VIME_SCRIPT_EXTERNAL_RAY", "0")
-    execute()
+    execute(offload_train=offload_train)
     assert len(commands) == (1 if ray_running else 2)
     if not ray_running:
         assert "ray start --head" in commands[0]
@@ -457,7 +508,9 @@ def test_comparison_launcher_uses_custom_driver(monkeypatch, ray_running):
     assert "-- python3 train.py " not in commands[-1]
     assert "--update-weight-transport sparse_hccl" in commands[-1]
     assert "SPARSE_HCCL_RESULT_DIR" in commands[-1]
-    assert "--num-rollout 2 " in commands[-1]
+    assert f"--num-rollout {1 if offload_train else 2} " in commands[-1]
+    assert ("--offload-train " in commands[-1]) == offload_train
+    assert "--use-critic" not in commands[-1]
     assert "--advantage-estimator grpo" in commands[-1]
 
 
@@ -472,7 +525,7 @@ if __name__ == "__main__":
 
         run_e2e(parse_args())
     else:
-        main()
+        main(offload_train="--offload-train" in sys.argv)
 
 
 @pytest.mark.skipif(
@@ -485,3 +538,14 @@ def test_qwen3_sparse_hccl_two_round_inference(monkeypatch, tmp_path):
     main()
     result = json.loads((tmp_path / "normal-two-round/comparison.json").read_text())
     assert result["passed"] and result["rounds"] == 2
+
+
+@pytest.mark.skipif(
+    os.environ.get("VIME_RUN_NPU_FUNCTIONAL") != "1",
+    reason="Requires six available NPUs and the Ascend training stack",
+)
+def test_qwen3_sparse_hccl_actor_offload_one_round(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys.modules[__name__], "RESULT_DIR", str(tmp_path))
+    main(offload_train=True)
+    result = json.loads((tmp_path / "comparison.json").read_text())
+    assert result["passed"] and result["rounds"] == 1 and str(result["weight_version"]) == "2"
