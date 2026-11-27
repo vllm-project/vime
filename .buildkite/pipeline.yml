@@ -258,7 +258,8 @@ steps:
             tests/test_vllm_server_control.py \
             tests/test_vllm_runtime.py \
             tests/observability/test_trace_utils.py; do
-            python -m pytest "$$test_file"
+            echo "Running $$test_file"
+            python -X faulthandler -m pytest "$$test_file"
           done
         '
 
