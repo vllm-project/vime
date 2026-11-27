@@ -97,7 +97,9 @@ def test_training_loss_keeps_metric_values_normalization_and_gradients(per_token
     assert report["keys"] == list(metrics)
     assert not report["values"].requires_grad
     assert report["values"].grad_fn is None
-    torch.testing.assert_close(normalizer, torch.tensor(2.0) if per_token else torch.tensor(1))
+    # The non-token normalizer is derived from an existing device scalar instead
+    # of a fresh int64 allocation, so it carries num_tokens' float dtype.
+    torch.testing.assert_close(normalizer, torch.tensor(2.0) if per_token else torch.tensor(1.0))
     loss.backward()
     scale = 2 if per_token else 4 / 128 * 2
     torch.testing.assert_close(logits.grad, logits.detach() * scale)
