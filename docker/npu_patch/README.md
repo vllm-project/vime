@@ -75,6 +75,10 @@ git -C /vllm-workspace/vllm-ascend apply --check "${PATCH_DIR}/vllm-ascend.patch
 git -C /vllm-workspace/vllm-ascend apply "${PATCH_DIR}/vllm-ascend.patch"
 ```
 
+Online external draft publication uses `start_draft_weight_update` on the
+Ascend worker. If the serving engine reports that this method is missing, use
+the vLLM and vLLM-Ascend builds and patches paired with this Vime revision.
+
 ### 2. Megatron-LM
 
 Build NVRX for checkpoint loading and asynchronous saving. Use an isolated build
@@ -157,6 +161,14 @@ Then install Vime:
 ```bash
 pip install -r "${VIME_INSTALL_ROOT}/vime/requirements.txt" 'opentelemetry-exporter-otlp==1.45.1'
 pip install --no-deps --no-build-isolation -e "${VIME_INSTALL_ROOT}/vime"
+```
+
+For online external draft training, install the versions used by
+[`Dockerfile.npu`](../Dockerfile.npu). Use `--no-deps` to retain the NumPy and
+Transformers versions provided by the NPU stack.
+
+```bash
+pip install --no-deps speculators==0.9.0 hs-connectors==0.9.0
 ```
 
 Qwen3.5/3.6 NPU training uses the base image's `fla_npu` package with

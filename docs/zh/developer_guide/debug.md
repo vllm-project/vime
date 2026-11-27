@@ -112,6 +112,8 @@ vime 支持将训练部分和推理部分分开进行调试，从而实现：
 
 检查对象、量化布局和 offload 支持范围遵循配套 vLLM 版本，具体参数范围和限制见 [vLLM Weight Checker 文档](https://docs.vllm.ai/en/latest/training/weight_checker/)。
 
+启用[外部 draft 模型在线训练](../advanced/speculative-decoding.md#外部-draft-模型在线训练)时，首次 checker 仍对比 target model 参数。验证 draft 发布时，确认 `/start_draft_weight_update`、`/update_weights` 和 `/finish_weight_update` 依次成功，并检查下一轮 rollout 能正常使用投机采样生成。
+
 ## Debug vllm illegal memory access (IMA)
 
 在进行大规模 RL 时，不时会遇到 vLLM IMA 的问题，以下是我们的一些 debug 建议：

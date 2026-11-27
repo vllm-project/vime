@@ -68,4 +68,16 @@ $$\text{speedup}\approx\frac{(\mathbb E[A]+1)t_t}{\gamma t_d+t_v+t_o}.$$
 
 注意 MTP 训练需要一个包含了 MTP 权重的 checkpoint，所以在将 huggingface checkpoint 转为 torch dist 时，也需要加上 `--mtp-num-layers 1`。
 
-外部 draft model 的训练还在 WIP。
+## 外部 draft 模型在线训练
+
+在 Ascend 上，Vime 可以使用 rollout 特征在线训练 EAGLE3 或 DSpark draft，
+并将更新后的 draft 权重发布到 vLLM，供下一轮 rollout 使用。开启
+`--enable-external-draft-training`，通过 `--draft-algorithm` 选择
+`eagle3` 或 `dspark`。将 `--draft-model-path` 和
+`--vllm-speculative-config` 中的模型指向同一个 draft checkpoint。
+
+Megatron 训练和 vLLM rollout 使用不同的设备，流水线并行度和上下文并行度均设为 1。
+使用 `--update-weight-mode full` 和 `--update-weight-transport nccl`，在 Ascend 上
+由 HCCL 传输权重。Qwen3-4B 启动脚本提供了
+[EAGLE3](https://github.com/vllm-project/vime/blob/ascend/scripts/run-qwen3-4B-npu-eagle3.sh) 和
+[DSpark](https://github.com/vllm-project/vime/blob/ascend/scripts/run-qwen3-4B-npu-dspark.sh) 的配置示例。

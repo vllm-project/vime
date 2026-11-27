@@ -114,6 +114,8 @@ On the first weight update with rollout offload enabled, Vime waits for the KV c
 
 The checked tensors and supported quantization/offload layouts follow the paired vLLM version. The target-model parameter scope and upstream limitations are described in the [vLLM Weight Checker documentation](https://docs.vllm.ai/en/latest/training/weight_checker/).
 
+When using [online external draft training](../advanced/speculative-decoding.md#online-training-for-external-draft-models), the initial checker still compares target-model parameters. To verify draft publication, check that `/start_draft_weight_update`, `/update_weights` and `/finish_weight_update` succeed in order and that the next rollout generates with speculative decoding.
+
 ## Debug vllm illegal memory access (IMA)
 
 When running large scale RL, we will occationally meet the IMA in vLLM, there are some debug suggestions based on our experience:
