@@ -4,6 +4,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from vime.utils import accelerator
+from vime.utils.accelerator import npu as npu_backend
 
 NUM_GPUS = 0
 
@@ -63,6 +64,8 @@ def reset_accelerator_selection(monkeypatch):
         "MUSA_VISIBLE_DEVICES",
         "MUSA_TITAN_PATH",
         "CUDA_VISIBLE_DEVICES",
+        "ASCEND_RT_VISIBLE_DEVICES",
+        "ASCEND_HOME_PATH",
         "SUPA_VISIBLE_DEVICES",
         "BIREN_HOME",
     ):
@@ -71,6 +74,8 @@ def reset_accelerator_selection(monkeypatch):
     accelerator.reset_accelerator()
     accelerator._MUSA_TITAN_IMPORTED = False
     accelerator._MUSA_BOOTSTRAP_CHECKED = False
+    monkeypatch.setattr(accelerator, "_NPU_RUNTIME_IMPORTED", False)
+    monkeypatch.setattr(accelerator, "_NPU_BOOTSTRAP_CHECKED", False)
     accelerator._SUPA_RUNTIME_IMPORTED = False
     accelerator._SUPA_BOOTSTRAP_CHECKED = False
     yield
@@ -198,6 +203,7 @@ def test_musa_accelerator_post_import_torch_uses_compatible_callback(monkeypatch
 @pytest.mark.unit
 def test_cpu_only_initialization_does_not_require_an_accelerator(monkeypatch):
     monkeypatch.setattr(accelerator, "is_musa_available", lambda: False)
+    monkeypatch.setattr(accelerator, "is_npu_available", lambda: False)
     monkeypatch.setattr(accelerator, "is_supa_available", lambda: False)
     monkeypatch.setattr(accelerator, "_cuda_available", lambda: False)
 
@@ -289,6 +295,83 @@ def test_musa_availability_handles_missing_torch_namespace(monkeypatch):
     monkeypatch.delattr(accelerator.torch, "musa", raising=False)
 
     assert accelerator.is_musa_available() is False
+
+
+@pytest.mark.unit
+def test_selected_npu_bootstraps_runtime_once(monkeypatch):
+    imports = []
+    fake_npu = SimpleNamespace(is_available=lambda: True)
+
+    def import_torch_npu():
+        imports.append("torch_npu")
+        monkeypatch.setattr(accelerator.torch, "npu", fake_npu, raising=False)
+        return True
+
+    monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", "0")
+    # Both auto-selection and runtime availability inspect device nodes.
+    # Mock the hardware boundary so both checks see the same fake device.
+    monkeypatch.setattr(npu_backend, "glob", lambda pattern: ["/dev/davinci0"])
+    monkeypatch.setattr(accelerator, "_import_torch_npu", import_torch_npu)
+
+    assert imports == []
+    assert accelerator.initialize_accelerator().name == "npu"
+    assert accelerator.initialize_accelerator().name == "npu"
+    assert imports == ["torch_npu"]
+
+
+@pytest.mark.unit
+def test_an_ascend_toolkit_without_devices_does_not_select_npu(monkeypatch):
+    """CANN exports ASCEND_HOME_PATH on hosts that have no cards at all."""
+    monkeypatch.setenv("ASCEND_HOME_PATH", "/usr/local/Ascend/ascend-toolkit/latest")
+    monkeypatch.setattr(accelerator, "_has_npu_device", lambda: False)
+    monkeypatch.setattr(accelerator, "is_musa_available", lambda: False)
+    monkeypatch.setattr(accelerator, "is_supa_available", lambda: False)
+    monkeypatch.setattr(accelerator, "_cuda_available", lambda: False)
+    monkeypatch.setattr(accelerator, "_import_torch_npu", lambda: pytest.fail("the runtime must not be imported"))
+
+    assert accelerator.initialize_accelerator() is None
+
+
+@pytest.mark.unit
+def test_an_explicit_request_selects_npu_without_a_device_probe(monkeypatch):
+    """Explicit selection skips the auto-selection gate, then validates runtime."""
+    fake_npu = SimpleNamespace(is_available=lambda: True)
+    monkeypatch.setenv("VIME_ACCELERATOR", "npu")
+    monkeypatch.setattr(npu_backend, "glob", lambda pattern: ["/dev/davinci0"])
+    monkeypatch.setattr(
+        accelerator,
+        "_has_npu_device",
+        lambda: pytest.fail("explicit selection must skip the auto-selection probe"),
+    )
+    monkeypatch.setattr(
+        accelerator,
+        "_import_torch_npu",
+        lambda: monkeypatch.setattr(accelerator.torch, "npu", fake_npu, raising=False) or True,
+    )
+
+    assert accelerator.initialize_accelerator().name == "npu"
+
+
+@pytest.mark.unit
+def test_npu_backend_maps_devices_and_process_groups(monkeypatch):
+    monkeypatch.setattr(accelerator.NPUAccelerator, "is_available", lambda self: True)
+    monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", "2,5")
+    accelerator.set_accelerator(accelerator.NPUAccelerator())
+
+    assert accelerator.device_type() == "npu"
+    assert accelerator.visible_devices_env_key() == "ASCEND_RT_VISIBLE_DEVICES"
+    assert accelerator.resolve_visible_device_id("5") == 1
+    assert accelerator.process_group_backend() == "hccl"
+    assert accelerator.weight_update_backend() == "cpu:gloo,npu:hccl"
+    assert accelerator.process_group_backend("gloo") == "gloo"
+    assert accelerator.distributed_device_id() is None
+
+
+@pytest.mark.unit
+def test_npu_backend_is_recognized_as_accelerator_backend():
+    assert accelerator.is_accelerator_backend("hccl") is True
+    assert accelerator.is_accelerator_backend("cpu:gloo,npu:hccl") is True
+    assert accelerator.is_accelerator_backend("gloo") is False
 
 
 @pytest.mark.unit
