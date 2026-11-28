@@ -13,6 +13,7 @@ resolved once in ``__init__`` from ``--qwen-gdn-backend``; ``forward`` reads
 only the resulting capability flags.
 """
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -257,6 +258,7 @@ class Qwen3_5GatedDeltaNetTP(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor = None,
+        cp_context=None,
     ):
         batch_size, seq_len, _ = hidden_states.shape
 
@@ -271,10 +273,18 @@ class Qwen3_5GatedDeltaNetTP(nn.Module):
         z = z.reshape(batch_size, seq_len, -1, self.head_v_dim)
 
         # Convolution on the TP-local QKV; head-first output when conv_head_num > 0.
-        mixed_qkv, _ = self.conv1d(
-            x=mixed_qkv,
-            cu_seqlens=cu_seqlens,
-        )
+        if cp_context is not None:
+            # fla's conv CP owns the halo exchange for the contiguous layout,
+            # but the packed document boundaries still have to reach the kernel:
+            # without them a shard that holds several documents convolves across
+            # the document switch (measured: first 3 tokens of every document
+            # after the first one were wrong).
+            _cu_before = None
+            mixed_qkv, _ = self.conv1d(
+                x=mixed_qkv, cu_seqlens=cu_seqlens, cp_context=cp_context
+            )
+        else:
+            mixed_qkv, _ = self.conv1d(x=mixed_qkv, cu_seqlens=cu_seqlens)
 
         if self.conv_head_num > 0:
             # Head-first output: leading 2*nk heads are Q+K, trailing nv are V.
@@ -320,15 +330,31 @@ class Qwen3_5GatedDeltaNetTP(nn.Module):
             key = key.transpose(1, 2).contiguous()
             value = value.transpose(1, 2).contiguous()
 
-        core_attn_out, last_recurrent_state = self.chunk_gated_delta_rule(
-            query,
-            key,
-            value,
-            g=g,
-            beta=beta,
-            use_qk_l2norm_in_kernel=True,
-            cu_seqlens=cu_seqlens,
-        )
+        if cp_context is not None and str(getattr(self, "gdn_backend", "")).startswith("fla_npu"):
+            # AscendC affine-chain CP: segment summary / merge run on fla_npu
+            # kernels, and the local prepare/fwd_h/fwd_o/backward are AscendC.
+            from .fla_npu_cp_impl import flash_gated_delta_rule_cp
+
+            core_attn_out, last_recurrent_state = flash_gated_delta_rule_cp(
+                query,
+                key,
+                value,
+                g=g,
+                beta=beta,
+                cp_context=cp_context,
+            )
+        else:
+            kernel_kwargs = {"g": g, "beta": beta, "use_qk_l2norm_in_kernel": True}
+            if cp_context is not None:
+                kernel_kwargs["cp_context"] = cp_context
+            else:
+                kernel_kwargs["cu_seqlens"] = cu_seqlens
+            core_attn_out, last_recurrent_state = self.chunk_gated_delta_rule(
+                query,
+                key,
+                value,
+                **kernel_kwargs,
+            )
 
         z_shape_og = z.shape
         # reshape input data into 2D tensor

@@ -29,6 +29,11 @@ def use_gloo_process_groups(args) -> bool:
 
 
 _ALLGATHER_CP_DSA_ARCHITECTURES = {
+    # Qwen3.5 is validated with contiguous (allgather) CP on ascend; its GDN
+    # layers then match fla's natively supported contiguous layout.
+    "Qwen3_5ForConditionalGeneration",
+    "Qwen3_5ForCausalLM",
+    "Qwen3_5MoeForConditionalGeneration",
     "DeepseekV32ForCausalLM",
     "GlmMoeDsaForCausalLM",
     "Glm5NextForCausalLM",

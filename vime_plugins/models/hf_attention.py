@@ -2,6 +2,7 @@ import json
 import os
 from abc import ABC, abstractmethod
 
+import os as _os
 import torch
 import torch.distributed.nn.functional as dist_nn
 from megatron.core import mpu, tensor_parallel
@@ -61,6 +62,10 @@ class HuggingfaceAttention(MegatronModule, ABC):
         self.hf_config = _load_hf_config(args.hf_checkpoint)
         # hardcode to fa2 at the moment.
         self.hf_config._attn_implementation = "flash_attention_2"
+        # Subclasses that implement context parallelism natively (e.g. GDN via
+        # FLA's ``cp_context``) set this to True: the base class must then NOT
+        # all-gather the full sequence before ``hf_forward``.
+        self.cp_native = False
 
     def forward(
         self,
@@ -91,7 +96,7 @@ class HuggingfaceAttention(MegatronModule, ABC):
                 group=mpu.get_tensor_model_parallel_group(),
             )
 
-        if cp_size > 1:
+        if cp_size > 1 and not self.cp_native:
             # Reordering CP chunks below needs Python integer slice bounds.
             # Reuse get_batch's CPU boundaries to avoid synchronizing a CUDA
             # scalar for each slice in every layer. Other callers may provide
@@ -129,7 +134,7 @@ class HuggingfaceAttention(MegatronModule, ABC):
 
         output = output.permute(1, 0, 2)  # [seq_len, bsz, hidden_dim]
 
-        if cp_size > 1:
+        if cp_size > 1 and not self.cp_native:
             cp_rank = mpu.get_context_parallel_rank()
             output_list = []
             for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=True):
