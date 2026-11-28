@@ -56,11 +56,11 @@ steps:
         timeout_in_minutes: 180
         command: |
           set -e
-          if ! python -c 'import yaml' 2>/dev/null; then
+          if ! python3 -c 'import yaml' 2>/dev/null; then
             yaml_deps=$$(mktemp -d)
             trap 'rm -rf "$$yaml_deps"' EXIT
-            python -m pip install --quiet --target "$$yaml_deps" pyyaml
+            python3 -m pip install --quiet --target "$$yaml_deps" pyyaml
             export PYTHONPATH="$$yaml_deps$${PYTHONPATH:+:$$PYTHONPATH}"
           fi
-          NPU_STEPS=$$(python .buildkite/npu_suites.py --pipeline)
+          NPU_STEPS=$$(python3 .buildkite/npu_suites.py --pipeline)
           buildkite-agent pipeline upload <<< "$$NPU_STEPS"

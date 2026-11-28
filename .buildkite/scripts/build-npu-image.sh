@@ -46,7 +46,10 @@ if ! timeout 60 buildctl \
   --opt image-resolve-mode=pull \
   --progress=plain; then
   BASE_IMAGE="$(sed -n 's/^ARG BASE_IMAGE=//p' docker/Dockerfile.npu)"
-  test -n "${BASE_IMAGE}"
+  if [[ -z "${BASE_IMAGE}" ]]; then
+    echo "ERROR: Missing or empty ARG BASE_IMAGE in docker/Dockerfile.npu; cannot select a fallback image" >&2
+    exit 1
+  fi
   echo "Internal base image unavailable; using ${BASE_IMAGE}:${BASE_IMAGE_TAG}"
 fi
 

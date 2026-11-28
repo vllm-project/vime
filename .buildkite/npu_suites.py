@@ -14,6 +14,7 @@ The uploader uses PyYAML to load the shared image-build step.
 """
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -116,14 +117,24 @@ def _read_suite_values() -> list[str]:
 
 
 def resolve_digest(default_image: str) -> str:
-    image, tag = default_image.rsplit(":", 1)
+    image, _, tag = default_image.rpartition(":")
+    if not image.startswith("quay.io/") or not tag:
+        raise SystemExit(f"Expected a tagged quay.io image for digest resolution, got {default_image}")
     repository = image.removeprefix("quay.io/")
     url = f"https://quay.io/api/v1/repository/{repository}/tag/?specificTag={tag}&onlyActiveTags=true"
-    with urllib.request.urlopen(url, timeout=30) as response:
-        tags = json.load(response)["tags"]
+    try:
+        with urllib.request.urlopen(url, timeout=30) as response:
+            data = json.load(response)
+    except (OSError, http.client.HTTPException, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"Failed to resolve Quay digest for {default_image}: {exc}") from exc
+    tags = data.get("tags") if isinstance(data, dict) else None
+    if not isinstance(tags, list):
+        raise SystemExit(f"Invalid Quay response for {default_image}: expected a list of tags")
     for entry in tags:
+        if not isinstance(entry, dict) or entry.get("name") != tag:
+            continue
         digest = entry.get("manifest_digest")
-        if entry["name"] == tag and isinstance(digest, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        if isinstance(digest, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
             return f"{image}@{digest}"
     raise SystemExit(f"Quay returned no valid manifest digest for {default_image}")
 
