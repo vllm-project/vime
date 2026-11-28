@@ -7,9 +7,8 @@ every sync is the dominant cost.
 
 Two transports are available: `disk` for shared-storage and cross-cluster deployments, and
 `sparse_hccl` for online transfer between Ascend trainers and vLLM-Ascend rollout workers.
-The first sync
-sends every checkpoint coordinate through the public sparse protocol; later syncs
-send only changed coordinates.
+Sparse HCCL sends every checkpoint coordinate when establishing a baseline.
+While that baseline is valid, each update sends only changed coordinates.
 
 For disk transport, the trainer publishes each sync as a canonical HF checkpoint
 directory; the engine's `pull_weights` worker RPC (shipped in vime's vllm patch) fans the
@@ -51,8 +50,8 @@ The script `scripts/run-qwen3-30B-A3B-sparse-hccl.sh` uses training
 TP2/PP2/EP2 and rollout TP2/PP1/EP2, on four training plus two rollout NPUs.
 Set `DATA_ROOT` to the directory containing `weights/` and `datasets/`, and load
 the NPU environment before running the script.
-VIME normalizes contiguous payloads onto the communicator device and validates
-them before invoking the trainer engine.
+VIME moves the indices and values to the communicator device, makes them contiguous,
+and validates the patches before calling the native trainer engine.
 
 Disk transport configuration:
 
@@ -80,14 +79,18 @@ Deltas are always zstd-compressed (level 1); profiling showed it dominates lz4 /
 
 ### Sparse HCCL
 
-Initial updates and unverified reconnections use Seed; subsequent updates use Diff.
-An explicitly suspended connection resumes Diff only after matching receiver identity and version.
-Both paths share Publish and Apply.
+The first update uses Seed, and subsequent updates use Diff while the baseline is valid.
+On reconnection, VIME resumes Diff only if an explicit
+suspension preserved a valid baseline, the rollout engines have the same actor IDs
+in the same order, and the trainer and every engine still report the saved weight
+version. If any check fails or an engine's version cannot be read, the next update
+uses a full Seed. An update that may have applied only partially also requires a
+full Seed. Both Seed and Diff use the same Publish and Apply steps.
 
-1. **Seed.** On the first update or after an unverified reconnection, export all current training
-   weights in HF format and produce complete checkpoint coordinates and target
-   values for Publish/Apply. After successful seeding, capture local shard snapshots
-   as the baseline for later diffs. Reconnection fully overwrites worker weights.
+1. **Seed.** Export all current training weights in HF format. Publish and Apply
+   use the complete checkpoint coordinates and target values to overwrite all worker
+   weights. After sending the seed, capture local shard snapshots as the baseline
+   for later diffs.
 2. **Diff.** On later updates, compare current training shards with their snapshots
    bitwise. Convert changed positions and values into HF checkpoint coordinates
    using the same conversion rules as full export.

@@ -3,7 +3,8 @@
 Delta 权重同步只发送两次同步之间发生变化的字节，而不是每次都写一份完整 checkpoint，以此让非 colocate 的 rollout engine 保持最新。它面向大模型、跨集群或跨数据中心的训推解耦场景——这种场景下每次都写整份 actor 权重是主要开销。
 
 它支持两条传输路径：`disk` 面向跨集群共享存储，`sparse_hccl` 面向 Ascend
-训练和 vLLM-Ascend rollout 之间的在线传输。首次通过标准 sparse 协议发送全部 checkpoint 坐标，后续只发送变化坐标。
+训练和 vLLM-Ascend rollout 之间的在线传输。Sparse HCCL 在建立基准时发送全部 checkpoint 坐标。
+只要该基准仍然有效，每次更新就只发送变化的坐标。
 
 对于 disk transport，训练端把每次同步发布为一份 canonical HF checkpoint 目录；engine 的 `pull_weights` worker RPC（随 vime 的 vllm patch 提供）把 apply 扇出到 **engine 覆盖的每一个 host** 并校验，随后 engine 通过 `update_weights_from_disk` 适配接口调用原生 reload RPC，加载打过补丁的本地 checkpoint。vime 对每个 engine 只与一个端点通信，所以多节点 serving 和外部 rollout engine 在 vime 侧都不需要任何额外支持。
 
@@ -17,7 +18,7 @@ Sparse HCCL **暂不支持** PPO critic 训练（`--advantage-estimator ppo` 会
 坐标，维护分片快照，按一致顺序汇聚变化项，并管理更新版本。全量导出和稀疏坐标转换
 使用相同的 `convert_to_hf()` 规则。
 
-坐标转换需要稠密临时缓冲和输出扫描，临时内存会随 TP 大小增长。支持未量化的浮点权重，
+坐标转换需要稠密临时缓冲和输出扫描，临时内存可能随 TP 大小增长。支持未量化的浮点权重，
 转换需保持元素值不变；不支持 draft/MTP 权重。新增模型布局时，应验证稀疏重建与全量
 导出的结果一致。
 
@@ -30,12 +31,12 @@ Sparse HCCL **暂不支持** PPO critic 训练（`--advantage-estimator ppo` 会
 
 该路径要求非 colocate、未量化 ND rollout 权重、关闭 EPLB，以及推理 PP=1；
 设置 `--vllm-pipeline-parallel-size 1`。接收端支持 TP/DP/EP，推理 PP>1
-在建组前明确拒绝。训练侧 PP/TP/EP 导出与 gather 保留。
+在建组前明确拒绝。训练侧仍支持 PP/TP/EP 权重导出。
 
 脚本 `scripts/run-qwen3-30B-A3B-sparse-hccl.sh` 使用训练 TP2/PP2/EP2、
 推理 TP2/PP1/EP2，四张训练卡加两张推理卡。设置 `DATA_ROOT` 指向包含
-`weights/` 和 `datasets/` 的目录，运行前加载 NPU 环境。VIME 在调用训练引擎前完成输入校验、
-设备转换及连续化，不改写引擎的发送或接收实现。
+`weights/` 和 `datasets/` 的目录，运行前加载 NPU 环境。VIME 将索引和值移到通信设备，
+使其在内存中连续，并在调用原生训练端引擎前校验补丁。
 
 磁盘传输配置：
 
@@ -63,12 +64,14 @@ delta 始终用 zstd（level 1）压缩；profiling 显示对这类数据它在 
 
 ### Sparse HCCL
 
-首轮或无法验证基准的重连执行 Seed，后续更新执行 Diff；两条路径共用 Publish 和 Apply。
-显式休眠的连接仅在接收端身份及版本核对一致后恢复 Diff。
+首次更新执行 Seed，后续更新在基准有效时执行 Diff。
+重连时，只有显式挂起时保存了有效基准、rollout 引擎的 actor ID 及顺序均未变化，
+且训练端和每个引擎的权重版本仍与保存的版本一致，VIME 才会复用基准并继续执行 Diff。
+若任一条件不满足，或无法读取某个引擎的版本，下一次更新就执行全量 Seed。
+如果一次更新可能只应用了部分权重，也必须重新执行全量 Seed。Seed 和 Diff 共用 Publish 和 Apply 两步。
 
-1. **Seed。** 首轮或无法验证基准的重连后，将当前训练权重完整导出为 HF 格式，生成全部 checkpoint
-   坐标与目标值，交给 Publish／Apply 阶段发送和应用。首轮成功后保存本地 shard snapshot，
-   作为后续差分基准；重连时重新全量覆盖 worker 权重。
+1. **Seed。** 将当前所有训练权重导出为 HF 格式。Publish 和 Apply 使用全部 checkpoint 坐标
+   及目标值覆盖每个 worker 的全部权重。发送 Seed 后，保存本地分片快照，作为后续差分的基准。
 2. **Diff。** 后续更新对当前训练分片与 snapshot 做 bitwise diff，使用与全量导出相同的转换规则，
    将变化位置及其值转换为 HF checkpoint 坐标和值。
 3. **Publish。** 对 Diff 生成的变化项，先按一致目录执行变长 gather，聚合到 rank0。
