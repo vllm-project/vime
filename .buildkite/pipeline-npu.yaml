@@ -1,7 +1,7 @@
 # Usage:  buildkite-agent pipeline upload .buildkite/pipeline-npu.yaml
 #
 # This pipeline is for running NPU tests on PRs.
-# Scheduled builds always build a fresh image. PR builds reuse DEFAULT_CI_IMAGE
+# Scheduled builds always build a fresh image. PR builds reuse the selected hardware's image
 # unless image-build is selected; patch-only changes are reconciled at runtime.
 
 steps:
@@ -54,19 +54,13 @@ steps:
         agents:
           queue: small_cpu_queue_premerge
         timeout_in_minutes: 180
-        command:  |
-          NPU_SUITES=$$(buildkite-agent meta-data get "npu-suites" --default "")
-          if [[ "$$BUILDKITE_SOURCE" == "schedule" ]]; then
-            echo "Scheduled build — building the image."
-            echo "BUILDKITE_SOURCE: $$BUILDKITE_SOURCE"
-            SKIP_IMAGE_BUILD=false
-          elif [[ "$$NPU_SUITES" == *"image-build"* ]]; then
-            echo "image-build selected — building the image."
-            echo "NPU_SUITES: $$NPU_SUITES"
-            SKIP_IMAGE_BUILD=false
-          else
-            echo "Skipping image build because image-build is not present in the npu-suites."
-            SKIP_IMAGE_BUILD=true
+        command: |
+          set -e
+          if ! python -c 'import yaml' 2>/dev/null; then
+            yaml_deps=$$(mktemp -d)
+            trap 'rm -rf "$$yaml_deps"' EXIT
+            python -m pip install --quiet --target "$$yaml_deps" pyyaml
+            export PYTHONPATH="$$yaml_deps$${PYTHONPATH:+:$$PYTHONPATH}"
           fi
-          sed -e "s/__SKIP_IMAGE_BUILD__/$${SKIP_IMAGE_BUILD}/g" .buildkite/pipeline-npu-image.yaml | buildkite-agent pipeline upload
-          python .buildkite/npu_suites.py | buildkite-agent pipeline upload
+          NPU_STEPS=$$(python .buildkite/npu_suites.py --pipeline)
+          buildkite-agent pipeline upload <<< "$$NPU_STEPS"
