@@ -86,7 +86,7 @@ class UpdateWeightFromDistributed:
         return metrics
 
     @torch.no_grad()
-    def update_weights(self) -> None:
+    def update_weights(self, *, resume_generation: bool = True) -> None:
         assert self._trainer is not None
         self.weight_version += 1
         flush_cache = should_flush_cache(
@@ -96,7 +96,9 @@ class UpdateWeightFromDistributed:
         if dist.get_rank() == 0:
             ray.get(
                 [
-                    engine.pause_generation.remote(mode="abort" if flush_cache else "in_place")
+                    engine.pause_generation.remote(
+                        mode="abort" if flush_cache or not resume_generation else "in_place"
+                    )
                     for engine in self.rollout_engines
                 ]
             )
@@ -130,7 +132,8 @@ class UpdateWeightFromDistributed:
                     post_process_quantization=True,
                     rollout_engines=self.rollout_engines,
                 )
-            ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
+            if resume_generation:
+                ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
 
 

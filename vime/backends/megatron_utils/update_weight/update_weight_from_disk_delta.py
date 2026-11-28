@@ -84,7 +84,7 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
         pass  # no NCCL groups to tear down
 
     @torch.no_grad()
-    def update_weights(self) -> None:
+    def update_weights(self, *, resume_generation: bool = True) -> None:
         if self._needs_full_sync:
             # A failed update may have reached host-local checkpoints without
             # reaching GPU weights. Publish above every attempted disk version,
@@ -109,7 +109,10 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
             self._publish_full()
         else:
             self._publish()
-        self._reload_engines()
+        if resume_generation:
+            self._reload_engines()
+        else:
+            self._reload_engines(resume_generation=False)
         self._needs_full_sync = False
         self._record_metrics()
 
@@ -176,7 +179,7 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
             _atomic_write(os.path.join(self._version_dir, "model.safetensors.index.json"), json.dumps(index).encode())
         dist.barrier(group=group)
 
-    def _reload_engines(self) -> None:
+    def _reload_engines(self, *, resume_generation: bool = True) -> None:
         """Commit the published files, have each engine pull the delta onto every host it spans
         (checksum-verified), then reload the engines."""
         if self._post_write_hook is not None:
@@ -191,7 +194,9 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
             ray.get([engine.pull_weights.remote(self.weight_version) for engine in self.rollout_engines])
             ray.get(
                 [
-                    engine.pause_generation.remote(mode="abort" if flush_cache else "in_place")
+                    engine.pause_generation.remote(
+                        mode="abort" if flush_cache or not resume_generation else "in_place"
+                    )
                     for engine in self.rollout_engines
                 ]
             )
@@ -207,7 +212,8 @@ class UpdateWeightFromDiskDelta(UpdateWeightFromDistributed):
                     for engine in self.rollout_engines
                 ]
             )
-            ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
+            if resume_generation:
+                ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
 
     def _iter_hf_tensors(self):
