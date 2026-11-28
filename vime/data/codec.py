@@ -186,12 +186,29 @@ class SampleCodec:
             blobs.append(record)
             return node
 
+        from vime.data.transport import DiskPayloadRef, RawRolloutRef, RolloutGroupRef, TrainBatchRef
+        from vime.rollout.filter_hub.base_types import DynamicFilterOutput
+
         active = set()
+        plain = {str, bool, int, type(None)}
+        replay_fields = frozenset(
+            {
+                "rollout_routed_experts",
+                "rollout_topk_token_ids",
+                "rollout_topk_log_probs",
+                "rollout_top_p_token_ids",
+                "rollout_top_p_token_offsets",
+                "rollout_top_p_log_probs",
+            }
+        )
 
         def visit(value):
             nonlocal token_count
-            from vime.data.transport import DiskPayloadRef, RawRolloutRef, RolloutGroupRef, TrainBatchRef
-
+            kind = type(value)
+            if kind in plain:
+                return value
+            if kind is float:
+                return value if math.isfinite(value) else ["float", repr(value)]
             if isinstance(value, DiskPayloadRef):
                 if value.manifest not in dependency_positions:
                     dependency_positions[value.manifest] = len(dependencies)
@@ -226,10 +243,6 @@ class SampleCodec:
                     dependency_index,
                     visit(extra),
                 ]
-            if value is None or type(value) in (str, bool, int):
-                return value
-            if type(value) is float:
-                return value if math.isfinite(value) else ["float", repr(value)]
             if isinstance(value, (QueueTensorRef, torch.Tensor)):
                 return tensor(value, lazy=isinstance(value, QueueTensorRef))
             if isinstance(value, np.ndarray):
@@ -256,14 +269,7 @@ class SampleCodec:
                     validated = self._prepare_sample(value)
                     fields = []
                     for key, child in vars(value).items():
-                        if child is not None and key in {
-                            "rollout_routed_experts",
-                            "rollout_topk_token_ids",
-                            "rollout_topk_log_probs",
-                            "rollout_top_p_token_ids",
-                            "rollout_top_p_token_offsets",
-                            "rollout_top_p_log_probs",
-                        }:
+                        if child is not None and key in replay_fields:
                             if key == "rollout_routed_experts" and not isinstance(child, QueueTensorRef):
                                 child = value.materialize_rollout_routed_experts(replace=False)
                             elif not isinstance(child, QueueTensorRef):
@@ -283,8 +289,6 @@ class SampleCodec:
                     return ["spec-info", visit(vars(value))]
                 if isinstance(value, Sample.PrefixCacheInfo):
                     return ["prefix-cache-info", visit(vars(value))]
-                from vime.rollout.filter_hub.base_types import DynamicFilterOutput
-
                 if isinstance(value, DynamicFilterOutput):
                     return ["dynamic-filter", visit(vars(value))]
                 if isinstance(value, dict):
@@ -293,10 +297,12 @@ class SampleCodec:
                         [[visit(key), visit(item)] for key, item in value.items()],
                     ]
                 if isinstance(value, (list, tuple)):
-                    return [
-                        "tuple" if isinstance(value, tuple) else "list",
-                        [visit(item) for item in value],
-                    ]
+                    # Plain scalars encode as themselves; skip per-item recursion.
+                    if set(map(type, value)) <= plain:
+                        items = list(value)
+                    else:
+                        items = [visit(item) for item in value]
+                    return ["tuple" if isinstance(value, tuple) else "list", items]
                 # Preserve raw multimodal images losslessly using an explicit codec.
                 from PIL import Image
 
