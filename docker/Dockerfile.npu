@@ -109,7 +109,6 @@ ENV SOC_VERSION=$SOC_VERSION \
     ASCEND_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp \
     ASCEND_AICPU_PATH=/usr/local/Ascend/ascend-toolkit/latest \
     ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest \
-    VLLM_ASCEND_ENABLE_NZ=0 \
     RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1 \
     HCCL_HOST_SOCKET_PORT_RANGE=60000-60050 \
     HCCL_NPU_SOCKET_PORT_RANGE=61000-61050 \
