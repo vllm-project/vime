@@ -23,14 +23,6 @@ need nothing extra on the vime side.
 Sparse HCCL:
 
 **Currently unsupported:** Sparse HCCL with `--offload-train --use-critic`.
-HF language-model initialization of the critic can fail when loading its scalar
-value-head bias; this is a generic critic initialization issue, tracked separately
-from sparse transport in PR #545. A historical local run with an initialization fix matched
-independent checkpoint inference, but subsequently lost a critic worker to host
-memory pressure. It is not an overall end-to-end pass. The offload/critic
-functional case is not enabled in this PR's CI; CI schedules two resident rounds and a separate one-round
-actor-only training offload case. Neither fixing initialization nor matching inference establishes
-resource stability for this combination.
 
 This path uses the sparse HCCL engines included in vLLM-Ascend.
 VIME exports weights into HF checkpoint coordinates, tracks shard snapshots,
