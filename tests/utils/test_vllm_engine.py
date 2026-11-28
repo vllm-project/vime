@@ -1512,7 +1512,7 @@ if __name__ == "__main__":
 @pytest.mark.parametrize("platform", ["npu", "cuda"])
 @pytest.mark.parametrize("backend", ["sparse_hccl", "hccl", "nccl", "npu_ipc", "ipc", None])
 @pytest.mark.parametrize("inherited", [None, "fork", "spawn"])
-def test_build_subprocess_env_scopes_spawn_to_sparse_npu(vllm_args, monkeypatch, platform, backend, inherited):
+def test_build_subprocess_env_preserves_worker_start_method(vllm_args, monkeypatch, platform, backend, inherited):
     from vime.platforms import get_platform
 
     monkeypatch.setattr(mod, "current_platform", lambda: get_platform(platform))
@@ -1524,5 +1524,4 @@ def test_build_subprocess_env_scopes_spawn_to_sparse_npu(vllm_args, monkeypatch,
     if backend is not None:
         server_args["weight_transfer_config"] = {"backend": backend}
     env = mod._build_subprocess_env(server_args)
-    expected = "spawn" if platform == "npu" and backend == "sparse_hccl" else inherited
-    assert env.get("VLLM_WORKER_MULTIPROC_METHOD") == expected
+    assert env.get("VLLM_WORKER_MULTIPROC_METHOD") == inherited
