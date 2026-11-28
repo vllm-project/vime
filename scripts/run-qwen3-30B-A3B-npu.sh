@@ -22,14 +22,14 @@ source "${ASCEND_HOME:-/usr/local/Ascend}/ascend-toolkit/set_env.sh"
 # Select the backend explicitly. Detection would also find these devices,
 # but a run script should not depend on what the host happens to expose.
 export VIME_ACCELERATOR=npu
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}"
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
+export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-600}"
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
 export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
 export HYDRA_FULL_ERROR=1
 export DISABLE_L2_CACHE=1
-export VLLM_ASCEND_ENABLE_NZ=0
 export VLLM_USE_AOT_COMPILE=0
 export PYTHONPATH="/root/Megatron-LM/:${PYTHONPATH:-}"
 

@@ -22,28 +22,24 @@ source "${ASCEND_HOME:-/usr/local/Ascend}/ascend-toolkit/set_env.sh"
 export VIME_ACCELERATOR=npu
 
 export PYTHONPATH="/root/Megatron-LM/:${PYTHONPATH:-}"
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-600}"
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
 export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
 export HYDRA_FULL_ERROR=1
 export DISABLE_L2_CACHE=1
-export VLLM_ASCEND_ENABLE_NZ=0
 export VLLM_USE_AOT_COMPILE=0
 
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 
-VIME_ROOT="${VIME_ROOT:-/workspace/wky/vime-ascend}"
-SCRIPT_DIR="${VIME_ROOT}/scripts"
-WEIGHT_DIR="${WEIGHT_DIR:-/home/data/weights/Qwen3-4B}"
-DATA_FILE="${DATA_FILE:-/home/w00893744/dataset/dapo-math-17k.jsonl}"
-RUN_TS="${RUN_TS:-$(date +%Y%m%d_%H%M%S)}"
-LOG_FILE="${LOG_FILE:-/home/w00893744/train_qwen3_4b_multi_agent_vllm_${RUN_TS}.log}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+WEIGHT_DIR="${WEIGHT_DIR:-/root/models/Qwen3-4B}"
+DATA_FILE="${DATA_FILE:-/root/datasets/dapo-math-17k/dapo-math-17k.jsonl}"
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 
-cd "${VIME_ROOT}"
-source "${SCRIPT_DIR}/models/qwen3-4B.sh"
+source "${SCRIPT_DIR}/../../scripts/models/qwen3-4B.sh"
 
 CKPT_ARGS=(
    --hf-checkpoint "${WEIGHT_DIR}"

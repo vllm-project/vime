@@ -1,5 +1,5 @@
 #!/bin/bash
-# Tiny end-to-end fully-async GRPO example using Qwen3-4B-Instruct on the
+# Tiny end-to-end fully-async GRPO example using Qwen3-4B on the
 # dapo-math-17k dataset. Designed to run on a single 4-NPU node
 #
 # Prerequisites:
@@ -14,15 +14,15 @@ export PYTHONUNBUFFERED=1
 # raylet and every actor it spawns inherit them.
 source "${ASCEND_HOME:-/usr/local/Ascend}/ascend-toolkit/set_env.sh"
 export VIME_ACCELERATOR=npu
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3}"
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export RAY_USE_UVLOOP=0 # upstream: Ray's uvloop integration has caused intermittent async actor issues.
 export CUDA_DEVICE_MAX_CONNECTIONS=1
+export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-600}"
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
 export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
 export HYDRA_FULL_ERROR=1
 export DISABLE_L2_CACHE=1
-export VLLM_ASCEND_ENABLE_NZ=0
 export VLLM_USE_AOT_COMPILE=0
 export PYTHONPATH="/root/Megatron-LM/:${PYTHONPATH:-}"
 

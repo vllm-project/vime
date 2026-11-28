@@ -49,7 +49,6 @@ docker run -d --name vime-npu -it --net=host --shm-size=1024g \
     -v /mnt:/mnt \
     -v /tmp:/tmp \
     -v /data:/data \
-    -v /path/to:/path/to \
     -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \
     "${IMAGE}"
 
@@ -89,6 +88,7 @@ hf download --repo-type dataset zhuzilin/dapo-math-17k \
 
 ```bash
 cd /root/vime
+set -o pipefail
 
 # Source these explicitly if not already initialized by the image.
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
@@ -109,42 +109,58 @@ DATA_ROOT="${MODEL_ROOT:-/root}" bash scripts/run-qwen3-4B-npu.sh \
 训练脚本示例如下：
 
 ```bash
-export SLIME_SCRIPT_TRAIN_BACKEND=megatron
+set -eo pipefail
+cd /root/vime
+source "${ASCEND_HOME:-/usr/local/Ascend}/ascend-toolkit/set_env.sh"
+source "${ASCEND_HOME:-/usr/local/Ascend}/nnal/atb/set_env.sh"
+export PYTHONUNBUFFERED=1
+export VIME_ACCELERATOR=npu
 export PYTHONPATH="/root/Megatron-LM/:/root/MegatronAdaptor:/root/TransformerEngineNPU:$PYTHONPATH"
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
+export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-600}"
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
 export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
 export HYDRA_FULL_ERROR=1
 export MASTER_PORT=$(shuf -i 20000-65000 -n 1)  # or any free port
 export DISABLE_L2_CACHE=1
-export VLLM_ASCEND_ENABLE_NZ=0
+export VLLM_USE_AOT_COMPILE=0
+
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 
 SCRIPT_DIR="/root/vime/scripts/"
 source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 LOG_FILE="/root/vime/train_qwen3_4b_vllm.log"
 MODEL_ROOT="${MODEL_ROOT:-/root}"
 
-python /root/vime/train.py \
+export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
+if ! ray status >/dev/null 2>&1; then
+  ray start --head --num-gpus 0 --resources '{"NPU": 8}' \
+    --node-ip-address "$MASTER_ADDR" --disable-usage-stats \
+    --dashboard-host=0.0.0.0 --dashboard-port=8265
+fi
+
+ray job submit --address="http://${MASTER_ADDR}:8265" \
+  -- python3 train.py \
   --train-backend megatron \
   --actor-num-nodes 1 \
   --actor-num-gpus-per-node 4 \
   --rollout-num-gpus 4 \
   --rollout-num-gpus-per-engine 4 \
-  ${MODEL_ARGS[@]} \
+  "${MODEL_ARGS[@]}" \
   \
-  --hf-checkpoint ${MODEL_ROOT}/models/Qwen3-4B/ \
+  --hf-checkpoint "${MODEL_ROOT}/models/Qwen3-4B/" \
+  --ref-load "${MODEL_ROOT}/models/Qwen3-4B/" \
   \
-  --prompt-data ${MODEL_ROOT}/datasets/dapo-math-17k/dapo-math-17k.jsonl \
+  --prompt-data "${MODEL_ROOT}/datasets/dapo-math-17k/dapo-math-17k.jsonl" \
   --input-key prompt \
   --label-key label \
   --apply-chat-template \
   --rollout-shuffle \
   --rm-type math \
   \
-  --rollout-backend vllm \
-  --vllm-weight-sync-mode native \
+  --vllm-additional-config '{"weight_nz_mode":0}' \
   --vllm-gpu-memory-utilization 0.6 \
   --vllm-enable-sleep-mode \
   --vllm-max-model-len 4096 \
@@ -171,6 +187,9 @@ python /root/vime/train.py \
   --weight-decay 0.1 \
   --adam-beta1 0.9 \
   --adam-beta2 0.98 \
+  --optimizer-cpu-offload \
+  --overlap-cpu-optimizer-d2h-h2d \
+  --use-precision-aware-optimizer \
   \
   --tensor-model-parallel-size 4 \
   --pipeline-model-parallel-size 1 \
@@ -182,8 +201,7 @@ python /root/vime/train.py \
   --recompute-num-layers 1 \
   --use-dynamic-batch-size \
   --max-tokens-per-gpu 8192 \
-  --load ${MODEL_ROOT}/models/Qwen3-4B \
-  --megatron-to-hf-mode bridge \
+  --load "${MODEL_ROOT}/models/Qwen3-4B" \
   \
   --attention-dropout 0.0 \
   --hidden-dropout 0.0 \
@@ -193,6 +211,5 @@ python /root/vime/train.py \
   --micro-batch-size 1 \
   --use-flash-attn \
   \
-  --train-memory-margin-bytes 2147483648 \
   2>&1 | tee -a "$LOG_FILE"
 ```
