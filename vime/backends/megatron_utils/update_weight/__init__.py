@@ -19,15 +19,28 @@ def create_weight_updater(
     update_weight_mode = args.update_weight_mode
     update_weight_transport = args.update_weight_transport
 
-    if update_weight_mode == "delta":
-        # Delta sync is disk-transport only: each engine's pull_weights worker RPC applies the published
-        # deltas into a host-local checkpoint on every host it spans, and the engines reload
-        # via vanilla update_weights_from_disk.
-        assert not args.colocate, "--update-weight-mode=delta is not supported with --colocate"
-        assert update_weight_transport == "disk", "--update-weight-mode=delta requires --update-weight-transport=disk"
-        from .update_weight_from_disk_delta import UpdateWeightFromDiskDelta
+    if update_weight_transport == "sparse_hccl":
+        from vime.platforms import current_platform
 
-        update_weight_cls = UpdateWeightFromDiskDelta
+        if update_weight_mode != "delta" or args.colocate:
+            raise ValueError("sparse_hccl requires delta mode without colocate")
+        if not current_platform().is_npu:
+            raise ValueError("sparse_hccl requires an NPU platform")
+
+    if update_weight_mode == "delta":
+        assert not args.colocate, "--update-weight-mode=delta is not supported with --colocate"
+        if update_weight_transport == "disk":
+            from .update_weight_from_disk_delta import UpdateWeightFromDiskDelta
+
+            update_weight_cls = UpdateWeightFromDiskDelta
+        elif update_weight_transport == "sparse_hccl":
+            if quantization_config:
+                raise NotImplementedError("Sparse HCCL requires unquantized rollout weights")
+            from .update_weight_from_sparse_hccl import UpdateWeightFromSparseHCCL
+
+            update_weight_cls = UpdateWeightFromSparseHCCL
+        else:
+            raise ValueError("--update-weight-mode=delta requires --update-weight-transport=disk or sparse_hccl")
     elif update_weight_transport == "disk":
         from .update_weight_from_disk import UpdateWeightFromDisk
 

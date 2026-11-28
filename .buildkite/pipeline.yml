@@ -103,6 +103,7 @@ steps:
           pip install -q --upgrade --no-deps --only-binary=straw-queue "straw-queue==0.1.6"
           pip install -q -e . --no-deps
           python tests/test_megatron_argument_validation.py
+          python -m pytest -q -rs tests/test_sparse_hccl.py
           python tests/test_megatron_tokenizer_init.py
           python tests/test_megatron_grad_sync_memory.py
           python tests/test_qwen3_5_native_weights.py

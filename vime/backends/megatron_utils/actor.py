@@ -200,7 +200,10 @@ class MegatronTrainRayActor(TrainRayActor):
             and not self.args.colocate
             and hasattr(self.weight_updater, "disconnect_rollout_engines")
         ):
-            self.weight_updater.disconnect_rollout_engines()
+            if self.args.update_weight_mode == "delta" and self.args.update_weight_transport == "sparse_hccl":
+                self.weight_updater.suspend_rollout_engines()
+            else:
+                self.weight_updater.disconnect_rollout_engines()
         destroy_process_groups()
 
         torch_memory_saver.pause()
@@ -828,10 +831,27 @@ class MegatronTrainRayActor(TrainRayActor):
                 logger.info("No updatable vLLM engines are running; skip weight update.")
             return
 
-        if reconnect_rollout_engines:
+        sparse_live_weights = (
+            self.args.offload_train
+            and self.args.update_weight_mode == "delta"
+            and self.args.update_weight_transport == "sparse_hccl"
+        )
+        # Sparse conversion reads live model shards rather than the CPU backup
+        # used by full export. Resume model allocations before probing/diffing,
+        # then restore the offloaded state after the synchronous update.
+        if reconnect_rollout_engines or sparse_live_weights:
             self.wake_up()
         elif self.args.offload_train:
             reload_process_groups()
+
+        # Sparse export reads the live model, which may still hold ref/teacher weights.
+        # Preserve live actor updates; restore the backup only when switching roles.
+        if (
+            self.args.update_weight_mode == "delta"
+            and self.args.update_weight_transport == "sparse_hccl"
+            and self._active_model_tag != "actor"
+        ):
+            self._switch_model("actor")
 
         if num_new_engines > 0 or reconnect_rollout_engines:
             # A replacement trainer must reconnect even to surviving engines;
@@ -867,7 +887,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 self._pending_external_draft_version = None
             print_memory("after update_weights")
 
-        if reconnect_rollout_engines:
+        if reconnect_rollout_engines or sparse_live_weights:
             self.sleep()
         elif self.args.offload_train:
             destroy_process_groups()

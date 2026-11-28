@@ -1,3 +1,4 @@
+import argparse
 import sys
 import types
 from argparse import Namespace
@@ -5,6 +6,7 @@ from argparse import Namespace
 import pytest
 
 from vime.backends.megatron_utils.update_weight import create_weight_updater
+
 
 NUM_GPUS = 0
 
@@ -24,6 +26,14 @@ class _FakeUpdater:
     ("mode", "transport", "colocate", "module_name", "class_name"),
     [
         pytest.param("delta", "disk", False, "update_weight_from_disk_delta", "UpdateWeightFromDiskDelta", id="delta"),
+        pytest.param(
+            "delta",
+            "sparse_hccl",
+            False,
+            "update_weight_from_sparse_hccl",
+            "UpdateWeightFromSparseHCCL",
+            id="sparse-hccl-delta",
+        ),
         pytest.param("full", "disk", False, "update_weight_from_disk", "UpdateWeightFromDisk", id="disk"),
         pytest.param("full", "nccl", True, "update_weight_from_tensor", "UpdateWeightFromTensor", id="colocated"),
         pytest.param(
@@ -37,6 +47,8 @@ class _FakeUpdater:
     ],
 )
 def test_create_weight_updater_selects_implementation(monkeypatch, mode, transport, colocate, module_name, class_name):
+    monkeypatch.setenv("VIME_PLATFORM", "npu" if transport == "sparse_hccl" else "cuda")
+    monkeypatch.delenv("VIME_ACCELERATOR", raising=False)
     full_module_name = f"vime.backends.megatron_utils.update_weight.{module_name}"
     fake_module = types.ModuleType(full_module_name)
     setattr(fake_module, class_name, _FakeUpdater)
@@ -58,7 +70,7 @@ def test_create_weight_updater_selects_implementation(monkeypatch, mode, transpo
         model,
         weights_getter,
         model_name="model",
-        quantization_config={"quant_method": "test"},
+        quantization_config=None if transport == "sparse_hccl" else {"quant_method": "test"},
     )
 
     assert isinstance(updater, _FakeUpdater)
@@ -66,8 +78,59 @@ def test_create_weight_updater_selects_implementation(monkeypatch, mode, transpo
     assert updater.model is model
     assert updater.weights_getter is weights_getter
     assert updater.model_name == "model"
-    assert updater.quantization_config == {"quant_method": "test"}
+    assert updater.quantization_config == (None if transport == "sparse_hccl" else {"quant_method": "test"})
     assert updater.weight_version == 7
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("transport", ["nccl", "disk", "sparse_hccl"])
+def test_transport_options_are_registered_once(transport):
+    from vime.utils.arguments import get_vime_extra_args_provider
+
+    parser = get_vime_extra_args_provider()(argparse.ArgumentParser())
+    args = parser.parse_args(
+        [
+            "--rollout-batch-size",
+            "1",
+            "--update-weight-transport",
+            transport,
+        ]
+    )
+    assert args.update_weight_transport == transport
+    assert args.update_weight_delta_batch_diff == 32
+    assert args.update_weight_delta_batch_gather == 32
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("quantization,error", [({"quant_method": "test"}, NotImplementedError)])
+def test_sparse_options_rejected_before_import(monkeypatch, quantization, error):
+    monkeypatch.setenv("VIME_PLATFORM", "npu")
+    monkeypatch.delenv("VIME_ACCELERATOR", raising=False)
+    args = Namespace(
+        update_weight_mode="delta",
+        update_weight_transport="sparse_hccl",
+        colocate=False,
+    )
+    with pytest.raises(error):
+        create_weight_updater(args, [], lambda: {}, model_name="test", quantization_config=quantization)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "platform,mode,colocate",
+    [
+        ("cuda", "delta", False),
+        ("npu", "full", False),
+        ("npu", "full", True),
+        ("npu", "delta", True),
+    ],
+)
+def test_sparse_invalid_combinations_fail_before_import(monkeypatch, platform, mode, colocate):
+    monkeypatch.setenv("VIME_PLATFORM", platform)
+    monkeypatch.delenv("VIME_ACCELERATOR", raising=False)
+    args = Namespace(update_weight_mode=mode, update_weight_transport="sparse_hccl", colocate=colocate)
+    with pytest.raises(ValueError, match="sparse_hccl requires"):
+        create_weight_updater(args, [], lambda: {}, model_name="test", quantization_config=None)
 
 
 if __name__ == "__main__":
