@@ -61,7 +61,7 @@ HARDWARE = {
     ),
     "a5": Hardware(
         queue="ascend-a5",
-        default_image="quay.io/ascend/vime:vime-latest-a5",
+        default_image="quay.io/ascend/vime:vime-a5-latest",
         build_suffix="-a5",
         soc_version="ascend950dt_9582",
         toolkit_env="/usr/local/Ascend/ascend-toolkit/set_env.sh",
