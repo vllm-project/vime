@@ -31,8 +31,6 @@ SUITES = {
         ("test_delta_disk_weight_update.py", "npu-4", "", {}),
         ("test_qwen3_4B_npu.py", "npu-8", "", {}),
         ("test_qwen3_30B_A3B_npu.py", "npu-16", "", {}),
-        # Enable once the Qwen3-VL HF-to-Megatron loader and native model land:
-        # ("test_qwen3_vl_8B_npu.py", "npu-8", "", {}),
         ("test_glm4.7_30B_A3B_npu.py", "npu-16", "", {}),
         # 35B convert plus the first rollout does not fit in the default 180 minutes.
         ("test_qwen3.5_35B_A3B_npu.py", "npu-16", "", {}, 360),

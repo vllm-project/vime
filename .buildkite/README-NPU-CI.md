@@ -54,8 +54,7 @@ configuration), which lists suite names from the `SUITES` dict.
 Suites and test mappings are defined in [`npu_suites.py`](./npu_suites.py). Two
 suites are predefined: `smk` and the currently empty `nightly`.
 The smoke suite runs disk delta weight update, Qwen3-4B, Qwen3-30B-A3B,
-GLM-4.7-30B-A3B, and Qwen3.5-35B-A3B. Qwen3-VL remains disabled pending its
-loader/model prerequisites and hardware validation.
+GLM-4.7-30B-A3B, and Qwen3.5-35B-A3B.
 
 Each entry has four fields and an optional timeout in minutes:
 
