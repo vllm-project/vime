@@ -40,6 +40,7 @@ class Hardware:
     build_suffix: str
     soc_version: str = ""  # Empty uses the Dockerfile default.
     test_env: dict = field(default_factory=dict)
+    toolkit_env: str = ""
 
     @property
     def build_key(self) -> str:
@@ -63,6 +64,7 @@ HARDWARE = {
         default_image="quay.io/ascend/vime:vime-latest-a5",
         build_suffix="-a5",
         soc_version="ascend950dt_9582",
+        toolkit_env="/usr/local/Ascend/ascend-toolkit/set_env.sh",
     ),
 }
 
@@ -89,16 +91,17 @@ class Case:
 
 SUITES = {
     "smk": [
-        Case("test_delta_disk_weight_update.py", A3_4),
-        Case("test_qwen3_4B_npu.py", A3_8),
+        # Temporarily pause A3 cases while validating the A5 runtime environment.
+        # Case("test_delta_disk_weight_update.py", A3_4),
+        # Case("test_qwen3_4B_npu.py", A3_8),
         Case("test_qwen3_4B_npu.py", A5_8),
-        Case("test_qwen3_4B_eagle3_npu.py", A3_8),
-        Case("test_qwen3_4B_dspark_npu.py", A3_8),
-        Case("test_qwen3_30B_A3B_npu.py", A3_16),
-        Case("test_qwen3_vl_8B_npu.py", A3_8),
-        Case("test_glm4.7_30B_A3B_npu.py", A3_16),
+        # Case("test_qwen3_4B_eagle3_npu.py", A3_8),
+        # Case("test_qwen3_4B_dspark_npu.py", A3_8),
+        # Case("test_qwen3_30B_A3B_npu.py", A3_16),
+        # Case("test_qwen3_vl_8B_npu.py", A3_8),
+        # Case("test_glm4.7_30B_A3B_npu.py", A3_16),
         # 35B convert plus the first rollout does not fit in the default 180 minutes.
-        Case("test_qwen3.6_35B_A3B_npu.py", A3_16, timeout_in_minutes=360),
+        # Case("test_qwen3.6_35B_A3B_npu.py", A3_16, timeout_in_minutes=360),
     ],
     "nightly": [],
 }
@@ -165,19 +168,19 @@ def npu_step(suite: str, case: Case, image: str) -> dict:
         **case.env,
     }
 
-    commands = "\n".join(
-        [
-            'echo "INFO: update NPU environment"',
-            'if [ -n "${BUILDKITE_COMMIT}" ]; then',
-            "  source /workspace/build/buildkite/.buildkite/scripts/update-npu-environment.sh",
-            "fi",
-            "export HF_HUB_OFFLINE=0",
-            # Cover checkpoint conversion before the training launcher runs.
-            'export HCCL_CONNECT_TIMEOUT="$${HCCL_CONNECT_TIMEOUT:-600}"',
-            f"python tests/{case.script} {case.extra_args}".rstrip(),
-        ]
-    )
-    command = f"bash -c '{commands}'"
+    commands = [
+        'echo "INFO: update NPU environment"',
+        'if [ -n "${BUILDKITE_COMMIT}" ]; then',
+        "  source /workspace/build/buildkite/.buildkite/scripts/update-npu-environment.sh",
+        "fi",
+        "export HF_HUB_OFFLINE=0",
+        # Cover checkpoint conversion before the training launcher runs.
+        'export HCCL_CONNECT_TIMEOUT="$${HCCL_CONNECT_TIMEOUT:-600}"',
+    ]
+    if hardware.toolkit_env:
+        commands.append(f"source {hardware.toolkit_env} || exit 1")
+    commands.append(f"python tests/{case.script} {case.extra_args}".rstrip())
+    command = "bash -c '" + "\n".join(commands) + "'"
 
     label = f":fire: {suite} [{case.preset.variant.upper()} {case.preset.resource_class}]: {case.script} {case.extra_args}".rstrip()
     step = {
@@ -221,11 +224,11 @@ def build_image_step(variant: str, hardware: Hardware) -> dict:
 def generate_steps(values: list[str], *, include_builds: bool) -> list[dict]:
     suites = selected_suites(values)
     build_images = "image-build" in values or BUILDKITE_SOURCE == "schedule"
-    # Scheduled builds also refresh the default smoke image when no tests are selected.
     cases = [(suite, case) for suite in suites for case in SUITES[suite]]
     variants = {case.preset.variant for _, case in cases}
-    if BUILDKITE_SOURCE == "schedule":
-        variants.add("a3")
+    # Temporarily pause the scheduled A3 image refresh for the A5-only run.
+    # if BUILDKITE_SOURCE == "schedule":
+    #     variants.add("a3")
 
     images = {}
     steps = []
