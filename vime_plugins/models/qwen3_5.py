@@ -11,6 +11,8 @@ from transformers.activations import ACT2FN
 
 from vime.utils import accelerator
 
+from .cp_attn_boundary import wrap_attention_spec
+
 try:
     from fla.modules import FusedRMSNormGated, ShortConvolution
 except ImportError:
@@ -28,6 +30,34 @@ def _get_text_config(hf_config):
 
 
 # Adapted from Qwen3NextGatedDeltaNet but with separate in_proj_qkv and in_proj_z
+# Per-step cache: building the fla CP context costs a device->host sync
+# (cu_seqlens.tolist()) plus python interval bookkeeping.  The packed params
+# object is shared by every layer of one forward pass, so build it once.
+_CP_CTX_CACHE: dict = {}
+
+
+def _cp_ctx_for_layer(packed_seq_params, cp_group, conv_kernel_size):
+    cu = packed_seq_params.cu_seqlens_q
+    key = (id(packed_seq_params), conv_kernel_size)
+    hit = _CP_CTX_CACHE.get(key)
+    if hit is not None and hit[0] == cu.data_ptr():
+        return hit[1], hit[2]
+    from fla.ops.cp import build_cp_context
+
+    cu_list = [int(v) for v in cu.tolist()]
+    ctx = build_cp_context(
+        cu,
+        cp_group,
+        conv1d_kernel_size=conv_kernel_size,
+        cu_seqlens_cpu=torch.tensor(cu_list, dtype=torch.int32),
+        layout="contiguous",
+    )
+    if len(_CP_CTX_CACHE) > 4:
+        _CP_CTX_CACHE.clear()
+    _CP_CTX_CACHE[key] = (cu.data_ptr(), cu_list, ctx)
+    return cu_list, ctx
+
+
 class Qwen3_5GatedDeltaNet(nn.Module):
     """
     Qwen3.5 GatedDeltaNet with varlen support.
@@ -178,6 +208,42 @@ class Attention(HuggingfaceAttention):
         self.hf_config = _get_text_config(self.hf_config)
         self.hf_config._attn_implementation = "flash_attention_2"
 
+        # --- Qwen3.5-only GDN context parallelism (opt-in) -------------------
+        # The stock HuggingfaceAttention CP path all-gathers the whole sequence
+        # and recomputes it on every rank (fake CP: cp_size x compute and
+        # ~33MB/layer of traffic).  When enabled, the GDN layers use fla's
+        # *contiguous* CP kernels instead, and hidden states are converted
+        # between megatron's zigzag layout and fla's contiguous layout at the
+        # layer boundary.  Off by default: behaviour is unchanged unless
+        # VIME_GDN_REAL_CP=1.
+        import os as _os
+
+        from megatron.core import mpu as _mpu
+
+        self.cp_native = (
+            _os.environ.get("VIME_GDN_REAL_CP") == "1"
+            and _mpu.get_context_parallel_world_size() > 1
+            and getattr(args, "qwen_gdn_implementation", "replicated") == "fused_tp"
+            and str(getattr(args, "qwen_gdn_backend", "fla")) in ("fla", "fla_npu")
+        )
+
+        # With --allgather-cp the packed stream is already sliced contiguously,
+        # which is exactly what fla's CP kernels want: skip the per-layer
+        # zigzag<->contiguous shuffles entirely (the dense attention layers do
+        # them instead, once each, via CPAttnBoundary).
+        self.cp_contiguous = bool(getattr(args, "allgather_cp", False))
+        if (
+            self.cp_contiguous
+            and not self.cp_native
+            and getattr(args, "context_parallel_size", 1) > 1
+        ):
+            raise ValueError(
+                "Qwen3.5 with --allgather-cp requires the real GDN CP path "
+                "(set VIME_GDN_REAL_CP=1): the HF-style gather fallback assumes the "
+                "per-document zigzag layout and would silently mis-order the "
+                "contiguous shards."
+            )
+
         if getattr(args, "qwen_gdn_implementation", "replicated") == "fused_tp":
             from .gdn.qwen3_5_tp import Qwen3_5GatedDeltaNetTP
 
@@ -197,23 +263,93 @@ class Attention(HuggingfaceAttention):
 
             self.input_layernorm = RMSNorm(self.hf_config.hidden_size, eps=self.hf_config.rms_norm_eps)
 
+    def forward(self, hidden_states, attention_mask, *args, **kwargs):
+        """Skip HuggingfaceAttention's all-gather fake CP when real CP is on."""
+        if not self.cp_native:
+            return super().forward(hidden_states, attention_mask, *args, **kwargs)
+
+        from megatron.core import mpu, tensor_parallel
+
+        packed_seq_params = kwargs.get("packed_seq_params")
+        assert packed_seq_params is not None, "thd packed input is required for GDN CP"
+        _sp = bool(self.args.sequence_parallel)
+        # Contract recorded BEFORE the SP gather: the caller hands us the SP
+        # (TP-split) layout and must get the same layout back.
+        input_shape = tuple(hidden_states.shape)
+        _pre_rows = int(input_shape[0])
+        if _sp:
+            # Same contract as HuggingfaceAttention.forward: the linear attention
+            # below is not TP-sharded, so the backward must split, not reduce.
+            hidden_states = tensor_parallel.gather_from_sequence_parallel_region(
+                hidden_states,
+                tensor_parallel_output_grad=False,
+                group=mpu.get_tensor_model_parallel_group(),
+            )
+        _gathered_rows = int(hidden_states.shape[0])
+        hidden_states = hidden_states.permute(1, 0, 2)  # [b, t, h]
+        output = self.hf_forward(hidden_states, packed_seq_params)
+        output = output.permute(1, 0, 2)                # [s, b, h] (full CP shard)
+        if _sp:
+            # Exit-side counterpart of the entry gather: the caller (and the
+            # residual add in the next layer) expect the SP layout, i.e. rows
+            # split across TP. GDN itself keeps the full CP shard.
+            _full_rows = int(output.shape[0])
+            output = tensor_parallel.scatter_to_sequence_parallel_region(
+                output, group=mpu.get_tensor_model_parallel_group()
+            )
+            if not globals().get("_SP_DIAG"):
+                globals()["_SP_DIAG"] = True
+                print(f"[sp] gdn rows: pre_gather={_pre_rows} gathered={_gathered_rows} "
+                      f"pre_scatter={_full_rows} post_scatter={int(output.shape[0])}",
+                      flush=True)
+        assert tuple(output.shape) == input_shape, (
+            f"GDN shape mismatch: input={input_shape}, output={tuple(output.shape)}"
+        )
+        return output, None
+
     def hf_forward(self, hidden_states, packed_seq_params):
+        import os as _os8
+
         hidden_states = self.input_layernorm(hidden_states)
+        cu_seqlens = packed_seq_params.cu_seqlens_q
+        cp_context = None
+        cu_list = None
+        cp_group = None
+        if self.cp_native:
+            from megatron.core import mpu
+
+            from .gdn.cp_layout import contiguous_to_zigzag, zigzag_to_contiguous
+
+            cp_group = mpu.get_context_parallel_group()
+            cu_list, cp_context = _cp_ctx_for_layer(
+                packed_seq_params, cp_group, self.linear_attn.conv_kernel_size
+            )
+            if not self.cp_contiguous:
+                # default layout is megatron zigzag (per document) while fla's
+                # chunkwise CP kernels consume the flat contiguous layout.
+                hidden_states = zigzag_to_contiguous(hidden_states, cu_list, cp_group)
         hidden_states = self.linear_attn(
             hidden_states=hidden_states,
-            cu_seqlens=packed_seq_params.cu_seqlens_q,
+            cu_seqlens=cu_seqlens,
+            cp_context=cp_context,
         )
+        if cp_context is not None and not self.cp_contiguous:
+            hidden_states = contiguous_to_zigzag(hidden_states, cu_list, cp_group)
         return hidden_states
 
 
+# --- hidden-state probe for CP A/B/C comparison (env gated) ---------------
 def get_qwen3_5_spec(args, config, vp_stage):
     # always use the moe path for MoE models
     if not args.num_experts:
         config.moe_layer_freq = [0] * config.num_layers
 
     # Define the decoder block spec
+    # Honour --transformer-impl so the model can run without the NPU
+    # transformer-engine build (e.g. inside the vllm-ascend image).
     kwargs = {
-        "use_transformer_engine": True,
+        "use_transformer_engine": getattr(args, "transformer_impl", "transformer_engine")
+        == "transformer_engine",
     }
     if vp_stage is not None:
         kwargs["vp_stage"] = vp_stage
@@ -269,5 +405,13 @@ def get_qwen3_5_spec(args, config, vp_stage):
                 if native_spec is not None
                 else ModuleSpec(module=Attention, params={"args": args})
             )
+            transformer_layer_spec.layer_specs[layer_id] = layer_specs
+        elif getattr(args, "allgather_cp", False) and args.context_parallel_size > 1:
+            # Contiguous main layout, but TE's ring attention only understands
+            # zigzag: convert at the attention boundary (2 shuffles per dense
+            # layer instead of 2 per GDN layer).
+            layer_specs = copy.deepcopy(transformer_layer_spec.layer_specs[layer_id])
+            base_attention = layer_specs.submodules.self_attention
+            layer_specs.submodules.self_attention = wrap_attention_spec(base_attention, args)
             transformer_layer_spec.layer_specs[layer_id] = layer_specs
     return transformer_layer_spec

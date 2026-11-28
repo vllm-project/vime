@@ -28,6 +28,8 @@ Layout contract (matches the upstream example):
     returns o: [B, T, H, V]
 """
 
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -204,13 +206,27 @@ class AscendCCausalConv1dFunction(torch.autograd.Function):
         weight: torch.Tensor,
         H: int,
         cu_seqlens: torch.Tensor | None = None,
+        conv_state: torch.Tensor | None = None,
     ):
         op_weight = weight.transpose(-1, -2).contiguous()
         width, dim = op_weight.shape
         op_x, query_start_loc, is_varlen = _flatten_varlen_x(x, cu_seqlens)
         num_sequences = len(query_start_loc) - 1 if query_start_loc is not None else int(x.shape[0])
-        # No initial_state support: the conv always starts from a zero state.
-        conv_states = torch.zeros(num_sequences, width - 1, dim, dtype=x.dtype, device=x.device)
+        # ``conv_state`` carries the previous CP rank's last width-1 inputs;
+        # without it the conv starts from a zero state (non-CP path).
+        # ``conv_state`` is usually None or a plain tensor; autograd only accepts a
+        # gradient for it when it was a leaf Variable, so remember which.
+        ctx.state_wants_grad = bool(
+            isinstance(conv_state, torch.Tensor) and conv_state.requires_grad
+        )
+        if conv_state is None:
+            conv_states = torch.zeros(num_sequences, width - 1, dim, dtype=x.dtype, device=x.device)
+        else:
+            conv_states = (
+                conv_state.to(dtype=x.dtype)
+                .reshape(num_sequences, width - 1, dim)
+                .contiguous()
+            )
         query_start_loc_device = (
             cu_seqlens.to(device=op_x.device, dtype=torch.int32).contiguous() if cu_seqlens is not None else None
         )
@@ -223,7 +239,7 @@ class AscendCCausalConv1dFunction(torch.autograd.Function):
         y = ascendc_causal_conv1d_fn(
             op_x,
             op_weight,
-            None,  # bias: the Qwen3.5/3.6 conv is bias-free
+            None,
             conv_states,
             query_start_loc=query_start_loc_device,
             has_initial_state=None,
@@ -240,6 +256,7 @@ class AscendCCausalConv1dFunction(torch.autograd.Function):
         # output, so the preactivation is recomputed in the backward pass
         # (one extra conv call there) rather than saved here.
         ctx.save_for_backward(x, op_weight)
+        ctx.conv_state = conv_state
         ctx.query_start_loc = query_start_loc
         ctx.is_varlen = is_varlen
         ctx.head_num = H
@@ -276,12 +293,12 @@ class AscendCCausalConv1dFunction(torch.autograd.Function):
             else preactivation.contiguous()
         )
 
-        dx, dw, _, _ = ascendc_causal_conv1d_bwd(
+        dx, dw, _db, dconv_state = ascendc_causal_conv1d_bwd(
             x=op_x,
             y=op_y,
             weight=op_weight,
             dy=op_dy,
-            initial_state=None,
+            initial_state=ctx.conv_state,
             dht=None,
             query_start_loc=ctx.query_start_loc,
             activation=1,  # silu
@@ -289,7 +306,7 @@ class AscendCCausalConv1dFunction(torch.autograd.Function):
         )
         dx = dx.reshape_as(x)
         dw = dw.transpose(0, 1).contiguous()
-        return dx, dw, None, None
+        return dx, dw, None, None, (dconv_state if ctx.state_wants_grad else None)
 
 
 def causal_conv1d_ascendc(
@@ -297,8 +314,9 @@ def causal_conv1d_ascendc(
     weight: torch.Tensor,
     H: int,
     cu_seqlens: torch.Tensor | None = None,
+    conv_state: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    return AscendCCausalConv1dFunction.apply(x, weight, H, cu_seqlens)
+    return AscendCCausalConv1dFunction.apply(x, weight, H, cu_seqlens, conv_state)
 
 
 # ---------------------------------------------------------------------------
@@ -316,19 +334,35 @@ def flash_chunk_gated_delta_rule_fwd(
     cu_seqlens_list=None,
     chunk_indices_list=None,
     chunk_size: int = 64,
+    initial_state=None,
+    output_final_state: bool = False,
 ):
     chunk_list = _chunk_list(chunk_indices_list, chunk_size)
+    if torch.is_tensor(initial_state):
+        initial_state = initial_state.to(q.dtype)
     # The composite AscendC kernel runs the whole forward (cumsum, kkt,
     # solve_tri, WY repr, recurrent, output) and returns the cumsum'd g and A
     # needed by the backward pass.
-    o, _, g, A, *_ = ascendc_chunk_gated_delta_rule_fwd(
+    import os as _os
+
+    _init = initial_state
+    if _init is None and _os.environ.get("VIME_FLA_NPU_INIT") == "1":
+        # probe only: a fixed non-zero state, to see whether the op honours it
+        _seed = int(_os.environ.get("VIME_FLA_NPU_INIT_SEED", "7"))
+        _gen = torch.Generator(device=q.device).manual_seed(_seed)
+        _dtype = q.dtype if _os.environ.get("VIME_FLA_NPU_INIT_DTYPE", "same") == "same" else torch.float32
+        _order = _os.environ.get("VIME_FLA_NPU_INIT_ORDER", "kv")
+        _k, _v = k.shape[-1], v.shape[-1]
+        _shape = (q.shape[0], q.shape[1], _v, _k) if _order == "vk" else (q.shape[0], q.shape[1], _k, _v)
+        _init = torch.randn(*_shape, device=q.device, dtype=_dtype, generator=_gen)
+    o, final_state, g, A, *_ = ascendc_chunk_gated_delta_rule_fwd(
         q,
         k,
         v,
         g,
         beta,
-        initial_state=None,
-        output_final_state=False,
+        initial_state=_init,
+        output_final_state=bool(output_final_state or _init is not None),
         chunk_size=chunk_size,
         cu_seqlens=cu_seqlens_list,
         chunk_indices=chunk_list,
@@ -337,7 +371,7 @@ def flash_chunk_gated_delta_rule_fwd(
         return_intermediate_states=False,
         use_qk_l2norm_in_kernel=False,
     )
-    return g, o, A
+    return g, o, A, final_state
 
 
 def flash_chunk_gated_delta_rule_bwd(
@@ -354,9 +388,17 @@ def flash_chunk_gated_delta_rule_bwd(
     chunk_indices=None,
     chunk_indices_list=None,
     chunk_size: int = 64,
+    initial_state=None,
+    dht=None,
+    cp_dht_provider=None,
 ):
     g = g.transpose(1, 2).contiguous()
     beta = beta.transpose(1, 2).contiguous().float()
+    # AscendC requires the state / state-gradient dtype to match q.
+    if torch.is_tensor(initial_state):
+        initial_state = initial_state.to(q.dtype)
+    if torch.is_tensor(dht):
+        dht = dht.to(q.dtype)
 
     w, u = recompute_w_u(
         k,
@@ -376,13 +418,23 @@ def flash_chunk_gated_delta_rule_bwd(
         u,
         g=g,
         gk=None,
-        initial_state=None,
+        initial_state=initial_state,
         output_final_state=False,
         chunk_size=chunk_size,
         cu_seqlens=cu_seqlens_list,
         chunk_indices=_chunk_list(chunk_indices_list, chunk_size),
     )
 
+    if __import__("os").environ.get("VIME_DBG_DVLOCAL") == "1":
+        print("[dbg dv_local]",
+              "q", tuple(q.shape), q.dtype,
+              "k", tuple(k.shape),
+              "do", tuple(do.shape),
+              "g", None if g is None else tuple(g.shape),
+              "A", None if A is None else tuple(A.shape),
+              "scale", scale, "cs", chunk_size,
+              "cu", cu_seqlens_list, "ci", _chunk_list(chunk_indices_list, chunk_size),
+              flush=True)
     dv = ascendc_chunk_bwd_dv_local(
         q,
         k,
@@ -396,9 +448,21 @@ def flash_chunk_gated_delta_rule_bwd(
         chunk_indices=_chunk_list(chunk_indices_list, chunk_size),
     )
 
-    # No recurrent-state support: h0 / dht stay None, matching the forward,
-    # which never takes an initial_state and never outputs a final_state.
-    dh, _, dv = ascendc_chunk_gated_delta_rule_bwd_dhu(
+    # Context parallelism: the incoming state-gradient depends on the sibling
+    # ranks' summaries, which need the local dv computed above.
+    if cp_dht_provider is not None:
+        dht = cp_dht_provider(
+            q=q,
+            k=k,
+            w=w,
+            do=do,
+            dv=dv,
+            g=g,
+            scale=scale,
+            chunk_size=chunk_size,
+        )
+
+    dh, dh0, dv = ascendc_chunk_gated_delta_rule_bwd_dhu(
         q,
         k,
         w,
@@ -408,8 +472,8 @@ def flash_chunk_gated_delta_rule_bwd(
         chunk_size,
         g=g,
         gK=None,
-        h0=None,
-        dht=None,
+        h0=initial_state,
+        dht=dht,
         cu_seqlens=cu_seqlens_list,
         chunk_indices=_chunk_list(chunk_indices_list, chunk_size),
         use_exp2=False,
@@ -476,7 +540,7 @@ def flash_chunk_gated_delta_rule_bwd(
         chunk_indices=chunk_indices,
         chunk_size=chunk_size,
     )
-    return dq, dk, dv, db, dg
+    return dq, dk, dv, db, dg, dh0
 
 
 class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
@@ -497,6 +561,8 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         chunk_indices_list=None,
         use_qk_l2norm_in_kernel: bool = False,
         chunk_size: int = 64,
+        initial_state=None,
+        output_final_state: bool = False,
     ):
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
@@ -504,7 +570,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         else:
             q_rstd, k_rstd = None, None
 
-        g, o, A = flash_chunk_gated_delta_rule_fwd(
+        g, o, A, final_state = flash_chunk_gated_delta_rule_fwd(
             q=q,
             k=k,
             v=v,
@@ -514,6 +580,8 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             cu_seqlens_list=cu_seqlens_list,
             chunk_indices_list=chunk_indices_list,
             chunk_size=chunk_size,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
         )
 
         ctx.save_for_backward(q, k, v, g, beta, A)
@@ -526,14 +594,15 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         ctx.cu_seqlens_list = cu_seqlens_list
         ctx.chunk_indices = chunk_indices
         ctx.chunk_indices_list = chunk_indices_list
-        return o.to(q.dtype)
+        ctx.initial_state = initial_state
+        return o.to(q.dtype), final_state
 
     @staticmethod
     @input_guard
     @autocast_custom_bwd
-    def backward(ctx, do):
+    def backward(ctx, do, dfinal_state=None):
         q, k, v, g, beta, A = ctx.saved_tensors
-        dq, dk, dv, db, dg = flash_chunk_gated_delta_rule_bwd(
+        dq, dk, dv, db, dg, dh0 = flash_chunk_gated_delta_rule_bwd(
             q=q,
             k=k,
             v=v,
@@ -547,6 +616,8 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             chunk_indices=ctx.chunk_indices,
             chunk_indices_list=ctx.chunk_indices_list,
             chunk_size=ctx.chunk_size,
+            initial_state=ctx.initial_state,
+            dht=dfinal_state,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, ctx.q_rstd, dq)
@@ -564,6 +635,8 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             None,
             None,
             None,
+            dh0,
+            None,
         )
 
 
@@ -578,6 +651,8 @@ def flash_gated_delta_rule(
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
 ):
     r"""
     Flash-linear-attention NPU port of xtuner's GDN entry.
@@ -633,7 +708,7 @@ def flash_gated_delta_rule(
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
-    o = ChunkGatedDeltaRuleFunction.apply(
+    o, final_state = ChunkGatedDeltaRuleFunction.apply(
         q,
         k,
         v,
@@ -646,8 +721,10 @@ def flash_gated_delta_rule(
         chunk_indices_list,
         use_qk_l2norm_in_kernel,
         chunk_size,
+        initial_state,
+        output_final_state,
     )
-    return o, None
+    return o, final_state
 
 
 # ---------------------------------------------------------------------------
@@ -655,6 +732,232 @@ def flash_gated_delta_rule(
 # ---------------------------------------------------------------------------
 
 
+class _CPConvWithState(torch.autograd.Function):
+    """Causal conv with a cross-rank initial state (CP).
+
+    Reference semantics (``fla/modules/causal_conv1d/cp.py:88-104``):
+
+    * the first rank injects nothing (it still joins the collective);
+    * only ``min(W-1, pre_num_conv_tokens)`` rows of the previous rank's tail are
+      real history for this shard;
+    * only the FIRST document of a contiguous shard can continue a previous rank.
+
+    The AscendC kernel mutates its state buffer and its backward wants a
+    ``[B, W, dim]`` state, so a snapshot is taken before the forward.
+    """
+
+    @staticmethod
+    def forward(ctx, x, weight, H, cu_seqlens, cp_context):
+        import torch.distributed as dist
+
+        if x.dim() != 3:
+            raise NotImplementedError(
+                "fla_npu CP conv expects x of shape (batch, seqlen, dim)."
+            )
+
+        op_weight = weight.transpose(-1, -2).contiguous()
+        w_width, dim = op_weight.shape
+        pad = w_width - 1
+
+        # The kernel validates queryStartLoc against the token count it is given,
+        # so it must describe THIS shard, not the global packed stream.  Prefer
+        # the rank-local boundaries carried by the CP context.
+        _ctx_cu = getattr(cp_context, "cu_seqlens", None) if cp_context is not None else None
+        if _ctx_cu is not None:
+            _local_cu = [int(v) for v in (_ctx_cu.tolist() if hasattr(_ctx_cu, "tolist") else _ctx_cu)]
+        elif cu_seqlens is not None:
+            _local_cu = [int(v) for v in (cu_seqlens.tolist() if hasattr(cu_seqlens, "tolist") else cu_seqlens)]
+        else:
+            _local_cu = None
+        if _local_cu is not None and _local_cu[-1] != int(x.shape[1]):
+            _local_cu = [0, int(x.shape[1])]
+        if os.environ.get("VIME_CP_CONV_DIAG") == "1":
+            _r = dist.get_rank(cp_context.group) if getattr(cp_context, "group", None) is not None else 0
+            print(f"[cpconv] rank={_r} T_local={int(x.shape[1])} "
+                  f"given_cu={None if cu_seqlens is None else [int(v) for v in (cu_seqlens.tolist() if hasattr(cu_seqlens, 'tolist') else cu_seqlens)]} "
+                  f"ctx_cu={_ctx_cu is not None and [int(v) for v in (_ctx_cu.tolist() if hasattr(_ctx_cu, 'tolist') else _ctx_cu)]} "
+                  f"chosen={_local_cu}", flush=True)
+        cu_seqlens = (
+            torch.tensor(_local_cu, dtype=torch.int32, device=x.device) if _local_cu is not None else None
+        )
+        op_x, query_start_loc, is_varlen = _flatten_varlen_x(x, cu_seqlens)
+        num_sequences = len(query_start_loc) - 1 if query_start_loc is not None else int(x.shape[0])
+        qsl_device = (
+            cu_seqlens.to(device=op_x.device, dtype=torch.int32).contiguous()
+            if cu_seqlens is not None
+            else None
+        )
+
+        group = None if cp_context is None else cp_context.group
+        rank = dist.get_rank(group) if group is not None else 0
+        world = dist.get_world_size(group) if group is not None else 1
+        ctx.group = group
+        ctx.rank = rank
+        ctx.world = world
+        ctx.pad = pad
+
+        tail = x.detach()[:, -pad:, :].contiguous()
+        if world > 1:
+            gathered = [torch.zeros_like(tail) for _ in range(world)]
+            dist.all_gather(gathered, tail, group=group)
+            prev = gathered[rank - 1] if rank > 0 else torch.zeros_like(tail)
+        else:
+            prev = torch.zeros_like(tail)
+
+        state = torch.zeros(num_sequences, w_width, dim, dtype=x.dtype, device=x.device)
+        # `FLACPContext` owns both fields and computes `pre_num_conv_tokens` as
+        # `max(0, shard_global_start - first_doc_global_start)`, i.e. how many
+        # tokens of the containing document precede this shard.  Guessing it
+        # (for example defaulting to the kernel width) would splice one
+        # document's tail onto a shard that actually starts a new one, so the
+        # fields are treated as required rather than defaulted.
+        try:
+            is_first_rank = bool(cp_context.is_first_rank)
+            pre_conv = int(cp_context.pre_num_conv_tokens)
+        except AttributeError as exc:
+            raise RuntimeError(
+                "CP short convolution needs a FLACPContext with both "
+                "`is_first_rank` and `pre_num_conv_tokens`; the supplied "
+                f"{type(cp_context).__name__} is missing one of them."
+            ) from exc
+        valid_len = min(pad, pre_conv) if world > 1 else 0
+        # The AscendC prefill entry (run_mode=0) only *writes* conv_states; it
+        # does not consume them as a prefix history (verified: four different
+        # state layouts produced identical outputs).  Splice the real history
+        # into the input instead and drop the prefix outputs.
+        ctx.window_mode = True
+        ctx.window_len = 0
+        if valid_len > 0 and not is_first_rank:
+            if x.shape[0] != 1:
+                raise ValueError("CP prefix windows require one packed token stream.")
+            hist = prev[:, -valid_len:, :]
+            x_win = torch.cat((hist, x), dim=1)
+            base = query_start_loc if query_start_loc is not None else [0, x.shape[1]]
+            window_cu = [0] + [int(c) + valid_len for c in base[1:]]
+            cu_win = torch.tensor(window_cu, dtype=torch.int32, device=x.device)
+            y_full = ascendc_causal_conv1d_fn(
+                x_win.flatten(0, 1), op_weight, None, state,
+                query_start_loc=cu_win, has_initial_state=None, activation="silu",
+                pad_slot_id=-1, null_block_id=None, head_num=H,
+            )
+            if H:
+                if y_full.ndim == 3:
+                    y_full = y_full.unsqueeze(0)
+                if y_full.shape != (1, H, x_win.shape[1], dim // H):
+                    raise RuntimeError(f"Unexpected window conv output {tuple(y_full.shape)}")
+                y = y_full[:, :, valid_len:, :]
+            else:
+                y = y_full.reshape_as(x_win)[:, valid_len:, :]
+            ctx.save_for_backward(x_win, op_weight)
+            ctx.conv_states = None  # history is already in x_win
+            ctx.query_start_loc = window_cu
+            ctx.is_varlen = True
+            ctx.head_num = H
+            ctx.window_len = valid_len
+            return y
+        ctx.injected = valid_len  # backward must only send these slots back
+        ctx.prev_tail = (
+            prev.reshape(x.shape[0], -1, x.shape[-1])[:, -valid_len:, :].detach().clone()
+            if valid_len > 0
+            else None
+        )
+        if (not is_first_rank) and valid_len > 0:
+            state[0, -valid_len:, :] = prev.reshape(-1, dim)[-valid_len:]
+        state_snapshot = state.clone()
+
+        y = ascendc_causal_conv1d_fn(
+            op_x,
+            op_weight,
+            None,
+            state,
+            query_start_loc=qsl_device,
+            # state holds the previous rank's tail; without this flag the kernel
+            # ignores the buffer and the first W-1 tokens of every non-first
+            # rank are convolved from zeros (measured: first3 error 1.7e+00).
+            has_initial_state=None,
+            activation="silu",
+            pad_slot_id=-1,
+            null_block_id=None,
+            head_num=H,
+        )
+        if is_varlen:
+            y = y.unsqueeze(0)
+
+        ctx.save_for_backward(x, op_weight)
+        ctx.conv_states = None if ctx.window_mode else state_snapshot
+        ctx.query_start_loc = query_start_loc
+        ctx.is_varlen = is_varlen
+        ctx.head_num = H
+        return y
+
+    @staticmethod
+    def backward(ctx, dy):
+        import torch.distributed as dist
+
+        x, op_weight = ctx.saved_tensors
+        op_x = x.reshape(-1, x.shape[-1]).contiguous() if ctx.is_varlen and x.ndim == 3 else x.contiguous()
+        if ctx.window_len:
+            # Forward discarded the prefix outputs. Their adjoints are zero.
+            time_axis = 2 if ctx.head_num else 1
+            prefix_shape = list(dy.shape)
+            prefix_shape[time_axis] = ctx.window_len
+            dy = torch.cat((dy.new_zeros(prefix_shape), dy), dim=time_axis)
+        if ctx.is_varlen and (dy.ndim == 4 or (ctx.window_mode and not ctx.head_num)):
+            op_dy = dy.squeeze(0).contiguous()
+        else:
+            op_dy = dy.contiguous()
+
+        qsl_device = None
+        if ctx.query_start_loc is not None:
+            qsl_device = torch.tensor(ctx.query_start_loc, dtype=torch.int32, device=op_x.device).contiguous()
+
+        preactivation = ascendc_causal_conv1d_fn(
+            op_x,
+            op_weight,
+            None,
+            None if ctx.conv_states is None else ctx.conv_states.clone(),
+            query_start_loc=qsl_device,
+            has_initial_state=None,
+            activation=None,
+            pad_slot_id=-1,
+            null_block_id=None,
+            head_num=ctx.head_num,
+        )
+        op_y = (
+            preactivation.squeeze(0).contiguous()
+            if ctx.is_varlen and preactivation.ndim == 4
+            else preactivation.contiguous()
+        )
+
+        dx, dw, _db, dh0 = ascendc_causal_conv1d_bwd(
+            x=op_x,
+            y=op_y,
+            weight=op_weight,
+            dy=op_dy,
+            initial_state=ctx.conv_states,
+            dht=None,
+            query_start_loc=ctx.query_start_loc,
+            activation=1,
+            input_layout="NTD" if ctx.is_varlen else "BNSD",
+        )
+        dx = dx.reshape_as(x)
+        dw = dw.transpose(0, 1).contiguous()
+
+        # Every rank joins, including document starts with no prefix.
+        # Align the newest history row with the last row of the buffer.
+        h = ctx.window_len
+        local_dx = dx[:, h:, :].contiguous()
+        if ctx.world > 1 and ctx.pad:
+            halo = dx.new_zeros((dx.shape[0], ctx.pad, dx.shape[-1]))
+            if h:
+                halo[:, -h:, :].copy_(dx[:, :h, :])
+            received = [torch.empty_like(halo) for _ in range(ctx.world)]
+            dist.all_gather(received, halo, group=ctx.group)
+            if ctx.rank + 1 < ctx.world:
+                n = min(ctx.pad, local_dx.shape[1])
+                if n:
+                    local_dx[:, -n:, :].add_(received[ctx.rank + 1][:, -n:, :])
+        return local_dx, dw, None, None, None
 class ShortConvolution(nn.Module):
     """NPU replacement for ``fla.modules.ShortConvolution``.
 
@@ -693,11 +996,28 @@ class ShortConvolution(nn.Module):
         self.weight = nn.Parameter(torch.empty(hidden_size, 1, kernel_size))
         nn.init.normal_(self.weight, std=0.02)
 
-    def forward(self, x: torch.Tensor, cu_seqlens: torch.Tensor | None = None):
+    def forward(
+        self,
+        x: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        cp_context=None,
+    ):
         # activation="silu" is applied inside the AscendC kernel, matching
         # the rollout (vllm-ascend gdn.py) path; head_num is forwarded
         # verbatim so the kernel picks the same head-first / flat layout as
         # the rollout: head_num>0 -> [H, T, D] head-first, head_num==0 -> flat.
+        if cp_context is not None:
+            # The kernel needs a grad-free recurrent state buffer, so the whole
+            # conv (state exchange included) runs inside our own Function.
+            out = _CPConvWithState.apply(
+                x,
+                self.weight.squeeze(1),
+                self.head_num,
+                cu_seqlens,
+                cp_context,
+            )
+            return out, None
+
         out = causal_conv1d_ascendc(
             x,
             weight=self.weight.squeeze(1),
