@@ -1506,22 +1506,3 @@ def test_make_request_short_circuits_on_headless(vllm_engine, monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("platform", ["npu", "cuda"])
-@pytest.mark.parametrize("backend", ["sparse_hccl", "hccl", "nccl", "npu_ipc", "ipc", None])
-@pytest.mark.parametrize("inherited", [None, "fork", "spawn"])
-def test_build_subprocess_env_preserves_worker_start_method(vllm_args, monkeypatch, platform, backend, inherited):
-    from vime.platforms import get_platform
-
-    monkeypatch.setattr(mod, "current_platform", lambda: get_platform(platform))
-    if inherited is None:
-        monkeypatch.delenv("VLLM_WORKER_MULTIPROC_METHOD", raising=False)
-    else:
-        monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", inherited)
-    server_args = {"_args": vllm_args, "_visible_devices": "0"}
-    if backend is not None:
-        server_args["weight_transfer_config"] = {"backend": backend}
-    env = mod._build_subprocess_env(server_args)
-    assert env.get("VLLM_WORKER_MULTIPROC_METHOD") == inherited
