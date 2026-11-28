@@ -1,4 +1,5 @@
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -357,3 +358,109 @@ def test_supa_availability_handles_missing_torch_namespace(monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
+
+
+@pytest.fixture
+def no_local_backend(monkeypatch):
+    monkeypatch.setattr(accelerator, "_register_builtin_backends", lambda: None)
+
+
+class HookAccelerator(FakeAccelerator):
+    ray_device_key = "CUSTOM"
+
+    def __init__(self):
+        raise AssertionError("Backend descriptions must not construct a device runtime")
+
+    @classmethod
+    def device_env_qualname(cls):
+        return "test_accelerator_hooks"
+
+    @classmethod
+    def megatron_lifecycle_qualname(cls):
+        return "test_accelerator_hooks"
+
+    @classmethod
+    def weight_transfer_backend(cls, transport):
+        return f"custom_{transport}"
+
+    @classmethod
+    def weight_transfer_init_info_qualname(cls, transport):
+        return "types.SimpleNamespace"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("custom", [False, True])
+def test_ray_resources_follow_backend_without_a_local_device(monkeypatch, no_local_backend, custom):
+    import ray
+
+    from vime.ray import resources
+
+    if custom:
+        accelerator.register_accelerator("custom", HookAccelerator, lambda: False)
+        monkeypatch.setenv("VIME_ACCELERATOR", "custom")
+    monkeypatch.setattr(ray, "get_gpu_ids", lambda: [3], raising=False)
+    context = SimpleNamespace(get_accelerator_ids=lambda: {"CUSTOM": ["5"]})
+    monkeypatch.setattr(ray, "get_runtime_context", lambda: context, raising=False)
+
+    assert resources.bundle(cpu_count=2) == {"CUSTOM" if custom else "GPU": 1, "CPU": 2}
+    assert resources.actor_options(0.5) == (
+        {"num_gpus": 0, "resources": {"CUSTOM": 0.5}} if custom else {"num_gpus": 0.5}
+    )
+    assert resources.accelerator_ids() == (["5"] if custom else ["3"])
+    assert accelerator._ACCELERATOR is None
+
+
+@pytest.mark.unit
+def test_default_backend_hooks_preserve_the_callers_environment(no_local_backend):
+    from vime.backends import megatron_lifecycle
+    from vime.utils import device_env
+
+    args = SimpleNamespace(offload_train=True)
+    inherited = {"LD_PRELOAD": "caller.so", "TMS_INIT_ENABLE": "1", "CUDA_VISIBLE_DEVICES": "0,1"}
+    expected = dict(inherited)
+    for hook in (device_env.current().train_actor_env, device_env.current().engine_actor_env):
+        assert hook(args, inherited) == expected
+    assert device_env.current().serving_subprocess_env(inherited, visible_devices="2", colocate=True) == expected
+    assert inherited == expected
+    assert megatron_lifecycle.current() is megatron_lifecycle
+    megatron_lifecycle.current().before_import()
+    megatron_lifecycle.current().after_args(args)
+
+
+@pytest.mark.unit
+def test_backend_overrides_resolve_without_a_local_device(monkeypatch, no_local_backend):
+    from vime.backends import megatron_lifecycle
+    from vime.utils import device_env
+
+    module = ModuleType("test_accelerator_hooks")
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    accelerator.register_accelerator("custom", HookAccelerator, lambda: False)
+    monkeypatch.setenv("VIME_ACCELERATOR", "custom")
+
+    assert device_env.current() is module
+    assert megatron_lifecycle.current() is module
+    assert accelerator.weight_transfer_backend("distributed") == "custom_distributed"
+    assert accelerator.weight_transfer_init_info("distributed", rank=3).rank == 3
+
+
+@pytest.mark.unit
+def test_function_factory_requires_runtime_selection_before_describing_backend(monkeypatch, no_local_backend):
+    from vime.ray import resources
+
+    calls = []
+
+    def factory():
+        calls.append("create")
+        return FakeAccelerator()
+
+    accelerator.register_accelerator("custom", factory, lambda: True)
+    monkeypatch.setenv("VIME_ACCELERATOR", "custom")
+
+    with pytest.raises(TypeError, match="custom.*requires class registration"):
+        resources.actor_options(1)
+    assert calls == []
+
+    selected = accelerator.get_accelerator()
+    assert accelerator.get_accelerator() is selected
+    assert resources.actor_options(1) == {"num_gpus": 1}
+    assert calls == ["create"]
