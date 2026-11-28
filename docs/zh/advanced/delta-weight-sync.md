@@ -11,12 +11,7 @@ Delta 权重同步只发送两次同步之间发生变化的字节，而不是�
 
 Sparse HCCL：
 
-**当前暂不支持** Sparse HCCL 与 `--offload-train --use-critic` 的组合。
-critic 从 HF 语言模型初始化时，标量 value-head bias 的加载可能失败；这是通用
-critic 初始化问题，由独立 PR #545 修复，不属于 sparse 传输逻辑。历史本地实验在修复
-初始化后完成了独立 checkpoint 推理一致性对比，但随后 critic worker 因主机内存
-压力被终止，不能视为整体端到端通过。本 PR 不启用 offload/critic 专项功能用例的
-CI，运行普通两轮及仅 actor 训练 offload 的独立一轮用例。初始化修复及推理一致性都不能证明该组合的资源稳定性。
+Sparse HCCL **暂不支持** PPO critic 训练（`--advantage-estimator ppo` 会自动启用 critic 和训练 offload）。
 
 该路径使用 vLLM-Ascend 提供的 sparse HCCL 引擎。VIME 将权重导出为 HF checkpoint
 坐标，维护分片快照，按一致顺序汇聚变化项，并管理更新版本。全量导出和稀疏坐标转换

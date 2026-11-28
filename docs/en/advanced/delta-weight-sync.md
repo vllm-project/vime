@@ -22,7 +22,7 @@ need nothing extra on the vime side.
 
 Sparse HCCL:
 
-**Currently unsupported:** Sparse HCCL with `--offload-train --use-critic`.
+Sparse HCCL **does not currently support** PPO critic training (`--advantage-estimator ppo` enables both the critic and training offload).
 
 This path uses the sparse HCCL engines included in vLLM-Ascend.
 VIME exports weights into HF checkpoint coordinates, tracks shard snapshots,

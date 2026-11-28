@@ -112,17 +112,20 @@ MISC_ARGS=(
 
 ray start --head --num-gpus 0 --resources '{"NPU": 6}' --node-ip-address 127.0.0.1 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 
+# Preserve spaces in paths and literal brackets in --moe-layer-freq during array expansion.
+IFS=''
+set -f
 ray job submit --address="http://127.0.0.1:8265" \
    -- python3 train.py \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node 4 \
    --rollout-num-gpus 2 \
-   "${MODEL_ARGS[@]}" \
-   "${CKPT_ARGS[@]}" \
-   "${ROLLOUT_ARGS[@]}" \
-   "${OPTIMIZER_ARGS[@]}" \
-   "${GRPO_ARGS[@]}" \
-   "${PERF_ARGS[@]}" \
-   "${VLLM_ARGS[@]}" \
-   "${UPDATE_WEIGHT_ARGS[@]}" \
-   "${MISC_ARGS[@]}"
+   ${MODEL_ARGS[@]} \
+   ${CKPT_ARGS[@]} \
+   ${ROLLOUT_ARGS[@]} \
+   ${OPTIMIZER_ARGS[@]} \
+   ${GRPO_ARGS[@]} \
+   ${PERF_ARGS[@]} \
+   ${VLLM_ARGS[@]} \
+   ${UPDATE_WEIGHT_ARGS[@]} \
+   ${MISC_ARGS[@]}
