@@ -94,7 +94,8 @@ SUITES = {
         # Temporarily pause A3 cases while validating the A5 runtime environment.
         # Case("test_delta_disk_weight_update.py", A3_4),
         # Case("test_qwen3_4B_npu.py", A3_8),
-        Case("test_qwen3_4B_npu.py", A5_8),
+        # Temporary for Buildkite #752. Remove this flag after diagnosing the rollout HCCL failure.
+        Case("test_qwen3_4B_npu.py", A5_8, env={"VIME_CI_A5_HCCL_PROBE": "1"}),
         # Case("test_qwen3_4B_eagle3_npu.py", A3_8),
         # Case("test_qwen3_4B_dspark_npu.py", A3_8),
         # Case("test_qwen3_30B_A3B_npu.py", A3_16),

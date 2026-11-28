@@ -5,8 +5,10 @@ import json
 import logging
 import multiprocessing
 import os
+import subprocess
 import sys
 import time
+from pathlib import Path
 from threading import Thread
 from typing import Any
 
@@ -56,6 +58,12 @@ def launch_server_process(server_args_dict: dict):
     logger.info("Launching vLLM server: %s", kwargs)
 
     executable = getattr(server_args_dict["_args"], "vllm_python_executable", None)
+    # Temporary for Buildkite #752. Remove this hook and the CI probe after diagnosing A5 rollout.
+    if env.get("VIME_CI_A5_HCCL_PROBE") == "1":
+        probe = Path(__file__).resolve().parents[3] / ".buildkite/scripts/a5_hccl_probe.py"
+        subprocess.run(
+            ["timeout", "--kill-after=15s", "180s", executable or sys.executable, str(probe)], env=env, check=True
+        )
     if executable:
         p = launch_server_subprocess(executable, kwargs, environ=env)
     else:
