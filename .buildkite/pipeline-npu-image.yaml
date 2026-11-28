@@ -84,8 +84,6 @@ steps:
         --opt build-arg:RUST_IMAGE="$${RUST_IMAGE}" \
         --opt build-arg:CARGO_REGISTRY="$${CARGO_REGISTRY}" \
         --opt build-arg:GITHUB_MIRROR="$${GITHUB_MIRROR}" \
-        --opt build-arg:APTMIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081 \
-        --opt build-arg:PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple \
         --secret id=dockerconfig,src=/home/user/.docker/config.json \
         --output type=image,name=$${IMAGE_REGISTRY}/$${IMAGE_NAME}:$${VIME_IMAGE_TAG},push=true \
         --progress=plain

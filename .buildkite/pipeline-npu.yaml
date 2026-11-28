@@ -52,8 +52,7 @@ steps:
         depends_on:
           - npu-gate
         agents:
-          queue: "ascend-a3"
-          resource_class: "npu-2"
+          queue: small_cpu_queue_premerge
         timeout_in_minutes: 180
         command:  |
           NPU_SUITES=$$(buildkite-agent meta-data get "npu-suites" --default "")
@@ -70,4 +69,4 @@ steps:
             SKIP_IMAGE_BUILD=true
           fi
           sed -e "s/__SKIP_IMAGE_BUILD__/$${SKIP_IMAGE_BUILD}/g" .buildkite/pipeline-npu-image.yaml | buildkite-agent pipeline upload
-          python .buildkite/npu_suites.py | buildkite-agent pipeline upload
+          python3 .buildkite/npu_suites.py | buildkite-agent pipeline upload
